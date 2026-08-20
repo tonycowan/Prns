@@ -46,12 +46,23 @@ assets = root / "assets"
 for js in assets.glob("*.js"):
     body = js.read_text()
     # Prefer same-directory wasm next to the JS bundle.
+    # fetch() resolves relative to the HTML document (dioxus/), not the JS file
+    wasm_name = next(assets.glob("*.wasm")).name
     body = re.sub(
-        r'module_or_path:"/\.?/assets/(personal-hopspot-dioxus-android_bg-[^"]+\.wasm)"',
-        r'module_or_path:"./\1"',
+        r'module_or_path:"[^"]+\.wasm"',
+        f'module_or_path:"./assets/{wasm_name}"',
         body,
     )
     body = body.replace('"/./assets/', '"./assets/').replace('"/assets/', '"./assets/')
+    css_name = next(assets.glob("*.css")).name
+    index_text = (root / "index.html").read_text()
+    if css_name not in index_text:
+        index_text = index_text.replace(
+            "</head>",
+            f'        <link rel="stylesheet" href="./assets/{css_name}">\n    </head>',
+        )
+    index_text = index_text.replace(" crossorigin", "")
+    (root / "index.html").write_text(index_text)
     js.write_text(body)
 print(f"synced dioxus assets from {root}")
 PY

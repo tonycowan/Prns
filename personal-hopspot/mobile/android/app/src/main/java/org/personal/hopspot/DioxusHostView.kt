@@ -5,39 +5,64 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
+import android.util.Log
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewAssetLoader
+import java.io.IOException
 
 /**
  * Hosts the Dioxus web build from assets and bridges live engine calls to
  * [PrnsService] via [HopspotJsBridge].
+ *
+ * Uses [WebViewAssetLoader] so WASM/module scripts load over
+ * `https://appassets.androidplatform.net` — `file://` cannot fetch WASM.
  */
 @SuppressLint("SetJavaScriptEnabled")
 class DioxusHostView(
     context: Context,
 ) : WebView(context) {
     private val bridge = HopspotJsBridge(context.applicationContext)
+    private val assetLoader =
+        WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", MimeAwareAssetsHandler(context.applicationContext))
+            .build()
 
     init {
         setBackgroundColor(0xFF0B0D10.toInt())
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
-        settings.allowFileAccess = true
+        settings.allowFileAccess = false
         settings.cacheMode = WebSettings.LOAD_NO_CACHE
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
-            @Suppress("DEPRECATION")
-            settings.allowFileAccessFromFileURLs = true
-            @Suppress("DEPRECATION")
-            settings.allowUniversalAccessFromFileURLs = true
-        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             setWebContentsDebuggingEnabled(true)
         }
-        webViewClient = WebViewClient()
+        webChromeClient =
+            object : WebChromeClient() {
+                override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                    Log.i(
+                        TAG,
+                        "${consoleMessage.messageLevel()} ${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} ${consoleMessage.message()}",
+                    )
+                    return true
+                }
+            }
+        webViewClient =
+            object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView,
+                    request: WebResourceRequest,
+                ): WebResourceResponse? = assetLoader.shouldInterceptRequest(request.url)
+            }
         addJavascriptInterface(bridge, "HopspotBridge")
-        loadUrl("file:///android_asset/dioxus/index.html")
+        // Served from APK assets/ via WebViewAssetLoader (not file://).
+        loadUrl("$ASSET_BASE/dioxus/index.html")
     }
 
     fun setService(service: PrnsService?) {
@@ -82,5 +107,55 @@ class DioxusHostView(
                     ?: return
             clipboard.setPrimaryClip(ClipData.newPlainText("RNS config", text))
         }
+    }
+
+    /** Serves APK assets with MIME types WebView needs for ES modules + WASM. */
+    private class MimeAwareAssetsHandler(
+        context: Context,
+    ) : WebViewAssetLoader.PathHandler {
+        private val assets = context.assets
+
+        override fun handle(path: String): WebResourceResponse? {
+            val assetPath = path.trimStart('/')
+            val candidates =
+                listOf(
+                    assetPath,
+                    "dioxus/$assetPath",
+                    "dioxus/assets/$assetPath",
+                    assetPath.removePrefix("dioxus/"),
+                ).distinct()
+            for (candidate in candidates) {
+                val mime = mimeFor(candidate)
+                try {
+                    return WebResourceResponse(
+                        mime,
+                        Charsets.UTF_8.name(),
+                        assets.open(candidate),
+                    )
+                } catch (_: IOException) {
+                    // try next
+                }
+            }
+            Log.w(TAG, "asset miss: $assetPath")
+            return null
+        }
+
+        private fun mimeFor(assetPath: String): String =
+            when {
+                assetPath.endsWith(".wasm") -> "application/wasm"
+                assetPath.endsWith(".js") || assetPath.endsWith(".mjs") -> "text/javascript"
+                assetPath.endsWith(".css") -> "text/css"
+                assetPath.endsWith(".html") || assetPath.endsWith(".htm") -> "text/html"
+                assetPath.endsWith(".json") -> "application/json"
+                assetPath.endsWith(".svg") -> "image/svg+xml"
+                assetPath.endsWith(".png") -> "image/png"
+                assetPath.endsWith(".woff2") -> "font/woff2"
+                else -> "application/octet-stream"
+            }
+    }
+
+    private companion object {
+        private const val TAG = "HopspotDioxus"
+        private const val ASSET_BASE = "https://appassets.androidplatform.net/assets"
     }
 }
