@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "Dioxus Android demo face for Personal Hopspot: same management functionality as the OLED face, using mobile UI norms and mock data for now."
+description = "Dioxus management UI for Personal Hopspot: mock web preview, live via Hopspot PrnsService WebView bridge."
 
 # Own workspace so the Dioxus dep tree stays out of the suite lockfile / no_std gate.
 [workspace]
@@ -21,6 +21,14 @@ mobile = ["dioxus/mobile"]
 [dependencies]
 # Pinned to match the locally installed `dx` 0.7.5 used elsewhere in the suite.
 dioxus = { version = "=0.7.5", features = ["router"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Window"] }
 
 [profile.release]
 lto = true

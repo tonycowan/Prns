@@ -36,8 +36,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) const ANDROID_PORT: &str = "android-usb";
-pub(super) const LOCAL_RNS_PORT: u16 = 37428;
-pub(super) const RPC_PORT: u16 = LOCAL_RNS_PORT + 1;
+pub(crate) const LOCAL_RNS_PORT: u16 = 37428;
+pub(crate) const RPC_PORT: u16 = LOCAL_RNS_PORT + 1;
 pub(super) const ANNOUNCE_APP_DATA: &[u8] = b"personal-hopspot";
 pub(super) const NODE_ANNOUNCE_APP_DATA: &[u8] = b"personal-hopspot";
 pub(super) const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);

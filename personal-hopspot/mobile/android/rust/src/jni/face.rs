@@ -276,6 +276,48 @@ pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeAnnounce(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeUiSnapshotJson(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = crate::ui_live::capture_ui_live_snapshot_json();
+    env.new_string(json)
+        .map_or(core::ptr::null_mut(), JString::into_raw)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeToggleInterface(
+    mut env: JNIEnv,
+    _class: JClass,
+    id_hex: JString,
+) {
+    let Ok(id) = env.get_string(&id_hex) else {
+        return;
+    };
+    let Some(interface_id) = crate::ui_live::parse_interface_id_hex(&id.to_string_lossy()) else {
+        log::warn!("nativeToggleInterface: invalid interface id");
+        return;
+    };
+    crate::engine::toggle_interface(interface_id);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeSleepInterfaces(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    crate::engine::sleep_interfaces();
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeWakeInterfaces(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    crate::engine::wake_interfaces();
+}
+
+#[no_mangle]
 pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeRuntimeHealth(
     env: JNIEnv,
     _class: JClass,

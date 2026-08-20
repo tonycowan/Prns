@@ -125,6 +125,20 @@ class PrnsService : Service() {
         NativeBridge.nativeAnnounce()
     }
 
+    fun uiSnapshotJson(): String = NativeBridge.nativeUiSnapshotJson()
+
+    fun toggleInterface(idHex: String) {
+        NativeBridge.nativeToggleInterface(idHex)
+    }
+
+    fun sleepInterfaces() {
+        NativeBridge.nativeSleepInterfaces()
+    }
+
+    fun wakeInterfaces() {
+        NativeBridge.nativeWakeInterfaces()
+    }
+
     @Synchronized
     private fun ensureEngineStarted() {
         when (NativeBridge.engineState()) {

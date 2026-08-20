@@ -1,9 +1,10 @@
-//! Mock Hopspot management model mirroring core face concepts.
+//! Hopspot management model: mock sample data + live snapshot apply.
 
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Kept for future live engine mapping.
 pub enum EngineState {
     Stopped,
     Starting,
@@ -29,10 +30,18 @@ impl EngineState {
             Self::Stopped => "off",
         }
     }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "starting" => Self::Starting,
+            "running" => Self::Running,
+            "failed" => Self::Failed,
+            _ => Self::Stopped,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Kept for future live engine mapping.
 pub enum ConnectionState {
     Initializing,
     Connected,
@@ -58,7 +67,6 @@ impl ConnectionState {
         }
     }
 
-    /// Compact status used on Hopspot interface-menu peer rows.
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Initializing => "Init",
@@ -84,10 +92,22 @@ impl ConnectionState {
     pub fn is_powered_on(self) -> bool {
         !matches!(self, Self::Disabled)
     }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "initializing" => Self::Initializing,
+            "connected" => Self::Connected,
+            "degraded" => Self::Degraded,
+            "reconnecting" => Self::Reconnecting,
+            "failed" => Self::Failed,
+            "disconnected" => Self::Disconnected,
+            "disabled" => Self::Disabled,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Kept for future live engine mapping.
 pub enum InterfaceKind {
     Usb,
     Lan,
@@ -125,11 +145,23 @@ impl InterfaceKind {
             Self::LoRa => "LR",
         }
     }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "usb" => Self::Usb,
+            "ble" => Self::Ble,
+            "wifi_direct" => Self::WifiDirect,
+            "wifi_aware" => Self::WifiAware,
+            "local" => Self::Local,
+            "app" => Self::App,
+            "lora" => Self::LoRa,
+            _ => Self::Lan,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PeerInfo {
-    /// Display tag, e.g. `abcd` or `Mac Book`.
     pub label: String,
     pub connection: ConnectionState,
 }
@@ -142,7 +174,6 @@ impl PeerInfo {
         }
     }
 
-    /// Matches Hopspot's `P abcd Live` peer row wording.
     pub fn row_label(&self) -> String {
         format!("P {} {}", self.label, self.connection.short_label())
     }
@@ -150,25 +181,24 @@ impl PeerInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InterfaceCard {
-    pub id: u32,
+    pub id: String,
     pub kind: InterfaceKind,
     pub connection: ConnectionState,
-    pub failure_reason: Option<&'static str>,
+    pub failure_reason: Option<String>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub links: u32,
     pub peers: Option<u32>,
     pub destinations: u32,
-    pub activity_age: Option<&'static str>,
-    pub detail_lines: Vec<&'static str>,
-    /// Connected (or known) peers for this interface, as on the OLED menu detail.
+    pub activity_age: Option<String>,
+    pub detail_lines: Vec<String>,
     pub peer_list: Vec<PeerInfo>,
 }
 
 impl InterfaceCard {
     pub fn subtitle(&self) -> String {
-        if let Some(reason) = self.failure_reason {
-            return reason.to_string();
+        if let Some(reason) = &self.failure_reason {
+            return reason.clone();
         }
         if self.connection == ConnectionState::Connected {
             let peers = self.peers.unwrap_or(self.destinations);
@@ -198,7 +228,7 @@ impl InterfaceCard {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LimitRow {
-    pub name: &'static str,
+    pub name: String,
     pub value: String,
 }
 
@@ -211,7 +241,7 @@ pub struct Notice {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DemoState {
     pub engine: EngineState,
-    pub uptime: &'static str,
+    pub uptime: String,
     pub interface_count: u32,
     pub online_interface_count: u32,
     pub rx_bytes: u64,
@@ -221,13 +251,15 @@ pub struct DemoState {
     pub sleeping: bool,
     pub notice: Option<Notice>,
     pub rns_config: String,
+    /// When true, power/sleep/announce go through the Hopspot service bridge.
+    pub live: bool,
 }
 
 impl DemoState {
     pub fn sample() -> Self {
         Self {
             engine: EngineState::Running,
-            uptime: "1h 12m",
+            uptime: "1h 12m".into(),
             interface_count: 6,
             online_interface_count: 4,
             rx_bytes: 1_842_112,
@@ -237,6 +269,7 @@ impl DemoState {
             sleeping: false,
             notice: None,
             rns_config: sample_rns_config(),
+            live: false,
         }
     }
 
@@ -256,11 +289,21 @@ impl DemoState {
     }
 
     pub fn announce(&mut self) {
+        if self.live {
+            crate::backend::announce();
+        }
         self.flash("Announcing");
     }
 
     pub fn toggle_sleep(&mut self) {
         self.sleeping = !self.sleeping;
+        if self.live {
+            if self.sleeping {
+                crate::backend::sleep_interfaces();
+            } else {
+                crate::backend::wake_interfaces();
+            }
+        }
         if self.sleeping {
             self.flash("Sleeping");
         } else {
@@ -268,11 +311,16 @@ impl DemoState {
         }
     }
 
-    pub fn toggle_power(&mut self, id: u32) {
+    pub fn toggle_power(&mut self, id: &str) {
         let Some(index) = self.cards.iter().position(|card| card.id == id) else {
             return;
         };
         let label = self.cards[index].kind.label();
+        if self.live {
+            crate::backend::toggle_interface(id);
+            self.flash(format!("{label} toggled"));
+            return;
+        }
         if self.cards[index].connection.is_powered_on() {
             self.cards[index].connection = ConnectionState::Disabled;
             self.cards[index].failure_reason = None;
@@ -285,7 +333,22 @@ impl DemoState {
     }
 
     pub fn copy_rns_config(&mut self) {
+        if self.live {
+            crate::backend::copy_text(&self.rns_config);
+        }
         self.flash("RNS config copied");
+    }
+
+    pub fn apply_live_json(&mut self, json: &str) {
+        let Ok(snap) = serde_json::from_str::<LiveSnapshotWire>(json) else {
+            return;
+        };
+        let sleeping = self.sleeping;
+        let notice = self.notice.clone();
+        *self = snap.into_state();
+        self.live = true;
+        self.sleeping = sleeping;
+        self.notice = notice;
     }
 
     fn recount_online(&mut self) {
@@ -295,6 +358,96 @@ impl DemoState {
             .filter(|card| card.connection == ConnectionState::Connected)
             .count() as u32;
         self.interface_count = self.cards.len() as u32;
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveSnapshotWire {
+    engine: String,
+    uptime_ms: u64,
+    interface_count: u32,
+    online_interface_count: u32,
+    rx_bytes: u64,
+    tx_bytes: u64,
+    cards: Vec<LiveCardWire>,
+    limits: Vec<LiveLimitWire>,
+    rns_config: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveCardWire {
+    id: String,
+    kind: String,
+    connection: String,
+    failure_reason: Option<String>,
+    tx_bytes: u64,
+    rx_bytes: u64,
+    links: u32,
+    peers: Option<u32>,
+    destinations: u32,
+    activity_age_secs: Option<u32>,
+    detail_lines: Vec<String>,
+    peer_list: Vec<LivePeerWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LivePeerWire {
+    label: String,
+    connection: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveLimitWire {
+    name: String,
+    value: String,
+}
+
+impl LiveSnapshotWire {
+    fn into_state(self) -> DemoState {
+        DemoState {
+            engine: EngineState::from_wire(&self.engine),
+            uptime: fmt_uptime(self.uptime_ms),
+            interface_count: self.interface_count,
+            online_interface_count: self.online_interface_count,
+            rx_bytes: self.rx_bytes,
+            tx_bytes: self.tx_bytes,
+            cards: self
+                .cards
+                .into_iter()
+                .map(|card| InterfaceCard {
+                    id: card.id,
+                    kind: InterfaceKind::from_wire(&card.kind),
+                    connection: ConnectionState::from_wire(&card.connection),
+                    failure_reason: card.failure_reason,
+                    tx_bytes: card.tx_bytes,
+                    rx_bytes: card.rx_bytes,
+                    links: card.links,
+                    peers: card.peers,
+                    destinations: card.destinations,
+                    activity_age: card.activity_age_secs.map(|secs| format!("{secs}s")),
+                    detail_lines: card.detail_lines,
+                    peer_list: card
+                        .peer_list
+                        .into_iter()
+                        .map(|peer| {
+                            PeerInfo::new(peer.label, ConnectionState::from_wire(&peer.connection))
+                        })
+                        .collect(),
+                })
+                .collect(),
+            limits: self
+                .limits
+                .into_iter()
+                .map(|row| LimitRow {
+                    name: row.name,
+                    value: row.value,
+                })
+                .collect(),
+            sleeping: false,
+            notice: None,
+            rns_config: self.rns_config,
+            live: true,
+        }
     }
 }
 
@@ -315,10 +468,24 @@ pub fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
+fn fmt_uptime(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {secs}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn sample_cards() -> Vec<InterfaceCard> {
     vec![
         InterfaceCard {
-            id: 1,
+            id: "1".into(),
             kind: InterfaceKind::Usb,
             connection: ConnectionState::Disconnected,
             failure_reason: None,
@@ -328,11 +495,11 @@ fn sample_cards() -> Vec<InterfaceCard> {
             peers: None,
             destinations: 0,
             activity_age: None,
-            detail_lines: vec!["Waiting for accessory"],
+            detail_lines: vec!["Waiting for accessory".into()],
             peer_list: vec![],
         },
         InterfaceCard {
-            id: 2,
+            id: "2".into(),
             kind: InterfaceKind::Lan,
             connection: ConnectionState::Connected,
             failure_reason: None,
@@ -341,8 +508,8 @@ fn sample_cards() -> Vec<InterfaceCard> {
             links: 3,
             peers: Some(2),
             destinations: 8,
-            activity_age: Some("12s"),
-            detail_lines: vec!["AutoInterface on WLAN0"],
+            activity_age: Some("12s".into()),
+            detail_lines: vec!["AutoInterface on WLAN0".into()],
             peer_list: vec![
                 PeerInfo::new("a1f3", ConnectionState::Connected),
                 PeerInfo::new("0c2e", ConnectionState::Connected),
@@ -350,7 +517,7 @@ fn sample_cards() -> Vec<InterfaceCard> {
             ],
         },
         InterfaceCard {
-            id: 3,
+            id: "3".into(),
             kind: InterfaceKind::Ble,
             connection: ConnectionState::Connected,
             failure_reason: None,
@@ -359,26 +526,26 @@ fn sample_cards() -> Vec<InterfaceCard> {
             links: 1,
             peers: Some(1),
             destinations: 3,
-            activity_age: Some("4s"),
-            detail_lines: vec!["Bluetooth Auto", "Recovery: idle"],
+            activity_age: Some("4s".into()),
+            detail_lines: vec!["Bluetooth Auto".into(), "Recovery: idle".into()],
             peer_list: vec![PeerInfo::new("MacBook", ConnectionState::Connected)],
         },
         InterfaceCard {
-            id: 4,
+            id: "4".into(),
             kind: InterfaceKind::WifiAware,
             connection: ConnectionState::Failed,
-            failure_reason: Some("Wi-Fi Aware unavailable"),
+            failure_reason: Some("Wi-Fi Aware unavailable".into()),
             tx_bytes: 0,
             rx_bytes: 0,
             links: 0,
             peers: None,
             destinations: 0,
             activity_age: None,
-            detail_lines: vec!["Platform link did not start"],
+            detail_lines: vec!["Platform link did not start".into()],
             peer_list: vec![],
         },
         InterfaceCard {
-            id: 5,
+            id: "5".into(),
             kind: InterfaceKind::Local,
             connection: ConnectionState::Connected,
             failure_reason: None,
@@ -387,10 +554,10 @@ fn sample_cards() -> Vec<InterfaceCard> {
             links: 2,
             peers: Some(2),
             destinations: 2,
-            activity_age: Some("1s"),
+            activity_age: Some("1s".into()),
             detail_lines: vec![
-                "Shared instance TCP 127.0.0.1:37428",
-                "RPC control 37429",
+                "Shared instance TCP 127.0.0.1:37428".into(),
+                "RPC control 37429".into(),
             ],
             peer_list: vec![
                 PeerInfo::new("Sideband", ConnectionState::Connected),
@@ -398,7 +565,7 @@ fn sample_cards() -> Vec<InterfaceCard> {
             ],
         },
         InterfaceCard {
-            id: 6,
+            id: "6".into(),
             kind: InterfaceKind::App,
             connection: ConnectionState::Connected,
             failure_reason: None,
@@ -407,8 +574,8 @@ fn sample_cards() -> Vec<InterfaceCard> {
             links: 1,
             peers: None,
             destinations: 1,
-            activity_age: Some("8s"),
-            detail_lines: vec!["Local client of this shared instance"],
+            activity_age: Some("8s".into()),
+            detail_lines: vec!["Local client of this shared instance".into()],
             peer_list: vec![],
         },
     ]
@@ -417,27 +584,27 @@ fn sample_cards() -> Vec<InterfaceCard> {
 fn sample_limits() -> Vec<LimitRow> {
     vec![
         LimitRow {
-            name: "Destinations",
+            name: "Destinations".into(),
             value: "128".into(),
         },
         LimitRow {
-            name: "Announces",
+            name: "Announces".into(),
             value: "64".into(),
         },
         LimitRow {
-            name: "Links",
+            name: "Links".into(),
             value: "32".into(),
         },
         LimitRow {
-            name: "MTU",
+            name: "MTU".into(),
             value: "500".into(),
         },
         LimitRow {
-            name: "Resource buffer",
+            name: "Resource buffer".into(),
             value: "16 KiB".into(),
         },
         LimitRow {
-            name: "Receipts",
+            name: "Receipts".into(),
             value: "48".into(),
         },
     ]

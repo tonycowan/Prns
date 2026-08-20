@@ -11,22 +11,37 @@ window. This crate adds the platform adapters Android needs:
 - Android-hosted USB Auto (`app/src/main/java/org/personal/hopspot/UsbLink.kt`)
 - Wi-Fi Auto/mDNS and Bluetooth LE Auto bridges into the shared Rust engine
 
-`rust/` is the JNI `cdylib`. The Kotlin app shell in `app/` hosts it with a
-plain Android `View` so the same APK can run on old Android devices as well as
-modern phones.
+`rust/` is the JNI `cdylib`. The Kotlin app shell in `app/` hosts it. The default
+`dioxus` product flavor shows the Dioxus management UI (WebView + `HopspotBridge`
+into `PrnsService`). The `oled` flavor keeps the pixel face for regression.
 
-## Native ABI — `com.personal.hopspot.NativeBridge`
+```bash
+./gradlew :app:assembleDioxusDebug   # management UI (default)
+./gradlew :app:assembleOledDebug     # OLED pixel face
+```
+
+Sync the Dioxus web bundle into assets before a dioxus APK build:
+
+```bash
+../scripts/sync-dioxus-assets.sh
+```
+
+## Native ABI — `org.personal.hopspot.NativeBridge`
 
 ```
-nativeInit(storageDir) -> long handle
-nativePostInput(handle, code) -> int action   // code: 0 = tap, 1 = hold; action: 0 = none, 1 = announce
-nativeRender(handle, directByteBuffer)         // fills PANEL_WIDTH * PANEL_HEIGHT * 4 RGBA bytes
+nativeInit() -> long handle
+nativePostInput(handle, code) -> int action
+nativeRender(handle, directByteBuffer)
 nativeFree(handle)
+nativeUiSnapshotJson() -> String          // live cards / peers / health
+nativeToggleInterface(idHex)
+nativeSleepInterfaces()
+nativeWakeInterfaces()
+nativeAnnounce()
 ```
 
-The render path is pull-model and zero-copy: Kotlin owns a direct `ByteBuffer`,
-Rust draws the current `UiState` into it, Kotlin blits it nearest-neighbor into an
-`ARGB_8888` `Bitmap`. The panel is 64x128; bytes are `[R, G, B, A]` per pixel.
+The OLED render path is pull-model and zero-copy. The Dioxus path polls
+`nativeUiSnapshotJson` through `PrnsService` / `HopspotBridge`.
 
 ## USB role model
 
