@@ -8,6 +8,10 @@ use gloo_timers::future::TimeoutFuture;
 use crate::backend;
 use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind, Notice};
 
+/// Visible on RNS Config so we can confirm the phone is running this binary.
+const UI_BUILD: &str = "2026-08-20g sideband-format";
+
+
 #[derive(Clone, Debug, PartialEq)]
 enum Screen {
     Home,
@@ -151,17 +155,14 @@ pub fn App() -> Element {
                                     id: back_id.clone(),
                                 })
                             },
+                            show_copy: true,
+                            on_copy: move |_| {
+                                let text = state.read().rns_config.clone();
+                                backend::schedule_copy(&text);
+                            },
                             on_menu: move |_| sheet_open.set(true),
                         }
-                        RnsConfigPage {
-                            state,
-                            on_done: move |_| {
-                                screen.set(Screen::Interface {
-                                    id: return_to.clone(),
-                                })
-                            },
-                            on_flash: move |message| flash(message),
-                        }
+                        RnsConfigPage { state }
                     }
                 },
             }
@@ -190,6 +191,8 @@ fn TopBar(
     title: String,
     #[props(default = false)] show_back: bool,
     #[props(default = EventHandler::default())] on_back: EventHandler<()>,
+    #[props(default = false)] show_copy: bool,
+    #[props(default = EventHandler::default())] on_copy: EventHandler<()>,
     on_menu: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -204,6 +207,15 @@ fn TopBar(
                 }
             }
             h1 { "{title}" }
+            if show_copy {
+                button {
+                    class: "text-btn",
+                    r#type: "button",
+                    aria_label: "Copy RNS config",
+                    onclick: move |_| on_copy.call(()),
+                    "Copy"
+                }
+            }
             button {
                 class: "icon-btn",
                 r#type: "button",
@@ -409,35 +421,15 @@ fn LimitsPage(state: Signal<DemoState>) -> Element {
 }
 
 #[component]
-fn RnsConfigPage(
-    state: Signal<DemoState>,
-    on_done: EventHandler<()>,
-    on_flash: EventHandler<String>,
-) -> Element {
+fn RnsConfigPage(state: Signal<DemoState>) -> Element {
     let config = state.read().rns_config.clone();
     rsx! {
         div { class: "content",
             p { class: "muted",
-                "Paste into Sideband Utilities → Advanced Reticulum settings. Live builds fill the device RPC key."
+                "Copy puts a Sideband Advanced Reticulum template on the clipboard (live rpc_key). Leave with ←."
             }
+            p { class: "muted mono", "ui-build {UI_BUILD}" }
             pre { class: "config-box mono", "{config}" }
-            div { class: "detail-actions",
-                button {
-                    class: "btn primary",
-                    r#type: "button",
-                    onclick: move |_| {
-                        state.read().copy_rns_config_to_clipboard();
-                        on_flash.call("RNS config copied".into());
-                    },
-                    "Copy to clipboard"
-                }
-                button {
-                    class: "btn",
-                    r#type: "button",
-                    onclick: move |_| on_done.call(()),
-                    "Done"
-                }
-            }
         }
     }
 }

@@ -61,8 +61,8 @@ android {
         applicationId = "org.personal.hopspot"
         minSdk = 19
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 5
+        versionName = "0.1.4-sideband-format"
         testInstrumentationRunner = "org.personal.hopspot.PrnsRuntimeProbe"
         buildConfigField("boolean", "EXPERIMENTAL_WIFI_DIRECT", experimentalWifiDirect)
         buildConfigField("String", "UI_FACE", "\"dioxus\"")
