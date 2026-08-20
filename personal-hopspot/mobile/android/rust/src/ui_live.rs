@@ -256,24 +256,50 @@ fn static_limits() -> Vec<UiLiveLimit> {
 
 fn rns_config_template(rpc_key_hex: Option<&str>) -> String {
     let key = rpc_key_hex.unwrap_or("<device-local-key>");
+    // Raw string so Sideband's 2-space section indent is preserved. The older
+    // `format!("...\n\ ...")` line-continuations stripped that leading indent.
     format!(
-        "# This template is used to generate a\n\
-         # running configuration for Sideband's\n\
-         # internal RNS instance.\n\
-         \n\
-         [reticulum]\n\
-           enable_transport = TRANSPORT_IS_ENABLED\n\
-           local_hops_delta = LOCAL_HOPS_DELTA\n\
-           share_instance = Yes\n\
-           shared_instance_type = tcp\n\
-           instance_control_port = {RPC_PORT}\n\
-           rpc_key = {key}\n\
-           panic_on_interface_error = No\n\
-         \n\
-         [logging]\n\
-           loglevel = 3\n\
-         \n\
-         [interfaces]\n"
+        "\
+# This template is used to generate a
+# running configuration for Sideband's
+# internal RNS instance. Incorrect changes
+# or addition here may cause Sideband to
+# fail starting up or working properly.
+#
+# If Sideband detects that Reticulum
+# aborts at startup, due to an error in
+# configuration, any template changes
+# will be reset to this default.
+
+[reticulum]
+  # Don't change these lines, use the UI
+  # settings instead. Removing them from
+  # the config template will break these
+  # settings controls in the UI.
+  enable_transport = TRANSPORT_IS_ENABLED
+  local_hops_delta = LOCAL_HOPS_DELTA
+
+  # Changing this setting will cause
+  # Sideband to not work.
+  share_instance = Yes
+
+  # Personal Hopspot
+  shared_instance_type = tcp
+  instance_control_port = {RPC_PORT}
+  rpc_key = {key}
+  panic_on_interface_error = No
+
+# Logging is controlled by settings
+# in the UI, so this section is mostly
+# not relevant in Sideband.
+[logging]
+  loglevel = 3
+
+# No additional interfaces are currently
+# defined, but you can use this section
+# to add additional custom interfaces.
+[interfaces]
+"
     )
 }
 
@@ -288,6 +314,18 @@ mod tests {
         assert_eq!(hex, "abcd010203040506");
         assert_eq!(parse_interface_id_hex(&hex), Some(id));
         assert_eq!(parse_interface_id_hex("nope"), None);
+    }
+
+    #[test]
+    fn rns_config_template_keeps_sideband_indent() {
+        let text = rns_config_template(Some("deadbeef"));
+        assert!(text.contains("rpc_key = deadbeef"));
+        assert!(
+            text.contains("\n  enable_transport = TRANSPORT_IS_ENABLED\n"),
+            "section keys must keep a 2-space indent; got:\n{text}"
+        );
+        assert!(text.contains("Incorrect changes"));
+        assert!(!text.contains('\\'));
     }
 
     #[test]

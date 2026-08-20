@@ -305,12 +305,6 @@ impl DemoState {
         self.recount_online();
     }
 
-    pub fn copy_rns_config_to_clipboard(&self) {
-        if self.live {
-            crate::backend::copy_text(&self.rns_config);
-        }
-    }
-
     /// Apply a live snapshot without clobbering ephemeral UI (sleep flag).
     pub fn apply_live_json(&mut self, json: &str) {
         let Ok(snap) = serde_json::from_str::<LiveSnapshotWire>(json) else {
@@ -581,22 +575,48 @@ fn sample_limits() -> Vec<LimitRow> {
 }
 
 fn sample_rns_config() -> String {
-    "# This template is used to generate a\n\
-     # running configuration for Sideband's\n\
-     # internal RNS instance.\n\
-     \n\
-     [reticulum]\n\
-       enable_transport = TRANSPORT_IS_ENABLED\n\
-       local_hops_delta = LOCAL_HOPS_DELTA\n\
-       share_instance = Yes\n\
-       shared_instance_type = tcp\n\
-       instance_control_port = 37429\n\
-       rpc_key = <device-local-key>\n\
-       panic_on_interface_error = No\n\
-     \n\
-     [logging]\n\
-       loglevel = 3\n\
-     \n\
-     [interfaces]\n"
-        .into()
+    // Keep in sync with android rust `ui_live::rns_config_template`.
+    String::from(
+        "\
+# This template is used to generate a
+# running configuration for Sideband's
+# internal RNS instance. Incorrect changes
+# or addition here may cause Sideband to
+# fail starting up or working properly.
+#
+# If Sideband detects that Reticulum
+# aborts at startup, due to an error in
+# configuration, any template changes
+# will be reset to this default.
+
+[reticulum]
+  # Don't change these lines, use the UI
+  # settings instead. Removing them from
+  # the config template will break these
+  # settings controls in the UI.
+  enable_transport = TRANSPORT_IS_ENABLED
+  local_hops_delta = LOCAL_HOPS_DELTA
+
+  # Changing this setting will cause
+  # Sideband to not work.
+  share_instance = Yes
+
+  # Personal Hopspot
+  shared_instance_type = tcp
+  instance_control_port = 37429
+  rpc_key = <device-local-key>
+  panic_on_interface_error = No
+
+# Logging is controlled by settings
+# in the UI, so this section is mostly
+# not relevant in Sideband.
+[logging]
+  loglevel = 3
+
+# No additional interfaces are currently
+# defined, but you can use this section
+# to add additional custom interfaces.
+[interfaces]
+",
+    )
 }
