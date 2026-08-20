@@ -1,9 +1,11 @@
 //! Demo Hopspot management UI in Dioxus.
 //!
 //! Surfaces the same *functionality* as the OLED/Android face (interfaces,
-//! announce, limits, sleep, power toggles, RNS config export) with ordinary
-//! mobile navigation patterns. State is mocked until wired to `PrnsService`.
+//! announce, limits, sleep, power toggles, RNS config export). Browser preview
+//! uses mock state; the Hopspot APK WebView injects `HopspotBridge` for live
+//! `PrnsService` data.
 
+mod backend;
 mod model;
 mod ui;
 

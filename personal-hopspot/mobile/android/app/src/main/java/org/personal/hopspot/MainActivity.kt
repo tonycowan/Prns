@@ -8,29 +8,33 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
-import android.os.BatteryManager
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+<<<<<<< HEAD
 import android.os.PersistableBundle
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
 import android.widget.Toast
 import java.nio.ByteBuffer
+=======
+>>>>>>> 436aa105 (Wire Dioxus management UI to live PrnsService in the Hopspot APK.)
 
+/**
+ * Launcher Activity. Default (`dioxus` flavor) hosts the Dioxus management UI;
+ * `oled` flavor keeps the pixel face for regression.
+ *
+ * Both flavors only bind [PrnsService] — closing this Activity does not stop the
+ * engine.
+ */
 class MainActivity : Activity() {
     private var service: PrnsService? = null
     private var bound = false
     private var hopspotView: HopspotView? = null
+    private var dioxusView: DioxusHostView? = null
     private var refreshLinksOnConnect = false
     private var lastPermissionState: List<Boolean>? = null
 
@@ -39,6 +43,7 @@ class MainActivity : Activity() {
             val local = binder as? PrnsService.LocalBinder ?: return
             service = local.service
             hopspotView?.setService(local.service)
+            dioxusView?.setService(local.service)
             if (refreshLinksOnConnect) {
                 refreshLinksOnConnect = false
                 local.service.refreshPlatformLinks()
@@ -48,12 +53,17 @@ class MainActivity : Activity() {
         override fun onServiceDisconnected(name: ComponentName) {
             service = null
             hopspotView?.setService(null)
+            dioxusView?.setService(null)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        hopspotView = HopspotView(this).also { setContentView(it) }
+        if (BuildConfig.UI_FACE == "oled") {
+            hopspotView = HopspotView(this).also { setContentView(it) }
+        } else {
+            dioxusView = DioxusHostView(this).also { setContentView(it) }
+        }
         startAndBindService()
         requestMissingPermissions()
     }
@@ -63,6 +73,8 @@ class MainActivity : Activity() {
         hopspotView?.stop()
         hopspotView?.setService(null)
         hopspotView = null
+        dioxusView?.setService(null)
+        dioxusView = null
         if (bound) {
             unbindService(serviceConnection)
             bound = false
@@ -165,6 +177,7 @@ class MainActivity : Activity() {
         private const val PRNS_PERMISSION_REQUEST = 1
     }
 }
+<<<<<<< HEAD
 
 private class HopspotView(
     context: android.content.Context,
@@ -300,3 +313,5 @@ private class HopspotView(
         private const val BATTERY_EVERY_FRAMES = 30
     }
 }
+=======
+>>>>>>> 436aa105 (Wire Dioxus management UI to live PrnsService in the Hopspot APK.)

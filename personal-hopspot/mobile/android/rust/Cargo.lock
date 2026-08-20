@@ -1815,6 +1815,8 @@ dependencies = [
  "personal-hopspot-core",
  "personal-rns",
  "prns-ffi",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

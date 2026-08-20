@@ -69,6 +69,14 @@ object NativeBridge {
 
     external fun nativeAnnounce()
 
+    external fun nativeUiSnapshotJson(): String
+
+    external fun nativeToggleInterface(idHex: String)
+
+    external fun nativeSleepInterfaces()
+
+    external fun nativeWakeInterfaces()
+
     external fun nativeRuntimeHealth(): LongArray?
 
     external fun nativePersistenceHealth(): LongArray?

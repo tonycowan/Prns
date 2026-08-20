@@ -3,6 +3,7 @@ mod engine;
 mod face;
 mod jni;
 mod service_discovery;
+mod ui_live;
 
 use prns_ffi::bluetooth_auto::android as bluetooth_auto;
 use prns_ffi::wifi_aware::android as wifi_aware;
@@ -13,4 +14,7 @@ pub use jni::*;
 pub use personal_hopspot_core::{
     MOBILE_PANEL_HEIGHT as PANEL_HEIGHT, MOBILE_PANEL_WIDTH as PANEL_WIDTH,
     MOBILE_RGBA_BYTES as RGBA_BYTES,
+};
+pub use ui_live::{
+    capture_ui_live_snapshot, capture_ui_live_snapshot_json, parse_interface_id_hex, UiLiveSnapshot,
 };

@@ -367,13 +367,48 @@ impl Card {
     }
 
     #[must_use]
+    pub fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    #[must_use]
     pub const fn connection(&self) -> ConnectionState {
         self.connection
     }
 
     #[must_use]
+    pub const fn failure_reason(&self) -> Option<&'static str> {
+        self.failure_reason
+    }
+
+    #[must_use]
+    pub const fn tx_bytes(&self) -> u64 {
+        self.tx_bytes
+    }
+
+    #[must_use]
+    pub const fn rx_bytes(&self) -> u64 {
+        self.rx_bytes
+    }
+
+    #[must_use]
+    pub const fn links(&self) -> u32 {
+        self.links
+    }
+
+    #[must_use]
     pub const fn peers(&self) -> Option<u32> {
         self.peers
+    }
+
+    #[must_use]
+    pub const fn destinations(&self) -> u32 {
+        self.destinations
+    }
+
+    #[must_use]
+    pub const fn last_activity_secs(&self) -> Option<u32> {
+        self.last_activity_secs
     }
 }
 
