@@ -8,61 +8,80 @@ DST="$ROOT/android/app/src/main/assets/dioxus"
 cd "$UI"
 dx build --platform web --release
 
-# dx 0.7 writes under CARGO_TARGET_DIR; fall back to the usual local target.
-CANDIDATES=(
-  "${CARGO_TARGET_DIR:-}/dx/personal-hopspot-dioxus-android/release/web/public"
-  "$UI/target/dx/personal-hopspot-dioxus-android/release/web/public"
-)
+# Prefer an explicit target dir; otherwise pick the newest dx public output.
 SRC=""
-for candidate in "${CANDIDATES[@]}"; do
-  if [[ -n "$candidate" && -f "$candidate/index.html" ]]; then
-    SRC="$candidate"
-    break
-  fi
-done
-if [[ -z "$SRC" ]]; then
-  # Cursor / sandbox cargo target cache
-  SRC="$(find /var/folders -path '*personal-hopspot-dioxus-android/release/web/public/index.html' 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)"
+if [[ -n "${CARGO_TARGET_DIR:-}" && -f "${CARGO_TARGET_DIR}/dx/personal-hopspot-dioxus-android/release/web/public/index.html" ]]; then
+  SRC="${CARGO_TARGET_DIR}/dx/personal-hopspot-dioxus-android/release/web/public"
+elif [[ -f "$UI/target/dx/personal-hopspot-dioxus-android/release/web/public/index.html" ]]; then
+  SRC="$UI/target/dx/personal-hopspot-dioxus-android/release/web/public"
+else
+  SRC="$(
+    find /var/folders "$HOME" -path '*/dx/personal-hopspot-dioxus-android/release/web/public/index.html' 2>/dev/null \
+      | xargs -I{} dirname {} \
+      | xargs -I{} stat -f '%m %N' {} 2>/dev/null \
+      | sort -nr \
+      | head -1 \
+      | cut -d' ' -f2-
+  )"
 fi
 if [[ -z "$SRC" || ! -f "$SRC/index.html" ]]; then
   echo "could not locate dx web public output" >&2
   exit 1
 fi
 
+echo "syncing from $SRC"
+rm -rf "$DST"
 mkdir -p "$DST"
-rsync -a --delete "$SRC/" "$DST/"
+rsync -a "$SRC/" "$DST/"
 
-# file:// WebView cannot resolve absolute /assets/... paths.
 python3 - <<PY
 from pathlib import Path
 import re
+
 root = Path("$DST")
-index = root / "index.html"
-text = index.read_text()
-text = text.replace('"/./assets/', '"./assets/').replace('"/assets/', '"./assets/')
-text = text.replace("'/./assets/", "'./assets/").replace("'/assets/", "'./assets/")
-index.write_text(text)
 assets = root / "assets"
-for js in assets.glob("*.js"):
-    body = js.read_text()
-    # Prefer same-directory wasm next to the JS bundle.
-    # fetch() resolves relative to the HTML document (dioxus/), not the JS file
-    wasm_name = next(assets.glob("*.wasm")).name
-    body = re.sub(
-        r'module_or_path:"[^"]+\.wasm"',
-        f'module_or_path:"./assets/{wasm_name}"',
-        body,
-    )
-    body = body.replace('"/./assets/', '"./assets/').replace('"/assets/', '"./assets/')
-    css_name = next(assets.glob("*.css")).name
-    index_text = (root / "index.html").read_text()
-    if css_name not in index_text:
-        index_text = index_text.replace(
-            "</head>",
-            f'        <link rel="stylesheet" href="./assets/{css_name}">\n    </head>',
-        )
-    index_text = index_text.replace(" crossorigin", "")
-    (root / "index.html").write_text(index_text)
-    js.write_text(body)
-print(f"synced dioxus assets from {root}")
+
+def newest(pattern: str) -> Path:
+    files = sorted(assets.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        raise SystemExit(f"no assets matching {pattern}")
+    return files[0]
+
+# Drop stale hashed bundles left behind by dx's public dir.
+keep = {newest("*.js"), newest("*.wasm"), newest("*.css")}
+for path in assets.iterdir():
+    if path.is_file() and path not in keep:
+        path.unlink()
+
+js = newest("*.js")
+wasm = newest("*.wasm")
+css = newest("*.css")
+
+body = js.read_text()
+body = re.sub(
+    r'module_or_path:"[^"]+\.wasm"',
+    f'module_or_path:"./assets/{wasm.name}"',
+    body,
+)
+body = body.replace('"/./assets/', '"./assets/').replace('"/assets/', '"./assets/')
+js.write_text(body)
+
+(root / "index.html").write_text(
+    f"""<!DOCTYPE html>
+<html>
+    <head>
+        <title>Personal Hopspot</title>
+        <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta charset="UTF-8">
+        <link rel="stylesheet" href="./assets/{css.name}">
+    </head>
+    <body>
+        <div id="main"></div>
+        <script type="module" src="./assets/{js.name}"></script>
+    </body>
+</html>
+"""
+)
+print(f"synced dioxus assets js={js.name} wasm={wasm.name} css={css.name}")
 PY

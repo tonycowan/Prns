@@ -102,10 +102,13 @@ class DioxusHostView(
 
         @JavascriptInterface
         fun copyText(text: String) {
-            val clipboard =
-                appContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                    ?: return
-            clipboard.setPrimaryClip(ClipData.newPlainText("RNS config", text))
+            val app = appContext
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                val clipboard =
+                    app.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        ?: return@post
+                clipboard.setPrimaryClip(ClipData.newPlainText("RNS config", text))
+            }
         }
     }
 
