@@ -406,3 +406,35 @@ button {
   max-height: 240px;
   overflow: auto;
 }
+
+.peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.peer-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.peer-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.peer-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.peer-sub {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}

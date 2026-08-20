@@ -260,6 +260,31 @@ fn InterfaceDetail(
                 }
             }
 
+            {
+                let connected = card.connected_peers();
+                if !connected.is_empty() {
+                    rsx! {
+                        h2 { class: "section-title", "Peers {connected.len()}" }
+                        div { class: "peer-list",
+                            for peer in connected {
+                                div { class: "peer-row",
+                                    div { class: "peer-body",
+                                        div { class: "peer-title mono", "{peer.row_label()}" }
+                                        div { class: "peer-sub", "{peer.label}" }
+                                    }
+                                    span {
+                                        class: "chip {peer.connection.chip_class()}",
+                                        "{peer.connection.label()}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    rsx! {}
+                }
+            }
+
             h2 { class: "section-title", "Actions" }
             div { class: "detail-actions",
                 button {
