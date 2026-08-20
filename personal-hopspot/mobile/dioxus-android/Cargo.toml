@@ -1,0 +1,27 @@
+[package]
+name = "personal-hopspot-dioxus-android"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Dioxus Android demo face for Personal Hopspot: same management functionality as the OLED face, using mobile UI norms and mock data for now."
+
+# Own workspace so the Dioxus dep tree stays out of the suite lockfile / no_std gate.
+[workspace]
+
+[[bin]]
+name = "personal-hopspot-dioxus-android"
+path = "src/main.rs"
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+mobile = ["dioxus/mobile"]
+
+[dependencies]
+# Pinned to match the locally installed `dx` 0.7.5 used elsewhere in the suite.
+dioxus = { version = "=0.7.5", features = ["router"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
