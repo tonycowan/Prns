@@ -58,6 +58,20 @@ impl ConnectionState {
         }
     }
 
+    /// Compact status used on Hopspot interface-menu peer rows.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Initializing => "Init",
+            Self::Connected => "Live",
+            Self::Degraded => "Degr",
+            Self::Reconnecting => "Retry",
+            Self::Failed => "Fail",
+            Self::Disconnected => "Disc",
+            Self::Disabled => "Off",
+            Self::Unknown => "Unkn",
+        }
+    }
+
     pub fn chip_class(self) -> &'static str {
         match self {
             Self::Connected => "ok",
@@ -114,6 +128,27 @@ impl InterfaceKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct PeerInfo {
+    /// Display tag, e.g. `abcd` or `Mac Book`.
+    pub label: String,
+    pub connection: ConnectionState,
+}
+
+impl PeerInfo {
+    pub fn new(label: impl Into<String>, connection: ConnectionState) -> Self {
+        Self {
+            label: label.into(),
+            connection,
+        }
+    }
+
+    /// Matches Hopspot's `P abcd Live` peer row wording.
+    pub fn row_label(&self) -> String {
+        format!("P {} {}", self.label, self.connection.short_label())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct InterfaceCard {
     pub id: u32,
     pub kind: InterfaceKind,
@@ -126,6 +161,8 @@ pub struct InterfaceCard {
     pub destinations: u32,
     pub activity_age: Option<&'static str>,
     pub detail_lines: Vec<&'static str>,
+    /// Connected (or known) peers for this interface, as on the OLED menu detail.
+    pub peer_list: Vec<PeerInfo>,
 }
 
 impl InterfaceCard {
@@ -144,6 +181,18 @@ impl InterfaceCard {
             );
         }
         self.connection.label().to_string()
+    }
+
+    pub fn connected_peers(&self) -> Vec<&PeerInfo> {
+        self.peer_list
+            .iter()
+            .filter(|peer| {
+                matches!(
+                    peer.connection,
+                    ConnectionState::Connected | ConnectionState::Degraded
+                )
+            })
+            .collect()
     }
 }
 
@@ -279,7 +328,8 @@ fn sample_cards() -> Vec<InterfaceCard> {
             peers: None,
             destinations: 0,
             activity_age: None,
-            detail_lines: vec!["Peer: none", "Waiting for accessory"],
+            detail_lines: vec!["Waiting for accessory"],
+            peer_list: vec![],
         },
         InterfaceCard {
             id: 2,
@@ -292,7 +342,12 @@ fn sample_cards() -> Vec<InterfaceCard> {
             peers: Some(2),
             destinations: 8,
             activity_age: Some("12s"),
-            detail_lines: vec!["AutoInterface on WLAN0", "Peers: 2 live"],
+            detail_lines: vec!["AutoInterface on WLAN0"],
+            peer_list: vec![
+                PeerInfo::new("a1f3", ConnectionState::Connected),
+                PeerInfo::new("0c2e", ConnectionState::Connected),
+                PeerInfo::new("77b0", ConnectionState::Disconnected),
+            ],
         },
         InterfaceCard {
             id: 3,
@@ -306,6 +361,7 @@ fn sample_cards() -> Vec<InterfaceCard> {
             destinations: 3,
             activity_age: Some("4s"),
             detail_lines: vec!["Bluetooth Auto", "Recovery: idle"],
+            peer_list: vec![PeerInfo::new("MacBook", ConnectionState::Connected)],
         },
         InterfaceCard {
             id: 4,
@@ -319,6 +375,7 @@ fn sample_cards() -> Vec<InterfaceCard> {
             destinations: 0,
             activity_age: None,
             detail_lines: vec!["Platform link did not start"],
+            peer_list: vec![],
         },
         InterfaceCard {
             id: 5,
@@ -334,7 +391,10 @@ fn sample_cards() -> Vec<InterfaceCard> {
             detail_lines: vec![
                 "Shared instance TCP 127.0.0.1:37428",
                 "RPC control 37429",
-                "Fleet members roll into Local",
+            ],
+            peer_list: vec![
+                PeerInfo::new("Sideband", ConnectionState::Connected),
+                PeerInfo::new("Termux", ConnectionState::Connected),
             ],
         },
         InterfaceCard {
@@ -349,6 +409,7 @@ fn sample_cards() -> Vec<InterfaceCard> {
             destinations: 1,
             activity_age: Some("8s"),
             detail_lines: vec!["Local client of this shared instance"],
+            peer_list: vec![],
         },
     ]
 }
