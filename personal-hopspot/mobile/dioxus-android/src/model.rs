@@ -1,6 +1,6 @@
 //! Hopspot management model: mock sample data + live snapshot apply.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::Deserialize;
 
@@ -249,7 +249,6 @@ pub struct DemoState {
     pub cards: Vec<InterfaceCard>,
     pub limits: Vec<LimitRow>,
     pub sleeping: bool,
-    pub notice: Option<Notice>,
     pub rns_config: String,
     /// When true, power/sleep/announce go through the Hopspot service bridge.
     pub live: bool,
@@ -267,26 +266,8 @@ impl DemoState {
             cards: sample_cards(),
             limits: sample_limits(),
             sleeping: false,
-            notice: None,
             rns_config: sample_rns_config(),
             live: false,
-        }
-    }
-
-    pub fn flash(&mut self, message: impl Into<String>) {
-        self.notice = Some(Notice {
-            message: message.into(),
-            shown_at: Instant::now(),
-        });
-    }
-
-    pub fn clear_stale_notice(&mut self) {
-        let expired = self
-            .notice
-            .as_ref()
-            .is_some_and(|notice| notice.shown_at.elapsed() > Duration::from_secs(2));
-        if expired {
-            self.notice = None;
         }
     }
 
@@ -294,7 +275,6 @@ impl DemoState {
         if self.live {
             crate::backend::announce();
         }
-        self.flash("Announcing");
     }
 
     pub fn toggle_sleep(&mut self) {
@@ -306,52 +286,40 @@ impl DemoState {
                 crate::backend::wake_interfaces();
             }
         }
-        if self.sleeping {
-            self.flash("Sleeping");
-        } else {
-            self.flash("Awake");
-        }
     }
 
     pub fn toggle_power(&mut self, id: &str) {
         let Some(index) = self.cards.iter().position(|card| card.id == id) else {
             return;
         };
-        let label = self.cards[index].kind.label();
         if self.live {
             crate::backend::toggle_interface(id);
-            self.flash(format!("{label} toggled"));
             return;
         }
         if self.cards[index].connection.is_powered_on() {
             self.cards[index].connection = ConnectionState::Disabled;
             self.cards[index].failure_reason = None;
-            self.flash(format!("{label} off"));
         } else {
             self.cards[index].connection = ConnectionState::Connected;
-            self.flash(format!("{label} on"));
         }
         self.recount_online();
     }
 
-    pub fn copy_rns_config(&mut self) {
+    pub fn copy_rns_config_to_clipboard(&self) {
         if self.live {
             crate::backend::copy_text(&self.rns_config);
         }
-        self.flash("RNS config copied");
     }
 
-    /// Apply a live snapshot without clobbering ephemeral UI (sleep flag, toast).
+    /// Apply a live snapshot without clobbering ephemeral UI (sleep flag).
     pub fn apply_live_json(&mut self, json: &str) {
         let Ok(snap) = serde_json::from_str::<LiveSnapshotWire>(json) else {
             return;
         };
         let sleeping = self.sleeping;
-        let notice = self.notice.clone();
         *self = snap.into_state();
         self.live = true;
         self.sleeping = sleeping;
-        self.notice = notice;
     }
 
     fn recount_online(&mut self) {
@@ -447,7 +415,6 @@ impl LiveSnapshotWire {
                 })
                 .collect(),
             sleeping: false,
-            notice: None,
             rns_config: self.rns_config,
             live: true,
         }

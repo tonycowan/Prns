@@ -1,17 +1,20 @@
 //! Mobile-norm screens for the Hopspot management demo.
 
+use std::time::Instant;
+
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::backend;
-use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind};
+use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind, Notice};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Screen {
     Home,
     Interface { id: String },
     Limits,
-    RnsConfig,
+    /// Return to this interface detail after leaving RNS Config.
+    RnsConfig { return_to: String },
 }
 
 #[component]
@@ -29,30 +32,44 @@ pub fn App() -> Element {
     });
     let mut screen = use_signal(|| Screen::Home);
     let mut sheet_open = use_signal(|| false);
+    let mut toast = use_signal(|| None::<Notice>);
+    let mut last_snapshot = use_signal(String::new);
 
     use_future(move || async move {
         loop {
-            TimeoutFuture::new(200).await;
-            {
-                let mut state = state.write();
-                state.clear_stale_notice();
-                if backend::is_live() {
-                    if let Some(json) = backend::poll_snapshot_json() {
-                        state.apply_live_json(&json);
-                    }
+            TimeoutFuture::new(250).await;
+            if let Some(notice) = toast() {
+                if notice.shown_at.elapsed().as_secs() >= 2 {
+                    toast.set(None);
                 }
             }
+            if !backend::is_live() {
+                continue;
+            }
+            let Some(json) = backend::poll_snapshot_json() else {
+                continue;
+            };
+            if json == last_snapshot() {
+                continue;
+            }
+            last_snapshot.set(json.clone());
+            state.write().apply_live_json(&json);
         }
     });
 
-    let notice = state.read().notice.clone();
+    let mut flash = move |message: String| {
+        toast.set(Some(Notice {
+            message,
+            shown_at: Instant::now(),
+        }));
+    };
 
     rsx! {
         div { class: "app",
             match screen() {
                 Screen::Home => rsx! {
                     TopBar {
-                        title: "Personal Hopspot",
+                        title: "Personal Hopspot".to_string(),
                         on_menu: move |_| sheet_open.set(true),
                     }
                     div { class: "content",
@@ -66,7 +83,10 @@ pub fn App() -> Element {
                     div { class: "fab-bar",
                         button {
                             class: "btn primary",
-                            onclick: move |_| state.write().announce(),
+                            onclick: move |_| {
+                                state.write().announce();
+                                flash("Announcing".into());
+                            },
                             "Announce"
                         }
                         button {
@@ -79,22 +99,30 @@ pub fn App() -> Element {
                 Screen::Interface { id } => {
                     let card = state.read().cards.iter().find(|card| card.id == id).cloned();
                     match card {
-                        Some(card) => rsx! {
-                            TopBar {
-                                title: "{card.kind.label()}",
-                                show_back: true,
-                                on_back: move |_| screen.set(Screen::Home),
-                                on_menu: move |_| sheet_open.set(true),
-                            }
-                            InterfaceDetail {
-                                state,
-                                card,
-                                on_rns_config: move |_| screen.set(Screen::RnsConfig),
+                        Some(card) => {
+                            let return_id = id.clone();
+                            rsx! {
+                                TopBar {
+                                    title: card.kind.label().to_string(),
+                                    show_back: true,
+                                    on_back: move |_| screen.set(Screen::Home),
+                                    on_menu: move |_| sheet_open.set(true),
+                                }
+                                InterfaceDetail {
+                                    state,
+                                    card,
+                                    on_rns_config: move |_| {
+                                        screen.set(Screen::RnsConfig {
+                                            return_to: return_id.clone(),
+                                        })
+                                    },
+                                    on_flash: move |message| flash(message),
+                                }
                             }
                         },
                         None => rsx! {
                             TopBar {
-                                title: "Missing interface",
+                                title: "Missing interface".to_string(),
                                 show_back: true,
                                 on_back: move |_| screen.set(Screen::Home),
                                 on_menu: move |_| sheet_open.set(true),
@@ -105,21 +133,36 @@ pub fn App() -> Element {
                 },
                 Screen::Limits => rsx! {
                     TopBar {
-                        title: "Limits",
+                        title: "Limits".to_string(),
                         show_back: true,
                         on_back: move |_| screen.set(Screen::Home),
                         on_menu: move |_| sheet_open.set(true),
                     }
                     LimitsPage { state }
                 },
-                Screen::RnsConfig => rsx! {
-                    TopBar {
-                        title: "RNS Config",
-                        show_back: true,
-                        on_back: move |_| screen.set(Screen::Home),
-                        on_menu: move |_| sheet_open.set(true),
+                Screen::RnsConfig { return_to } => {
+                    let back_id = return_to.clone();
+                    rsx! {
+                        TopBar {
+                            title: "RNS Config".to_string(),
+                            show_back: true,
+                            on_back: move |_| {
+                                screen.set(Screen::Interface {
+                                    id: back_id.clone(),
+                                })
+                            },
+                            on_menu: move |_| sheet_open.set(true),
+                        }
+                        RnsConfigPage {
+                            state,
+                            on_done: move |_| {
+                                screen.set(Screen::Interface {
+                                    id: return_to.clone(),
+                                })
+                            },
+                            on_flash: move |message| flash(message),
+                        }
                     }
-                    RnsConfigPage { state }
                 },
             }
 
@@ -131,10 +174,11 @@ pub fn App() -> Element {
                         sheet_open.set(false);
                         screen.set(Screen::Limits);
                     },
+                    on_flash: move |message| flash(message),
                 }
             }
 
-            if let Some(notice) = notice {
+            if let Some(notice) = toast() {
                 div { class: "toast", "{notice.message}" }
             }
         }
@@ -145,7 +189,7 @@ pub fn App() -> Element {
 fn TopBar(
     title: String,
     #[props(default = false)] show_back: bool,
-    #[props(default = None)] on_back: Option<EventHandler<()>>,
+    #[props(default = EventHandler::default())] on_back: EventHandler<()>,
     on_menu: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -153,18 +197,16 @@ fn TopBar(
             if show_back {
                 button {
                     class: "icon-btn",
+                    r#type: "button",
                     aria_label: "Back",
-                    onclick: move |_| {
-                        if let Some(handler) = on_back {
-                            handler.call(());
-                        }
-                    },
+                    onclick: move |_| on_back.call(()),
                     "←"
                 }
             }
             h1 { "{title}" }
             button {
                 class: "icon-btn",
+                r#type: "button",
                 aria_label: "Menu",
                 onclick: move |_| on_menu.call(()),
                 "⋮"
@@ -219,6 +261,7 @@ fn InterfaceList(state: Signal<DemoState>, on_open: EventHandler<String>) -> Ele
                     rsx! {
                         button {
                             class: "row",
+                            r#type: "button",
                             key: "{id}",
                             onclick: move |_| on_open.call(id_for_click.clone()),
                             div { class: "row-icon", "{card.kind.short_icon()}" }
@@ -241,6 +284,7 @@ fn InterfaceDetail(
     state: Signal<DemoState>,
     card: InterfaceCard,
     on_rns_config: EventHandler<()>,
+    on_flash: EventHandler<String>,
 ) -> Element {
     let id = card.id.clone();
     let powered = card.connection.is_powered_on();
@@ -313,12 +357,24 @@ fn InterfaceDetail(
             div { class: "detail-actions",
                 button {
                     class: if powered { "btn danger" } else { "btn primary" },
-                    onclick: move |_| state.write().toggle_power(&id),
+                    r#type: "button",
+                    onclick: move |_| {
+                        let label = state
+                            .read()
+                            .cards
+                            .iter()
+                            .find(|card| card.id == id)
+                            .map(|card| card.kind.label())
+                            .unwrap_or("Interface");
+                        state.write().toggle_power(&id);
+                        on_flash.call(format!("{label} toggled"));
+                    },
                     "{power_label}"
                 }
                 if card.kind == InterfaceKind::Local {
                     button {
                         class: "btn",
+                        r#type: "button",
                         onclick: move |_| on_rns_config.call(()),
                         "RNS Config"
                     }
@@ -353,7 +409,11 @@ fn LimitsPage(state: Signal<DemoState>) -> Element {
 }
 
 #[component]
-fn RnsConfigPage(state: Signal<DemoState>) -> Element {
+fn RnsConfigPage(
+    state: Signal<DemoState>,
+    on_done: EventHandler<()>,
+    on_flash: EventHandler<String>,
+) -> Element {
     let config = state.read().rns_config.clone();
     rsx! {
         div { class: "content",
@@ -361,10 +421,22 @@ fn RnsConfigPage(state: Signal<DemoState>) -> Element {
                 "Paste into Sideband Utilities → Advanced Reticulum settings. Live builds fill the device RPC key."
             }
             pre { class: "config-box mono", "{config}" }
-            button {
-                class: "btn primary",
-                onclick: move |_| state.write().copy_rns_config(),
-                "Copy to clipboard"
+            div { class: "detail-actions",
+                button {
+                    class: "btn primary",
+                    r#type: "button",
+                    onclick: move |_| {
+                        state.read().copy_rns_config_to_clipboard();
+                        on_flash.call("RNS config copied".into());
+                    },
+                    "Copy to clipboard"
+                }
+                button {
+                    class: "btn",
+                    r#type: "button",
+                    onclick: move |_| on_done.call(()),
+                    "Done"
+                }
             }
         }
     }
@@ -372,9 +444,10 @@ fn RnsConfigPage(state: Signal<DemoState>) -> Element {
 
 #[component]
 fn GlobalSheet(
-    state: Signal<DemoState>,
+    mut state: Signal<DemoState>,
     on_close: EventHandler<()>,
     on_limits: EventHandler<()>,
+    on_flash: EventHandler<String>,
 ) -> Element {
     let sleep_label = if state.read().sleeping {
         "Wake interfaces"
@@ -393,27 +466,38 @@ fn GlobalSheet(
                 h2 { "Node actions" }
                 button {
                     class: "btn",
+                    r#type: "button",
                     onclick: move |_| {
                         state.write().announce();
+                        on_flash.call("Announcing".into());
                         on_close.call(());
                     },
                     "Announce"
                 }
                 button {
                     class: "btn",
+                    r#type: "button",
                     onclick: move |_| on_limits.call(()),
                     "Limits"
                 }
                 button {
                     class: "btn",
+                    r#type: "button",
                     onclick: move |_| {
+                        let sleeping = !state.read().sleeping;
                         state.write().toggle_sleep();
+                        on_flash.call(if sleeping {
+                            "Sleeping".into()
+                        } else {
+                            "Awake".into()
+                        });
                         on_close.call(());
                     },
                     "{sleep_label}"
                 }
                 button {
                     class: "btn",
+                    r#type: "button",
                     onclick: move |_| on_close.call(()),
                     "Close"
                 }
