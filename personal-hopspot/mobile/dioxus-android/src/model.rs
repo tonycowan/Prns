@@ -281,10 +281,12 @@ impl DemoState {
     }
 
     pub fn clear_stale_notice(&mut self) {
-        if let Some(notice) = &self.notice {
-            if notice.shown_at.elapsed() > Duration::from_secs(2) {
-                self.notice = None;
-            }
+        let expired = self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.shown_at.elapsed() > Duration::from_secs(2));
+        if expired {
+            self.notice = None;
         }
     }
 
@@ -339,6 +341,7 @@ impl DemoState {
         self.flash("RNS config copied");
     }
 
+    /// Apply a live snapshot without clobbering ephemeral UI (sleep flag, toast).
     pub fn apply_live_json(&mut self, json: &str) {
         let Ok(snap) = serde_json::from_str::<LiveSnapshotWire>(json) else {
             return;
