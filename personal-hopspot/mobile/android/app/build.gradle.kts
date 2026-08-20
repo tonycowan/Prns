@@ -76,6 +76,7 @@ android {
         create("dioxus") {
             dimension = "ui"
             isDefault = true
+            minSdk = 21
             buildConfigField("String", "UI_FACE", "\"dioxus\"")
         }
         create("oled") {
@@ -137,6 +138,7 @@ tasks.register("verifyExperimentalWifiDirectDisabled")
 
 dependencies {
     implementation(libs.usb.serial)
+    "dioxusImplementation"(libs.androidx.webkit)
     testImplementation(libs.junit)
 }
 
