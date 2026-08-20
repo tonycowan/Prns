@@ -1,0 +1,17 @@
+[application]
+name = "Personal Hopspot"
+default_platform = "web"
+
+[web.app]
+title = "Personal Hopspot"
+
+[web.watcher]
+reload_html = true
+index_on_404 = true
+
+[bundle]
+identifier = "org.personal.hopspot.dioxus"
+publisher = "Personal Hopspot"
+short_description = "Personal Hopspot management demo"
+long_description = "Dioxus Android demo of Hopspot management actions with mock node state."
+category = "Utility"
