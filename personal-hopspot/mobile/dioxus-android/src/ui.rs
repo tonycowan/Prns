@@ -1,25 +1,47 @@
 //! Mobile-norm screens for the Hopspot management demo.
 
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 
+use crate::backend;
 use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Screen {
     Home,
-    Interface { id: u32 },
+    Interface { id: String },
     Limits,
     RnsConfig,
 }
 
 #[component]
 pub fn App() -> Element {
-    let mut state = use_signal(DemoState::sample);
+    let mut state = use_signal(|| {
+        let mut initial = DemoState::sample();
+        if backend::is_live() {
+            if let Some(json) = backend::poll_snapshot_json() {
+                initial.apply_live_json(&json);
+            } else {
+                initial.live = true;
+            }
+        }
+        initial
+    });
     let mut screen = use_signal(|| Screen::Home);
     let mut sheet_open = use_signal(|| false);
 
-    // Drop toasts after a short delay without a timer crate: clear on next interaction
-    // and whenever the home screen re-renders after a signal write.
+    use_future(move || async move {
+        loop {
+            TimeoutFuture::new(200).await;
+            if !backend::is_live() {
+                continue;
+            }
+            if let Some(json) = backend::poll_snapshot_json() {
+                state.write().apply_live_json(&json);
+            }
+        }
+    });
+
     state.write().clear_stale_notice();
 
     let notice = state.read().notice.clone();
@@ -76,7 +98,7 @@ pub fn App() -> Element {
                                 on_back: move |_| screen.set(Screen::Home),
                                 on_menu: move |_| sheet_open.set(true),
                             }
-                            div { class: "content muted", "That interface is no longer in the demo set." }
+                            div { class: "content muted", "That interface is no longer available." }
                         },
                     }
                 },
@@ -185,18 +207,19 @@ fn StatusPanel(state: Signal<DemoState>) -> Element {
 }
 
 #[component]
-fn InterfaceList(state: Signal<DemoState>, on_open: EventHandler<u32>) -> Element {
+fn InterfaceList(state: Signal<DemoState>, on_open: EventHandler<String>) -> Element {
     let cards = state.read().cards.clone();
     rsx! {
         div { class: "list",
             for card in cards {
                 {
-                    let id = card.id;
+                    let id = card.id.clone();
+                    let id_for_click = id.clone();
                     rsx! {
                         button {
                             class: "row",
                             key: "{id}",
-                            onclick: move |_| on_open.call(id),
+                            onclick: move |_| on_open.call(id_for_click.clone()),
                             div { class: "row-icon", "{card.kind.short_icon()}" }
                             div { class: "row-body",
                                 div { class: "row-title", "{card.kind.label()}" }
@@ -218,7 +241,7 @@ fn InterfaceDetail(
     card: InterfaceCard,
     on_rns_config: EventHandler<()>,
 ) -> Element {
-    let id = card.id;
+    let id = card.id.clone();
     let powered = card.connection.is_powered_on();
     let power_label = if powered { "Turn off" } else { "Turn on" };
 
@@ -229,7 +252,7 @@ fn InterfaceDetail(
                     span { class: "status-label", "Status" }
                     span { class: "chip {card.connection.chip_class()}", "{card.connection.label()}" }
                 }
-                if let Some(reason) = card.failure_reason {
+                if let Some(reason) = &card.failure_reason {
                     p { class: "muted", "{reason}" }
                 }
                 if card.connection == crate::model::ConnectionState::Connected {
@@ -252,7 +275,7 @@ fn InterfaceDetail(
                         }
                     }
                 }
-                if let Some(age) = card.activity_age {
+                if let Some(age) = &card.activity_age {
                     p { class: "muted", "Last activity {age} ago" }
                 }
                 for line in card.detail_lines.iter() {
@@ -289,7 +312,7 @@ fn InterfaceDetail(
             div { class: "detail-actions",
                 button {
                     class: if powered { "btn danger" } else { "btn primary" },
-                    onclick: move |_| state.write().toggle_power(id),
+                    onclick: move |_| state.write().toggle_power(&id),
                     "{power_label}"
                 }
                 if card.kind == InterfaceKind::Local {
@@ -307,9 +330,15 @@ fn InterfaceDetail(
 #[component]
 fn LimitsPage(state: Signal<DemoState>) -> Element {
     let limits = state.read().limits.clone();
+    let live = state.read().live;
+    let blurb = if live {
+        "Storage and transport limits for this node."
+    } else {
+        "Storage and transport limits for this node (mock values)."
+    };
     rsx! {
         div { class: "content",
-            p { class: "muted", "Storage and transport limits for this node (mock values)." }
+            p { class: "muted", "{blurb}" }
             div { class: "limits",
                 for row in limits {
                     div { class: "limit-row",
@@ -328,7 +357,7 @@ fn RnsConfigPage(state: Signal<DemoState>) -> Element {
     rsx! {
         div { class: "content",
             p { class: "muted",
-                "Paste into Sideband Utilities → Advanced Reticulum settings. Live builds will fill the device RPC key."
+                "Paste into Sideband Utilities → Advanced Reticulum settings. Live builds fill the device RPC key."
             }
             pre { class: "config-box mono", "{config}" }
             button {

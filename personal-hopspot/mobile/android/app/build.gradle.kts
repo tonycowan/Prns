@@ -65,8 +65,22 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "org.personal.hopspot.PrnsRuntimeProbe"
         buildConfigField("boolean", "EXPERIMENTAL_WIFI_DIRECT", experimentalWifiDirect)
+        buildConfigField("String", "UI_FACE", "\"dioxus\"")
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
+    }
+
+    flavorDimensions += "ui"
+    productFlavors {
+        create("dioxus") {
+            dimension = "ui"
+            isDefault = true
+            buildConfigField("String", "UI_FACE", "\"dioxus\"")
+        }
+        create("oled") {
+            dimension = "ui"
+            buildConfigField("String", "UI_FACE", "\"oled\"")
         }
     }
 
@@ -116,7 +130,7 @@ tasks.named("preBuild").configure {
 
 tasks.register("assembleProduction") {
     notCompatibleWithConfigurationCache("signing credentials must not be serialized")
-    dependsOn("assembleRelease")
+    dependsOn("assembleDioxusRelease")
 }
 
 tasks.register("verifyExperimentalWifiDirectDisabled")
@@ -127,7 +141,7 @@ dependencies {
 }
 
 afterEvaluate {
-    val releaseRuntimeCoordinates = configurations.getByName("releaseRuntimeClasspath")
+    val releaseRuntimeCoordinates = configurations.getByName("dioxusReleaseRuntimeClasspath")
         .incoming.resolutionResult.allComponents
         .mapNotNull { component ->
             component.moduleVersion?.takeIf { id -> id.version != "unspecified" }?.toString()
@@ -146,7 +160,7 @@ afterEvaluate {
                 .sorted()
             val actual = releaseRuntimeCoordinates
             check(actual == expected) {
-                "releaseRuntimeClasspath drifted.\nExpected:\n${expected.joinToString("\n")}\n" +
+                "dioxusReleaseRuntimeClasspath drifted.\nExpected:\n${expected.joinToString("\n")}\n" +
                     "Actual:\n${actual.joinToString("\n")}"
             }
         }
