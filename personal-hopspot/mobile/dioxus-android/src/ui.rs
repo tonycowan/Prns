@@ -33,16 +33,17 @@ pub fn App() -> Element {
     use_future(move || async move {
         loop {
             TimeoutFuture::new(200).await;
-            if !backend::is_live() {
-                continue;
-            }
-            if let Some(json) = backend::poll_snapshot_json() {
-                state.write().apply_live_json(&json);
+            {
+                let mut state = state.write();
+                state.clear_stale_notice();
+                if backend::is_live() {
+                    if let Some(json) = backend::poll_snapshot_json() {
+                        state.apply_live_json(&json);
+                    }
+                }
             }
         }
     });
-
-    state.write().clear_stale_notice();
 
     let notice = state.read().notice.clone();
 
