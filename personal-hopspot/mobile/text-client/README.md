@@ -9,13 +9,34 @@ announces `lxmf.delivery`. It never hosts.
    with the local shared bus on `127.0.0.1:37428`).
 2. Leave Hopspot running; this app attaches as a TCP LocalClient only.
 
-## Message
+## Using the app
 
-1. **Announce** (so peers can path to you).
-2. Tap a **heard** `lxmf.delivery` peer (e.g. Sideband).
-3. Type a short text and **Send** (opportunistic LXMF single packet).
+Three tabs:
 
-Inbound LXMF opportunistic packets show up under **Conversation**. Keep texts short (~240 chars) so they fit one encrypted packet.
+| Tab | Purpose |
+|---|---|
+| **Me** | Connection status, your LXMF destination hash, announce count, **Announce** button |
+| **Others** | Heard peers and message-only peers; tap a row to open **Chats** |
+| **Chats** | Thread with the selected peer; compose and **Send** at the bottom |
+
+Typical flow:
+
+1. Open **Me** and tap **Announce** (so peers can path to you).
+2. Open **Others** and pick a peer (heard announce, or a dashed placeholder row if they messaged you but have not announced yet).
+3. In **Chats**, send short texts (~240 characters) via opportunistic LXMF.
+
+**Others tab details**
+
+- Each peer gets a default alias (`Alias 1`, `Alias 2`, …). Tap the alias to rename it.
+- Tap anywhere else on the row to open that peer in **Chats**.
+- The tab badge clears when you visit **Others**; unread message dots clear when you open that peer’s chat.
+- Peers who sent a message without announcing appear with a dashed border and a warning that return path may be unavailable.
+
+**Chats tab details**
+
+- Header shows the peer alias (left) and **You** (right), with `…abcd` address tails underneath.
+- Message bubbles show a timestamp; delivery errors appear in bold red.
+- New messages stay in view when you are already scrolled to the bottom.
 
 ## Desktop (Mac) — live LocalClient
 
@@ -27,9 +48,7 @@ cargo run
 ```
 
 With Hopspot/prnsd listening on `:37428`, status should flip to
-**Connected (LocalClient)**. Press **Announce**.
-
-Identity is stored at `~/.personal-text-client/lxmf_identity`.
+**Connected (LocalClient)**.
 
 Live bus smoke (optional):
 
@@ -56,17 +75,27 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 export NDK_HOME="$ANDROID_NDK_HOME"
 
 cd personal-hopspot/mobile/text-client
-dx bundle --platform android --features mobile --no-default-features
+dx bundle --platform android --features mobile --no-default-features --release --package-types apk --out-dir dist
 ```
 
-Install the debug APK (path under `target/dx/.../apk/debug/app-debug.apk`, also
-copied to `dist/personal-text-client-debug.apk` when built here):
+Install the release APK (dx may name the artifact `app-debug.apk` internally; rename or use the copy you keep in `dist/`):
 
 ```bash
-adb install -r dist/personal-text-client-debug.apk
+adb install -r dist/personal-text-client-release.apk
 ```
 
 Package id: `org.personal.textclient`. Start Hopspot first, then this app.
+
+For a debug build (much larger APK, unstripped native lib), omit `--release`.
+
+## Local data
+
+| Data | Desktop | Android |
+|---|---|---|
+| LXMF identity | `~/.personal-text-client/lxmf_identity` | app files dir (`lxmf_identity`) |
+| Peer aliases | `~/.personal-text-client/aliases.json` | app files dir (`aliases.json`) |
+
+Identity is created on first launch and reused on later runs (stable destination hash).
 
 ## What it does
 
@@ -76,9 +105,9 @@ Package id: `org.personal.textclient`. Start Hopspot first, then this app.
 | Hopspot down | Status **Waiting for Hopspot**; retries every 2s |
 | Announce | `announce_now` on registered `lxmf.delivery` |
 | Heard | Lists `AnnounceHeard` diagnostics from the LocalClient path |
+| Send / receive | Opportunistic and direct LXMF (Sideband-compatible short texts) |
 
 ## Out of scope (for now)
 
-- LXMF message codec / Sideband chat interop
 - Hosting a shared instance
 - Binding Hopspot’s signature-protected `Messenger` API (TCP bus is enough)
