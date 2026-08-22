@@ -297,7 +297,34 @@ button {
 }
 
 .heard-item.message-only {
-  border-style: dashed;
+  --dash-len: 14px;
+  --dash-gap: 10px;
+  border: none;
+  background-color: var(--panel);
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      var(--warn) 0 var(--dash-len),
+      transparent var(--dash-len) calc(var(--dash-len) + var(--dash-gap))
+    ),
+    repeating-linear-gradient(
+      90deg,
+      var(--warn) 0 var(--dash-len),
+      transparent var(--dash-len) calc(var(--dash-len) + var(--dash-gap))
+    ),
+    repeating-linear-gradient(
+      0deg,
+      var(--warn) 0 var(--dash-len),
+      transparent var(--dash-len) calc(var(--dash-len) + var(--dash-gap))
+    ),
+    repeating-linear-gradient(
+      0deg,
+      var(--warn) 0 var(--dash-len),
+      transparent var(--dash-len) calc(var(--dash-len) + var(--dash-gap))
+    );
+  background-size: 100% 2px, 100% 2px, 2px 100%, 2px 100%;
+  background-position: top, bottom, left, right;
+  background-repeat: repeat-x, repeat-x, repeat-y, repeat-y;
 }
 
 .heard-item.selected {
@@ -385,13 +412,15 @@ button {
   margin-bottom: 0.25rem;
 }
 
+.status-error-text,
 .chat-meta-error {
   color: var(--bad);
   font-weight: 650;
 }
 
-.heard-placeholder {
-  font-style: italic;
+.heard-meta-extra {
+  color: var(--muted);
+  font-weight: 400;
 }
 
 .chat-text,

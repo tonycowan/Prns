@@ -289,6 +289,9 @@ enum OtherRow {
     MessageOnly { hex: String },
 }
 
+const MESSAGE_ONLY_NOTICE: &str =
+    "Has not announced on the mesh yet. Return path may be unavailable.";
+
 fn message_only_peers(heard: &[HeardAnnounce], messages: &[ChatLine]) -> Vec<String> {
     let heard_set: HashSet<String> = heard
         .iter()
@@ -535,10 +538,16 @@ fn OthersTab(
                                     } else {
                                         div { class: "heard-body",
                                             div { class: "heard-hash", "{hex}" }
-                                            div { class: "heard-meta heard-placeholder",
-                                                "Has not announced on the mesh yet."
-                                                if is_selected { " · selected" }
-                                                if has_unread { " · new message" }
+                                            div { class: "heard-meta",
+                                                span { class: "status-error-text",
+                                                    "{MESSAGE_ONLY_NOTICE}"
+                                                }
+                                                if is_selected {
+                                                    span { class: "heard-meta-extra", " · selected" }
+                                                }
+                                                if has_unread {
+                                                    span { class: "heard-meta-extra", " · new message" }
+                                                }
                                             }
                                         }
                                     }
@@ -706,7 +715,7 @@ fn ChatsTab(
                                             span { class: "chat-meta-time", "{stamp}" }
                                             if let Some(message) = error {
                                                 span { class: "chat-meta-sep", " · " }
-                                                span { class: "chat-meta-error", "{message}" }
+                                                span { class: "status-error-text", "{message}" }
                                             }
                                         }
                                         div { class: "chat-text", "{line.text}" }
