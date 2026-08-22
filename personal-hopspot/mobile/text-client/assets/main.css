@@ -385,6 +385,11 @@ button {
   margin-bottom: 0.25rem;
 }
 
+.chat-meta-error {
+  color: var(--bad);
+  font-weight: 650;
+}
+
 .heard-placeholder {
   font-style: italic;
 }

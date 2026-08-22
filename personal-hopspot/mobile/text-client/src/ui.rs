@@ -602,16 +602,36 @@ fn AliasEditor(
     }
 }
 
-fn chat_meta(line: &ChatLine) -> String {
-    let stamp = if line.at.is_empty() {
+fn chat_meta_is_ok(status: &str) -> bool {
+    status == "sent" || status.starts_with("received (")
+}
+
+fn space_camel_case(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let chars: Vec<char> = text.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        if i > 0
+            && ch.is_uppercase()
+            && chars
+                .get(i - 1)
+                .is_some_and(|prev| prev.is_lowercase() || prev.is_ascii_digit())
+        {
+            out.push(' ');
+        }
+        out.push(*ch);
+    }
+    out
+}
+
+fn format_error_status(status: &str) -> String {
+    space_camel_case(status)
+}
+
+fn chat_meta_stamp(line: &ChatLine) -> String {
+    if line.at.is_empty() {
         format_message_time()
     } else {
         line.at.clone()
-    };
-    if line.status == "sent" || line.status.starts_with("received (") {
-        stamp
-    } else {
-        format!("{stamp} · {}", line.status)
     }
 }
 
@@ -668,14 +688,30 @@ fn ChatsTab(
                 } else {
                     ul { class: "chat-list",
                         for line in thread.iter().rev() {
-                            li {
-                                class: if line.direction == ChatDirection::Out {
-                                    "chat-item out"
+                            {
+                                let stamp = chat_meta_stamp(line);
+                                let error = if chat_meta_is_ok(&line.status) {
+                                    None
                                 } else {
-                                    "chat-item in"
-                                },
-                                div { class: "chat-meta", "{chat_meta(line)}" }
-                                div { class: "chat-text", "{line.text}" }
+                                    Some(format_error_status(&line.status))
+                                };
+                                rsx! {
+                                    li {
+                                        class: if line.direction == ChatDirection::Out {
+                                            "chat-item out"
+                                        } else {
+                                            "chat-item in"
+                                        },
+                                        div { class: "chat-meta",
+                                            span { class: "chat-meta-time", "{stamp}" }
+                                            if let Some(message) = error {
+                                                span { class: "chat-meta-sep", " · " }
+                                                span { class: "chat-meta-error", "{message}" }
+                                            }
+                                        }
+                                        div { class: "chat-text", "{line.text}" }
+                                    }
+                                }
                             }
                         }
                     }
