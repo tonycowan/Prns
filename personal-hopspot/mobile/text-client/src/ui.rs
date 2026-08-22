@@ -4,9 +4,10 @@ use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 
+use crate::aliases;
 use crate::backend;
 use crate::model::{ChatDirection, ChatLine, ConnectionPhase, HeardAnnounce, Snapshot};
-use crate::timeutil::sleep_ms;
+use crate::timeutil::{format_message_time, sleep_ms};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -26,13 +27,13 @@ pub fn App() -> Element {
     let mut draft = use_signal(String::new);
     let mut tab = use_signal(|| Tab::Me);
 
-    // Announce-arrival badge on the Others tab (clears when Others is visited).
+    let mut peer_aliases = use_signal(aliases::load);
+    let mut alias_next = use_signal(|| 0u32);
+    let mut editing_alias = use_signal(|| None::<String>);
+
     let mut others_announce_badge = use_signal(|| false);
     let mut known_peers = use_signal(HashSet::<String>::new);
     let mut peers_seeded = use_signal(|| false);
-
-    // Unread inbound messages: per-peer highest viewed inbound seq.
-    // Others tab + list items stay embellished until that peer is clicked.
     let mut viewed_inbound_seq = use_signal(HashMap::<String, u64>::new);
 
     use_future(move || async move {
@@ -47,7 +48,18 @@ pub fn App() -> Element {
                 &mut known_peers,
                 &mut others_announce_badge,
             );
-            // Active chat: treat new inbound messages for this peer as already seen.
+            let extra_peers = message_only_peers(&next.heard, &next.messages);
+            let (updated, next_num) = aliases::ensure_defaults(
+                &next.heard,
+                &extra_peers,
+                peer_aliases(),
+                alias_next(),
+            );
+            if updated != peer_aliases() {
+                peer_aliases.set(updated.clone());
+                alias_next.set(next_num);
+                aliases::persist(&updated, next_num);
+            }
             if tab() == Tab::Chats {
                 let peer = selected_peer();
                 if !peer.is_empty() {
@@ -69,32 +81,12 @@ pub fn App() -> Element {
     let connected = matches!(snap.read().phase, ConnectionPhase::Connected);
     let peer_now = selected_peer();
     let current_tab = tab();
+    let alias_map = peer_aliases();
 
     let unread_peers = unread_peer_set(&snap.read().messages, &viewed_inbound_seq());
     let others_tab_embellished = others_announce_badge() || !unread_peers.is_empty();
 
-    // Keep Chats scrolled to the newest message (bottom).
-    let chat_len = snap
-        .read()
-        .messages
-        .iter()
-        .filter(|m| !peer_now.is_empty() && m.peer_hex == peer_now)
-        .count();
-    let scroll_peer = peer_now.clone();
-    use_effect(move || {
-        let _ = (current_tab, chat_len, scroll_peer.clone());
-        if current_tab == Tab::Chats {
-            spawn(async move {
-                sleep_ms(50).await;
-                let _ = document::eval(
-                    "const e = document.getElementById('chat-scroll'); if (e) { e.scrollTop = e.scrollHeight; }",
-                );
-            });
-        }
-    });
-
     let open_others = move |_| {
-        // Visiting Others clears the "new announce" tab badge and remembers everyone heard.
         others_announce_badge.set(false);
         let mut known = known_peers();
         for entry in snap.read().heard.iter() {
@@ -107,7 +99,20 @@ pub fn App() -> Element {
     let select_peer = move |hex: String| {
         mark_peer_viewed(&hex, &snap.read().messages, &mut viewed_inbound_seq);
         selected_peer.set(hex);
+        editing_alias.set(None);
         tab.set(Tab::Chats);
+    };
+
+    let set_alias = move |(hex, name): (String, String)| {
+        let trimmed = name.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        let mut map = peer_aliases();
+        map.insert(hex, trimmed);
+        peer_aliases.set(map.clone());
+        aliases::persist(&map, alias_next());
+        editing_alias.set(None);
     };
 
     rsx! {
@@ -153,14 +158,30 @@ pub fn App() -> Element {
                     Tab::Others => rsx! {
                         OthersTab {
                             heard: snap.read().heard.clone(),
+                            messages: snap.read().messages.clone(),
+                            aliases: alias_map.clone(),
                             selected: peer_now.clone(),
                             unread: unread_peers.clone(),
+                            editing: editing_alias(),
                             on_select: select_peer,
+                            on_edit_alias: move |hex| editing_alias.set(Some(hex)),
+                            on_save_alias: set_alias,
+                            on_cancel_edit: move |_| editing_alias.set(None),
                         }
                     },
                     Tab::Chats => rsx! {
                         ChatsTab {
                             peer: peer_now.clone(),
+                            peer_label: if peer_now.is_empty() {
+                                "No peer selected — pick someone under Others.".to_string()
+                            } else {
+                                aliases::display_name(&peer_now, &alias_map)
+                            },
+                            my_hex: snap
+                                .read()
+                                .destination_hex
+                                .clone()
+                                .unwrap_or_default(),
                             messages: snap.read().messages.clone(),
                             draft,
                             connected,
@@ -208,7 +229,6 @@ fn update_announce_badges(
     }
 
     if current_tab == Tab::Others {
-        // Already looking at the list — absorb arrivals so leaving doesn't re-badge them.
         let mut known = known_peers();
         for entry in next.heard.iter() {
             known.insert(entry.destination_hex.clone());
@@ -261,6 +281,58 @@ fn mark_peer_viewed(
     let mut map = viewed_inbound_seq();
     map.insert(peer.to_string(), max_seq);
     viewed_inbound_seq.set(map);
+}
+
+#[derive(Clone)]
+enum OtherRow {
+    Announced(HeardAnnounce),
+    MessageOnly { hex: String },
+}
+
+fn message_only_peers(heard: &[HeardAnnounce], messages: &[ChatLine]) -> Vec<String> {
+    let heard_set: HashSet<String> = heard
+        .iter()
+        .map(|entry| entry.destination_hex.clone())
+        .collect();
+    let mut peers = HashSet::new();
+    for message in messages {
+        if message.peer_hex == "unknown" {
+            continue;
+        }
+        if heard_set.contains(&message.peer_hex) {
+            continue;
+        }
+        peers.insert(message.peer_hex.clone());
+    }
+    let mut list: Vec<String> = peers.into_iter().collect();
+    list.sort();
+    list
+}
+
+fn build_other_rows(heard: &[HeardAnnounce], messages: &[ChatLine]) -> Vec<OtherRow> {
+    let mut rows: Vec<OtherRow> = heard
+        .iter()
+        .cloned()
+        .map(OtherRow::Announced)
+        .collect();
+
+    let mut msg_only: Vec<(String, u64)> = message_only_peers(heard, messages)
+        .into_iter()
+        .map(|hex| {
+            let latest = messages
+                .iter()
+                .filter(|m| m.peer_hex == hex)
+                .map(|m| m.seq)
+                .max()
+                .unwrap_or(0);
+            (hex, latest)
+        })
+        .collect();
+    msg_only.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq));
+    for (hex, _) in msg_only {
+        rows.push(OtherRow::MessageOnly { hex });
+    }
+    rows
 }
 
 #[component]
@@ -376,42 +448,99 @@ fn MeTab(
 #[component]
 fn OthersTab(
     heard: Vec<HeardAnnounce>,
+    messages: Vec<ChatLine>,
+    aliases: HashMap<String, String>,
     selected: String,
     unread: HashSet<String>,
+    editing: Option<String>,
     on_select: EventHandler<String>,
+    on_edit_alias: EventHandler<String>,
+    on_save_alias: EventHandler<(String, String)>,
+    on_cancel_edit: EventHandler<()>,
 ) -> Element {
+    let rows = build_other_rows(&heard, &messages);
+
     rsx! {
         div { class: "tab-pane others-pane",
-            if heard.is_empty() {
+            if rows.is_empty() {
                 p { class: "empty", "None yet — announce from another peer on the mesh." }
             } else {
                 ul { class: "heard-list",
-                    for entry in heard.iter() {
+                    for row in rows.iter() {
                         {
-                            let hex = entry.destination_hex.clone();
-                            let hex_click = hex.clone();
+                            let (hex, announced) = match row {
+                                OtherRow::Announced(entry) => {
+                                    (entry.destination_hex.clone(), Some(entry.clone()))
+                                }
+                                OtherRow::MessageOnly { hex } => (hex.clone(), None),
+                            };
+                            let hex_open = hex.clone();
+                            let hex_edit = hex.clone();
+                            let hex_save = hex.clone();
                             let is_selected = hex == selected;
                             let has_unread = unread.contains(&hex);
-                            let item_class = match (is_selected, has_unread) {
-                                (true, true) => "heard-item selected embellished",
-                                (true, false) => "heard-item selected",
-                                (false, true) => "heard-item embellished",
-                                (false, false) => "heard-item",
+                            let alias = aliases
+                                .get(&hex)
+                                .cloned()
+                                .unwrap_or_else(|| hex.clone());
+                            let is_editing = editing.as_deref() == Some(hex.as_str());
+                            let item_class = match (is_selected, has_unread, announced.is_some()) {
+                                (true, true, true) => "heard-item selected embellished",
+                                (true, false, true) => "heard-item selected",
+                                (false, true, true) => "heard-item embellished",
+                                (false, false, true) => "heard-item",
+                                (true, true, false) => "heard-item message-only selected embellished",
+                                (true, false, false) => "heard-item message-only selected",
+                                (false, true, false) => "heard-item message-only embellished",
+                                (false, false, false) => "heard-item message-only",
                             };
                             rsx! {
                                 li {
                                     class: "{item_class}",
-                                    onclick: move |_| on_select.call(hex_click.clone()),
-                                    div { class: "heard-hash-row",
-                                        div { class: "heard-hash", "{entry.destination_hex}" }
-                                        if has_unread {
-                                            span { class: "item-dot", aria_label: "new messages" }
+                                    onclick: move |_| {
+                                        if !is_editing {
+                                            on_select.call(hex_open.clone());
+                                        }
+                                    },
+                                    div { class: "heard-alias-row",
+                                        if is_editing {
+                                            AliasEditor {
+                                                initial: alias,
+                                                on_save: move |name| on_save_alias.call((hex_save.clone(), name)),
+                                                on_cancel: move |_| on_cancel_edit.call(()),
+                                            }
+                                        } else {
+                                            button {
+                                                class: "alias-button",
+                                                onclick: move |event| {
+                                                    event.stop_propagation();
+                                                    on_edit_alias.call(hex_edit.clone());
+                                                },
+                                                "{alias}"
+                                            }
+                                            if has_unread {
+                                                span { class: "item-dot", aria_label: "new messages" }
+                                            }
                                         }
                                     }
-                                    div { class: "heard-meta",
-                                        "hops {entry.hops} · {entry.interface} · #{entry.seq}"
-                                        if is_selected { " · selected" }
-                                        if has_unread { " · new" }
+                                    if let Some(entry) = announced {
+                                        div { class: "heard-body",
+                                            div { class: "heard-hash", "{entry.destination_hex}" }
+                                            div { class: "heard-meta",
+                                                "hops {entry.hops} · {entry.interface} · #{entry.seq}"
+                                                if is_selected { " · selected" }
+                                                if has_unread { " · new" }
+                                            }
+                                        }
+                                    } else {
+                                        div { class: "heard-body",
+                                            div { class: "heard-hash", "{hex}" }
+                                            div { class: "heard-meta heard-placeholder",
+                                                "Has not announced on the mesh yet."
+                                                if is_selected { " · selected" }
+                                                if has_unread { " · new message" }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -424,8 +553,84 @@ fn OthersTab(
 }
 
 #[component]
+fn AliasEditor(
+    initial: String,
+    on_save: EventHandler<String>,
+    on_cancel: EventHandler<()>,
+) -> Element {
+    let mut value = use_signal(|| initial);
+
+    use_effect(move || {
+        spawn(async move {
+            sleep_ms(0).await;
+            let _ = document::eval(
+                "const el = document.querySelector('.alias-input'); \
+                 if (el) { el.focus(); el.select(); }",
+            );
+        });
+    });
+
+    rsx! {
+        input {
+            class: "alias-input",
+            r#type: "text",
+            value: "{value}",
+            autofocus: true,
+            oninput: move |event| value.set(event.value()),
+            onfocus: move |_| {
+                let _ = document::eval(
+                    "const el = document.activeElement; \
+                     if (el instanceof HTMLInputElement) el.select();",
+                );
+            },
+            onkeydown: move |event| {
+                if event.key() == Key::Enter {
+                    on_save.call(value());
+                } else if event.key() == Key::Escape {
+                    on_cancel.call(());
+                }
+            },
+        }
+        button {
+            class: "alias-save",
+            onclick: move |event| {
+                event.stop_propagation();
+                on_save.call(value());
+            },
+            "Save"
+        }
+    }
+}
+
+fn chat_meta(line: &ChatLine) -> String {
+    let stamp = if line.at.is_empty() {
+        format_message_time()
+    } else {
+        line.at.clone()
+    };
+    if line.status == "sent" || line.status.starts_with("received (") {
+        stamp
+    } else {
+        format!("{stamp} · {}", line.status)
+    }
+}
+
+fn address_tail(hex: &str) -> String {
+    let hex = hex.trim();
+    if hex.is_empty() {
+        "...—".to_string()
+    } else if hex.len() <= 4 {
+        format!("...{hex}")
+    } else {
+        format!("...{}", &hex[hex.len() - 4..])
+    }
+}
+
+#[component]
 fn ChatsTab(
     peer: String,
+    peer_label: String,
+    my_hex: String,
     messages: Vec<ChatLine>,
     draft: Signal<String>,
     connected: bool,
@@ -436,21 +641,23 @@ fn ChatsTab(
         .into_iter()
         .filter(|m| !peer.is_empty() && m.peer_hex == peer)
         .collect();
-    // Engine stores newest-first; show oldest at top, newest at bottom.
     thread.sort_by_key(|m| m.seq);
 
     let can_send = connected && !peer.is_empty() && !draft().trim().is_empty();
-    let peer_label = if peer.is_empty() {
-        "No peer selected — pick someone under Others.".to_string()
-    } else {
-        peer.clone()
-    };
+    let peer_tail = address_tail(&peer);
+    let my_tail = address_tail(&my_hex);
 
     rsx! {
         div { class: "tab-pane chats-pane",
-            div { class: "chat-peer",
-                span { class: "label", "With" }
-                span { class: "value peer", "{peer_label}" }
+            if !peer.is_empty() {
+                div { class: "chat-columns-header",
+                    span { class: "chat-col-them", "{peer_label}" }
+                    span { class: "chat-col-you", "You" }
+                }
+                div { class: "chat-address-row",
+                    span { class: "chat-col-them", "{peer_tail}" }
+                    span { class: "chat-col-you", "{my_tail}" }
+                }
             }
 
             div { class: "chat-scroll", id: "chat-scroll",
@@ -460,17 +667,14 @@ fn ChatsTab(
                     p { class: "empty", "No messages with this peer yet." }
                 } else {
                     ul { class: "chat-list",
-                        for line in thread.iter() {
+                        for line in thread.iter().rev() {
                             li {
                                 class: if line.direction == ChatDirection::Out {
                                     "chat-item out"
                                 } else {
                                     "chat-item in"
                                 },
-                                div { class: "chat-meta",
-                                    if line.direction == ChatDirection::Out { "you · " } else { "them · " }
-                                    "{line.status}"
-                                }
+                                div { class: "chat-meta", "{chat_meta(line)}" }
                                 div { class: "chat-text", "{line.text}" }
                             }
                         }

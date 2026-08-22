@@ -49,6 +49,7 @@ pub struct ChatLine {
     pub peer_hex: String,
     pub text: String,
     pub status: String,
+    pub at: String,
     pub seq: u64,
 }
 

@@ -3,6 +3,7 @@
 //! Starts Hopspot first (shared RNS host). This app never hosts — it only joins
 //! `127.0.0.1:37428` via `connect_existing_shared_instance`.
 
+mod aliases;
 mod backend;
 #[cfg(feature = "live")]
 mod engine;

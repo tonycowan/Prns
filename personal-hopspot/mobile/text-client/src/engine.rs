@@ -29,6 +29,7 @@ use crate::lxmf::{self, ANNOUNCE_APP_DATA};
 use crate::model::{
     hex_bytes, parse_dest_hex, ChatDirection, ChatLine, ConnectionPhase, HeardAnnounce, Snapshot,
 };
+use crate::timeutil::format_message_time;
 
 const BUS_PORT: u16 = 37428;
 const MAX_HEARD: usize = 40;
@@ -123,6 +124,7 @@ impl Shared {
             peer_hex,
             text,
             status,
+            at: format_message_time(),
             seq,
         };
         if let Ok(mut messages) = self.messages.lock() {
