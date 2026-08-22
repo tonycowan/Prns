@@ -9,8 +9,9 @@ use std::time::Duration;
 use personal_rns::engine::{AnnounceAppData, AnnounceNow, AnnounceTarget, RatchetPolicy};
 use personal_rns::identity::in_memory::InMemoryNodeIdentity;
 use personal_rns::identity::{Zeroizing, IDENTITY_SECRET_KEY_LEN};
-use personal_rns::interfaces::shared_instance::configured_policy;
-use personal_rns::interfaces::ConfiguredInterfacePolicy;
+use personal_rns::interfaces::{
+    shared_instance::configured_policy, ConfiguredInterfacePolicy, InterfaceId,
+};
 use personal_rns::request_endpoints;
 use personal_rns::routing::{LinkRequestPolicy, ProofStrategy};
 use personal_rns::runtime::{
@@ -35,6 +36,13 @@ const BUS_PORT: u16 = 37428;
 const MAX_HEARD: usize = 40;
 const MAX_MESSAGES: usize = 80;
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+
+/// Compact label for an announce source interface: kind name + channel-tag hash.
+fn format_source_interface(id: InterfaceId) -> String {
+    let bytes = id.as_bytes();
+    let kind = id.kind().map(|k| k.name()).unwrap_or("unknown");
+    format!("{kind} · {}", hex_bytes(&bytes[1..]))
+}
 
 enum Command {
     Announce,
@@ -74,7 +82,7 @@ impl Shared {
         }
     }
 
-    fn push_heard(&self, destination: DestinationHash, hops: u8, interface: String) {
+    fn push_heard(&self, destination: DestinationHash, hops: u8, source_interface: InterfaceId) {
         let seq = {
             let Ok(mut seq) = self.heard_seq.lock() else {
                 return;
@@ -82,10 +90,13 @@ impl Shared {
             *seq += 1;
             *seq
         };
+        let at = format_message_time();
+        let interface = format_source_interface(source_interface);
         let entry = HeardAnnounce {
             destination_hex: hex_bytes(destination.as_bytes()),
             hops,
             interface,
+            at: at.clone(),
             seq,
         };
         if let Ok(mut heard) = self.heard.lock() {
@@ -95,6 +106,7 @@ impl Shared {
             {
                 existing.hops = entry.hops;
                 existing.interface = entry.interface;
+                existing.at = at;
                 existing.seq = entry.seq;
                 return;
             }
@@ -369,8 +381,7 @@ async fn run_session(state: Arc<Shared>) -> SessionEnd {
                 hops,
                 source_interface,
             }) => {
-                let interface = format!("{source_interface:?}");
-                event_state.push_heard(destination, hops, interface);
+                event_state.push_heard(destination, hops, source_interface);
             }
             PrnsEvent::Message(Message::Delivered(delivery)) => {
                 let plaintext = match &delivery {

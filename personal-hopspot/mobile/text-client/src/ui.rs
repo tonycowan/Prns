@@ -530,7 +530,7 @@ fn OthersTab(
                                         div { class: "heard-body",
                                             div { class: "heard-hash", "{entry.destination_hex}" }
                                             div { class: "heard-meta",
-                                                "hops {entry.hops} · {entry.interface} · #{entry.seq}"
+                                                "{entry.at} · hops {entry.hops} · {entry.interface}"
                                                 if is_selected { " · selected" }
                                                 if has_unread { " · new" }
                                             }

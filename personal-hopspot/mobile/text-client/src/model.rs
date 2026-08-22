@@ -34,6 +34,8 @@ pub struct HeardAnnounce {
     pub destination_hex: String,
     pub hops: u8,
     pub interface: String,
+    /// Local time when this peer's announce was last heard.
+    pub at: String,
     pub seq: u64,
 }
 
@@ -77,7 +79,8 @@ impl Snapshot {
             heard: vec![HeardAnnounce {
                 destination_hex: "aabbccddeeff00112233445566778899".into(),
                 hops: 1,
-                interface: "LocalClient".into(),
+                interface: "local-client · aabbccddeeff00".into(),
+                at: "Aug 22, 9:30:00 AM".into(),
                 seq: 1,
             }],
             messages: vec![],
