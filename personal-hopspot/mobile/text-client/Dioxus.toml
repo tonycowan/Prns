@@ -1,0 +1,17 @@
+[application]
+name = "Personal Text"
+default_platform = "desktop"
+
+[web.app]
+title = "Personal Text"
+
+[web.watcher]
+reload_html = true
+index_on_404 = true
+
+[bundle]
+identifier = "org.personal.textclient"
+publisher = "Personal Hopspot"
+short_description = "LocalClient announce demo for Hopspot"
+long_description = "Joins Hopspot's shared Reticulum instance as a LocalClient and announces lxmf.delivery. Never hosts."
+category = "Utility"

@@ -1,0 +1,495 @@
+//! Live LocalClient engine: never hosts; only joins Hopspot's TCP shared bus.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use personal_rns::engine::{AnnounceAppData, AnnounceNow, AnnounceTarget, RatchetPolicy};
+use personal_rns::identity::in_memory::InMemoryNodeIdentity;
+use personal_rns::identity::{Zeroizing, IDENTITY_SECRET_KEY_LEN};
+use personal_rns::interfaces::shared_instance::configured_policy;
+use personal_rns::interfaces::ConfiguredInterfacePolicy;
+use personal_rns::request_endpoints;
+use personal_rns::routing::{LinkRequestPolicy, ProofStrategy};
+use personal_rns::runtime::{
+    load_or_create_identity_secret, Diagnostic, ManuallyAttached, Message, NoPersistence,
+    PreConfiguredDestination, PrnsEvent, PrnsNode, PrnsNodeRecipe, ServeMyRequestEndpoints,
+};
+use personal_rns::shared_instance::{
+    connect_existing_shared_instance, SharedInstanceClientIntent, SharedInstanceTransport,
+};
+use personal_rns::routing::delivery::Delivery;
+use personal_rns::storage::GrowableHeap;
+use personal_rns::DestinationHash;
+use tokio::sync::mpsc;
+
+use crate::lxmf::{self, ANNOUNCE_APP_DATA};
+use crate::model::{
+    hex_bytes, parse_dest_hex, ChatDirection, ChatLine, ConnectionPhase, HeardAnnounce, Snapshot,
+};
+
+const BUS_PORT: u16 = 37428;
+const MAX_HEARD: usize = 40;
+const MAX_MESSAGES: usize = 80;
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+
+enum Command {
+    Announce,
+    Send { peer_hex: String, text: String },
+}
+
+struct Shared {
+    phase: Mutex<ConnectionPhase>,
+    destination_hex: Mutex<Option<String>>,
+    announce_count: Mutex<u64>,
+    last_announce: Mutex<Option<String>>,
+    heard: Mutex<VecDeque<HeardAnnounce>>,
+    heard_seq: Mutex<u64>,
+    messages: Mutex<VecDeque<ChatLine>>,
+    message_seq: Mutex<u64>,
+    commands: Mutex<Option<mpsc::UnboundedSender<Command>>>,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(ConnectionPhase::Starting),
+            destination_hex: Mutex::new(None),
+            announce_count: Mutex::new(0),
+            last_announce: Mutex::new(None),
+            heard: Mutex::new(VecDeque::new()),
+            heard_seq: Mutex::new(0),
+            messages: Mutex::new(VecDeque::new()),
+            message_seq: Mutex::new(0),
+            commands: Mutex::new(None),
+        }
+    }
+
+    fn set_phase(&self, phase: ConnectionPhase) {
+        if let Ok(mut guard) = self.phase.lock() {
+            *guard = phase;
+        }
+    }
+
+    fn push_heard(&self, destination: DestinationHash, hops: u8, interface: String) {
+        let seq = {
+            let Ok(mut seq) = self.heard_seq.lock() else {
+                return;
+            };
+            *seq += 1;
+            *seq
+        };
+        let entry = HeardAnnounce {
+            destination_hex: hex_bytes(destination.as_bytes()),
+            hops,
+            interface,
+            seq,
+        };
+        if let Ok(mut heard) = self.heard.lock() {
+            if let Some(existing) = heard
+                .iter_mut()
+                .find(|h| h.destination_hex == entry.destination_hex)
+            {
+                existing.hops = entry.hops;
+                existing.interface = entry.interface;
+                existing.seq = entry.seq;
+                return;
+            }
+            heard.push_front(entry);
+            while heard.len() > MAX_HEARD {
+                heard.pop_back();
+            }
+        }
+    }
+
+    fn push_message(
+        &self,
+        direction: ChatDirection,
+        peer_hex: String,
+        text: String,
+        status: String,
+    ) {
+        let seq = {
+            let Ok(mut seq) = self.message_seq.lock() else {
+                return;
+            };
+            *seq += 1;
+            *seq
+        };
+        let line = ChatLine {
+            direction,
+            peer_hex,
+            text,
+            status,
+            seq,
+        };
+        if let Ok(mut messages) = self.messages.lock() {
+            messages.push_front(line);
+            while messages.len() > MAX_MESSAGES {
+                messages.pop_back();
+            }
+        }
+    }
+}
+
+static STARTED: AtomicBool = AtomicBool::new(false);
+static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
+
+fn shared() -> Arc<Shared> {
+    SHARED.get_or_init(|| Arc::new(Shared::new())).clone()
+}
+
+pub fn ensure_started() {
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let state = shared();
+    std::thread::Builder::new()
+        .name("personal-text-rns".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("personal-text-tokio")
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    state.set_phase(ConnectionPhase::Failed(format!(
+                        "tokio runtime: {error}"
+                    )));
+                    return;
+                }
+            };
+            runtime.block_on(run_forever(state));
+        })
+        .expect("spawn personal-text engine thread");
+}
+
+pub fn snapshot() -> Snapshot {
+    let state = shared();
+    let phase = state
+        .phase
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or(ConnectionPhase::Failed("lock poisoned".into()));
+    let destination_hex = state.destination_hex.lock().ok().and_then(|g| g.clone());
+    let announce_count = state.announce_count.lock().map(|g| *g).unwrap_or(0);
+    let last_announce = state.last_announce.lock().ok().and_then(|g| g.clone());
+    let heard = state
+        .heard
+        .lock()
+        .map(|g| g.iter().cloned().collect())
+        .unwrap_or_default();
+    let messages = state
+        .messages
+        .lock()
+        .map(|g| g.iter().cloned().collect())
+        .unwrap_or_default();
+    Snapshot {
+        phase,
+        destination_hex,
+        bus: format!("127.0.0.1:{BUS_PORT}"),
+        announce_count,
+        last_announce,
+        heard,
+        messages,
+        live: true,
+    }
+}
+
+fn require_connected_commands() -> Result<mpsc::UnboundedSender<Command>, String> {
+    let state = shared();
+    let phase = state
+        .phase
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or(ConnectionPhase::Failed("lock poisoned".into()));
+    if !matches!(phase, ConnectionPhase::Connected) {
+        return Err("Not connected to Hopspot yet.".into());
+    }
+    state
+        .commands
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(|| "Engine command channel not ready.".to_string())
+}
+
+pub fn request_announce() -> Result<(), String> {
+    require_connected_commands()?
+        .send(Command::Announce)
+        .map_err(|_| "Engine stopped.".to_string())
+}
+
+pub fn request_send(peer_hex: String, text: String) -> Result<(), String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("Message is empty.".into());
+    }
+    if text.len() > 240 {
+        return Err("Keep messages under ~240 characters for opportunistic LXMF.".into());
+    }
+    let _ = parse_dest_hex(&peer_hex)?;
+    require_connected_commands()?
+        .send(Command::Send { peer_hex, text })
+        .map_err(|_| "Engine stopped.".to_string())
+}
+
+fn ingest_lxmf_bytes(state: &Shared, data: &[u8], via: &str) {
+    if let Some(parsed) = lxmf::unpack_lxmf_bytes(data) {
+        let text = if parsed.title.is_empty() {
+            parsed.content
+        } else {
+            format!("{} — {}", parsed.title, parsed.content)
+        };
+        state.push_message(
+            ChatDirection::In,
+            parsed.source_hex,
+            text,
+            format!("received ({via})"),
+        );
+        return;
+    }
+    // Still surface the delivery so inbound path bugs are visible in Chats.
+    let preview = hex_bytes(&data[..data.len().min(12)]);
+    state.push_message(
+        ChatDirection::In,
+        "unknown".into(),
+        format!("({via} {} bytes) {preview}…", data.len()),
+        "unparsed".into(),
+    );
+}
+
+fn identity_path() -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        return PathBuf::from("/data/data/org.personal.textclient/files/lxmf_identity");
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let base = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        base.join(".personal-text-client").join("lxmf_identity")
+    }
+}
+
+fn lxmf_destination(
+    identity: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
+) -> PreConfiguredDestination<'static> {
+    PreConfiguredDestination::Single {
+        // Sideband often delivers short LXMs as link packets and larger ones as resources.
+        resource_strategy: personal_rns::routing::links::resources::ResourceStrategy::Accept {
+            max_uncompressed_bytes: 256 * 1024,
+            accept_compressed: true,
+        },
+        app_name: "lxmf",
+        aspects: &["delivery"],
+        identity,
+        announce_app_data: ANNOUNCE_APP_DATA,
+        proof: ProofStrategy::ProveAll,
+        link_requests: LinkRequestPolicy::AcceptAll,
+        ratchet: RatchetPolicy::NoRatchets,
+        maximum_request_bytes: Default::default(),
+        request_endpoints: ServeMyRequestEndpoints::No,
+    }
+}
+
+async fn run_forever(state: Arc<Shared>) {
+    loop {
+        match run_session(state.clone()).await {
+            SessionEnd::HopspotGone => {
+                state.set_phase(ConnectionPhase::WaitingForHopspot);
+            }
+            SessionEnd::Failed(message) => {
+                state.set_phase(ConnectionPhase::Failed(message));
+            }
+        }
+        if let Ok(mut commands) = state.commands.lock() {
+            *commands = None;
+        }
+        tokio::time::sleep(RECONNECT_DELAY).await;
+    }
+}
+
+enum SessionEnd {
+    HopspotGone,
+    Failed(String),
+}
+
+async fn run_session(state: Arc<Shared>) -> SessionEnd {
+    state.set_phase(ConnectionPhase::WaitingForHopspot);
+
+    let path = identity_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let identity_secret = match load_or_create_identity_secret(&path) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return SessionEnd::Failed(format!("identity file: {error}"));
+        }
+    };
+    let signer = InMemoryNodeIdentity::from_secret_key_bytes(&identity_secret);
+    let mut dest_secret = Zeroizing::new([0u8; IDENTITY_SECRET_KEY_LEN]);
+    dest_secret.copy_from_slice(identity_secret.as_ref());
+
+    let destination = lxmf_destination(dest_secret);
+    let destination_hash = match destination.destination_hash() {
+        Ok(hash) => hash,
+        Err(error) => {
+            return SessionEnd::Failed(format!("destination name: {error:?}"));
+        }
+    };
+    if let Ok(mut hex) = state.destination_hex.lock() {
+        *hex = Some(hex_bytes(destination_hash.as_bytes()));
+    }
+
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+    if let Ok(mut commands) = state.commands.lock() {
+        *commands = Some(command_tx);
+    }
+
+    let event_state = state.clone();
+    let node = PrnsNode::new(PrnsNodeRecipe {
+        transport_identity: None,
+        pre_configured_destinations: [destination],
+        app_state: (),
+        storage: GrowableHeap,
+        request_endpoints: request_endpoints![],
+        interfaces: ManuallyAttached,
+        persistence: NoPersistence,
+        on_event: move |event, _app| match event {
+            PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard {
+                destination,
+                hops,
+                source_interface,
+            }) => {
+                let interface = format!("{source_interface:?}");
+                event_state.push_heard(destination, hops, interface);
+            }
+            PrnsEvent::Message(Message::Delivered(delivery)) => {
+                let plaintext = match &delivery {
+                    Delivery::Single(single) => single.plaintext,
+                    Delivery::Link(link) => link.plaintext,
+                    Delivery::Plain(plain) => plain.payload,
+                    Delivery::Group(group) => group.plaintext,
+                };
+                ingest_lxmf_bytes(&event_state, plaintext, "packet");
+            }
+            PrnsEvent::Message(Message::Resource { data, .. }) => {
+                ingest_lxmf_bytes(&event_state, data, "resource");
+            }
+            _ => {}
+        },
+    });
+    let handle = node.handle();
+
+    let intent = SharedInstanceClientIntent {
+        bus_port: BUS_PORT,
+        transport: SharedInstanceTransport::Tcp,
+        policy: configured_policy(ConfiguredInterfacePolicy::default()),
+    };
+
+    match connect_existing_shared_instance(&handle, intent).await {
+        Ok(_) => {
+            state.set_phase(ConnectionPhase::Connected);
+        }
+        Err(_) => {
+            return SessionEnd::HopspotGone;
+        }
+    }
+
+    let cmd_handle = handle.clone();
+    let cmd_state = state.clone();
+    let command_task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                Command::Announce => {
+                    let result = cmd_handle
+                        .announce_now(AnnounceNow {
+                            destination: destination_hash,
+                            target: AnnounceTarget::AllInterfaces,
+                            app_data: AnnounceAppData::Registered,
+                        })
+                        .await;
+                    match result {
+                        Ok(()) => {
+                            if let Ok(mut count) = cmd_state.announce_count.lock() {
+                                *count += 1;
+                            }
+                            if let Ok(mut last) = cmd_state.last_announce.lock() {
+                                *last = Some("ok".into());
+                            }
+                        }
+                        Err(error) => {
+                            if let Ok(mut last) = cmd_state.last_announce.lock() {
+                                *last = Some(format!("error: {error:?}"));
+                            }
+                        }
+                    }
+                }
+                Command::Send { peer_hex, text } => {
+                    let peer_bytes = match parse_dest_hex(&peer_hex) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            cmd_state.push_message(
+                                ChatDirection::Out,
+                                peer_hex,
+                                text,
+                                format!("bad peer: {error}"),
+                            );
+                            continue;
+                        }
+                    };
+                    let peer = DestinationHash::new(peer_bytes);
+                    let packed = match lxmf::pack_opportunistic(
+                        peer,
+                        destination_hash,
+                        &signer,
+                        "",
+                        &text,
+                    ) {
+                        Ok(packed) => packed,
+                        Err(error) => {
+                            cmd_state.push_message(
+                                ChatDirection::Out,
+                                peer_hex,
+                                text,
+                                format!("pack: {error}"),
+                            );
+                            continue;
+                        }
+                    };
+                    match cmd_handle.send_single_packet(peer, &packed).await {
+                        Ok(_) => {
+                            cmd_state.push_message(
+                                ChatDirection::Out,
+                                peer_hex,
+                                text,
+                                "sent".into(),
+                            );
+                        }
+                        Err(error) => {
+                            cmd_state.push_message(
+                                ChatDirection::Out,
+                                peer_hex,
+                                text,
+                                format!("send: {error:?}"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let run_result = node.run().await;
+    command_task.abort();
+    match run_result {
+        Ok(()) => SessionEnd::HopspotGone,
+        Err(error) => SessionEnd::Failed(format!("node: {error:?}")),
+    }
+}
