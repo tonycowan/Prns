@@ -32,10 +32,32 @@ Typical flow:
 - The tab badge clears when you visit **Others**; unread message dots clear when you open that peer’s chat.
 - Peers who sent a message without announcing appear with a dashed border and a warning that return path may be unavailable.
 
+**Reading a heard-peer row**
+
+Under the alias and destination hash, each announced peer shows a meta line like:
+
+```text
+Aug 22, 9:52:03 AM · hops 1 · local-client · aabbccddeeff00
+```
+
+Read it left to right:
+
+| Part | Meaning |
+|---|---|
+| `Aug 22, 9:52:03 AM` | Local time when **you** last heard an announce from this peer (includes seconds). Updates when they re-announce. |
+| `hops 1` | How many hops the announce traveled through the mesh before it reached your node. Lower is closer; `0` is direct/local. |
+| `local-client` | Which **local** PRNS interface delivered the announce to Personal Text. For this app that is usually `local-client` (the Hopspot shared-instance TCP bus). Other values you might see if Hopspot forwards from wider mesh paths include `auto-wifi`, `bluetooth-peer`, `tcp-client`, and so on. |
+| `aabbccddeeff00` | A 14-character hex fingerprint of that specific interface **instance** (PRNS channel-tag hash). Two rows with the same kind but different hex values are different physical/logical channels. |
+
+Optional suffixes on the same line:
+
+- `· selected` — this peer is the active **Chats** thread.
+- `· new` — unread messages from this peer.
+
 **Chats tab details**
 
 - Header shows the peer alias (left) and **You** (right), with `…abcd` address tails underneath.
-- Message bubbles show a timestamp; delivery errors appear in bold red.
+- Message bubbles show a local timestamp with seconds (e.g. `Aug 22, 9:52:03 AM`); delivery errors appear in bold red.
 - New messages stay in view when you are already scrolled to the bottom.
 
 ## Desktop (Mac) — live LocalClient
@@ -78,15 +100,15 @@ cd personal-hopspot/mobile/text-client
 dx bundle --platform android --features mobile --no-default-features --release --package-types apk --out-dir dist
 ```
 
-Install the release APK (dx may name the artifact `app-debug.apk` internally; rename or use the copy you keep in `dist/`):
+Install the built APK (dx currently copies `app-debug.apk` into `dist/` even for `--release` Rust builds):
 
 ```bash
-adb install -r dist/personal-text-client-release.apk
+adb install -r dist/app-debug.apk
 ```
 
-Package id: `org.personal.textclient`. Start Hopspot first, then this app.
+A previously kept release artifact may also appear as `dist/personal-text-client-release.apk` (~10 MB). Either installs package id `org.personal.textclient`. Start Hopspot first, then this app.
 
-For a debug build (much larger APK, unstripped native lib), omit `--release`.
+For a fully unstripped debug build (much larger APK), omit `--release`.
 
 ## Local data
 
@@ -104,7 +126,7 @@ Identity is created on first launch and reused on later runs (stable destination
 | Startup | `connect_existing_shared_instance` → TCP `127.0.0.1:37428` |
 | Hopspot down | Status **Waiting for Hopspot**; retries every 2s |
 | Announce | `announce_now` on registered `lxmf.delivery` |
-| Heard | Lists `AnnounceHeard` diagnostics from the LocalClient path |
+| Heard | Lists `AnnounceHeard` diagnostics; Others rows show last-heard time, hop count, and a compact source-interface label (`kind · channel-hash`) |
 | Send / receive | Opportunistic and direct LXMF (Sideband-compatible short texts) |
 
 ## Out of scope (for now)
