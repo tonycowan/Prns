@@ -1,14 +1,20 @@
+mod gnss;
 mod hardware;
 mod identity;
+mod persistence;
 mod radio;
 
 use personal_rns::interfaces::InterfaceId;
 
 pub(crate) use crate::storage::Nrf52840Storage as Storage;
+pub(crate) use gnss::{
+    control as control_gnss, drive as drive_gnss, snapshot as gnss_snapshot, T1000eGnss as Gnss,
+};
 pub(crate) use hardware::{
     T1000eBoard as Board, T1000eHardware as Hardware, T1000eLoraInterface as LoraInterface,
 };
 pub(crate) use identity::bootstrap_node_identity;
+pub(crate) use persistence::{new as new_persistence, Persistence};
 
 pub(crate) const USB_MANUFACTURER: &str = "Stay Personal";
 pub(crate) const USB_PRODUCT: &str = "Personal Hopspot (T1000-E)";

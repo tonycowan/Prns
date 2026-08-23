@@ -1097,8 +1097,6 @@ dependencies = [
 [[package]]
 name = "esp-alloc"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46ced060d4085858283df950b80a4da2348e1707d7d07b1e966308582dae79f5"
 dependencies = [
  "allocator-api2",
  "cfg-if",
@@ -1113,8 +1111,6 @@ dependencies = [
 [[package]]
 name = "esp-backtrace"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37950e24b2dfd98f1581102d1798281d4d9547af881e6bffc2c2b534c026ec8f"
 dependencies = [
  "cfg-if",
  "document-features",
@@ -1304,8 +1300,6 @@ dependencies = [
 [[package]]
 name = "esp-radio-rtos-driver"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bd75cd9073a90ffaa53db0bf17df7dc14164f2407a6ff36c725d2d1f78ff494"
 dependencies = [
  "cfg-if",
  "esp-sync",
@@ -1339,8 +1333,6 @@ dependencies = [
 [[package]]
 name = "esp-rtos"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712"
 dependencies = [
  "allocator-api2",
  "cfg-if",
@@ -2382,6 +2374,7 @@ dependencies = [
  "embedded-storage-async",
  "heapless 0.8.0",
  "personal-rns",
+ "prns-core",
  "prns-macros",
  "sha2 0.11.0",
 ]
@@ -2412,6 +2405,7 @@ dependencies = [
  "esp-phy",
  "esp-println",
  "esp-radio",
+ "esp-radio-rtos-driver",
  "esp-rtos",
  "heapless 0.8.0",
  "log",
@@ -3898,8 +3892,6 @@ dependencies = [
 [[package]]
 name = "xtensa-lx-rt"
 version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "409a9b4629d429e995cde4dfbd9fe562ccae66f7624514e200733fc5d0ea8905"
 dependencies = [
  "document-features",
  "xtensa-lx",

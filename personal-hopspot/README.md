@@ -13,6 +13,14 @@ Personal Hopspot is also the board-backed embedded reference application. A
 screen is optional: headless boards run the node and expose their supported
 remote controls without compiling a display surface.
 
+## Public packages
+
+The `sdk/hopspot` directory is the shared home of the Rust crate and npm package
+named `hopspot`. Both are transparent, version-locked facades over the complete
+`personal-rns` Rust and JavaScript APIs. They provide an alternate package name
+without creating a second implementation, type system, protocol surface, or
+release line.
+
 ## The built-in NomadNet page
 
 Every hopspot serves small [micron](https://github.com/markqvist/NomadNet) pages about the project
@@ -69,20 +77,21 @@ T-Echo firmware:
 
 ## Local developer web flasher
 
-Build and serve the current working tree for one or more shipping boards with:
+Build and serve the current working tree for one or more cataloged boards with:
 
-    ./tools/prns run device.hopspot.dev-flasher.serve -- BOARD --port PORT
+    ./tools/prns run device.hopspot.dev-flasher.serve -- BOARD [BOARD ...] --port PORT
 
-For example, the canonical Heltec V4 command is:
+Supply multiple unique board slugs to test them together. Explicit selection
+may include qualification targets; `--all` intentionally builds only the
+shipping set:
 
-    ./tools/prns run device.hopspot.dev-flasher.serve -- heltec-v4 --port 8765
+    ./tools/prns run device.hopspot.dev-flasher.serve -- --all --port 8765
 
-`BOARD` may be `heltec-v4`, `heltec-v4-r8`, `t-beam-supreme`,
-`xiao-esp32-c6`, or `t-echo`. Multiple unique board slugs may be supplied in
-one command, or `--all` may replace them. The command builds the selected
-firmware, creates a private temporary candidate, signs its manifest and preview
-channel with a newly generated ephemeral key, and serves the real flasher only
-on `127.0.0.1`. Open the printed `/flash` URL in the browser under test.
+The [board catalog](../release/flash/boards.json) is the source of truth for
+available slugs and lifecycle state. The command builds the selected firmware,
+creates a private temporary candidate, signs its manifest and preview channel
+with a newly generated ephemeral key, and serves the real flasher only on
+`127.0.0.1`. Open the printed `/flash` URL in the browser under test.
 
 Flashing erases and rewrites device flash and can destroy the installed
 firmware and stored device state. Confirm the selected board and recovery path
@@ -93,43 +102,8 @@ The browser trusts only the ephemeral public key compiled into that local
 website build. This makes the assembled local candidate internally verifiable,
 but it is not production signing, published release custody, or hardware and
 browser qualification evidence. A successful local flash does not qualify a
-signed release.
-
-Heltec T114 developer firmware:
-
-    ./tools/prns build hopspot t114
-
-The T114 task builds the current working tree and writes
-`target/hopspot-t114/heltec-t114.bin` and
-`target/hopspot-t114/heltec-t114.uf2`. The UF2 begins at the vector table from
-the linked image, preserving the stock MBR, S140 recovery foundation, and UF2
-bootloader; the application does not link or enable S140. On a stock T114 Rev
-2.x, double-press Reset to mount `HT-n5262`, then copy the UF2 to that volume.
-The stock layout starts the application at `0x26000`. Do not flash this UF2 onto
-a board re-bootloadered for S140 7.3 and its `0x27000` application layout; the
-bootloader will jump four KiB above the image and the application will not run.
-
-The exact image built from `c40e8cb0` was independently confirmed on stock T114
-Rev. 2.x hardware: it booted, bound to WinUSB, retained UF2 recovery, completed
-USB Auto over its vendor-class interface, and carried LoRa traffic in both
-directions against a known-good RNode. The developer image is not yet in the
-signed release catalog. Its current radio profile is fixed at 915 MHz, so only
-exercise LoRa where that profile is permitted. The focused
-[T114 qualification receipt](../validation/t114-qualification.md) records the
-tested boundary and remaining limitations.
-
-Heltec MeshTower V2 developer firmware:
-
-    ./tools/prns build hopspot mesh-tower-v2
-
-The MeshTower V2 task writes `target/hopspot-mesh-tower-v2/heltec-mesh-tower-v2.bin`
-and `target/hopspot-mesh-tower-v2/heltec-mesh-tower-v2.uf2`. The UF2 begins at
-`0x26000` and enables the stock S140 6.1.1 SoftDevice already present on
-`HT-n5262` so Bluetooth Auto can run with USB and LoRa. Open the case and
-double-press RST to mount the UF2 volume. The image drives the KCT8103L
-frontend and pets the external watchdog; GPS stays powered off. The user
-button (P1.10, active-low) announces `nomadnetwork.node` on every interface.
-It is not in the signed release catalog. The radio profile is fixed at 915 MHz.
+signed release. Qualification receipts and their remaining limits live under
+[`validation/qualifications/`](../validation/qualifications/).
 
 ## Embedded flash-layout upgrade
 

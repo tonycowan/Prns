@@ -43,6 +43,12 @@ def complete_roster() -> dict:
         ("xiao-esp32-c6", "web"): ("windows", "x86_64"),
         ("t-echo", "cli"): ("linux", "aarch64"),
         ("t-echo", "web"): ("macos", "x86_64"),
+        ("t114", "cli"): ("linux", "x86_64"),
+        ("t114", "web"): ("macos", "aarch64"),
+        ("t096", "cli"): ("linux", "aarch64"),
+        ("t096", "web"): ("macos", "aarch64"),
+        ("t1000-e", "cli"): ("macos", "x86_64"),
+        ("t1000-e", "web"): ("windows", "x86_64"),
     }
     physical_assignments = []
     for (board, surface), (os_name, architecture) in hosts.items():
@@ -115,6 +121,9 @@ def manifest() -> dict:
         ("t-beam-supreme", "LilyGO T-Beam Supreme", "esp-serial", "esp32s3", True),
         ("xiao-esp32-c6", "Seeed XIAO ESP32-C6", "esp-serial", "esp32c6", False),
         ("t-echo", "LilyGO T-Echo", "uf2-mass-storage", None, False),
+        ("t114", "Heltec Mesh Node T114", "uf2-mass-storage", None, False),
+        ("t096", "Heltec Mesh Node T096", "uf2-mass-storage", None, False),
+        ("t1000-e", "Seeed SenseCAP T1000-E", "nrf-serial-dfu", None, False),
     )
     return {
         "schema": 3,
@@ -126,23 +135,66 @@ def manifest() -> dict:
                 "display_name": display_name,
                 "transport": transport,
                 "expected_chip": chip,
-                "parts": [] if transport == "uf2-mass-storage" else [{"path": f"{slug}.bin", "size": 1, "sha256": "a" * 64}],
-                "variants": [
+                "parts": (
+                    [{"path": f"{slug}.bin", "size": 1, "sha256": "a" * 64}]
+                    if transport == "esp-serial"
+                    else []
+                ),
+                "variants": (
+                    [
+                        {
+                            "softdevice_family": "s140",
+                            "softdevice_version": version,
+                            "fwid": fwid,
+                            "application_base": application_base,
+                            "family_id": "0xada52840",
+                            "path": f"t-echo-s140-{version}.uf2",
+                            "size": 512,
+                            "sha256": digest,
+                        }
+                        for version, fwid, application_base, digest in (
+                            ("6.1.1", "0x00b6", "0x00026000", "b" * 64),
+                            ("7.3.0", "0x0123", "0x00027000", "c" * 64),
+                        )
+                    ]
+                    if slug == "t-echo"
+                    else [
+                        {
+                            "softdevice_family": "s140",
+                            "softdevice_version": "6.1.1",
+                            "fwid": "0x00b6",
+                            "application_base": "0x00026000",
+                            "family_id": "0xada52840",
+                            "path": "heltec-t114-s140-6.1.1.uf2",
+                            "size": 512,
+                            "sha256": "d" * 64,
+                        }
+                    ]
+                    if slug == "t114"
+                    else [
+                        {
+                            "softdevice_family": "s140",
+                            "softdevice_version": "6.1.1",
+                            "fwid": "0x00b6",
+                            "application_base": "0x00026000",
+                            "family_id": "0xada52840",
+                            "path": "t096-s140-6.1.1.uf2",
+                            "size": 512,
+                            "sha256": "e" * 64,
+                        }
+                    ]
+                    if slug == "t096"
+                    else []
+                ),
+                "nrf_serial_dfu": (
                     {
-                        "softdevice_family": "s140",
-                        "softdevice_version": version,
-                        "fwid": fwid,
-                        "application_base": application_base,
-                        "family_id": "0xada52840",
-                        "path": f"t-echo-s140-{version}.uf2",
-                        "size": 512,
-                        "sha256": digest,
+                        "application": {"kind": "dfu-application", "path": "t1000e.bin"},
+                        "init_packet": {"kind": "dfu-init-packet", "path": "t1000e.dat"},
+                        "recovery": {"artifact": {"kind": "uf2", "path": "t1000e.uf2"}},
                     }
-                    for version, fwid, application_base, digest in (
-                        ("6.1.1", "0x00b6", "0x00026000", "b" * 64),
-                        ("7.3.0", "0x0123", "0x00027000", "c" * 64),
-                    )
-                ] if transport == "uf2-mass-storage" else [],
+                    if slug == "t1000-e"
+                    else None
+                ),
                 "provisioning": {"format": "HSPCFG1"} if provisioned else None,
             }
             for slug, display_name, transport, chip, provisioned in boards
@@ -196,7 +248,7 @@ class AcceptanceScaffoldTests(unittest.TestCase):
         )
         self.assertEqual(candidate["prerelease_published_at"], PUBLISHED_AT)
         self.assertEqual(record["schema"], 5)
-        self.assertEqual(len(record["runs"]), 12)
+        self.assertEqual(len(record["runs"]), 18)
         self.assertEqual(len(record["web_serial_smoke"]), 3)
         self.assertEqual(len(record["browser_fallbacks"]), 1)
         self.assertEqual(len(record["installation_smoke"]), 5)
@@ -336,6 +388,19 @@ class AcceptanceScaffoldTests(unittest.TestCase):
             json.dumps(self.manifest_document, sort_keys=True) + "\n", encoding="utf-8"
         )
         with self.assertRaisesRegex(ValueError, "exact S140 v6 and v7"):
+            self.create()
+
+    def test_t096_requires_its_exact_pinned_compatibility_variant(self) -> None:
+        t096 = next(
+            target
+            for target in self.manifest_document["targets"]
+            if target["board_slug"] == "t096"
+        )
+        t096["variants"][0]["softdevice_version"] = "7.3.0"
+        self.manifest_path.write_text(
+            json.dumps(self.manifest_document, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "t096 acceptance requires its exact pinned"):
             self.create()
 
     def test_prerelease_publication_requires_full_utc_timestamp(self) -> None:

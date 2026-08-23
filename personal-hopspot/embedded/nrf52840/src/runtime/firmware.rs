@@ -309,6 +309,8 @@ pub async fn run(spawner: Spawner) -> ! {
             storage_limits: <Storage as StorageLayout>::LIMITS,
             display_power_control: hopspot::DisplayPowerControl::Unavailable,
             access_point: hopspot::AccessPointState::Unsupported,
+            shared_instance_config_export: hopspot::SharedInstanceConfigExport::Unavailable,
+            gnss: hopspot::GnssAvailability::Unavailable,
         });
         let startup_notice = identity_startup_notice.or(profile_startup_notice);
         let mut pending_startup_notice = identity_startup_notice
@@ -335,7 +337,10 @@ pub async fn run(spawner: Spawner) -> ! {
             let mut adc = [0i16; 1];
             saadc.sample(&mut adc).await;
             let vbat_mv = (adc[0].max(0) as u32) * 6000 / 4096;
-            let battery = battery_gauge.update(Some(vbat_mv), usb_vbus_present());
+            let battery = battery_gauge.update(
+                Some(vbat_mv),
+                hopspot::ExternalPowerState::from_presence(usb_vbus_present()),
+            );
 
             let snapshots = build_snapshots(lora_status, usb_status);
             let mut cards = build_cards(&snapshots, lora_status.id(), usb_status.id());
@@ -407,6 +412,7 @@ pub async fn run(spawner: Spawner) -> ! {
                 hopspot::RenderFrame {
                     content,
                     battery,
+                    gnss: None,
                     state: &ui_state,
                     interface_menu_details: &interface_menu_details,
                     animation_ms: EINK_ANIMATION_MS,
@@ -567,6 +573,8 @@ pub async fn run(spawner: Spawner) -> ! {
                         hopspot::UiAction::ToggleStationUplink => {}
                         hopspot::UiAction::OledOff => {}
                         hopspot::UiAction::ToggleOledAutoOff => {}
+                        hopspot::UiAction::CopySharedInstanceConfig => {}
+                        hopspot::UiAction::ControlGnss(_) => {}
                         hopspot::UiAction::None => {}
                     }
                 }

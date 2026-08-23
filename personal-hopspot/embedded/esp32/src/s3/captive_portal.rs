@@ -32,17 +32,25 @@ pub(super) fn ap_ssid() -> String {
     alloc::format!("Hopspot-{:04X}", ap_ssid_suffix())
 }
 
-pub(super) fn ap_config() -> AccessPointConfig {
-    AccessPointConfig::default()
+pub(super) fn ap_config(channel: Option<u8>) -> AccessPointConfig {
+    let config = AccessPointConfig::default()
         .with_ssid(ap_ssid())
-        .with_max_connections(4)
+        .with_max_connections(4);
+    match channel {
+        Some(channel) => config.with_channel(channel),
+        None => config,
+    }
 }
 
-/// The Wi-Fi mode to request for a station config. APSTA keeps the Hopspot SoftAP alongside the
-/// station and survives reconnects; a bare `Station` configuration would drop the AP.
-pub(super) fn station_wifi_mode(station: StationConfig, ap_enabled: bool) -> WifiConfig {
+/// The Wi-Fi mode to request for a station config. Once discovery resolves the uplink channel,
+/// APSTA starts the Hopspot SoftAP on that same channel and keeps it alongside the station.
+pub(super) fn station_wifi_mode(
+    station: StationConfig,
+    ap_enabled: bool,
+    channel: Option<u8>,
+) -> WifiConfig {
     if ap_enabled {
-        return WifiConfig::AccessPointStation(station, ap_config());
+        return WifiConfig::AccessPointStation(station, ap_config(channel));
     }
     WifiConfig::Station(station)
 }
@@ -71,10 +79,10 @@ pub(super) fn build_ap_netif(
         gateway: None,
         dns_servers: Default::default(),
     });
-    let ap_resources = mk_static!(
-        StackResources<AP_STACK_SOCKET_CAPACITY>,
-        StackResources::new()
-    );
+    // Socket-set storage is ordinary software state, not DMA/control memory. Keep it in PSRAM so
+    // the radio blobs retain the scarce internal SRAM needed for concurrent AP + station RX.
+    let ap_resources =
+        crate::storage::allocate_psram(StackResources::<AP_STACK_SOCKET_CAPACITY>::new());
     let ap_seed = {
         let mut b = [0u8; 8];
         Rng::new().read(&mut b);
