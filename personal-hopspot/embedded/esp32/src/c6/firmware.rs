@@ -1,17 +1,18 @@
 use super::*;
+use connectivity::build_wifi;
+use esp_hal::gpio::Output;
 
 pub async fn run(spawner: Spawner) {
     let C6Hardware {
-        usb_rx,
-        usb_tx,
-        #[cfg(feature = "esp-now")]
         wifi,
-        #[cfg(feature = "bluetooth-auto")]
         bluetooth,
         identity_entropy,
         mac,
         timebase,
         _rtc,
+        _rf_switch_power,
+        _rf_antenna_select,
+        user_led,
     } = XiaoEsp32C6::bringup();
 
     let node_bootstrap = crate::identity::bootstrap_node_identity();
@@ -20,26 +21,7 @@ pub async fn run(spawner: Spawner) {
     crate::identity::log_persistence("Bluetooth", ble_bootstrap.persistence());
     drop(identity_entropy);
 
-    #[cfg(feature = "esp-now")]
-    let (_espnow_controller, espnow, _espnow_status) = {
-        let wifi_config = ControllerConfig::default()
-            .with_static_rx_buf_num(4)
-            .with_rx_ba_win(3);
-        let (controller, interfaces) =
-            esp_radio::wifi::new(wifi, wifi_config).expect("wifi controller");
-        let esp_now_radio = interfaces.esp_now;
-        let espnow_status: &'static EmbassyInterfaceStatus = mk_static!(
-            EmbassyInterfaceStatus,
-            EmbassyInterfaceStatus::new(espnow_core::interface_id(), ConnectionState::Initializing)
-        );
-        let espnow = EspNowInterface::new(
-            EspNowAdapter::new(esp_now_radio),
-            espnow_channel_policy(),
-            ESPNOW_PHY.bitrate,
-            espnow_status,
-        );
-        (controller, espnow, espnow_status)
-    };
+    let auto_wifi = build_wifi(&spawner, wifi, mac);
 
     let node_identity = node_bootstrap.into_identity();
     let transport_secret = node_identity.transport_secret();
@@ -49,22 +31,16 @@ pub async fn run(spawner: Spawner) {
         ANNOUNCE_APP_DATA,
         NODE_ANNOUNCE_APP_DATA,
     );
-    #[cfg(feature = "bluetooth-auto")]
-    let ble_identity = Some(ble_bootstrap.into_identity());
+    let ble_identity = ble_bootstrap.into_identity();
 
     let mut manifold_lanes = ManifoldLanes::new();
-    let usb_lane = manifold_lanes
-        .claim_interface(&USB_MANIFOLD_LANE, device_descriptor(USB_INTERFACE_ID))
-        .expect("USB lane is available");
-    #[cfg(feature = "esp-now")]
-    let espnow_lane = manifold_lanes
-        .claim_interface(&ESPNOW_MANIFOLD_LANE, espnow.descriptor())
-        .expect("ESP-NOW lane is available");
-    #[cfg(feature = "bluetooth-auto")]
-    let ble_supervisor_lane = ble_identity.as_ref().map(|_| {
+    let ble_supervisor_lane = manifold_lanes
+        .claim_supervisor(&BLE_MANIFOLD_LANE, BLE_SUPERVISOR_ID, &BLE_OUTBOUND_WAKE)
+        .expect("Bluetooth supervisor lane is available");
+    let wifi_supervisor_lane = auto_wifi.as_ref().map(|_| {
         manifold_lanes
-            .claim_supervisor(&BLE_MANIFOLD_LANE, BLE_SUPERVISOR_ID, &BLE_OUTBOUND_WAKE)
-            .expect("Bluetooth supervisor lane is available")
+            .claim_supervisor(&WIFI_MANIFOLD_LANE, WIFI_SUPERVISOR_ID, &WIFI_OUTBOUND_WAKE)
+            .expect("Wi-Fi Auto supervisor lane is available")
     });
 
     let handle = PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION);
@@ -75,19 +51,12 @@ pub async fn run(spawner: Spawner) {
         handle,
     );
 
-    let usb_seam = usb_lane.into_seam(NOTIFY.sender(), hardware_entropy);
-    spawner.spawn(usb_device_task(usb_rx, usb_tx, usb_seam).expect("usb device task fits"));
+    let ble_fleet: C6BleFleet = ble_supervisor_lane.into_fleet(NOTIFY.sender(), LIFECYCLE.sender());
+    let wifi = auto_wifi.zip(wifi_supervisor_lane).map(|(interface, lane)| {
+        let fleet: C6WifiFleet = lane.into_fleet(NOTIFY.sender(), LIFECYCLE.sender());
+        (interface, fleet)
+    });
 
-    #[cfg(feature = "esp-now")]
-    let espnow_seam = espnow_lane.into_seam(NOTIFY.sender(), hardware_entropy);
-
-    #[cfg(feature = "bluetooth-auto")]
-    let ble = ble_identity
-        .zip(ble_supervisor_lane)
-        .map(|(identity, lane)| {
-            let fleet: C6BleFleet = lane.into_fleet(NOTIFY.sender(), LIFECYCLE.sender());
-            (identity, fleet)
-        });
     let host = EmbassyHost::new_with_timebase(timebase, hardware_entropy as fn(&mut [u8]));
     let recipe = PrnsNodeRecipe {
         transport_identity: Some(transport_secret),
@@ -107,14 +76,99 @@ pub async fn run(spawner: Spawner) {
     static PERSISTENCE: StaticCell<crate::persistence::C6Persistence> = StaticCell::new();
     let persistence = PERSISTENCE.init(persistence);
     spawner.spawn(manifold_task(node, persistence).expect("manifold task fits"));
-    #[cfg(feature = "bluetooth-auto")]
-    if let Some((identity, fleet)) = ble {
-        spawner.spawn(
-            ble_task(spawner, bluetooth, mac, identity, fleet, &BLE_SHARED).expect("ble task fits"),
-        );
+    spawner.spawn(status_task(user_led).expect("status task fits"));
+    spawner.spawn(
+        ble_task(
+            spawner,
+            bluetooth,
+            mac,
+            ble_identity,
+            ble_fleet,
+            &BLE_SHARED,
+        )
+        .expect("ble task fits"),
+    );
+    if let Some((interface, fleet)) = wifi {
+        // Primary data path only (no SoftAP secondary): keep the unused secondary buffer tiny.
+        let data_buf = alloc::vec![0u8; wifi_auto_contract::HARDWARE_MTU].leak();
+        let secondary_data_buf = alloc::vec![0u8; 1].leak();
+        let run = alloc::boxed::Box::leak(alloc::boxed::Box::new(interface.run(
+            fleet,
+            data_buf,
+            secondary_data_buf,
+        )));
+        let run: core::pin::Pin<&'static mut dyn core::future::Future<Output = ()>> =
+            // SAFETY: leaked allocation cannot move or be freed.
+            unsafe { core::pin::Pin::new_unchecked(run) };
+        spawner.spawn(wifi_task(run).expect("Wi-Fi Auto task fits"));
+    } else {
+        // No station credentials: unblock BLE immediately so isolation still works.
+        WIFI_LINK_UP.signal(());
     }
-    #[cfg(feature = "esp-now")]
-    espnow.run(espnow_seam).await;
-    #[cfg(not(feature = "esp-now"))]
     core::future::pending().await
+}
+
+#[embassy_executor::task]
+async fn wifi_task(run: core::pin::Pin<&'static mut dyn core::future::Future<Output = ()>>) {
+    run.await
+}
+
+/// 1 Hz active-low LED pulse (100 ms on) plus heap/stack stats every 10 s.
+#[embassy_executor::task]
+async fn status_task(mut led: Output<'static>) -> ! {
+    const ILLUMINATED_MS: u64 = 100;
+    const PERIOD_MS: u64 = 1_000;
+    const HEAP_EVERY_TICKS: u32 = 10;
+    let mut ticks = 0u32;
+    loop {
+        led.set_low();
+        Timer::after(Duration::from_millis(ILLUMINATED_MS)).await;
+        led.set_high();
+        Timer::after(Duration::from_millis(PERIOD_MS - ILLUMINATED_MS)).await;
+        ticks = ticks.wrapping_add(1);
+        if ticks % HEAP_EVERY_TICKS == 0 {
+            let heap = esp_alloc::HEAP.stats();
+            let (stack_size, stack_free) = main_stack_stats();
+            match stack_free {
+                Some(free) => log::info!(
+                    "ram: heap used={} free={} high={} size={} stack_size={} stack_free={}",
+                    heap.current_usage,
+                    heap.size.saturating_sub(heap.current_usage),
+                    heap.max_usage,
+                    heap.size,
+                    stack_size,
+                    free
+                ),
+                None => log::info!(
+                    "ram: heap used={} free={} high={} size={} stack_size={} stack_free=off_main",
+                    heap.current_usage,
+                    heap.size.saturating_sub(heap.current_usage),
+                    heap.max_usage,
+                    heap.size,
+                    stack_size
+                ),
+            }
+        }
+    }
+}
+
+fn main_stack_stats() -> (usize, Option<usize>) {
+    unsafe extern "C" {
+        static _stack_end_cpu0: u32;
+        static _stack_start_cpu0: u32;
+    }
+    let bottom = core::ptr::addr_of!(_stack_end_cpu0) as usize;
+    let top = core::ptr::addr_of!(_stack_start_cpu0) as usize;
+    let size = top.saturating_sub(bottom);
+    let sp: usize;
+    // SAFETY: reading the stack pointer does not touch memory.
+    unsafe {
+        core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    let free = if sp > bottom && sp <= top {
+        Some(sp - bottom)
+    } else {
+        None
+    };
+    (size, free)
 }

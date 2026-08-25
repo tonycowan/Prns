@@ -32,7 +32,6 @@ heltec-v4-r8 = "build --release -p hopspot-heltec-v4-r8 --target xtensa-esp32s3-
 heltec-v4-r8-flash = "run --release -p hopspot-heltec-v4-r8 --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc"
 tbeam-supreme = "build --release -p hopspot-t-beam-supreme --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc"
 tbeam-supreme-flash = "run --release -p hopspot-t-beam-supreme --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc"
-# Seeed XIAO ESP32-C6 Hopspot: USB-auto + ESP-NOW + BLE on the headless board. ESP-NOW uses
-# Espressif's WiFi radio driver internally, but this build exposes no WiFi-LAN or SoftAP interface.
+# Seeed XIAO ESP32-C6 Hopspot: BLE Auto + station Wi-Fi Auto (no ESP-NOW/USB Auto).
 c6 = "build --release -p hopspot-xiao-esp32-c6 --target riscv32imac-unknown-none-elf -Zbuild-std=core,alloc"
 c6-flash = "run --release -p hopspot-xiao-esp32-c6 --target riscv32imac-unknown-none-elf -Zbuild-std=core,alloc"

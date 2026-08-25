@@ -12,10 +12,12 @@ use personal_rns::interfaces::bluetooth_auto::{
 use personal_rns::runtime::Fleet;
 use prns_interfaces_embassy::bluetooth_auto::GattCharacteristic;
 use prns_interfaces_embassy::bluetooth_auto::{
-    self, acceptor, dialer, host_runner, serve_slot, BleHub, CooperativeTransport, GattServer,
+    self, acceptor, host_runner, serve_slot, BleHub, CooperativeTransport, GattServer,
     ReticulumGattCharacteristics, ReticulumGattUuids, TroubleController, TroubleStack,
     GATT_VALUE_CAP, L2CAP_PSM, PEER_CAPACITY,
 };
+#[cfg(target_arch = "xtensa")]
+use prns_interfaces_embassy::bluetooth_auto::dialer;
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
@@ -40,7 +42,7 @@ const _: () = assert!(
 );
 #[cfg(target_arch = "riscv32")]
 const _: () = assert!(
-    PEER_CAPACITY == 8,
+    PEER_CAPACITY == 4,
     "C6 serve_slot_task pool_size must equal bluetooth_auto::PEER_CAPACITY"
 );
 #[cfg(target_arch = "xtensa")]
@@ -98,7 +100,7 @@ async fn serve_slot_task(run: core::pin::Pin<&'static mut dyn core::future::Futu
 }
 
 #[cfg(target_arch = "riscv32")]
-#[embassy_executor::task(pool_size = 8)]
+#[embassy_executor::task(pool_size = 4)]
 async fn serve_slot_task(
     idx: usize,
     hub: &'static BleHub,
@@ -172,8 +174,14 @@ pub async fn run(
     let server: &'static GattServer = SERVER.init(AttributeServer::new(table));
 
     let mut adv_data = [0u8; MAX_ADVERTISEMENT_LEN];
-    let adv_len = encode_advertisement(&mut adv_data, BleRoleCapabilities::DualRole)
+    // C6 gateway: advertise peripheral-only so Android (dual-role) dials in while we keep
+    // Wi-Fi Auto for Mac. Running central+peripheral+STA coex was StoreFaulting under load.
+    #[cfg(target_arch = "riscv32")]
+    let adv_len = encode_advertisement(&mut adv_data, BleRoleCapabilities::PeripheralOnly)
         .expect("advertisement fits");
+    #[cfg(target_arch = "xtensa")]
+    let adv_len =
+        encode_advertisement(&mut adv_data, BleRoleCapabilities::DualRole).expect("advertisement fits");
 
     let service_uuid = bluetooth_auto::service_uuid();
     let control_uuid = bluetooth_auto::control_uuid();
@@ -224,10 +232,23 @@ pub async fn run(
     }
 
     let host = host_runner(hub, runner);
-    let radio = join(
-        acceptor(hub, &mut peripheral, &adv_data[..adv_len]),
-        dialer(hub, central),
-    );
-    let plane = join(radio, supervisor.run(fleet));
-    join(host, plane).await;
+    #[cfg(target_arch = "riscv32")]
+    {
+        // Accept-only: park the unused central so we are not scanning/dialing under Wi-Fi coex.
+        let _central = central;
+        let plane = join(
+            acceptor(hub, &mut peripheral, &adv_data[..adv_len]),
+            supervisor.run(fleet),
+        );
+        join(host, plane).await;
+    }
+    #[cfg(target_arch = "xtensa")]
+    {
+        let radio = join(
+            acceptor(hub, &mut peripheral, &adv_data[..adv_len]),
+            dialer(hub, central),
+        );
+        let plane = join(radio, supervisor.run(fleet));
+        join(host, plane).await;
+    }
 }

@@ -5,7 +5,8 @@ use super::*;
 
 cfg_if! {
     if #[cfg(target_arch = "riscv32")] {
-        pub const PEER_CAPACITY: usize = 8;
+        /// Four peers: C6 SRAM must also host station Wi-Fi Auto + coex (no PSRAM).
+        pub const PEER_CAPACITY: usize = 4;
 
         pub(super) const GATT_FRAGMENT_PAYLOAD: usize = 120;
 
@@ -20,12 +21,14 @@ cfg_if! {
         pub(super) const CONN_PARAM_UPDATE_TIMEOUT: Duration = Duration::from_secs(2);
 
         pub(super) fn preferred_conn_params() -> RequestedConnParams {
+            // Wider interval under Wi-Fi coex: Android often starts at ~20 ms, which
+            // contested the radio hard enough to StoreFault while bridging traffic.
             RequestedConnParams {
-                min_connection_interval: Duration::from_millis(120),
-                max_connection_interval: Duration::from_millis(120),
+                min_connection_interval: Duration::from_millis(150),
+                max_connection_interval: Duration::from_millis(180),
                 max_latency: 0,
                 min_event_length: Duration::from_millis(1),
-                max_event_length: Duration::from_millis(4),
+                max_event_length: Duration::from_millis(3),
                 supervision_timeout: Duration::from_secs(8),
             }
         }
@@ -57,12 +60,14 @@ cfg_if! {
             connection: &Connection<'_, DefaultPacketPool>,
         ) {
             let _ = hub;
-            let phy_2m =
-                with_timeout(PHY_UPDATE_TIMEOUT, connection.set_phy(stack, PhyKind::Le2M)).await;
-            crate::diagnostic_log::debug!(
-                "ble: 2M PHY request ok={}",
-                matches!(phy_2m, Ok(Ok(())))
-            );
+            let _ = with_timeout(
+                CONN_PARAM_UPDATE_TIMEOUT,
+                connection.update_connection_params(stack, &preferred_conn_params()),
+            )
+            .await;
+            // Skip 2M PHY under Wi-Fi coex — PHY updates correlated with prior StoreFaults.
+            let _ = (stack, connection);
+            crate::diagnostic_log::debug!("ble: skip 2M PHY under wifi coex");
         }
     } else {
         pub const PEER_CAPACITY: usize = 4;

@@ -249,16 +249,18 @@ mod riscv {
 
     /// The XIAO ESP32-C6 Hopspot's storage profile, sized to its internal SRAM and application role.
     ///
-    /// This board is a headless USB/ESP-NOW/BLE mesh bridge. The intent is to keep one local app identity, bias the budget toward heard destinations, and leave links, resources, and channel windows modest.
+    /// This board is a headless USB / ESP-NOW / BLE / station Wi-Fi Auto mesh bridge. Keep one local
+    /// app identity, bias the budget toward heard destinations, and leave links, resources, and
+    /// channel windows modest — there is no PSRAM for SoftAP or large AutoWifi peer tables.
     pub struct C6Storage;
 
     impl C6Storage {
         // Keep cheap relationships abundant while channels and resource continuations borrow
-        // smaller shared tables. None of these counts constrain the eight-peer BLE controller.
+        // smaller shared tables. Room for a modest Wi-Fi Auto peer set plus the BLE controller.
         pub(crate) const TRACKED_DESTINATIONS: usize = 36;
         const UPSTREAM_APP_DESTINATIONS: usize = 2;
         const HELD_IDENTITIES: usize = 1;
-        pub const LINK_SESSIONS: usize = 12;
+        pub const LINK_SESSIONS: usize = 16;
         const TRANSPORTED_LINKS: usize = 8;
         const CHANNELS: usize = 2;
         const RESOURCE_ASSEMBLIES: usize = 1;
