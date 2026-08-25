@@ -25,6 +25,25 @@ Typical flow:
 2. Open **Others** and pick a peer (heard announce, or a dashed placeholder row if they messaged you but have not announced yet).
 3. In **Chats**, send short texts (~240 characters) via opportunistic LXMF.
 
+### Range check
+
+In-band GPS range test between two Personal Text clients:
+
+1. Type exactly `Range check` (any capitalization) and send. The sender attaches GPS before the message goes out as `Range check (lat, lon)`.
+2. The receiver sees an Accept/Deny prompt. Accept shares their GPS and replies with one message: `(lat, lon) - <distance>` (direct-line haversine). Deny sends nothing.
+3. Only the receiving client calculates distance.
+
+### Auto range check
+
+Continuous 10-second cycle until either side stops it:
+
+1. Type exactly `Auto range check` (any capitalization) and send. GPS is attached as `Auto range check (lat, lon)`.
+2. The peer Accepts once (same location share consent as a one-shot check).
+3. The **initiator** pings every **10 seconds** with a normal `Range check`; the peer auto-replies (no further prompts).
+4. Either side ends the session by sending exactly `stop` (any capitalization).
+
+Requires OS location permission (declared in `Dioxus.toml`). Desktop uses CoreLocation; Android uses the WebView geolocation API.
+
 **Others tab details**
 
 - Each peer gets a default alias (`Alias 1`, `Alias 2`, …). Tap the alias to rename it.
@@ -128,6 +147,8 @@ Identity is created on first launch and reused on later runs (stable destination
 | Announce | `announce_now` on registered `lxmf.delivery` |
 | Heard | Lists `AnnounceHeard` diagnostics; Others rows show last-heard time, hop count, and a compact source-interface label (`kind · channel-hash`) |
 | Send / receive | Opportunistic and direct LXMF (Sideband-compatible short texts) |
+| Range check | Sender attaches GPS; receiver Accept replies with `(lat, lon) - distance` |
+| Auto range check | Initiator pings every 10s; peer auto-replies until either side sends `stop` |
 
 ## Out of scope (for now)
 

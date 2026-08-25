@@ -28,8 +28,10 @@ use tokio::sync::mpsc;
 
 use crate::lxmf::{self, ANNOUNCE_APP_DATA};
 use crate::model::{
-    hex_bytes, parse_dest_hex, ChatDirection, ChatLine, ConnectionPhase, HeardAnnounce, Snapshot,
+    hex_bytes, parse_dest_hex, AutoRangeSession, ChatDirection, ChatLine, ConnectionPhase,
+    HeardAnnounce, RangePrompt, RangePromptKind, Snapshot,
 };
+use crate::range_check::{self, RangeRequestKind};
 use crate::timeutil::format_message_time;
 
 const BUS_PORT: u16 = 37428;
@@ -58,6 +60,9 @@ struct Shared {
     heard_seq: Mutex<u64>,
     messages: Mutex<VecDeque<ChatLine>>,
     message_seq: Mutex<u64>,
+    pending_range_prompt: Mutex<Option<RangePrompt>>,
+    pending_auto_reply: Mutex<Option<RangePrompt>>,
+    auto_range: Mutex<Option<AutoRangeSession>>,
     commands: Mutex<Option<mpsc::UnboundedSender<Command>>>,
 }
 
@@ -72,6 +77,9 @@ impl Shared {
             heard_seq: Mutex::new(0),
             messages: Mutex::new(VecDeque::new()),
             message_seq: Mutex::new(0),
+            pending_range_prompt: Mutex::new(None),
+            pending_auto_reply: Mutex::new(None),
+            auto_range: Mutex::new(None),
             commands: Mutex::new(None),
         }
     }
@@ -201,6 +209,17 @@ pub fn snapshot() -> Snapshot {
         .lock()
         .map(|g| g.iter().cloned().collect())
         .unwrap_or_default();
+    let pending_range_prompt = state
+        .pending_range_prompt
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let pending_auto_reply = state
+        .pending_auto_reply
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let auto_range = state.auto_range.lock().ok().and_then(|g| g.clone());
     Snapshot {
         phase,
         destination_hex,
@@ -209,6 +228,9 @@ pub fn snapshot() -> Snapshot {
         last_announce,
         heard,
         messages,
+        pending_range_prompt,
+        pending_auto_reply,
+        auto_range,
         live: true,
     }
 }
@@ -246,9 +268,127 @@ pub fn request_send(peer_hex: String, text: String) -> Result<(), String> {
         return Err("Keep messages under ~240 characters for opportunistic LXMF.".into());
     }
     let _ = parse_dest_hex(&peer_hex)?;
+    let state = shared();
+    if range_check::is_stop(&text) && auto_peer_matches(&state, &peer_hex) {
+        clear_auto_session(&state);
+    }
     require_connected_commands()?
         .send(Command::Send { peer_hex, text })
         .map_err(|_| "Engine stopped.".to_string())
+}
+
+fn auto_peer_matches(state: &Shared, peer_hex: &str) -> bool {
+    state
+        .auto_range
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .is_some_and(|session| session.peer_hex == peer_hex)
+}
+
+fn clear_auto_session(state: &Shared) {
+    if let Ok(mut session) = state.auto_range.lock() {
+        *session = None;
+    }
+    if let Ok(mut pending) = state.pending_auto_reply.lock() {
+        *pending = None;
+    }
+}
+
+fn maybe_handle_range_or_stop(state: &Shared, peer_hex: &str, text: &str) {
+    if range_check::is_stop(text) {
+        if auto_peer_matches(state, peer_hex) {
+            clear_auto_session(state);
+        }
+        return;
+    }
+
+    let Ok((kind, point)) = range_check::parse_request(text) else {
+        return;
+    };
+
+    let prompt = RangePrompt {
+        peer_hex: peer_hex.to_string(),
+        latitude: point.latitude,
+        longitude: point.longitude,
+        kind: match kind {
+            RangeRequestKind::OneShot => RangePromptKind::OneShot,
+            RangeRequestKind::Auto => RangePromptKind::Auto,
+        },
+    };
+
+    if auto_peer_matches(state, peer_hex) {
+        if let Ok(mut pending) = state.pending_auto_reply.lock() {
+            *pending = Some(prompt);
+        }
+        return;
+    }
+
+    if let Ok(mut pending) = state.pending_range_prompt.lock() {
+        // Keep an unanswered Auto prompt if the initiator's 10s cycle already
+        // started sending one-shot Range checks before Accept/Deny.
+        if let Some(existing) = pending.as_ref() {
+            if existing.peer_hex == peer_hex
+                && existing.kind == RangePromptKind::Auto
+                && prompt.kind == RangePromptKind::OneShot
+            {
+                return;
+            }
+        }
+        *pending = Some(prompt);
+    }
+}
+
+pub fn clear_range_prompt() {
+    let state = shared();
+    if let Ok(mut pending) = state.pending_range_prompt.lock() {
+        *pending = None;
+    };
+}
+
+pub fn take_range_prompt() -> Option<RangePrompt> {
+    let state = shared();
+    state
+        .pending_range_prompt
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+}
+
+pub fn restore_range_prompt(prompt: RangePrompt) {
+    let state = shared();
+    if let Ok(mut pending) = state.pending_range_prompt.lock() {
+        *pending = Some(prompt);
+    };
+}
+
+pub fn take_auto_reply() -> Option<RangePrompt> {
+    let state = shared();
+    state
+        .pending_auto_reply
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+}
+
+pub fn restore_auto_reply(prompt: RangePrompt) {
+    let state = shared();
+    if let Ok(mut pending) = state.pending_auto_reply.lock() {
+        *pending = Some(prompt);
+    };
+}
+
+pub fn set_auto_range_session(session: Option<AutoRangeSession>) {
+    let state = shared();
+    let clearing = session.is_none();
+    if let Ok(mut guard) = state.auto_range.lock() {
+        *guard = session;
+    }
+    if clearing {
+        if let Ok(mut pending) = state.pending_auto_reply.lock() {
+            *pending = None;
+        }
+    }
 }
 
 fn ingest_lxmf_bytes(state: &Shared, data: &[u8], via: &str) {
@@ -258,9 +398,11 @@ fn ingest_lxmf_bytes(state: &Shared, data: &[u8], via: &str) {
         } else {
             format!("{} — {}", parsed.title, parsed.content)
         };
+        let peer_hex = parsed.source_hex.clone();
+        maybe_handle_range_or_stop(state, &peer_hex, &text);
         state.push_message(
             ChatDirection::In,
-            parsed.source_hex,
+            peer_hex,
             text,
             format!("received ({via})"),
         );
@@ -380,6 +522,7 @@ async fn run_session(state: Arc<Shared>) -> SessionEnd {
                 destination,
                 hops,
                 source_interface,
+                ..
             }) => {
                 event_state.push_heard(destination, hops, source_interface);
             }

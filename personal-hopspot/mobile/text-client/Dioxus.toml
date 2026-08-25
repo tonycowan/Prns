@@ -15,3 +15,15 @@ publisher = "Personal Hopspot"
 short_description = "LocalClient announce demo for Hopspot"
 long_description = "Joins Hopspot's shared Reticulum instance as a LocalClient and announces lxmf.delivery. Never hosts."
 category = "Utility"
+
+[android]
+min_sdk = 24
+target_sdk = 34
+features = ["android.hardware.location.gps"]
+
+[macos.plist]
+NSLocationWhenInUseUsageDescription = "Share your GPS coordinates for Personal Text range checks"
+NSLocationUsageDescription = "Share your GPS coordinates for Personal Text range checks"
+
+[permissions]
+location = { precision = "fine", description = "Share your GPS coordinates for Personal Text range checks" }

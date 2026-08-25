@@ -6,7 +6,12 @@ use dioxus::prelude::*;
 
 use crate::aliases;
 use crate::backend;
-use crate::model::{ChatDirection, ChatLine, ConnectionPhase, HeardAnnounce, Snapshot};
+use crate::location;
+use crate::model::{
+    AutoRangeRole, AutoRangeSession, ChatDirection, ChatLine, ConnectionPhase, HeardAnnounce,
+    RangePrompt, RangePromptKind, Snapshot,
+};
+use crate::range_check::{self, GeoPoint};
 use crate::timeutil::{format_message_time, sleep_ms};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,7 +27,7 @@ pub fn App() -> Element {
         backend::ensure_started();
         backend::poll_snapshot()
     });
-    let mut toast = use_signal(|| None::<String>);
+    let toast = use_signal(|| None::<String>);
     let mut selected_peer = use_signal(String::new);
     let mut draft = use_signal(String::new);
     let mut tab = use_signal(|| Tab::Me);
@@ -35,8 +40,10 @@ pub fn App() -> Element {
     let mut known_peers = use_signal(HashSet::<String>::new);
     let mut peers_seeded = use_signal(|| false);
     let mut viewed_inbound_seq = use_signal(HashMap::<String, u64>::new);
+    let mut range_busy = use_signal(|| false);
 
     use_future(move || async move {
+        let mut saw_auto_peer = false;
         loop {
             sleep_ms(250).await;
             backend::ensure_started();
@@ -66,22 +73,72 @@ pub fn App() -> Element {
                     mark_peer_viewed(&peer, &next.messages, &mut viewed_inbound_seq);
                 }
             }
+
+            let has_auto = next.auto_range.is_some();
+            if saw_auto_peer && !has_auto {
+                show_toast(toast, "Auto range check stopped".to_string());
+            }
+            saw_auto_peer = has_auto;
+
+            if let Some(prompt) = backend::take_auto_reply() {
+                if !range_busy() {
+                    range_busy.set(true);
+                    spawn(async move {
+                        let _ = send_range_reply(toast, prompt, None, false).await;
+                        range_busy.set(false);
+                    });
+                } else {
+                    #[cfg(feature = "live")]
+                    crate::engine::restore_auto_reply(prompt);
+                }
+            }
+
             snap.set(next);
         }
     });
 
-    let mut flash = move |message: String| {
-        toast.set(Some(message));
-        spawn(async move {
-            sleep_ms(2_000).await;
-            toast.set(None);
-        });
+    // Only the initiating Driver sends Range check every 10s.
+    use_future(move || async move {
+        loop {
+            sleep_ms(range_check::AUTO_RANGE_INTERVAL_MS).await;
+            let Some(peer) = snap.read().auto_range.as_ref().and_then(|session| {
+                (session.role == AutoRangeRole::Driver).then(|| session.peer_hex.clone())
+            }) else {
+                continue;
+            };
+            if range_busy() {
+                continue;
+            }
+            if !matches!(snap.read().phase, ConnectionPhase::Connected) {
+                continue;
+            }
+            range_busy.set(true);
+            spawn(async move {
+                match location::current_fix().await {
+                    Ok(point) => {
+                        let wired = range_check::format_request(point);
+                        match backend::request_send(peer, wired) {
+                            Ok(()) => {}
+                            Err(error) => show_toast(toast, error),
+                        }
+                    }
+                    Err(error) => show_toast(toast, error.label()),
+                }
+                range_busy.set(false);
+            });
+        }
+    });
+
+    let flash = move |message: String| {
+        show_toast(toast, message);
     };
 
     let connected = matches!(snap.read().phase, ConnectionPhase::Connected);
     let peer_now = selected_peer();
     let current_tab = tab();
     let alias_map = peer_aliases();
+    let pending_range = snap.read().pending_range_prompt.clone();
+    let auto_session = snap.read().auto_range.clone();
 
     let unread_peers = unread_peer_set(&snap.read().messages, &viewed_inbound_seq());
     let others_tab_embellished = others_announce_badge() || !unread_peers.is_empty();
@@ -113,6 +170,112 @@ pub fn App() -> Element {
         peer_aliases.set(map.clone());
         aliases::persist(&map, alias_next());
         editing_alias.set(None);
+    };
+
+    let send_chat = move |_| {
+        if range_busy() {
+            return;
+        }
+        let peer = selected_peer();
+        let text = draft();
+
+        if range_check::is_stop(&text) {
+            match backend::request_send(peer, text) {
+                Ok(()) => {
+                    draft.set(String::new());
+                    flash("Stop sent".to_string());
+                }
+                Err(error) => flash(error),
+            }
+            return;
+        }
+
+        if range_check::is_bare_auto_range_check(&text) {
+            range_busy.set(true);
+            spawn(async move {
+                match location::current_fix().await {
+                    Ok(point) => {
+                        let wired = range_check::format_auto_request(point);
+                        match backend::request_send(peer.clone(), wired) {
+                            Ok(()) => {
+                                backend::set_auto_range_session(Some(AutoRangeSession {
+                                    peer_hex: peer,
+                                    role: AutoRangeRole::Driver,
+                                }));
+                                draft.set(String::new());
+                                show_toast(toast, "Auto range check started".to_string());
+                            }
+                            Err(error) => show_toast(toast, error),
+                        }
+                    }
+                    Err(error) => show_toast(toast, error.label()),
+                }
+                range_busy.set(false);
+            });
+            return;
+        }
+
+        if range_check::is_bare_range_check(&text) {
+            range_busy.set(true);
+            spawn(async move {
+                match location::current_fix().await {
+                    Ok(point) => {
+                        let wired = range_check::format_request(point);
+                        match backend::request_send(peer, wired) {
+                            Ok(()) => {
+                                draft.set(String::new());
+                                show_toast(toast, "Range check sent".to_string());
+                            }
+                            Err(error) => show_toast(toast, error),
+                        }
+                    }
+                    Err(error) => show_toast(toast, error.label()),
+                }
+                range_busy.set(false);
+            });
+            return;
+        }
+        match backend::request_send(peer, text) {
+            Ok(()) => {
+                draft.set(String::new());
+                flash("Send requested".to_string());
+            }
+            Err(error) => flash(error),
+        }
+    };
+
+    let accept_range = move |_| {
+        if range_busy() {
+            return;
+        }
+        let Some(prompt) = backend::take_range_prompt() else {
+            return;
+        };
+        let start_role = (prompt.kind == RangePromptKind::Auto).then_some(AutoRangeRole::Responder);
+        let peer_for_ui = prompt.peer_hex.clone();
+        range_busy.set(true);
+        spawn(async move {
+            let ok = send_range_reply(toast, prompt, start_role, true).await;
+            if ok {
+                selected_peer.set(peer_for_ui);
+                tab.set(Tab::Chats);
+            }
+            range_busy.set(false);
+        });
+    };
+
+    let deny_range = move |_| {
+        let was_auto = snap
+            .read()
+            .pending_range_prompt
+            .as_ref()
+            .is_some_and(|p| p.kind == RangePromptKind::Auto);
+        backend::clear_range_prompt();
+        flash(if was_auto {
+            "Auto range check declined".to_string()
+        } else {
+            "Range check declined".to_string()
+        });
     };
 
     rsx! {
@@ -185,20 +348,31 @@ pub fn App() -> Element {
                             messages: snap.read().messages.clone(),
                             draft,
                             connected,
+                            busy: range_busy(),
+                            auto_active: auto_session
+                                .as_ref()
+                                .is_some_and(|s| s.peer_hex == peer_now),
+                            auto_driving: auto_session.as_ref().is_some_and(|s| {
+                                s.peer_hex == peer_now && s.role == AutoRangeRole::Driver
+                            }),
                             on_draft: move |value| draft.set(value),
-                            on_send: move |_| {
-                                let peer = selected_peer();
-                                let text = draft();
-                                match backend::request_send(peer, text) {
-                                    Ok(()) => {
-                                        draft.set(String::new());
-                                        flash("Send requested".to_string());
-                                    }
-                                    Err(error) => flash(error),
-                                }
-                            },
+                            on_send: send_chat,
                         }
                     },
+                }
+            }
+
+            if let Some(prompt) = pending_range.clone() {
+                RangeCheckModal {
+                    peer_label: aliases::display_name(&prompt.peer_hex, &alias_map),
+                    peer_coords: format!(
+                        "({:.6}, {:.6})",
+                        prompt.latitude, prompt.longitude
+                    ),
+                    auto_session: prompt.kind == RangePromptKind::Auto,
+                    busy: range_busy(),
+                    on_accept: accept_range,
+                    on_deny: deny_range,
                 }
             }
 
@@ -208,6 +382,76 @@ pub fn App() -> Element {
                 }
             }
         }
+    }
+}
+
+fn show_toast(mut toast: Signal<Option<String>>, message: String) {
+    toast.set(Some(message));
+    spawn(async move {
+        sleep_ms(2_000).await;
+        toast.set(None);
+    });
+}
+
+async fn send_range_reply(
+    toast: Signal<Option<String>>,
+    prompt: RangePrompt,
+    join_as: Option<AutoRangeRole>,
+    from_modal: bool,
+) -> bool {
+    match location::current_fix().await {
+        Ok(own) => match GeoPoint::try_new(prompt.latitude, prompt.longitude) {
+            Ok(peer_point) => {
+                let reply = range_check::format_reply(own, peer_point);
+                match backend::request_send(prompt.peer_hex.clone(), reply) {
+                    Ok(()) => {
+                        if let Some(role) = join_as {
+                            backend::set_auto_range_session(Some(AutoRangeSession {
+                                peer_hex: prompt.peer_hex.clone(),
+                                role,
+                            }));
+                            show_toast(toast, "Auto range check started".to_string());
+                        } else if from_modal {
+                            show_toast(toast, "Range reply sent".to_string());
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        show_toast(toast, error);
+                        false
+                    }
+                }
+            }
+            Err(_) => {
+                show_toast(toast, "Invalid peer coordinates in range check.".into());
+                false
+            }
+        },
+        Err(error) => {
+            if from_modal {
+                restore_range_prompt(prompt);
+            } else {
+                #[cfg(feature = "live")]
+                crate::engine::restore_auto_reply(prompt);
+            }
+            show_toast(toast, error.label());
+            false
+        }
+    }
+}
+
+fn restore_range_prompt(prompt: RangePrompt) {
+    backend_set_range_prompt(prompt);
+}
+
+fn backend_set_range_prompt(prompt: RangePrompt) {
+    #[cfg(feature = "live")]
+    {
+        crate::engine::restore_range_prompt(prompt);
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        let _ = prompt;
     }
 }
 
@@ -663,6 +907,9 @@ fn ChatsTab(
     messages: Vec<ChatLine>,
     draft: Signal<String>,
     connected: bool,
+    busy: bool,
+    auto_active: bool,
+    auto_driving: bool,
     on_draft: EventHandler<String>,
     on_send: EventHandler<MouseEvent>,
 ) -> Element {
@@ -672,7 +919,7 @@ fn ChatsTab(
         .collect();
     thread.sort_by_key(|m| m.seq);
 
-    let can_send = connected && !peer.is_empty() && !draft().trim().is_empty();
+    let can_send = connected && !peer.is_empty() && !draft().trim().is_empty() && !busy;
     let peer_tail = address_tail(&peer);
     let my_tail = address_tail(&my_hex);
 
@@ -686,6 +933,15 @@ fn ChatsTab(
                 div { class: "chat-address-row",
                     span { class: "chat-col-them", "{peer_tail}" }
                     span { class: "chat-col-you", "{my_tail}" }
+                }
+                if auto_active {
+                    div { class: "auto-range-banner",
+                        if auto_driving {
+                            "Auto range check: sending every 10s — send stop to end"
+                        } else {
+                            "Auto range check: auto-replying — send stop to end"
+                        }
+                    }
                 }
             }
 
@@ -732,18 +988,69 @@ fn ChatsTab(
                     class: "draft",
                     placeholder: if peer.is_empty() {
                         "Select a peer first…"
+                    } else if busy {
+                        "Getting GPS…"
+                    } else if auto_active {
+                        "Auto ranging… send stop to end"
                     } else {
-                        "Type a short text…"
+                        "Type a short text… (Range check / Auto range check)"
                     },
                     value: "{draft}",
-                    disabled: !connected || peer.is_empty(),
+                    disabled: !connected || peer.is_empty() || busy,
                     oninput: move |event| on_draft.call(event.value()),
                 }
                 button {
                     class: "primary",
                     disabled: !can_send,
                     onclick: move |event| on_send.call(event),
-                    "Send"
+                    if busy { "…" } else { "Send" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RangeCheckModal(
+    peer_label: String,
+    peer_coords: String,
+    auto_session: bool,
+    busy: bool,
+    on_accept: EventHandler<MouseEvent>,
+    on_deny: EventHandler<MouseEvent>,
+) -> Element {
+    let title = if auto_session {
+        "Auto range check"
+    } else {
+        "Range check"
+    };
+    let body = if auto_session {
+        format!(
+            "{peer_label} started auto range check from {peer_coords}. Auto-reply with your location every ~10s until either side sends stop?"
+        )
+    } else {
+        format!(
+            "{peer_label} sent a range check from {peer_coords}. Share your location to reply with distance?"
+        )
+    };
+    rsx! {
+        div { class: "modal-backdrop", role: "dialog", aria_modal: "true",
+            div { class: "modal-sheet",
+                h2 { class: "modal-title", "{title}" }
+                p { class: "modal-body", "{body}" }
+                div { class: "modal-actions",
+                    button {
+                        class: "secondary",
+                        disabled: busy,
+                        onclick: move |event| on_deny.call(event),
+                        "Deny"
+                    }
+                    button {
+                        class: "primary",
+                        disabled: busy,
+                        onclick: move |event| on_accept.call(event),
+                        if busy { "Getting GPS…" } else { "Accept" }
+                    }
                 }
             }
         }

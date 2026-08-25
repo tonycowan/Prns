@@ -55,7 +55,36 @@ pub struct ChatLine {
     pub seq: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum RangePromptKind {
+    OneShot,
+    Auto,
+}
+
+/// Role in an auto range-check session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum AutoRangeRole {
+    /// Initiator: sends `Range check` every 10s.
+    Driver,
+    /// Acceptor: silent auto-replies only (does not ping).
+    Responder,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AutoRangeSession {
+    pub peer_hex: String,
+    pub role: AutoRangeRole,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RangePrompt {
+    pub peer_hex: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub kind: RangePromptKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub phase: ConnectionPhase,
     pub destination_hex: Option<String>,
@@ -64,6 +93,11 @@ pub struct Snapshot {
     pub last_announce: Option<String>,
     pub heard: Vec<HeardAnnounce>,
     pub messages: Vec<ChatLine>,
+    pub pending_range_prompt: Option<RangePrompt>,
+    /// Silent auto-reply owed while an auto session is active (no Accept modal).
+    pub pending_auto_reply: Option<RangePrompt>,
+    /// Active auto range-check session, if any.
+    pub auto_range: Option<AutoRangeSession>,
     pub live: bool,
 }
 
@@ -84,6 +118,9 @@ impl Snapshot {
                 seq: 1,
             }],
             messages: vec![],
+            pending_range_prompt: None,
+            pending_auto_reply: None,
+            auto_range: None,
             live: false,
         }
     }

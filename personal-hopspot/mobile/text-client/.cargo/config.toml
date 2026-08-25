@@ -1,0 +1,6 @@
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-L", "/Library/Developer/CommandLineTools/usr/lib/swift/macosx",
+  "-C", "link-arg=-lswiftCompatibility56",
+  "-C", "link-arg=-lswiftCompatibilityConcurrency",
+]

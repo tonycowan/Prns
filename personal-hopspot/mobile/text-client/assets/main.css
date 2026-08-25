@@ -436,3 +436,70 @@ button {
   font-size: 0.9rem;
   margin: 0.5rem 0.25rem;
 }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 12, 16, 0.72);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 40;
+}
+
+.modal-sheet {
+  width: min(440px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+
+.modal-body {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+.auto-range-banner {
+  margin-top: 0.35rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: calc(var(--radius) - 4px);
+  background: var(--accent-soft, rgba(61, 154, 214, 0.18));
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.modal-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+button.secondary {
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-weight: 600;
+}
+
+button.secondary:disabled,
+button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
