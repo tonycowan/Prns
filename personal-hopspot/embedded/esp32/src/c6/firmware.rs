@@ -52,10 +52,12 @@ pub async fn run(spawner: Spawner) {
     );
 
     let ble_fleet: C6BleFleet = ble_supervisor_lane.into_fleet(NOTIFY.sender(), LIFECYCLE.sender());
-    let wifi = auto_wifi.zip(wifi_supervisor_lane).map(|(interface, lane)| {
-        let fleet: C6WifiFleet = lane.into_fleet(NOTIFY.sender(), LIFECYCLE.sender());
-        (interface, fleet)
-    });
+    let wifi = auto_wifi
+        .zip(wifi_supervisor_lane)
+        .map(|(interface, lane)| {
+            let fleet: C6WifiFleet = lane.into_fleet(NOTIFY.sender(), LIFECYCLE.sender());
+            (interface, fleet)
+        });
 
     let host = EmbassyHost::new_with_timebase(timebase, hardware_entropy as fn(&mut [u8]));
     let recipe = PrnsNodeRecipe {

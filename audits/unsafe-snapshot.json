@@ -6299,7 +6299,7 @@
         ]
       },
       "name": "esp-wifi-sys-esp32c6",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source": "personal-hopspot/embedded/esp32/vendor/esp-wifi-sys-esp32c6-0.2.0",
       "unsafe": {
         "blocks": 1932,
         "externs": 219,
@@ -13986,11 +13986,11 @@
       "name": "personal-hopspot-esp32",
       "source": "personal-hopspot/embedded/esp32",
       "unsafe": {
-        "blocks": 777,
-        "externs": 553,
-        "functions": 121,
-        "impls": 37,
-        "tokens": 1619
+        "blocks": 2711,
+        "externs": 773,
+        "functions": 123,
+        "impls": 39,
+        "tokens": 3777
       },
       "version": "0.1.0"
     },
@@ -19811,11 +19811,11 @@
       "name": "t-echo",
       "source": "personal-hopspot/embedded/nrf52840",
       "unsafe": {
-        "blocks": 1476,
+        "blocks": 1477,
         "externs": 13,
         "functions": 298,
         "impls": 15,
-        "tokens": 1803
+        "tokens": 1804
       },
       "version": "0.1.0"
     },
@@ -21369,7 +21369,6 @@
           "central",
           "default-packet-pool",
           "default-packet-pool-mtu-512",
-          "default-packet-pool-size-32",
           "default-packet-pool-size-8",
           "derive",
           "gatt",
@@ -21382,7 +21381,6 @@
           "central",
           "default-packet-pool",
           "default-packet-pool-mtu-512",
-          "default-packet-pool-size-32",
           "default-packet-pool-size-8",
           "derive",
           "gatt",
@@ -21395,7 +21393,6 @@
           "central",
           "default-packet-pool",
           "default-packet-pool-mtu-512",
-          "default-packet-pool-size-32",
           "default-packet-pool-size-8",
           "derive",
           "gatt",
@@ -21408,7 +21405,6 @@
           "central",
           "default-packet-pool",
           "default-packet-pool-mtu-512",
-          "default-packet-pool-size-32",
           "default-packet-pool-size-8",
           "derive",
           "gatt",

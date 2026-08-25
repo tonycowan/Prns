@@ -10,14 +10,14 @@ use personal_rns::interfaces::bluetooth_auto::{
     Psm, BLE_HW_MTU, MAX_ADVERTISEMENT_LEN,
 };
 use personal_rns::runtime::Fleet;
+#[cfg(target_arch = "xtensa")]
+use prns_interfaces_embassy::bluetooth_auto::dialer;
 use prns_interfaces_embassy::bluetooth_auto::GattCharacteristic;
 use prns_interfaces_embassy::bluetooth_auto::{
     self, acceptor, host_runner, serve_slot, BleHub, CooperativeTransport, GattServer,
     ReticulumGattCharacteristics, ReticulumGattUuids, TroubleController, TroubleStack,
     GATT_VALUE_CAP, L2CAP_PSM, PEER_CAPACITY,
 };
-#[cfg(target_arch = "xtensa")]
-use prns_interfaces_embassy::bluetooth_auto::dialer;
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
@@ -180,8 +180,8 @@ pub async fn run(
     let adv_len = encode_advertisement(&mut adv_data, BleRoleCapabilities::PeripheralOnly)
         .expect("advertisement fits");
     #[cfg(target_arch = "xtensa")]
-    let adv_len =
-        encode_advertisement(&mut adv_data, BleRoleCapabilities::DualRole).expect("advertisement fits");
+    let adv_len = encode_advertisement(&mut adv_data, BleRoleCapabilities::DualRole)
+        .expect("advertisement fits");
 
     let service_uuid = bluetooth_auto::service_uuid();
     let control_uuid = bluetooth_auto::control_uuid();

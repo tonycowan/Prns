@@ -219,7 +219,8 @@ impl<'a, const TARGETS: usize> UdpServiceDiscovery<'a, TARGETS> {
 
     async fn serve(&mut self, instance: &DiscoveryInstance) {
         let mut packet = [0u8; UDP_SERVICE_DISCOVERY_PACKET_BYTES];
-        let Some(packet_len) = self.encode_publication(&mut packet, instance, PUBLICATION_TTL_SECONDS)
+        let Some(packet_len) =
+            self.encode_publication(&mut packet, instance, PUBLICATION_TTL_SECONDS)
         else {
             return;
         };
@@ -274,7 +275,7 @@ impl<'a, const TARGETS: usize> UdpServiceDiscovery<'a, TARGETS> {
                         }
                         QueryRelevance::Unrelated => {
                             unrelated_rx = unrelated_rx.saturating_add(1);
-                            if unrelated_rx == 1 || unrelated_rx % 32 == 0 {
+                            if unrelated_rx == 1 || unrelated_rx.is_multiple_of(32) {
                                 crate::diagnostic_log::info!(
                                     "wifi-auto: DNS-SD unrelated rx count={unrelated_rx} last_from={meta:?} len={length}"
                                 );

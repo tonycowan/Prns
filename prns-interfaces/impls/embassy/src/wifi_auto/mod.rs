@@ -65,9 +65,9 @@ enum SecondaryStackReadiness {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SegmentActivationError {
-    MulticastDiscoveryBind(UdpBindError),
-    UnicastDiscoveryBind(UdpBindError),
-    DataBind(UdpBindError),
+    MulticastDiscovery(UdpBindError),
+    UnicastDiscovery(UdpBindError),
+    Data(UdpBindError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,15 +153,15 @@ fn activate_segment(segment: &mut AutoWifiSegment<'_>) -> Result<(), SegmentActi
     segment
         .discovery
         .bind(contract::DEFAULT_DISCOVERY_PORT)
-        .map_err(SegmentActivationError::MulticastDiscoveryBind)?;
+        .map_err(SegmentActivationError::MulticastDiscovery)?;
     segment
         .unicast_discovery
         .bind(contract::UNICAST_DISCOVERY_PORT)
-        .map_err(SegmentActivationError::UnicastDiscoveryBind)?;
+        .map_err(SegmentActivationError::UnicastDiscovery)?;
     segment
         .data
         .bind(contract::DEFAULT_DATA_PORT)
-        .map_err(SegmentActivationError::DataBind)?;
+        .map_err(SegmentActivationError::Data)?;
     // Classic AutoWifi multicast discovery is best-effort. On some STA stacks (notably
     // ESP32-C6 + embassy-net) IPv6 group join fails while unicast LL + mDNS still work;
     // do not fail the whole segment and leave :29717 unbound/unread.
@@ -782,9 +782,7 @@ impl<'a, const MEMBERS: usize> AutoWifi<'a, MEMBERS> {
     ) {
         if let Ok((len, meta)) = received {
             if let IpAddress::Ipv6(src) = meta.endpoint.addr {
-                crate::diagnostic_log::info!(
-                    "wifi-auto: unicast discovery from {src} len={len}"
-                );
+                crate::diagnostic_log::info!("wifi-auto: unicast discovery from {src} len={len}");
                 let peering_token_reply = ingest_beacon(
                     &mut self.brain,
                     &mut state.peers,
@@ -969,12 +967,8 @@ impl<'a, const MEMBERS: usize> AutoWifi<'a, MEMBERS> {
             // discover us via announce+probe, so they never appear in discovered_targets.
             // Without unicast refresh, and with IPv6 multicast beacons blocked on many APs,
             // those peers time out after PEERING_TIMEOUT_MS.
-            send_unicast_peer_refresh(
-                &self.primary.unicast_discovery,
-                &self.brain,
-                self.status,
-            )
-            .await;
+            send_unicast_peer_refresh(&self.primary.unicast_discovery, &self.brain, self.status)
+                .await;
         }
         BeaconMaintenanceOutcome::Completed
     }
