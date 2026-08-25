@@ -8,11 +8,12 @@ use napi::Result;
 use napi_derive::napi;
 use personal_rns::engine::{
     AllowRequester, AllowRequesterFailure, AllowRequesterRejection, AnnounceAppData, AnnounceNow,
-    AnnounceTarget, DeliveryEvidence, DeliveryProof, EstablishLinkFailure, EstablishLinkRejection,
-    IdentifyFailure, IdentifyRejection, RequestPathFailure, RequestResponseTimeout, RespondFailure,
-    RespondRejection, SendRequestFailure, SendRequestRejection, SendResourceFailure,
-    SendResourceRejection, SendToChannelFailure, SendToChannelRejection, SendToLinkFailure,
-    SendToLinkRejection, SetResourceStrategyFailure, SetResourceStrategyRejection,
+    AnnounceNowRejection, AnnounceTarget, DeliveryEvidence, DeliveryProof, EstablishLinkFailure,
+    EstablishLinkRejection, IdentifyFailure, IdentifyRejection, RequestPathFailure,
+    RequestResponseTimeout, RespondFailure, RespondRejection, SendRequestFailure,
+    SendRequestRejection, SendResourceFailure, SendResourceRejection, SendToChannelFailure,
+    SendToChannelRejection, SendToLinkFailure, SendToLinkRejection, SetResourceStrategyFailure,
+    SetResourceStrategyRejection,
 };
 use personal_rns::engine::{DropRouteOutcome, RouteSnapshot};
 use personal_rns::identity::{
@@ -34,8 +35,8 @@ use personal_rns::runtime::{
     RoutingControl, RoutingControlError,
 };
 use personal_rns::runtime::{
-    RequestOptions as EngineRequestOptions, RequestPathError, ResourceSendError, ResponseSendError,
-    SegmentCompression,
+    AnnounceNowError, RequestOptions as EngineRequestOptions, RequestPathError, ResourceSendError,
+    ResponseSendError, SegmentCompression,
 };
 use personal_rns::shared_instance::{SharedInstanceClient, SharedInstanceServer};
 use personal_rns::units::{ByteLimit, DurationMillis, RttMillis};
@@ -801,6 +802,26 @@ fn response_send_error(error: ResponseSendError) -> crate::errors::CodeError {
             ErrorCode::WriteFailed,
             "response returned an unrelated settlement",
         ),
+    }
+}
+
+fn announce_error(error: AnnounceNowError) -> crate::errors::CodeError {
+    match error {
+        AnnounceNowError::NodeStopped => code_err(ErrorCode::NodeStopped, "node stopped"),
+        AnnounceNowError::Busy => code_err(ErrorCode::Busy, "engine busy"),
+        AnnounceNowError::Rejected(AnnounceNowRejection::AppDataTooLong) => code_err(
+            ErrorCode::PayloadTooLarge,
+            "announce app data is too long",
+        ),
+        AnnounceNowError::Rejected(AnnounceNowRejection::UnknownInterface) => {
+            code_err(ErrorCode::UnknownInterface, "unknown interface")
+        }
+        AnnounceNowError::Rejected(rejection) => {
+            code_err(ErrorCode::AnnounceFailed, format!("{rejection:?}"))
+        }
+        AnnounceNowError::WriteFailed(error) => {
+            code_err(ErrorCode::WriteFailed, format!("{error:?}"))
+        }
     }
 }
 
@@ -2286,7 +2307,7 @@ impl PrnsNode {
                 app_data: AnnounceAppData::Registered,
             })
             .await
-            .map_err(|error| send_error(ErrorCode::AnnounceFailed, error))
+            .map_err(announce_error)
     }
 
     async fn send_single_packet_inner(
