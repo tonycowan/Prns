@@ -58,7 +58,7 @@ use prns_host::{
     DestinationProofStrategy, DestinationRatchetPolicy, DiagnosticEvent, HostCommand, HostConfig,
     HostRole, HostSnapshot, IdentityConfig, IdentityHash, InterfaceConfig, InterfaceHealth,
     InterfaceId, InterfaceKind, InterfaceMode, InterfaceRoutingPolicy, InterfaceSnapshot,
-    LinkClosedReason, LinkId, PacketHash, PersistenceConfig, PersistenceFlushCause,
+    LinkClosedReason, LinkDelivery, LinkId, PacketHash, PersistenceConfig, PersistenceFlushCause,
     PersistenceFlushTarget, PersistenceSnapshot, RequestAvailable, RequestHandlerConfig, RequestId,
     RequestPathHash, RequestPolicy, ResourceAvailable, ResourceCompression, ResourceHash,
     ResourceNeedsDecompression, ResourceSegmentAvailable, ResourceStrategy, ResourceStreamId,
@@ -2817,7 +2817,14 @@ fn publish_message(sink: &dyn NativeEventSink, message: Message<'_>) -> bool {
                 plaintext: delivery.plaintext.to_vec(),
             })
         }
-        Message::Delivered(other) => {
+        Message::Delivered(Delivery::Link(delivery)) => {
+            ApplicationEvent::LinkDelivery(LinkDelivery {
+                link_id: host_link(delivery.link_id),
+                source_interface: host_interface(delivery.source_interface),
+                plaintext: delivery.plaintext.to_vec(),
+            })
+        }
+        Message::Delivered(other @ (Delivery::Plain(_) | Delivery::Group(_))) => {
             sink.publish_diagnostic(DiagnosticEvent::Delivered {
                 detail: format!("{other:?}"),
             });
@@ -2921,7 +2928,7 @@ fn publish_message(sink: &dyn NativeEventSink, message: Message<'_>) -> bool {
     sink.publish_application(event)
 }
 
-fn translate_diagnostic(diagnostic: Diagnostic) -> Option<DiagnosticEvent> {
+fn translate_diagnostic(diagnostic: Diagnostic<'_>) -> Option<DiagnosticEvent> {
     Some(match diagnostic {
         Diagnostic::PersistenceRestored {
             routes,
@@ -2952,10 +2959,12 @@ fn translate_diagnostic(diagnostic: Diagnostic) -> Option<DiagnosticEvent> {
             destination,
             hops,
             source_interface,
+            app_data,
         } => DiagnosticEvent::AnnounceHeard {
             destination: host_destination(destination),
             hops,
             source_interface: host_interface(source_interface),
+            app_data: app_data.to_vec(),
         },
         Diagnostic::LinkEstablished(established) => DiagnosticEvent::LinkEstablished {
             link_id: host_link(established.link_id),
