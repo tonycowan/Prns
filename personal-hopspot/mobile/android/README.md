@@ -15,14 +15,6 @@ window. This crate adds the platform adapters Android needs:
 `dioxus` product flavor shows the Dioxus management UI (WebView + `HopspotBridge`
 into `PrnsService`). The `oled` flavor keeps the pixel face for regression.
 
-<<<<<<< HEAD
-## Native ABI — `org.personal.hopspot.NativeBridge`
-
-```
-nativeInit(storageDir) -> long handle
-nativePostInput(handle, code) -> int action   // code: 0 = tap, 1 = hold; action: 0 = none, 1 = announce, 2 = copy shared-instance config
-nativeRender(handle, directByteBuffer)         // fills PANEL_WIDTH * PANEL_HEIGHT * 4 RGBA bytes
-=======
 ```bash
 ./gradlew :app:assembleDioxusDebug   # management UI (default)
 ./gradlew :app:assembleOledDebug     # OLED pixel face
@@ -37,10 +29,9 @@ Sync the Dioxus web bundle into assets before a dioxus APK build:
 ## Native ABI — `org.personal.hopspot.NativeBridge`
 
 ```
-nativeInit() -> long handle
-nativePostInput(handle, code) -> int action
-nativeRender(handle, directByteBuffer)
->>>>>>> 436aa105 (Wire Dioxus management UI to live PrnsService in the Hopspot APK.)
+nativeInit(storageDir) -> long handle
+nativePostInput(handle, code) -> int action   // code: 0 = tap, 1 = hold; action: 0 = none, 1 = announce, 2 = copy shared-instance config
+nativeRender(handle, directByteBuffer)         // fills PANEL_WIDTH * PANEL_HEIGHT * 4 RGBA bytes
 nativeFree(handle)
 nativeUiSnapshotJson() -> String          // live cards / peers / health
 nativeToggleInterface(idHex)
