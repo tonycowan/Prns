@@ -183,6 +183,7 @@ impl PrnsNodeHandle {
                 gravity: descriptor.gravity,
                 ifac: ifac.as_ref().map(RuntimeIfac::snapshot),
                 name,
+                rssi: None,
                 byte_accounting: ByteAccounting::OwnTraffic,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -245,6 +246,8 @@ impl PrnsNodeHandle {
                             membership: placement.membership,
                         },
                         ifac: ifac.clone(),
+                        rssi: registered.rssi,
+                        members: std::vec::Vec::new(),
                     }
                 })
             })
@@ -345,6 +348,7 @@ impl PrnsNodeHandle {
                 gravity: policy.gravity,
                 ifac: ifac_status,
                 name: None,
+                rssi: None,
                 byte_accounting: ByteAccounting::FleetAggregate,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -546,6 +550,31 @@ impl Fleet {
     where
         I: Interface + ReportsStatus + Send + 'static,
     {
+        self.add_with_peer_status(interface, None, None)
+    }
+
+    /// Stand up a named fleet member, optionally recording link-up RSSI for status nesting.
+    pub fn add_named<I>(
+        &self,
+        interface: I,
+        name: impl Into<String>,
+        rssi: Option<i8>,
+    ) -> AttachedInterface
+    where
+        I: Interface + ReportsStatus + Send + 'static,
+    {
+        self.add_with_peer_status(interface, Some(name.into()), rssi)
+    }
+
+    fn add_with_peer_status<I>(
+        &self,
+        interface: I,
+        name: Option<String>,
+        rssi: Option<i8>,
+    ) -> AttachedInterface
+    where
+        I: Interface + ReportsStatus + Send + 'static,
+    {
         let view = interface.status_view();
         let connection = interface.connection_view();
         let frame_accounting = interface.frame_accounting_recorder();
@@ -579,7 +608,8 @@ impl Fleet {
                 mode: descriptor.mode,
                 gravity: descriptor.gravity,
                 ifac: self.ifac.as_ref().map(RuntimeIfac::snapshot),
-                name: None,
+                name,
+                rssi,
                 byte_accounting: ByteAccounting::OwnTraffic,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -744,6 +774,7 @@ pub(super) struct RegisteredInterface {
     gravity: crate::interfaces::InterfaceGravity,
     ifac: Option<InterfaceIfacSnapshot>,
     name: Option<String>,
+    rssi: Option<i8>,
     byte_accounting: ByteAccounting,
     retired_member_bytes: RetiredMemberBytes,
     retired_member_frame_accounting: RetiredMemberFrameAccounting,
