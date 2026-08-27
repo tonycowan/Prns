@@ -1946,7 +1946,7 @@ fn reference_interface(config: &InterfaceConfig) -> Result<ReferenceInterface, C
         InterfaceConfig::AutomaticUsb => ("PrnsUsbAuto", ReferenceConfigParams::PrnsUsbAuto, None),
         InterfaceConfig::AutomaticBluetoothLe => (
             "PrnsBluetoothAuto",
-            ReferenceConfigParams::PrnsBluetoothAuto,
+            ReferenceConfigParams::PrnsBluetoothAuto { group_id: None },
             None,
         ),
         InterfaceConfig::WebSocketClient { target, framing } => (
