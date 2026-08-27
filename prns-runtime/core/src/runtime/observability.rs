@@ -262,6 +262,7 @@ impl ReliabilityMetricsSnapshot {
             Journaled::AnnounceHeard { .. }
             | Journaled::SelfRatchetRotated { .. }
             | Journaled::AnnounceHeldDropped { .. }
+            | Journaled::AnnounceIngestRejected { .. }
             | Journaled::Delivered(_)
             | Journaled::LinkEstablished(_)
             | Journaled::PeerIdentified { .. }
@@ -272,7 +273,11 @@ impl ReliabilityMetricsSnapshot {
             | Journaled::ResourceReceived { .. }
             | Journaled::ResourceNeedsDecompression { .. }
             | Journaled::ResourceSegmentReceived { .. }
-            | Journaled::ResourceAssembled { .. } => {}
+            | Journaled::ResourceAssembled { .. }
+            | Journaled::PacketForwarded { .. }
+            | Journaled::PacketForwardBlocked { .. }
+            | Journaled::PacketIgnored { .. }
+            | Journaled::PacketReceived { .. } => {}
         }
     }
 }

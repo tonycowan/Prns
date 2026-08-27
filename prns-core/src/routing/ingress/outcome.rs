@@ -30,12 +30,28 @@ use crate::wire::{DestinationHash, WirePacketHeader};
 pub(crate) struct IngestEffects<'a> {
     pub destination_identity_expiry: Option<InstantMillis>,
     pub accepted_announce: Option<AcceptedAnnounceEffect<'a>>,
+    pub ignored_announce: Option<IgnoredAnnounceEffect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AcceptedAnnounceEffect<'a> {
     pub observation: AnnounceObservation<'a>,
     pub rate_accounting: AnnounceRateAccounting,
+}
+
+/// Why an announce was not Accepted (silent at INFO before this effect was added).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceIgnoreReason {
+    Acceptance(crate::routing::announce::RejectReason),
+    PublicKeyChanged,
+    Blackholed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IgnoredAnnounceEffect {
+    pub destination: DestinationHash,
+    pub source_interface: InterfaceId,
+    pub reason: AnnounceIgnoreReason,
 }
 
 impl IngestEffects<'_> {
@@ -46,6 +62,19 @@ impl IngestEffects<'_> {
                     .map_or(expiry, |current| current.min(expiry)),
             );
         }
+    }
+
+    pub(crate) fn note_ignored_announce(
+        &mut self,
+        destination: DestinationHash,
+        source_interface: InterfaceId,
+        reason: AnnounceIgnoreReason,
+    ) {
+        self.ignored_announce = Some(IgnoredAnnounceEffect {
+            destination,
+            source_interface,
+            reason,
+        });
     }
 }
 

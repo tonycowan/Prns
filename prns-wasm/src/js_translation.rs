@@ -256,6 +256,18 @@ pub(crate) fn journaled_to_js(journaled: Journaled<'_>) -> JsValue {
             set_str(&object, "type", kind);
             set_bytes(&object, "destination", destination.as_bytes());
         }
+        Journaled::PacketForwarded { .. } => {
+            set_str(&object, "type", "packetForwarded");
+        }
+        Journaled::PacketForwardBlocked { .. } => {
+            set_str(&object, "type", "packetForwardBlocked");
+        }
+        Journaled::PacketIgnored { .. } => {
+            set_str(&object, "type", "packetIgnored");
+        }
+        Journaled::PacketReceived { .. } => {
+            set_str(&object, "type", "packetReceived");
+        }
     }
     object.into()
 }

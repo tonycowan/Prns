@@ -9,7 +9,10 @@
 //! The mapping is total: every `Journaled` lands in exactly one bucket.
 
 use crate::engine::LinkClosedReason;
-use crate::engine::{CommandId, HeldDropCause, LinkEstablished, RouteRemovalCause, Settlement};
+use crate::engine::{
+    AnnounceIgnoreReason, CommandId, HeldDropCause, IgnoreReason, LinkEstablished,
+    RouteRemovalCause, Settlement,
+};
 use crate::engine::{InstantMillis, Journaled, PersistenceFlushCause, PersistenceFlushTarget};
 use crate::identity::IdentityHash;
 use crate::interfaces::InterfaceId;
@@ -124,6 +127,11 @@ pub enum Diagnostic<'a> {
         source_interface: InterfaceId,
         cause: HeldDropCause,
     },
+    AnnounceIngestRejected {
+        destination: DestinationHash,
+        source_interface: InterfaceId,
+        reason: AnnounceIgnoreReason,
+    },
     CommandSettled {
         id: CommandId,
         settlement: Settlement,
@@ -158,6 +166,31 @@ pub enum Diagnostic<'a> {
     RouteRemoved {
         destination: DestinationHash,
         cause: RouteRemovalCause,
+    },
+    PacketForwarded {
+        source_interface: InterfaceId,
+        fire_on: InterfaceId,
+        destination: DestinationHash,
+        hops: u8,
+        packet_type: u8,
+    },
+    PacketForwardBlocked {
+        source_interface: InterfaceId,
+        fire_on: InterfaceId,
+        destination: DestinationHash,
+        hops: u8,
+        packet_type: u8,
+    },
+    PacketIgnored {
+        source_interface: InterfaceId,
+        reason: IgnoreReason,
+    },
+    /// Inbound frame sighted before accept/reject/forward (receipt-first).
+    PacketReceived {
+        source_interface: InterfaceId,
+        packet_type: u8,
+        destination: Option<DestinationHash>,
+        bytes: u16,
     },
 }
 
@@ -274,6 +307,15 @@ impl<'a> From<Journaled<'a>> for PrnsEvent<'a> {
                 source_interface,
                 cause,
             }),
+            Journaled::AnnounceIngestRejected {
+                destination,
+                source_interface,
+                reason,
+            } => PrnsEvent::Diagnostic(Diagnostic::AnnounceIngestRejected {
+                destination,
+                source_interface,
+                reason,
+            }),
             Journaled::CommandSettled { id, settlement } => {
                 PrnsEvent::Diagnostic(Diagnostic::CommandSettled { id, settlement })
             }
@@ -322,6 +364,50 @@ impl<'a> From<Journaled<'a>> for PrnsEvent<'a> {
             Journaled::RouteRemoved { destination, cause } => {
                 PrnsEvent::Diagnostic(Diagnostic::RouteRemoved { destination, cause })
             }
+            Journaled::PacketForwarded {
+                source_interface,
+                fire_on,
+                destination,
+                hops,
+                packet_type,
+            } => PrnsEvent::Diagnostic(Diagnostic::PacketForwarded {
+                source_interface,
+                fire_on,
+                destination,
+                hops,
+                packet_type,
+            }),
+            Journaled::PacketForwardBlocked {
+                source_interface,
+                fire_on,
+                destination,
+                hops,
+                packet_type,
+            } => PrnsEvent::Diagnostic(Diagnostic::PacketForwardBlocked {
+                source_interface,
+                fire_on,
+                destination,
+                hops,
+                packet_type,
+            }),
+            Journaled::PacketIgnored {
+                source_interface,
+                reason,
+            } => PrnsEvent::Diagnostic(Diagnostic::PacketIgnored {
+                source_interface,
+                reason,
+            }),
+            Journaled::PacketReceived {
+                source_interface,
+                packet_type,
+                destination,
+                bytes,
+            } => PrnsEvent::Diagnostic(Diagnostic::PacketReceived {
+                source_interface,
+                packet_type,
+                destination,
+                bytes,
+            }),
         }
     }
 }
@@ -330,6 +416,7 @@ impl<'a> From<Journaled<'a>> for PrnsEvent<'a> {
 mod tests {
     use super::*;
     use crate::routing::announce::{AnnounceObservation, AnnounceRateAccounting};
+    use crate::routing::ingress::RebroadcastDecision;
     use crate::units::HopCount;
 
     #[test]
@@ -346,6 +433,7 @@ mod tests {
                 is_path_response: false,
             },
             rate_accounting: AnnounceRateAccounting::NotApplied,
+            rebroadcast: RebroadcastDecision::Scheduled,
         });
 
         assert!(matches!(

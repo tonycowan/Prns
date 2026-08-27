@@ -72,6 +72,7 @@ pub enum Journaled<'a> {
     AnnounceHeard {
         observation: AnnounceObservation<'a>,
         rate_accounting: AnnounceRateAccounting,
+        rebroadcast: crate::routing::ingress::RebroadcastDecision,
     },
 
     SelfRatchetRotated {
@@ -96,6 +97,14 @@ pub enum Journaled<'a> {
         source_interface: InterfaceId,
         cause: HeldDropCause,
     },
+
+    /// An announce arrived but was not Accepted (replay / no newer evidence / blackhole / …).
+    AnnounceIngestRejected {
+        destination: DestinationHash,
+        source_interface: InterfaceId,
+        reason: crate::routing::ingress::AnnounceIgnoreReason,
+    },
+
     /// RNS 1.4.2's destination `set_packet_callback` delivery as data.
     ///
     /// Emitted synchronously before a corresponding [`ProofStrategy::ProveIf`](crate::routing::ProofStrategy::ProveIf)
@@ -212,6 +221,42 @@ pub enum Journaled<'a> {
     RouteRemoved {
         destination: DestinationHash,
         cause: RouteRemovalCause,
+    },
+
+    /// A transport-addressed data packet was accepted for relay onto `fire_on`.
+    PacketForwarded {
+        source_interface: InterfaceId,
+        fire_on: InterfaceId,
+        destination: DestinationHash,
+        hops: u8,
+        /// [`crate::wire::PacketType`] discriminant (Data=0, Announce=1, LinkRequest=2, Proof=3).
+        packet_type: u8,
+    },
+
+    /// A transport-addressed data packet matched a next hop but that interface cannot take egress.
+    PacketForwardBlocked {
+        source_interface: InterfaceId,
+        fire_on: InterfaceId,
+        destination: DestinationHash,
+        hops: u8,
+        packet_type: u8,
+    },
+
+    /// Ingress ignored a packet from `source_interface` (no relay / no local delivery).
+    PacketIgnored {
+        source_interface: InterfaceId,
+        reason: crate::routing::ingress::IgnoreReason,
+    },
+
+    /// First sight of an inbound frame on `source_interface`, before accept/reject/forward.
+    /// Emitted so hosts can separate "never arrived" from "arrived but not Accepted".
+    PacketReceived {
+        source_interface: InterfaceId,
+        /// [`crate::wire::PacketType`] discriminant, or `0xFF` when the header was unparseable.
+        packet_type: u8,
+        destination: Option<crate::wire::DestinationHash>,
+        /// Wire frame length in bytes (header + payload) when known; `0` if unparseable.
+        bytes: u16,
     },
 }
 

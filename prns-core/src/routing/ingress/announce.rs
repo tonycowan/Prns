@@ -1,4 +1,4 @@
-use super::outcome::{AcceptedAnnounceEffect, IngestEffects};
+use super::outcome::{AcceptedAnnounceEffect, AnnounceIgnoreReason, IngestEffects};
 use crate::engine::{EngineState, InstantMillis, RememberAnnouncedDestinationIdentityOutcome};
 use crate::identity::IdentityHash;
 use crate::interfaces::{AttachedInterfaces, InterfaceId, InterfaceKind};
@@ -198,6 +198,11 @@ impl<S: StorageLayout> EngineState<S> {
         effects: &mut IngestEffects<'a>,
     ) -> AnnounceIngest {
         if self.identity_blackholes.is_blackholed(&identity_hash) {
+            effects.note_ignored_announce(
+                arrival.announce.destination,
+                arrival.receiving_interface,
+                AnnounceIgnoreReason::Blackholed,
+            );
             return AnnounceIngest::Blackholed;
         }
         let &AnnounceArrival {
@@ -210,6 +215,11 @@ impl<S: StorageLayout> EngineState<S> {
         let mut remember_outcome =
             self.remember_announced_destination_identity(announce, arrival.arrived_at);
         if remember_outcome == RememberAnnouncedDestinationIdentityOutcome::PublicKeyChanged {
+            effects.note_ignored_announce(
+                announce.destination,
+                source_interface,
+                AnnounceIgnoreReason::PublicKeyChanged,
+            );
             return AnnounceIngest::Ignored;
         }
         if self.network_transport_enabled() {
@@ -239,14 +249,22 @@ impl<S: StorageLayout> EngineState<S> {
             arrived_at,
         });
 
-        if !matches!(decision, AnnounceAcceptanceDecision::Accept(_)) {
+        if let AnnounceAcceptanceDecision::Reject(reason) = decision {
             if remember_outcome == RememberAnnouncedDestinationIdentityOutcome::Remembered {
                 effects.note_destination_identity_expiry(
                     self.unprotected_destination_identity_expiry(&announce.destination),
                 );
             }
+            effects.note_ignored_announce(
+                announce.destination,
+                source_interface,
+                AnnounceIgnoreReason::Acceptance(reason),
+            );
             return AnnounceIngest::Ignored;
         }
+        let AnnounceAcceptanceDecision::Accept(_) = decision else {
+            return AnnounceIngest::Ignored;
+        };
 
         let previous_interface = self
             .routing_table

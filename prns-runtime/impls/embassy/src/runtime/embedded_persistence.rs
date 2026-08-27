@@ -408,7 +408,11 @@ where
             | Journaled::ResourceFailed { .. }
             | Journaled::ResourceNeedsDecompression { .. }
             | Journaled::ResourceSegmentReceived { .. }
-            | Journaled::ResourceAssembled { .. } => {}
+            | Journaled::ResourceAssembled { .. }
+            | Journaled::PacketForwarded { .. }
+            | Journaled::PacketForwardBlocked { .. }
+            | Journaled::PacketIgnored { .. }
+            | Journaled::PacketReceived { .. } => {}
         }
     }
 

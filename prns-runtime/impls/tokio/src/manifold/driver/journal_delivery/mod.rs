@@ -49,6 +49,7 @@ where
         if let Journaled::AnnounceHeard {
             observation,
             rate_accounting,
+            ..
         } = &journaled
         {
             self.announce_rate_history.record(

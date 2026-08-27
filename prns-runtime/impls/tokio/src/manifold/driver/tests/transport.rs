@@ -63,7 +63,12 @@ async fn a_loopback_frame_crosses_the_seam_and_the_rebroadcast_leaves_through_th
         | Journaled::ResourceAssembled { .. }
         | Journaled::PersistenceFlushed { .. }
         | Journaled::PersistenceFlushFailed { .. }
-        | Journaled::LinkInterfaceMismatch { .. } => {}
+        | Journaled::LinkInterfaceMismatch { .. }
+        | Journaled::AnnounceIngestRejected { .. }
+        | Journaled::PacketForwarded { .. }
+        | Journaled::PacketForwardBlocked { .. }
+        | Journaled::PacketIgnored { .. }
+        | Journaled::PacketReceived { .. } => {}
     };
 
     tokio::spawn(run(
@@ -416,7 +421,12 @@ async fn a_delivery_answers_with_a_proof_directive_on_the_arrival_lane() {
         | Journaled::ResourceAssembled { .. }
         | Journaled::PersistenceFlushed { .. }
         | Journaled::PersistenceFlushFailed { .. }
-        | Journaled::LinkInterfaceMismatch { .. } => {}
+        | Journaled::LinkInterfaceMismatch { .. }
+        | Journaled::AnnounceIngestRejected { .. }
+        | Journaled::PacketForwarded { .. }
+        | Journaled::PacketForwardBlocked { .. }
+        | Journaled::PacketIgnored { .. }
+        | Journaled::PacketReceived { .. } => {}
     };
 
     tokio::spawn(run(

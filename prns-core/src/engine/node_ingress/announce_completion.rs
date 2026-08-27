@@ -38,6 +38,7 @@ impl<S: StorageLayout> EngineState<S> {
                     sink(EngineReaction::Journaled(Journaled::AnnounceHeard {
                         observation,
                         rate_accounting,
+                        rebroadcast: accepted.rebroadcast,
                     }));
                 }
                 while let Some(settled) = self.pop_settled_path_request(&accepted.destination) {
@@ -108,6 +109,13 @@ impl<S: StorageLayout> EngineState<S> {
             &mut effects,
         );
         let accepted_observation = effects.accepted_announce.take();
+        if let Some(ignored) = effects.ignored_announce.take() {
+            sink(EngineReaction::Journaled(Journaled::AnnounceIngestRejected {
+                destination: ignored.destination,
+                source_interface: ignored.source_interface,
+                reason: ignored.reason,
+            }));
+        }
         self.apply_announce_ingest(
             ingest,
             accepted_observation,

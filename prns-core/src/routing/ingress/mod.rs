@@ -15,7 +15,7 @@ pub use forward::PacketToForward;
 pub use links::ForwardedLinkRequestBody;
 pub(crate) use outcome::{AcceptedAnnounceEffect, IngestEffects};
 pub use outcome::{
-    DeferredCrypto, IgnoreReason, IngestPacketOutcome, LinkRttOwed,
+    AnnounceIgnoreReason, DeferredCrypto, IgnoreReason, IngestPacketOutcome, LinkRttOwed,
     NON_TRANSPORTED_DATA_MAX_RECEIVED_HOPS,
 };
 pub use upstream_delivery::{

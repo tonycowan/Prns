@@ -60,7 +60,12 @@ async fn a_commanded_announce_fans_to_every_interface_and_settles() {
         | Journaled::ResourceAssembled { .. }
         | Journaled::PersistenceFlushed { .. }
         | Journaled::PersistenceFlushFailed { .. }
-        | Journaled::LinkInterfaceMismatch { .. } => {}
+        | Journaled::LinkInterfaceMismatch { .. }
+        | Journaled::AnnounceIngestRejected { .. }
+        | Journaled::PacketForwarded { .. }
+        | Journaled::PacketForwardBlocked { .. }
+        | Journaled::PacketIgnored { .. }
+        | Journaled::PacketReceived { .. } => {}
     };
 
     tokio::spawn(run(
