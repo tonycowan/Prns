@@ -1,3 +1,4 @@
+mod local_rpc_key;
 mod persistence;
 mod sideband_join;
 mod worker;

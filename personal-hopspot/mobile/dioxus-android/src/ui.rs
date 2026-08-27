@@ -1,16 +1,10 @@
 //! Mobile-norm screens for the Hopspot management demo.
 
-use std::time::Instant;
-
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::backend;
-use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind, Notice};
-
-/// Visible on RNS Config so we can confirm the phone is running this binary.
-const UI_BUILD: &str = "2026-08-20g sideband-format";
-
+use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Screen {
@@ -36,36 +30,35 @@ pub fn App() -> Element {
     });
     let mut screen = use_signal(|| Screen::Home);
     let mut sheet_open = use_signal(|| false);
-    let mut toast = use_signal(|| None::<Notice>);
-    let mut last_snapshot = use_signal(String::new);
+    let mut toast = use_signal(|| None::<String>);
+    let mut last_stable = use_signal(String::new);
 
     use_future(move || async move {
         loop {
             TimeoutFuture::new(250).await;
-            if let Some(notice) = toast() {
-                if notice.shown_at.elapsed().as_secs() >= 2 {
-                    toast.set(None);
-                }
-            }
             if !backend::is_live() {
                 continue;
             }
             let Some(json) = backend::poll_snapshot_json() else {
                 continue;
             };
-            if json == last_snapshot() {
+            let stable = backend::stable_snapshot_key(&json);
+            if stable == last_stable() {
+                // Counters/uptime only — do not replace cards (avoids remounting detail UI).
+                state.write().apply_live_metrics(&json);
                 continue;
             }
-            last_snapshot.set(json.clone());
+            last_stable.set(stable);
             state.write().apply_live_json(&json);
         }
     });
 
     let mut flash = move |message: String| {
-        toast.set(Some(Notice {
-            message,
-            shown_at: Instant::now(),
-        }));
+        toast.set(Some(message));
+        spawn(async move {
+            TimeoutFuture::new(2_000).await;
+            toast.set(None);
+        });
     };
 
     rsx! {
@@ -87,6 +80,7 @@ pub fn App() -> Element {
                     div { class: "fab-bar",
                         button {
                             class: "btn primary",
+                            r#type: "button",
                             onclick: move |_| {
                                 state.write().announce();
                                 flash("Announcing".into());
@@ -95,6 +89,7 @@ pub fn App() -> Element {
                         }
                         button {
                             class: "btn",
+                            r#type: "button",
                             onclick: move |_| sheet_open.set(true),
                             "More"
                         }
@@ -157,8 +152,8 @@ pub fn App() -> Element {
                             },
                             show_copy: true,
                             on_copy: move |_| {
-                                let text = state.read().rns_config.clone();
-                                backend::schedule_copy(&text);
+                                backend::copy_rns_config(&state.read().rns_config);
+                                flash("Copied".into());
                             },
                             on_menu: move |_| sheet_open.set(true),
                         }
@@ -179,8 +174,8 @@ pub fn App() -> Element {
                 }
             }
 
-            if let Some(notice) = toast() {
-                div { class: "toast", "{notice.message}" }
+            if let Some(message) = toast() {
+                div { class: "toast", "{message}" }
             }
         }
     }
@@ -428,7 +423,6 @@ fn RnsConfigPage(state: Signal<DemoState>) -> Element {
             p { class: "muted",
                 "Copy puts a Sideband Advanced Reticulum template on the clipboard (live rpc_key). Leave with ←."
             }
-            p { class: "muted mono", "ui-build {UI_BUILD}" }
             pre { class: "config-box mono", "{config}" }
         }
     }

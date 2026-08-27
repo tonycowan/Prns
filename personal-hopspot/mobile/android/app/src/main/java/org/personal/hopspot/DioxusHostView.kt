@@ -19,7 +19,6 @@ import android.webkit.WebViewClient
 import androidx.webkit.WebViewAssetLoader
 import java.io.IOException
 import org.json.JSONObject
-import org.json.JSONTokener
 
 /**
  * Hosts the Dioxus web build from assets and bridges live engine calls to
@@ -27,6 +26,10 @@ import org.json.JSONTokener
  *
  * Uses [WebViewAssetLoader] so WASM/module scripts load over
  * `https://appassets.androidplatform.net` — `file://` cannot fetch WASM.
+ *
+ * Important: `@JavascriptInterface` calls block the WebView UI thread until they
+ * return. Mutation methods must only `post` work and return immediately — doing
+ * engine/clipboard work inline deadlocks the UI (buttons stop responding).
  */
 @SuppressLint("SetJavaScriptEnabled")
 class DioxusHostView(
@@ -54,16 +57,9 @@ class DioxusHostView(
         webChromeClient =
             object : WebChromeClient() {
                 override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                    val message = consoleMessage.message()
-                    // Copy must not go through @JavascriptInterface during a click —
-                    // that path froze the WASM UI on RNS Config. UI logs this marker;
-                    // we then copy from the native snapshot (real newlines).
-                    if (message.contains(COPY_READY_MARKER)) {
-                        pullPendingCopyToClipboard()
-                    }
                     Log.i(
                         TAG,
-                        "${consoleMessage.messageLevel()} ${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} $message",
+                        "${consoleMessage.messageLevel()} ${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} ${consoleMessage.message()}",
                     )
                     return true
                 }
@@ -76,7 +72,6 @@ class DioxusHostView(
                 ): WebResourceResponse? = assetLoader.shouldInterceptRequest(request.url)
             }
         addJavascriptInterface(bridge, "HopspotBridge")
-        // Served from APK assets/ via WebViewAssetLoader (not file://).
         loadUrl("$ASSET_BASE/dioxus/index.html")
     }
 
@@ -84,31 +79,7 @@ class DioxusHostView(
         bridge.service = service
     }
 
-    /**
-     * Copy the live Sideband join config to the clipboard.
-     *
-     * Prefer the native snapshot JSON (proper newlines) over `evaluateJavascript`,
-     * which can leave literal `\n` sequences if decoding fails.
-     */
-    private fun pullPendingCopyToClipboard() {
-        mainHandler.postDelayed({
-            val nativeText = rnsConfigFromSnapshot(bridge.service?.uiSnapshotJson())
-            if (!nativeText.isNullOrEmpty()) {
-                setClipboard(nativeText, "native snapshot")
-                return@postDelayed
-            }
-            evaluateJavascript(PULL_PENDING_COPY_JS) { raw ->
-                val text = jsStringResult(raw)
-                if (text.isNullOrEmpty()) {
-                    Log.w(TAG, "pending copy empty (raw=$raw)")
-                    return@evaluateJavascript
-                }
-                setClipboard(text, "js fallback")
-            }
-        }, 200)
-    }
-
-    private fun setClipboard(text: String, source: String) {
+    private fun setClipboard(text: String) {
         val clipboard =
             context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         if (clipboard == null) {
@@ -116,10 +87,9 @@ class DioxusHostView(
             return
         }
         clipboard.setPrimaryClip(ClipData.newPlainText("RNS config", text))
-        Log.i(TAG, "copied ${text.length} chars via $source")
     }
 
-    class HopspotJsBridge {
+    inner class HopspotJsBridge {
         @Volatile
         var service: PrnsService? = null
 
@@ -130,22 +100,34 @@ class DioxusHostView(
 
         @JavascriptInterface
         fun announce() {
-            service?.announce()
+            mainHandler.post { service?.announce() }
         }
 
         @JavascriptInterface
         fun sleepInterfaces() {
-            service?.sleepInterfaces()
+            mainHandler.post { service?.sleepInterfaces() }
         }
 
         @JavascriptInterface
         fun wakeInterfaces() {
-            service?.wakeInterfaces()
+            mainHandler.post { service?.wakeInterfaces() }
         }
 
         @JavascriptInterface
         fun toggleInterface(idHex: String) {
-            service?.toggleInterface(idHex)
+            mainHandler.post { service?.toggleInterface(idHex) }
+        }
+
+        @JavascriptInterface
+        fun copyRnsConfig() {
+            mainHandler.post {
+                val text = rnsConfigFromSnapshot(service?.uiSnapshotJson())
+                if (text.isNullOrEmpty()) {
+                    Log.w(TAG, "copyRnsConfig: empty config")
+                    return@post
+                }
+                setClipboard(text)
+            }
         }
     }
 
@@ -197,9 +179,6 @@ class DioxusHostView(
     private companion object {
         private const val TAG = "HopspotDioxus"
         private const val ASSET_BASE = "https://appassets.androidplatform.net/assets"
-        private const val COPY_READY_MARKER = "HOPSPOT_COPY_READY"
-        private const val PULL_PENDING_COPY_JS =
-            "(function(){var t=window.__hopspotPendingCopy; window.__hopspotPendingCopy=null; return (t==null)?'':String(t);})()"
 
         private fun rnsConfigFromSnapshot(snapshotJson: String?): String? {
             if (snapshotJson.isNullOrBlank()) {
@@ -209,24 +188,6 @@ class DioxusHostView(
                 JSONObject(snapshotJson).optString("rns_config").takeIf { it.isNotEmpty() }
             } catch (_: Exception) {
                 null
-            }
-        }
-
-        private fun jsStringResult(raw: String?): String? {
-            if (raw.isNullOrBlank() || raw == "null") {
-                return null
-            }
-            val parsed =
-                try {
-                    JSONTokener(raw).nextValue() as? String
-                } catch (_: Exception) {
-                    null
-                } ?: return null
-            // Some WebView builds leave write escapes intact if JSON decode is skipped.
-            return if (parsed.contains('\\') && parsed.contains("\\n") && !parsed.contains('\n')) {
-                parsed.replace("\\n", "\n").replace("\\t", "\t")
-            } else {
-                parsed
             }
         }
     }
