@@ -179,7 +179,7 @@ pub async fn run(spawner: Spawner) -> ! {
     let lora_id = LoRaInterface::<board::Radio>::interface_id(&lora_profile);
     static LORA_STATUS: StaticCell<EmbassyInterfaceStatus> = StaticCell::new();
     let lora_status: &'static EmbassyInterfaceStatus = LORA_STATUS.init(
-        EmbassyInterfaceStatus::new(lora_id, ConnectionState::Initializing),
+        EmbassyInterfaceStatus::new_accounted(lora_id, ConnectionState::Initializing),
     );
     static LORA_SPECTRUM: StaticCell<LoRaSpectrumStatus> = StaticCell::new();
     let lora_spectrum: &'static LoRaSpectrumStatus = LORA_SPECTRUM.init(LoRaSpectrumStatus::new());
@@ -202,10 +202,9 @@ pub async fn run(spawner: Spawner) -> ! {
 
     let (usb_tx, usb_rx) = class.split();
     static USB_STATUS: StaticCell<EmbassyInterfaceStatus> = StaticCell::new();
-    let usb_status: &'static EmbassyInterfaceStatus = USB_STATUS.init(EmbassyInterfaceStatus::new(
-        USB_INTERFACE_ID,
-        ConnectionState::Initializing,
-    ));
+    let usb_status: &'static EmbassyInterfaceStatus = USB_STATUS.init(
+        EmbassyInterfaceStatus::new_accounted(USB_INTERFACE_ID, ConnectionState::Initializing),
+    );
     let usb_dev = UsbAutoDevice::new(UsbAutoDeviceInput {
         rx: usb_rx,
         tx: usb_tx,
@@ -214,7 +213,7 @@ pub async fn run(spawner: Spawner) -> ! {
     });
 
     let lora_lane = manifold_lanes
-        .claim_interface(&LORA_MANIFOLD_LANE, lora.descriptor())
+        .claim_accounted_interface(&LORA_MANIFOLD_LANE, lora.descriptor(), lora_status)
         .expect("LoRa lane is available");
     let ble_supervisor_lane = ble_identity.as_ref().map(|_| {
         manifold_lanes
@@ -222,7 +221,7 @@ pub async fn run(spawner: Spawner) -> ! {
             .expect("Bluetooth supervisor lane is available")
     });
     let usb_lane = manifold_lanes
-        .claim_interface(&USB_MANIFOLD_LANE, usb_dev.descriptor())
+        .claim_accounted_interface(&USB_MANIFOLD_LANE, usb_dev.descriptor(), usb_status)
         .expect("USB lane is available");
 
     let handle = PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION);
@@ -366,7 +365,8 @@ pub async fn run(spawner: Spawner) -> ! {
             }
 
             let _ = panel.clear(EpdColor::White);
-            let mut interface_menu_details = hopspot::snapshots_to_interface_menu_details(
+            let mut interface_menu_details = hopspot::ble_interface_menu_details(
+                Some(super::bluetooth_auto::local_discovery_group()),
                 ui_state.selected_card(content.cards),
                 &snapshots,
             );

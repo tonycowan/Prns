@@ -70,10 +70,10 @@ pub(in crate::screen) fn interface_menu_items(
         {
             SHARED_INSTANCE_MENU_ITEMS
         }
-        CardKind::Wifi
+        CardKind::Ble
+        | CardKind::Wifi
         | CardKind::Peer
         | CardKind::Usb
-        | CardKind::Ble
         | CardKind::EspNow
         | CardKind::SharedInstance
         | CardKind::Tcp => POWER_ONLY_MENU_ITEMS,

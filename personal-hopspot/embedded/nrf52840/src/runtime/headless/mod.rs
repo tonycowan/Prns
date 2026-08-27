@@ -293,7 +293,7 @@ pub async fn run(spawner: Spawner) -> ! {
     let lora_id = LoraInterface::interface_id(&lora_profile);
     static LORA_STATUS: StaticCell<EmbassyInterfaceStatus> = StaticCell::new();
     let lora_status: &'static EmbassyInterfaceStatus = LORA_STATUS.init(
-        EmbassyInterfaceStatus::new(lora_id, ConnectionState::Initializing),
+        EmbassyInterfaceStatus::new_accounted(lora_id, ConnectionState::Initializing),
     );
     static LORA_SPECTRUM: StaticCell<LoRaSpectrumStatus> = StaticCell::new();
     let lora_spectrum: &'static LoRaSpectrumStatus = LORA_SPECTRUM.init(LoRaSpectrumStatus::new());
@@ -315,10 +315,9 @@ pub async fn run(spawner: Spawner) -> ! {
 
     let (usb_tx, usb_rx) = class.split();
     static USB_STATUS: StaticCell<EmbassyInterfaceStatus> = StaticCell::new();
-    let usb_status: &'static EmbassyInterfaceStatus = USB_STATUS.init(EmbassyInterfaceStatus::new(
-        USB_INTERFACE_ID,
-        ConnectionState::Initializing,
-    ));
+    let usb_status: &'static EmbassyInterfaceStatus = USB_STATUS.init(
+        EmbassyInterfaceStatus::new_accounted(USB_INTERFACE_ID, ConnectionState::Initializing),
+    );
     let usb_device = UsbAutoDevice::new(UsbAutoDeviceInput {
         rx: usb_rx,
         tx: usb_tx,
@@ -327,7 +326,7 @@ pub async fn run(spawner: Spawner) -> ! {
     });
 
     let lora_lane = manifold_lanes
-        .claim_interface(&LORA_MANIFOLD_LANE, lora.descriptor())
+        .claim_accounted_interface(&LORA_MANIFOLD_LANE, lora.descriptor(), lora_status)
         .expect("LoRa lane is available");
     #[cfg(any(
         feature = "board-t096",
@@ -344,7 +343,7 @@ pub async fn run(spawner: Spawner) -> ! {
             .expect("Bluetooth supervisor lane is available")
     });
     let usb_lane = manifold_lanes
-        .claim_interface(&USB_MANIFOLD_LANE, usb_device.descriptor())
+        .claim_accounted_interface(&USB_MANIFOLD_LANE, usb_device.descriptor(), usb_status)
         .expect("USB lane is available");
     let handle = PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION);
     let manifold_wiring = manifold_lanes.into_manifold_wiring(

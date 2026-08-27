@@ -27,10 +27,11 @@ use personal_rns::bluetooth_auto::{
     BluetoothAutoShared, BluetoothAutoStatus, FrameLease, FramePoolError, SharedFramePool,
 };
 use personal_rns::interfaces::bluetooth_auto::{
-    columba_connection_role, columba_role_capabilities, contains_service, encode_advertisement,
-    encode_stream_frame, fragments_of, BleAddress, BleIdentity, BleRoleCapabilities,
-    ColumbaConnectionRole, Control, Fragment, L2capPlan, PeerProtocol, Reassembler, BLE_HW_MTU,
-    CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN, STREAM_FRAME_PREFIX_LEN,
+    columba_connection_role, columba_role_capabilities, contains_service, default_group_tag,
+    discovery_groups_match, encode_advertisement, encode_stream_frame, fragments_of, group_tag,
+    BleAddress, BleIdentity, BleRoleCapabilities, ColumbaConnectionRole, Control, Fragment,
+    L2capPlan, PeerProtocol, Reassembler, BLE_HW_MTU, CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN,
+    GROUP_NAME, GROUP_TAG_LEN, STREAM_FRAME_PREFIX_LEN,
 };
 use personal_rns::interfaces::bluetooth_auto::{
     AdvertisingMode, BleBackend, BleEvent, BleLink, BleSink, BleSource, DialOutcome, Origin,
@@ -77,6 +78,25 @@ const PREFERRED_MIN_CONN_INTERVAL: u16 = 12;
 const PREFERRED_MAX_CONN_INTERVAL: u16 = 24;
 const PREFERRED_SLAVE_LATENCY: u16 = 0;
 const PREFERRED_SUPERVISION_TIMEOUT: u16 = 400;
+
+/// Discovery group id for SoftDevice advertise + passive scan.
+///
+/// Override at compile time without touching BLE identity flash:
+/// `PRNS_BLE_DISCOVERY_GROUP=mt-leg-a` / `mt-leg-b` (lab islands).
+/// Empty / unset keeps the open-mesh default (`reticulum`).
+pub(super) fn local_discovery_group() -> &'static str {
+    match option_env!("PRNS_BLE_DISCOVERY_GROUP") {
+        Some(group) if !group.is_empty() => group,
+        _ => GROUP_NAME,
+    }
+}
+
+fn local_discovery_group_tag() -> [u8; GROUP_TAG_LEN] {
+    match local_discovery_group() {
+        GROUP_NAME => default_group_tag(),
+        group => group_tag(group.as_bytes()),
+    }
+}
 const SIGHTING_PACING: Duration = Duration::from_millis(200);
 const SCAN_ERROR_BACKOFF: Duration = Duration::from_millis(500);
 /// One scan window before the scanner releases the central-radio permit (10 ms units), so a pending
@@ -1358,7 +1378,16 @@ pub(super) async fn acceptor(sd: &'static Softdevice, hub: &'static BleHub) -> !
 
         let mut adv_buf = [0u8; 31];
         let adv_len =
-            encode_advertisement(&mut adv_buf, BleRoleCapabilities::DualRole).unwrap_or(0);
+            encode_advertisement(
+                &mut adv_buf,
+                BleRoleCapabilities::DualRole,
+                local_discovery_group_tag(),
+            )
+            .unwrap_or(0);
+        debug_assert_eq!(
+            adv_len, 31,
+            "SoftDevice classic ADV must fill the 31-byte budget with the group tag"
+        );
         let scan_data = [0x05u8, 0x09, b'P', b'r', b'n', b's'];
         let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
             adv_data: &adv_buf[..adv_len],
@@ -1421,7 +1450,10 @@ pub(super) async fn scanner(sd: &'static Softdevice, hub: &'static BleHub) -> ! 
                 BleAddress::from_hci_bytes(address.bytes()),
                 capabilities,
             ) == ColumbaConnectionRole::Dial;
-            if contains_service(data) && should_dial {
+            if contains_service(data)
+                && discovery_groups_match(local_discovery_group_tag(), data)
+                && should_dial
+            {
                 Some(SeenPeer {
                     address,
                     rssi: report.rssi,

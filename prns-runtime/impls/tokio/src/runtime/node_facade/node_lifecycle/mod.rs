@@ -309,6 +309,7 @@ where
         let handle = PrnsNodeHandle {
             commands: command_tx,
             ids: Arc::new(AtomicU64::new(0)),
+            attachment_epochs: Arc::new(AtomicU64::new(0)),
             notify_tx,
             iface_build: iface_build_tx,
             interfaces: Arc::new(Mutex::new(HashMap::new())),
@@ -353,6 +354,13 @@ where
             .set_non_routing_identity(&identity)
             .map_err(NonRoutingIdentityError::Configure)?;
         Ok(self)
+    }
+
+    pub fn hold_remote_control_controller_identity(
+        &mut self,
+        secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
+    ) -> Result<IdentityHash, HoldIdentityError> {
+        self.node.engine.hold_identity(secret)
     }
 
     pub fn with_shared_instance_identity(

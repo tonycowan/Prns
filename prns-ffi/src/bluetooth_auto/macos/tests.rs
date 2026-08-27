@@ -1,12 +1,16 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use objc2_core_bluetooth::CBCharacteristicProperties;
 use prns_core::interfaces::bluetooth_auto::{
-    AdvertisingMode, BleBackend, BleIdentity, Control, ScanningMode,
+    default_group_tag, group_tag, manufacturer_role_payload, BleRoleCapabilities, AdvertisingMode,
+    BleBackend, BleIdentity, Control, ScanningMode,
 };
 use tokio::sync::{mpsc, oneshot};
 
-use super::backend::{dial_admission, scan_op, DialAdmission, ScanOp, StartupReadiness};
+use super::backend::{
+    dial_admission, scan_lease, scan_op, DialAdmission, ScanLease, ScanOp, StartupReadiness,
+};
 use super::central::CentralPeerSession;
 use super::discovery::{
     candidate_strength, discover_disposition, CandidateStrength, DiscoverDisposition,
@@ -16,6 +20,7 @@ use super::gatt_link::{
     gatt_inbound_channel, gatt_inbound_channel_with_budget, GattInboundSendError,
 };
 use super::gatt_write::{write_admission, GattWriteAdmission, GattWriteMode, GattWritePlan};
+use super::peripheral::{advertising_op, has_session_for_peer, AdvertisingOp};
 use super::MacosBleError;
 use super::{CoreBluetoothPeerId, MacosBleBackend};
 
@@ -95,16 +100,69 @@ fn discovery_recovery_distinguishes_owned_stale_and_transitioning_links() {
 
 #[test]
 fn candidate_strength_accepts_prns_name_or_manufacturer_marker() {
-    assert_eq!(candidate_strength(true, None), CandidateStrength::Strong);
     assert_eq!(
-        candidate_strength(false, Some(&[0xff, 0xff, 0x03, 0x00])),
+        candidate_strength(true, None, default_group_tag()),
         CandidateStrength::Strong
     );
     assert_eq!(
-        candidate_strength(false, Some(&[0x4c, 0x00, 0x03, 0x00])),
+        candidate_strength(false, Some(&[0xff, 0xff, 0x03, 0x00]), default_group_tag()),
+        CandidateStrength::Strong
+    );
+    assert_eq!(
+        candidate_strength(false, Some(&[0x4c, 0x00, 0x03, 0x00]), default_group_tag()),
         CandidateStrength::Weak
     );
-    assert_eq!(candidate_strength(false, None), CandidateStrength::Weak);
+    assert_eq!(
+        candidate_strength(false, None, default_group_tag()),
+        CandidateStrength::Weak
+    );
+}
+
+#[test]
+fn candidate_strength_rejects_other_discovery_groups() {
+    let other = group_tag(b"mt-leg-b");
+    let default_body = manufacturer_role_payload(BleRoleCapabilities::DualRole, default_group_tag());
+    let mut default_mfg = [0u8; 8];
+    default_mfg[0] = 0xff;
+    default_mfg[1] = 0xff;
+    default_mfg[2..].copy_from_slice(&default_body);
+
+    let other_body = manufacturer_role_payload(BleRoleCapabilities::DualRole, other);
+    let mut other_mfg = [0u8; 8];
+    other_mfg[0] = 0xff;
+    other_mfg[1] = 0xff;
+    other_mfg[2..].copy_from_slice(&other_body);
+
+    assert_eq!(
+        candidate_strength(false, Some(&default_mfg), other),
+        CandidateStrength::Rejected
+    );
+    assert_eq!(
+        candidate_strength(false, Some(&other_mfg), default_group_tag()),
+        CandidateStrength::Rejected
+    );
+    assert_eq!(
+        candidate_strength(false, Some(&other_mfg), other),
+        CandidateStrength::Strong
+    );
+    // Legacy name-only ads are the default group only.
+    assert_eq!(
+        candidate_strength(true, None, other),
+        CandidateStrength::Rejected
+    );
+}
+
+#[test]
+fn rejected_candidates_are_never_admitted() {
+    let now = Instant::now();
+    let peer = peer_id(7);
+    let mut guard = DiscoveryGuard::default();
+    assert!(!guard.admit_candidate(peer, CandidateStrength::Rejected, now));
+    assert!(!guard.admit_candidate(
+        peer,
+        CandidateStrength::Rejected,
+        now + Duration::from_secs(1)
+    ));
 }
 
 #[test]
@@ -166,21 +224,24 @@ fn startup_requires_central_gatt_and_l2cap_readiness() {
 }
 
 #[test]
-fn dial_yields_for_system_connection_or_live_inbound_session() {
+fn dial_admission_is_scoped_to_the_target_peer() {
+    let inbound_peer = peer_id(1);
+    let unrelated_peer = peer_id(2);
+    let inbound_sessions = HashMap::from([(inbound_peer, ())]);
+
     assert_eq!(
         dial_admission(true, false),
         DialAdmission::YieldToSystemConnection
     );
     assert_eq!(
-        dial_admission(false, true),
+        dial_admission(false, has_session_for_peer(&inbound_sessions, inbound_peer)),
         DialAdmission::YieldToInboundSession
     );
     assert_eq!(
-        dial_admission(true, true),
-        DialAdmission::YieldToSystemConnection
-    );
-    assert_eq!(
-        dial_admission(false, false),
+        dial_admission(
+            false,
+            has_session_for_peer(&inbound_sessions, unrelated_peer)
+        ),
         DialAdmission::AttachCentralSession
     );
 }
@@ -194,6 +255,22 @@ fn scan_op_starts_restarts_and_stops_without_spurious_work() {
     assert_eq!(scan_op(false, true, false), ScanOp::Stop);
     assert_eq!(scan_op(false, true, true), ScanOp::Stop);
     assert_eq!(scan_op(false, false, true), ScanOp::None);
+}
+
+#[test]
+fn scan_lease_restarts_only_an_enabled_scan_without_observed_activity() {
+    assert_eq!(scan_lease(false, false), ScanLease::Inactive);
+    assert_eq!(scan_lease(false, true), ScanLease::Inactive);
+    assert_eq!(scan_lease(true, true), ScanLease::Renewed);
+    assert_eq!(scan_lease(true, false), ScanLease::Expired);
+}
+
+#[test]
+fn advertising_reconciliation_never_bounces_a_healthy_advertisement() {
+    assert_eq!(advertising_op(true, false), AdvertisingOp::Start);
+    assert_eq!(advertising_op(true, true), AdvertisingOp::None);
+    assert_eq!(advertising_op(false, true), AdvertisingOp::Stop);
+    assert_eq!(advertising_op(false, false), AdvertisingOp::None);
 }
 
 #[test]
@@ -350,7 +427,7 @@ fn write_admission_serializes_acks_and_waits_for_unacknowledged_capacity() {
 #[tokio::test]
 #[ignore = "needs a real Bluetooth radio + Bluetooth permission; run with `--ignored` on a Mac"]
 async fn the_node_publishes_then_accepts_explicit_radio_modes() {
-    let mut backend = MacosBleBackend::new(BleIdentity::new([0; 16]))
+    let mut backend = MacosBleBackend::new(BleIdentity::new([0; 16]), default_group_tag())
         .await
         .expect("bluetooth should power on and publish both listeners");
     <MacosBleBackend as BleBackend<{ MacosBleBackend::MAX_PEERS }>>::set_advertising(

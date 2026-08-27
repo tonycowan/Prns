@@ -75,7 +75,7 @@ impl<Src: BleSource, Snk: BleSink> BluetoothPeer<Src, Snk> {
             sink,
             channel_tag,
             policy,
-            status: TokioInterfaceStatus::new(id, ConnectionState::Connected),
+            status: TokioInterfaceStatus::new_unaccounted(id, ConnectionState::Connected),
             closed: None,
         }
     }
@@ -297,7 +297,7 @@ impl BluetoothAutoStatus {
         let (enabled, _) = watch::channel(true);
         Self {
             shared: Arc::new(BluetoothAutoShared {
-                id: InterfaceId::from_channel_tag(InterfaceKind::BluetoothAuto, contract::GROUP_ID),
+                id: InterfaceId::from_channel_tag(InterfaceKind::BluetoothAuto, contract::CHANNEL_TAG),
                 enabled,
                 up: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
@@ -459,7 +459,7 @@ where
     const KIND: InterfaceKind = InterfaceKind::BluetoothAuto;
 
     fn channel_tag(&self) -> &[u8] {
-        contract::GROUP_ID
+        contract::CHANNEL_TAG
     }
 
     fn policy(&self) -> EffectiveInterfacePolicy {
@@ -887,7 +887,7 @@ mod tests {
         let status = BluetoothAutoStatus::new();
         status.mark_up();
 
-        status.set_members(std::vec![TokioInterfaceStatus::new(
+        status.set_members(std::vec![TokioInterfaceStatus::new_unaccounted(
             InterfaceId::new([0xB2; 8]),
             ConnectionState::Connected,
         )]);

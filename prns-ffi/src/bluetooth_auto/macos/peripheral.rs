@@ -37,6 +37,21 @@ pub(super) enum ListenerCharacteristic {
     Data,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AdvertisingOp {
+    Start,
+    Stop,
+    None,
+}
+
+pub(super) const fn advertising_op(enabled: bool, is_advertising: bool) -> AdvertisingOp {
+    match (enabled, is_advertising) {
+        (true, false) => AdvertisingOp::Start,
+        (false, true) => AdvertisingOp::Stop,
+        _ => AdvertisingOp::None,
+    }
+}
+
 enum InboundProfile {
     Native,
     Columba(BleIdentity),
@@ -65,6 +80,13 @@ struct PeripheralPeerSession {
     data_tx: GattInboundSender,
 }
 
+pub(super) fn has_session_for_peer<V>(
+    sessions: &HashMap<CoreBluetoothPeerId, V>,
+    peer_id: CoreBluetoothPeerId,
+) -> bool {
+    sessions.contains_key(&peer_id)
+}
+
 impl PeripheralPeerSession {
     fn data_receiver_closed(&self) -> bool {
         // The control receiver is handshake-only and closes when a link settles. The data
@@ -75,6 +97,7 @@ impl PeripheralPeerSession {
 
 pub(super) struct PeripheralDelegateIvars {
     events: tokio_mpsc::UnboundedSender<Event>,
+    group_tag: [u8; 4],
     characteristic: RefCell<Retained<CBMutableCharacteristic>>,
     data_characteristic: RefCell<Retained<CBMutableCharacteristic>>,
     columba_rx_characteristic: RefCell<Retained<CBMutableCharacteristic>>,
@@ -454,14 +477,15 @@ define_class!(
 
 impl PeripheralDelegate {
     /// Queue-confined: call only from the CoreBluetooth serial dispatch queue.
-    pub(super) fn has_inbound_sessions(&self) -> bool {
-        !self.ivars().sessions.borrow().is_empty()
+    pub(super) fn has_inbound_session(&self, peer_id: CoreBluetoothPeerId) -> bool {
+        has_session_for_peer(&self.ivars().sessions.borrow(), peer_id)
     }
 
     pub(super) fn new(
         events: tokio_mpsc::UnboundedSender<Event>,
         queue: DispatchRetained<DispatchQueue>,
         identity: BleIdentity,
+        group_tag: [u8; 4],
     ) -> Retained<Self> {
         let data_plane_properties = CBCharacteristicProperties::Write
             | CBCharacteristicProperties::WriteWithoutResponse
@@ -525,6 +549,7 @@ impl PeripheralDelegate {
         };
         let this = Self::alloc().set_ivars(PeripheralDelegateIvars {
             events,
+            group_tag,
             characteristic: RefCell::new(characteristic),
             data_characteristic: RefCell::new(data_characteristic),
             columba_rx_characteristic: RefCell::new(columba_rx_characteristic),
@@ -662,50 +687,6 @@ impl PeripheralDelegate {
         });
     }
 
-    /// Periodic watchdog path: bounce advertising only when idle. A stop/start while a central is
-    /// subscribed tears down the live inbound GATT/L2CAP link on dual-role peers.
-    pub(super) fn refresh_advertising_if_idle(&self) {
-        let queue = self.ivars().queue.clone();
-        let this = SendPeripheralDelegate(self.retain());
-        queue.exec_async(move || {
-            let this = this;
-            if this.has_inbound_sessions() {
-                crate::diagnostic_log::debug!(
-                    "bluetooth: skipped advertising refresh — inbound session active"
-                );
-                return;
-            }
-            let Some(manager) = this
-                .0
-                .ivars()
-                .manager
-                .borrow()
-                .as_ref()
-                .map(|m| m.0.clone())
-            else {
-                return;
-            };
-            // SAFETY: this authoritative CoreBluetooth state query runs on the retained manager's
-            // serial dispatch queue.
-            let is_advertising = unsafe { manager.isAdvertising() };
-            if is_advertising {
-                // SAFETY: the retained manager is messaged only on its serial dispatch queue.
-                unsafe { manager.stopAdvertising() };
-            }
-            let uuid = service_uuid();
-            let services = NSArray::from_slice(&[&*uuid]);
-            let data = advertisement_data(&services);
-            // SAFETY: the retained manager is messaged on its serial dispatch queue and the
-            // advertisement dictionary remains live for the synchronous call.
-            unsafe { manager.startAdvertising(Some(&data)) };
-            if is_advertising {
-                crate::diagnostic_log::debug!(
-                    "bluetooth: restarted advertising — discoverable as Prns"
-                );
-            }
-        });
-    }
-
     pub(super) fn set_advertising(&self, mode: AdvertisingMode) {
         let queue = self.ivars().queue.clone();
         let this = SendPeripheralDelegate(self.retain());
@@ -724,23 +705,23 @@ impl PeripheralDelegate {
             // SAFETY: this authoritative CoreBluetooth state query runs on the retained manager's
             // serial dispatch queue.
             let is_advertising = unsafe { manager.isAdvertising() };
-            if mode.is_on() {
-                // Policy only toggles On when currently Off; do not bounce while subscribed.
-                if is_advertising {
-                    return;
+            match advertising_op(mode.is_on(), is_advertising) {
+                AdvertisingOp::Start => {
+                    let uuid = service_uuid();
+                    let services = NSArray::from_slice(&[&*uuid]);
+                    let data = advertisement_data(&services, this.0.ivars().group_tag);
+                    // SAFETY: the retained manager is messaged on its serial dispatch queue and the
+                    // advertisement dictionary remains live for the synchronous call.
+                    unsafe { manager.startAdvertising(Some(&data)) };
                 }
-                let uuid = service_uuid();
-                let services = NSArray::from_slice(&[&*uuid]);
-                let data = advertisement_data(&services);
-                // SAFETY: the retained manager is messaged on its serial dispatch queue and the
-                // advertisement dictionary remains live for the synchronous call.
-                unsafe { manager.startAdvertising(Some(&data)) };
-            } else if is_advertising {
-                // SAFETY: the retained manager is messaged only on its serial dispatch queue.
-                unsafe { manager.stopAdvertising() };
-                crate::diagnostic_log::debug!(
-                    "bluetooth: advertising stopped — at connection capacity"
-                );
+                AdvertisingOp::Stop => {
+                    // SAFETY: the retained manager is messaged only on its serial dispatch queue.
+                    unsafe { manager.stopAdvertising() };
+                    crate::diagnostic_log::debug!(
+                        "bluetooth: advertising stopped — at connection capacity"
+                    );
+                }
+                AdvertisingOp::None => {}
             }
         });
     }

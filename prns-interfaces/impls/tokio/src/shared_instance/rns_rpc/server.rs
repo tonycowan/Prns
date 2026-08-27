@@ -32,6 +32,7 @@ pub struct SharedInstanceRpcServer<Q, B = Q> {
     started_at: std::time::Instant,
     transport_identity: prns_core::identity::IdentityHash,
     network_identity: Option<prns_core::identity::IdentityHash>,
+    software_version: Option<String>,
 }
 
 pub struct SharedInstanceRpcListener<Q, B = Q> {
@@ -49,6 +50,7 @@ pub(super) struct RpcService<Q, B> {
     pub(super) started_at: std::time::Instant,
     pub(super) transport_identity: prns_core::identity::IdentityHash,
     pub(super) network_identity: Option<prns_core::identity::IdentityHash>,
+    pub(super) software_version: Option<String>,
 }
 
 pub(super) enum RpcBind {
@@ -117,6 +119,7 @@ where
             started_at: std::time::Instant::now(),
             transport_identity,
             network_identity: None,
+            software_version: None,
         }
     }
 
@@ -140,6 +143,7 @@ where
             started_at: std::time::Instant::now(),
             transport_identity,
             network_identity: None,
+            software_version: None,
         }
     }
 }
@@ -174,6 +178,7 @@ where
             started_at: std::time::Instant::now(),
             transport_identity,
             network_identity: None,
+            software_version: None,
         }
     }
 
@@ -197,6 +202,7 @@ where
             started_at: std::time::Instant::now(),
             transport_identity,
             network_identity: None,
+            software_version: None,
         }
     }
 
@@ -229,6 +235,12 @@ where
         self
     }
 
+    #[must_use]
+    pub fn with_software_version(mut self, software_version: impl Into<String>) -> Self {
+        self.software_version = Some(software_version.into());
+        self
+    }
+
     pub async fn bind(self) -> Result<SharedInstanceRpcListener<Q, B>, SharedInstanceRpcBindError> {
         let Self {
             credentials,
@@ -240,6 +252,7 @@ where
             started_at,
             transport_identity,
             network_identity,
+            software_version,
         } = self;
         let listener = match bind {
             RpcBind::Tcp(address) => RpcListener::Tcp(
@@ -264,6 +277,7 @@ where
                 started_at,
                 transport_identity,
                 network_identity,
+                software_version,
             },
         })
     }
@@ -367,6 +381,7 @@ where
         started_at,
         transport_identity,
         network_identity,
+        software_version,
     } = service;
     let _active = telemetry.connection_opened();
     let client_authenticated =
@@ -435,11 +450,17 @@ where
         &query,
         &blackholes,
         blackhole_source,
-        Some(RnsTransportStatus::new(
-            transport_identity,
-            network_identity,
-            started_at.elapsed(),
-        )),
+        Some({
+            let mut status = RnsTransportStatus::new(
+                transport_identity,
+                network_identity,
+                started_at.elapsed(),
+            );
+            if let Some(software_version) = software_version {
+                status = status.with_software_version(software_version);
+            }
+            status
+        }),
     )
     .await
     .map_err(std::io::Error::other)?;

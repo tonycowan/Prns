@@ -1,5 +1,7 @@
 use core::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use objc2::rc::Retained;
@@ -276,6 +278,8 @@ pub(super) struct CentralDelegateIvars {
     events: tokio_mpsc::UnboundedSender<Event>,
     peripherals: PeripheralTable,
     restored: RestoredPeripherals,
+    scan_activity: Arc<AtomicBool>,
+    group_tag: [u8; 4],
     sessions: RefCell<HashMap<CoreBluetoothPeerId, CentralPeerSession>>,
     discovery_guard: RefCell<DiscoveryGuard>,
 }
@@ -336,9 +340,10 @@ define_class!(
             advertisement_data: &NSDictionary<NSString, AnyObject>,
             rssi: &NSNumber,
         ) {
+            self.ivars().scan_activity.store(true, Ordering::Relaxed);
             let peer_id = core_bluetooth_peer_id(peripheral);
             let now = Instant::now();
-            let strength = advertisement_candidate_strength(advertisement_data);
+            let strength = advertisement_candidate_strength(advertisement_data, self.ivars().group_tag);
             if cfg!(target_os = "macos")
                 && !self
                     .ivars()
@@ -762,11 +767,15 @@ impl CentralDelegate {
         events: tokio_mpsc::UnboundedSender<Event>,
         peripherals: PeripheralTable,
         restored: RestoredPeripherals,
+        scan_activity: Arc<AtomicBool>,
+        group_tag: [u8; 4],
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(CentralDelegateIvars {
             events,
             peripherals,
             restored,
+            scan_activity,
+            group_tag,
             sessions: RefCell::new(HashMap::new()),
             discovery_guard: RefCell::new(DiscoveryGuard::default()),
         });

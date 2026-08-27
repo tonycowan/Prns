@@ -77,6 +77,7 @@ cargo_manifests = [
     "personal-hopspot/embedded/esp32/vendor/esp-radio-0.18.0/Cargo.toml",
     "personal-hopspot/embedded/esp32/vendor/esp-radio-rtos-driver-0.3.0/Cargo.toml",
     "personal-hopspot/embedded/esp32/vendor/esp-rtos-0.3.0/Cargo.toml",
+    "personal-hopspot/embedded/esp32/vendor/esp-wifi-sys-esp32s3-0.2.0/Cargo.toml",
     "personal-hopspot/embedded/esp32/vendor/trouble-host-0.6.0/Cargo.toml",
     "personal-hopspot/embedded/esp32/vendor/xtensa-lx-rt-0.22.0/Cargo.toml",
     "personal-hopspot/embedded/nrf52840/Cargo.toml",
@@ -685,6 +686,24 @@ timeout_seconds = 3600
 command = ["bash", "validation/platforms/embedded.sh"]
 inputs = ["validation/platforms/embedded.sh", "validation/platforms/no-std-esp-build.sh"]
 artifacts = "validation-artifacts/results/embedded-builds"
+
+[[suite]]
+id = "esp32-firmware-check"
+domain = "platform"
+group = "esp"
+tiers = ["pr"]
+platform = "linux"
+toolchain = "esp"
+timeout_seconds = 5400
+command = ["bash", "validation/platforms/esp32-firmware-check.sh"]
+inputs = [
+  "validation/platforms/esp32-firmware-check.sh",
+  "personal-hopspot/embedded/esp32",
+  "tools/release/install-release-esp-toolchain.sh",
+  "tools/release/release-esp-toolchain-identity.sh",
+  "tools/release/verify-release-esp-toolchain.sh",
+]
+artifacts = "validation-artifacts/results/esp32-firmware-check"
 
 [[suite]]
 id = "shipping-firmware"

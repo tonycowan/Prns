@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Notify;
 
-use prns_core::interfaces::bluetooth_auto::{AdvertisingMode, RadioMode, ScanningMode};
+use prns_core::interfaces::bluetooth_auto::{DEFAULT_GROUP_TAG, GROUP_TAG_LEN, AdvertisingMode, RadioMode, ScanningMode};
 use prns_core::interfaces::bluetooth_auto::{BleAddress, BleIdentity, PeerProtocol};
 
 use super::outbound::{BoundedByteQueue, BoundedMessageQueue};
@@ -91,6 +91,85 @@ impl Endpoints {
     }
 }
 
+pub(super) enum LinkRecord {
+    Active(Endpoints),
+    Closing { address: BleAddress },
+}
+
+impl LinkRecord {
+    fn address(&self) -> BleAddress {
+        match self {
+            Self::Active(endpoints) => endpoints.address,
+            Self::Closing { address } => *address,
+        }
+    }
+
+    pub(super) fn active(&self) -> Option<&Endpoints> {
+        match self {
+            Self::Active(endpoints) => Some(endpoints),
+            Self::Closing { .. } => None,
+        }
+    }
+
+    fn request_close(&mut self) -> bool {
+        let Self::Active(endpoints) = self else {
+            return false;
+        };
+        let address = endpoints.address;
+        let previous = core::mem::replace(self, Self::Closing { address });
+        if let Self::Active(endpoints) = previous {
+            endpoints.close();
+        }
+        true
+    }
+
+    fn close(self) {
+        if let Self::Active(endpoints) = self {
+            endpoints.close();
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CloseRequests {
+    pending: VecDeque<u32>,
+}
+
+impl CloseRequests {
+    fn enqueue(&mut self, conn_id: u32) -> bool {
+        if self.pending.contains(&conn_id) {
+            return true;
+        }
+        if self.pending.len() >= PEER_CAPACITY {
+            return false;
+        }
+        self.pending.push_back(conn_id);
+        true
+    }
+
+    fn remove(&mut self, conn_id: u32) {
+        self.pending.retain(|pending| *pending != conn_id);
+    }
+
+    fn next(&mut self) -> Option<u32> {
+        self.pending.pop_front()
+    }
+
+    fn clear(&mut self) {
+        self.pending.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
 pub(super) struct PendingLink {
     pub(super) conn_id: u32,
     pub(super) address: BleAddress,
@@ -145,13 +224,14 @@ impl RadioState {
 pub(super) struct Shared {
     radio: Mutex<RadioState>,
     local_identity: Mutex<Option<[u8; 16]>>,
+    local_group_tag: Mutex<[u8; GROUP_TAG_LEN]>,
     pub(super) psm: Mutex<Option<u16>>,
     psm_ready: Notify,
-    pub(super) links: Mutex<HashMap<u32, Endpoints>>,
+    pub(super) links: Mutex<HashMap<u32, LinkRecord>>,
     pub(super) events: Mutex<VecDeque<Event>>,
     pub(super) events_ready: Notify,
     pub(super) dial_requests: Mutex<VecDeque<[u8; 6]>>,
-    pub(super) close_requests: Mutex<VecDeque<u32>>,
+    pub(super) close_requests: Mutex<CloseRequests>,
     pub(super) l2cap_opens: Arc<Mutex<VecDeque<(u32, u16)>>>,
     work: Arc<WorkSignal>,
     ingress_pressure_events: AtomicU64,
@@ -176,13 +256,14 @@ impl AndroidBleBridge {
             shared: Arc::new(Shared {
                 radio: Mutex::new(RadioState::default()),
                 local_identity: Mutex::new(None),
+                local_group_tag: Mutex::new(DEFAULT_GROUP_TAG),
                 psm: Mutex::new(None),
                 psm_ready: Notify::new(),
                 links: Mutex::new(HashMap::new()),
                 events: Mutex::new(VecDeque::new()),
                 events_ready: Notify::new(),
                 dial_requests: Mutex::new(VecDeque::new()),
-                close_requests: Mutex::new(VecDeque::new()),
+                close_requests: Mutex::new(CloseRequests::default()),
                 l2cap_opens: Arc::new(Mutex::new(VecDeque::new())),
                 work: Arc::new(WorkSignal::default()),
                 ingress_pressure_events: AtomicU64::new(0),
@@ -211,6 +292,26 @@ impl AndroidBleBridge {
         };
         out[..16].copy_from_slice(&identity);
         16
+    }
+
+    pub fn set_local_group_tag(&self, tag: [u8; GROUP_TAG_LEN]) {
+        if let Ok(mut slot) = self.shared.local_group_tag.lock() {
+            *slot = tag;
+        }
+    }
+
+    pub fn local_group_tag(&self, out: &mut [u8]) -> usize {
+        if out.len() < GROUP_TAG_LEN {
+            return 0;
+        }
+        let tag = self
+            .shared
+            .local_group_tag
+            .lock()
+            .map(|slot| *slot)
+            .unwrap_or(DEFAULT_GROUP_TAG);
+        out[..GROUP_TAG_LEN].copy_from_slice(&tag);
+        GROUP_TAG_LEN
     }
 
     pub fn set_radio_mode(&self, mode: RadioMode) {
@@ -268,13 +369,15 @@ impl AndroidBleBridge {
             *slot = None;
         }
         if let Ok(mut links) = self.shared.links.lock() {
-            links.values().for_each(Endpoints::close);
-            links.clear();
+            links.drain().for_each(|(_, link)| link.close());
         }
         if let Ok(mut events) = self.shared.events.lock() {
             events.clear();
         }
         if let Ok(mut requests) = self.shared.dial_requests.lock() {
+            requests.clear();
+        }
+        if let Ok(mut requests) = self.shared.close_requests.lock() {
             requests.clear();
         }
         if let Ok(mut opens) = self.shared.l2cap_opens.lock() {
@@ -382,12 +485,12 @@ impl AndroidBleBridge {
         });
         let peer_identity = peer_identity.map(BleIdentity::new);
         if let Ok(mut links) = self.shared.links.lock() {
-            if links.len() >= PEER_CAPACITY && !links.contains_key(&conn_id) {
+            if links.len() >= PEER_CAPACITY || links.contains_key(&conn_id) {
                 return false;
             }
-            if let Some(replaced) = links.insert(
+            let replaced = links.insert(
                 conn_id,
-                Endpoints {
+                LinkRecord::Active(Endpoints {
                     address: BleAddress::new(address),
                     control_in_tx: control_tx,
                     l2cap_in_tx: l2cap_tx,
@@ -396,10 +499,9 @@ impl AndroidBleBridge {
                     l2cap_out: Arc::clone(&l2cap_out),
                     data_out: Arc::clone(&data_out),
                     l2cap_up: Arc::clone(&l2cap_up),
-                },
-            ) {
-                replaced.close();
-            }
+                }),
+            );
+            debug_assert!(replaced.is_none());
         } else {
             return false;
         }
@@ -443,7 +545,7 @@ impl AndroidBleBridge {
 
     pub fn control_in(&self, conn_id: u32, bytes: &[u8]) -> AndroidBleIngressAdmission {
         if let Ok(links) = self.shared.links.lock() {
-            if let Some(ep) = links.get(&conn_id) {
+            if let Some(ep) = links.get(&conn_id).and_then(LinkRecord::active) {
                 return self.try_ingress(&ep.control_in_tx, bytes);
             }
         }
@@ -465,12 +567,12 @@ impl AndroidBleBridge {
     }
 
     pub fn l2cap_in(&self, conn_id: u32, bytes: &[u8]) -> bool {
-        let sender = self
-            .shared
-            .links
-            .lock()
-            .ok()
-            .and_then(|links| links.get(&conn_id).map(|ep| ep.l2cap_in_tx.clone()));
+        let sender = self.shared.links.lock().ok().and_then(|links| {
+            links
+                .get(&conn_id)
+                .and_then(LinkRecord::active)
+                .map(|ep| ep.l2cap_in_tx.clone())
+        });
         sender.is_some_and(|sender| sender.blocking_send(bytes.to_vec()).is_ok())
     }
 
@@ -483,7 +585,7 @@ impl AndroidBleBridge {
 
     pub fn data_in(&self, conn_id: u32, bytes: &[u8]) -> AndroidBleIngressAdmission {
         if let Ok(links) = self.shared.links.lock() {
-            if let Some(ep) = links.get(&conn_id) {
+            if let Some(ep) = links.get(&conn_id).and_then(LinkRecord::active) {
                 return self.try_ingress(&ep.data_in_tx, bytes);
             }
         }
@@ -491,12 +593,12 @@ impl AndroidBleBridge {
     }
 
     pub fn data_out(&self, conn_id: u32, out: &mut [u8]) -> usize {
-        let queue = self
-            .shared
-            .links
-            .lock()
-            .ok()
-            .and_then(|links| links.get(&conn_id).map(|ep| Arc::clone(&ep.data_out)));
+        let queue = self.shared.links.lock().ok().and_then(|links| {
+            links
+                .get(&conn_id)
+                .and_then(LinkRecord::active)
+                .map(|ep| Arc::clone(&ep.data_out))
+        });
         let Some(queue) = queue else {
             return 0;
         };
@@ -504,12 +606,12 @@ impl AndroidBleBridge {
     }
 
     pub fn commit_data_out(&self, conn_id: u32) -> bool {
-        let queue = self
-            .shared
-            .links
-            .lock()
-            .ok()
-            .and_then(|links| links.get(&conn_id).map(|ep| Arc::clone(&ep.data_out)));
+        let queue = self.shared.links.lock().ok().and_then(|links| {
+            links
+                .get(&conn_id)
+                .and_then(LinkRecord::active)
+                .map(|ep| Arc::clone(&ep.data_out))
+        });
         match queue {
             Some(queue) => queue.commit(),
             None => false,
@@ -525,43 +627,47 @@ impl AndroidBleBridge {
     }
 
     pub fn disconnected(&self, conn_id: u32) {
-        if let Ok(mut links) = self.shared.links.lock() {
-            if let Some(link) = links.remove(&conn_id) {
-                link.close();
+        let removed = if let Ok(mut links) = self.shared.links.lock() {
+            let removed = links.remove(&conn_id);
+            if let Ok(mut closes) = self.shared.close_requests.lock() {
+                closes.remove(conn_id);
             }
-        }
-        if let Ok(mut closes) = self.shared.close_requests.lock() {
-            closes.retain(|pending| *pending != conn_id);
+            removed
+        } else {
+            None
+        };
+        if let Some(link) = removed {
+            link.close();
         }
         self.shared.work.wake();
     }
 
     /// Policy rejected a link: drop Rust endpoints and ask Java to tear down the physical radio.
-    pub fn close_by_address(&self, address: [u8; 6]) {
+    pub fn close_by_address(&self, address: [u8; 6]) -> bool {
         let target = BleAddress::new(address);
-        let mut closed = Vec::new();
-        if let Ok(mut links) = self.shared.links.lock() {
-            links.retain(|conn_id, endpoints| {
-                if endpoints.address == target {
-                    endpoints.close();
-                    closed.push(*conn_id);
-                    false
+        let Ok(mut links) = self.shared.links.lock() else {
+            return false;
+        };
+        let Ok(mut requests) = self.shared.close_requests.lock() else {
+            return false;
+        };
+        let mut queued = false;
+        let mut complete = true;
+        for (conn_id, link) in links.iter_mut() {
+            if link.address() == target && matches!(link, LinkRecord::Active(_)) {
+                if requests.enqueue(*conn_id) {
+                    queued |= link.request_close();
                 } else {
-                    true
-                }
-            });
-        }
-        if closed.is_empty() {
-            return;
-        }
-        if let Ok(mut requests) = self.shared.close_requests.lock() {
-            for conn_id in closed {
-                if !requests.contains(&conn_id) {
-                    requests.push_back(conn_id);
+                    complete = false;
                 }
             }
         }
-        self.shared.work.wake();
+        drop(requests);
+        drop(links);
+        if queued {
+            self.shared.work.wake();
+        }
+        complete
     }
 
     pub fn next_close(&self) -> Option<u32> {
@@ -569,7 +675,7 @@ impl AndroidBleBridge {
             .close_requests
             .lock()
             .ok()
-            .and_then(|mut requests| requests.pop_front())
+            .and_then(|mut requests| requests.next())
     }
 
     pub fn push_dial(&self, address: [u8; 6]) -> bool {
@@ -656,7 +762,7 @@ impl AndroidBleBridge {
             .links
             .lock()
             .ok()
-            .and_then(|links| links.get(&conn_id).map(pick))
+            .and_then(|links| links.get(&conn_id).and_then(LinkRecord::active).map(pick))
     }
 
     fn out_byte_queue(
@@ -668,15 +774,16 @@ impl AndroidBleBridge {
             .links
             .lock()
             .ok()
-            .and_then(|links| links.get(&conn_id).map(pick))
+            .and_then(|links| links.get(&conn_id).and_then(LinkRecord::active).map(pick))
     }
 
     fn out_signal(&self, conn_id: u32) -> Option<Arc<LinkSignal>> {
-        self.shared
-            .links
-            .lock()
-            .ok()
-            .and_then(|links| links.get(&conn_id).map(|ep| Arc::clone(&ep.l2cap_up)))
+        self.shared.links.lock().ok().and_then(|links| {
+            links
+                .get(&conn_id)
+                .and_then(LinkRecord::active)
+                .map(|ep| Arc::clone(&ep.l2cap_up))
+        })
     }
 }
 
