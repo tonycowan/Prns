@@ -79,6 +79,29 @@ pub fn toggle_interface(id_hex: &str) {
     call_bridge("toggleInterface", Some(id_hex));
 }
 
+/// Persist a new BLE Auto discovery group id on the live Hopspot service.
+#[cfg(target_arch = "wasm32")]
+pub fn set_ble_discovery_group(group_id: &str) -> bool {
+    let Some(bridge) = bridge() else {
+        return false;
+    };
+    let Ok(func) = js_sys::Reflect::get(&bridge, &"setBleDiscoveryGroup".into()) else {
+        return false;
+    };
+    let Ok(func) = func.dyn_into::<js_sys::Function>() else {
+        return false;
+    };
+    let Ok(result) = func.call1(&bridge, &wasm_bindgen::JsValue::from_str(group_id)) else {
+        return false;
+    };
+    result.as_bool().unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_ble_discovery_group(_group_id: &str) -> bool {
+    false
+}
+
 /// Ask the host to copy [text] without calling `@JavascriptInterface` in this turn.
 ///
 /// Live Android: stash on `window.__hopspotPendingCopy` and log a marker so Kotlin

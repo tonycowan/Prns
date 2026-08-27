@@ -147,6 +147,10 @@ class DioxusHostView(
         fun toggleInterface(idHex: String) {
             service?.toggleInterface(idHex)
         }
+
+        @JavascriptInterface
+        fun setBleDiscoveryGroup(groupId: String): Boolean =
+            service?.setBleDiscoveryGroup(groupId) ?: false
     }
 
     /** Serves APK assets with MIME types WebView needs for ES modules + WASM. */
