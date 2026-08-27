@@ -48,6 +48,7 @@ impl DaemonRequestState {
             transport_identity: identity.transport,
             network_identity: identity.network,
             uptime: self.started.elapsed(),
+            software_version: Some(format!("prnsd {}", env!("CARGO_PKG_VERSION"))),
         })
     }
 }
