@@ -67,8 +67,7 @@ impl MobileActionCode {
             | UiAction::OpenLoRaEditor
             | UiAction::SetLoRaProfile(_)
             | UiAction::ResetLoRaProfile
-            | UiAction::SwapRadioMode
-            | UiAction::CycleBleDiscoveryGroup => Self::None,
+            | UiAction::SwapRadioMode => Self::None,
         }
     }
 
