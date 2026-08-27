@@ -43,6 +43,8 @@ pub fn poll_snapshot_json() -> Option<String> {
     None
 }
 
+/// Call into the Android host. Host methods must return immediately (post work);
+/// a blocking `@JavascriptInterface` freezes the WebView while the UI thread waits.
 #[cfg(target_arch = "wasm32")]
 fn call_bridge(method: &str, arg: Option<&str>) {
     let Some(bridge) = bridge() else {
@@ -79,31 +81,21 @@ pub fn toggle_interface(id_hex: &str) {
     call_bridge("toggleInterface", Some(id_hex));
 }
 
-/// Ask the host to copy [text] without calling `@JavascriptInterface` in this turn.
-///
-/// Live Android: stash on `window.__hopspotPendingCopy` and log a marker so Kotlin
-/// can `evaluateJavascript` + ClipboardManager after navigation paints. Calling
-/// bridge/clipboard/`WebView.onPause` during the click froze the WASM UI on
-/// RNS Config (even `on_done` before copy never painted).
-#[cfg(target_arch = "wasm32")]
-pub fn schedule_copy(text: &str) {
+/// Copy RNS config: live host posts clipboard work; mock/web uses the Clipboard API.
+pub fn copy_rns_config(text: &str) {
     if is_live() {
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let _ = js_sys::Reflect::set(
-            &window,
-            &"__hopspotPendingCopy".into(),
-            &wasm_bindgen::JsValue::from_str(text),
-        );
-        web_sys::console::log_1(&"HOPSPOT_COPY_READY".into());
+        call_bridge("copyRnsConfig", None);
         return;
     }
-    let _ = start_clipboard_write(text);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = start_clipboard_write(text);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = text;
+    }
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn schedule_copy(_text: &str) {}
 
 #[cfg(target_arch = "wasm32")]
 fn start_clipboard_write(text: &str) -> bool {
@@ -113,4 +105,30 @@ fn start_clipboard_write(text: &str) -> bool {
     let clipboard = window.navigator().clipboard();
     let _promise = clipboard.write_text(text);
     true
+}
+
+/// Fingerprint of a live snapshot ignoring fields that change every poll.
+///
+/// `uptime_ms` / byte counters / activity age change continuously; applying a
+/// full `DemoState` replace for those remounts the detail screen mid-interaction.
+pub fn stable_snapshot_key(json: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return json.to_string();
+    };
+    object.remove("uptime_ms");
+    object.remove("rx_bytes");
+    object.remove("tx_bytes");
+    if let Some(cards) = object.get_mut("cards").and_then(|cards| cards.as_array_mut()) {
+        for card in cards {
+            if let Some(card) = card.as_object_mut() {
+                card.remove("tx_bytes");
+                card.remove("rx_bytes");
+                card.remove("activity_age_secs");
+            }
+        }
+    }
+    value.to_string()
 }

@@ -197,7 +197,7 @@ fn kind_wire(kind: CardKind, label: &str) -> &'static str {
             _ => "lan",
         },
         CardKind::Ble => "ble",
-        CardKind::Tcp => "local",
+        CardKind::Tcp | CardKind::SharedInstance => "local",
         CardKind::Peer => "app",
         CardKind::LoRa => "lora",
         CardKind::EspNow => "espnow",
@@ -285,6 +285,7 @@ fn rns_config_template(rpc_key_hex: Option<&str>) -> String {
 
   # Personal Hopspot
   shared_instance_type = tcp
+  shared_instance_port = {LOCAL_RNS_PORT}
   instance_control_port = {RPC_PORT}
   rpc_key = {key}
   panic_on_interface_error = No
@@ -324,6 +325,8 @@ mod tests {
             text.contains("\n  enable_transport = TRANSPORT_IS_ENABLED\n"),
             "section keys must keep a 2-space indent; got:\n{text}"
         );
+        assert!(text.contains("shared_instance_port = 37428"));
+        assert!(text.contains("instance_control_port = 37429"));
         assert!(text.contains("Incorrect changes"));
         assert!(!text.contains('\\'));
     }

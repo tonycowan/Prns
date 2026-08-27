@@ -1,7 +1,5 @@
 //! Hopspot management model: mock sample data + live snapshot apply.
 
-use std::time::Instant;
-
 use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -233,12 +231,6 @@ pub struct LimitRow {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Notice {
-    pub message: String,
-    pub shown_at: Instant,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct DemoState {
     pub engine: EngineState,
     pub uptime: String,
@@ -294,8 +286,8 @@ impl DemoState {
         };
         if self.live {
             crate::backend::toggle_interface(id);
-            return;
         }
+        // Optimistic flip so the action button updates before the next snapshot.
         if self.cards[index].connection.is_powered_on() {
             self.cards[index].connection = ConnectionState::Disabled;
             self.cards[index].failure_reason = None;
@@ -314,6 +306,23 @@ impl DemoState {
         *self = snap.into_state();
         self.live = true;
         self.sleeping = sleeping;
+    }
+
+    /// Update counters/uptime only — avoids replacing `cards` (which remounts detail UI).
+    pub fn apply_live_metrics(&mut self, json: &str) {
+        let Ok(snap) = serde_json::from_str::<LiveSnapshotWire>(json) else {
+            return;
+        };
+        self.uptime = fmt_uptime(snap.uptime_ms);
+        self.rx_bytes = snap.rx_bytes;
+        self.tx_bytes = snap.tx_bytes;
+        for card in &mut self.cards {
+            if let Some(next) = snap.cards.iter().find(|c| c.id == card.id) {
+                card.tx_bytes = next.tx_bytes;
+                card.rx_bytes = next.rx_bytes;
+                card.activity_age = next.activity_age_secs.map(|secs| format!("{secs}s"));
+            }
+        }
     }
 
     fn recount_online(&mut self) {
@@ -603,6 +612,7 @@ fn sample_rns_config() -> String {
 
   # Personal Hopspot
   shared_instance_type = tcp
+  shared_instance_port = 37428
   instance_control_port = 37429
   rpc_key = <device-local-key>
   panic_on_interface_error = No

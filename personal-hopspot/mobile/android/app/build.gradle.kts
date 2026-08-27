@@ -61,8 +61,8 @@ android {
         applicationId = "org.personal.hopspot"
         minSdk = 19
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.1.4-sideband-format"
+        versionCode = 16
+        versionName = "0.1.16-localclient-rx"
         testInstrumentationRunner = "org.personal.hopspot.PrnsRuntimeProbe"
         buildConfigField("boolean", "EXPERIMENTAL_WIFI_DIRECT", experimentalWifiDirect)
         buildConfigField("String", "UI_FACE", "\"dioxus\"")
@@ -138,7 +138,8 @@ tasks.register("verifyExperimentalWifiDirectDisabled")
 
 dependencies {
     implementation(libs.usb.serial)
-    "dioxusImplementation"(libs.androidx.webkit)
+    // Shared by dioxus (WebView) and oled (DioxusHostView still compiles in the APK).
+    implementation(libs.androidx.webkit)
     testImplementation(libs.junit)
 }
 
