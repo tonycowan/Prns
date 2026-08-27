@@ -87,6 +87,7 @@ impl HopspotFace {
             }
             UiAction::Announce => self.show_notice(UiNotice::Announcing),
             UiAction::CopySharedInstanceConfig => {}
+            UiAction::CycleBleDiscoveryGroup => {}
             UiAction::None
             | UiAction::DisplayOff
             | UiAction::ToggleDisplayAutoOff
