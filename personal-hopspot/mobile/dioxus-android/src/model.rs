@@ -242,6 +242,8 @@ pub struct DemoState {
     pub limits: Vec<LimitRow>,
     pub sleeping: bool,
     pub rns_config: String,
+    /// Live BLE Auto discovery group (Android persistence), when known.
+    pub ble_discovery_group: Option<String>,
     /// When true, power/sleep/announce go through the Hopspot service bridge.
     pub live: bool,
 }
@@ -259,6 +261,7 @@ impl DemoState {
             limits: sample_limits(),
             sleeping: false,
             rns_config: sample_rns_config(),
+            ble_discovery_group: Some("reticulum".into()),
             live: false,
         }
     }
@@ -295,6 +298,32 @@ impl DemoState {
             self.cards[index].connection = ConnectionState::Connected;
         }
         self.recount_online();
+    }
+
+    pub fn set_ble_discovery_group(&mut self, group_id: &str) -> bool {
+        let group_id = group_id.trim();
+        if group_id.is_empty() {
+            return false;
+        }
+        if self.live {
+            if !crate::backend::set_ble_discovery_group(group_id) {
+                return false;
+            }
+            self.ble_discovery_group = Some(group_id.to_string());
+            for card in &mut self.cards {
+                if card.kind == InterfaceKind::Ble {
+                    card.detail_lines = vec![format!("grp {group_id}")];
+                }
+            }
+            return true;
+        }
+        self.ble_discovery_group = Some(group_id.to_string());
+        for card in &mut self.cards {
+            if card.kind == InterfaceKind::Ble {
+                card.detail_lines = vec![format!("grp {group_id}")];
+            }
+        }
+        true
     }
 
     /// Apply a live snapshot without clobbering ephemeral UI (sleep flag).
@@ -346,6 +375,8 @@ struct LiveSnapshotWire {
     cards: Vec<LiveCardWire>,
     limits: Vec<LiveLimitWire>,
     rns_config: String,
+    #[serde(default)]
+    ble_discovery_group: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,6 +450,7 @@ impl LiveSnapshotWire {
                 .collect(),
             sleeping: false,
             rns_config: self.rns_config,
+            ble_discovery_group: self.ble_discovery_group,
             live: true,
         }
     }
@@ -500,7 +532,7 @@ fn sample_cards() -> Vec<InterfaceCard> {
             peers: Some(1),
             destinations: 3,
             activity_age: Some("4s".into()),
-            detail_lines: vec!["Bluetooth Auto".into(), "Recovery: idle".into()],
+            detail_lines: vec!["grp reticulum".into()],
             peer_list: vec![PeerInfo::new("MacBook", ConnectionState::Connected)],
         },
         InterfaceCard {

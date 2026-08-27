@@ -139,6 +139,11 @@ class PrnsService : Service() {
         NativeBridge.nativeWakeInterfaces()
     }
 
+    fun bleDiscoveryGroup(): String? = NativeBridge.nativeBleDiscoveryGroup()
+
+    fun setBleDiscoveryGroup(groupId: String): Boolean =
+        NativeBridge.nativeBleSetDiscoveryGroup(groupId)
+
     @Synchronized
     private fun ensureEngineStarted() {
         when (NativeBridge.engineState()) {

@@ -81,21 +81,54 @@ pub fn toggle_interface(id_hex: &str) {
     call_bridge("toggleInterface", Some(id_hex));
 }
 
-/// Copy RNS config: live host posts clipboard work; mock/web uses the Clipboard API.
-pub fn copy_rns_config(text: &str) {
+/// Persist a new BLE Auto discovery group id on the live Hopspot service.
+#[cfg(target_arch = "wasm32")]
+pub fn set_ble_discovery_group(group_id: &str) -> bool {
+    let Some(bridge) = bridge() else {
+        return false;
+    };
+    let Ok(func) = js_sys::Reflect::get(&bridge, &"setBleDiscoveryGroup".into()) else {
+        return false;
+    };
+    let Ok(func) = func.dyn_into::<js_sys::Function>() else {
+        return false;
+    };
+    let Ok(result) = func.call1(&bridge, &wasm_bindgen::JsValue::from_str(group_id)) else {
+        return false;
+    };
+    result.as_bool().unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_ble_discovery_group(_group_id: &str) -> bool {
+    false
+}
+
+/// Ask the host to copy [text] without calling `@JavascriptInterface` in this turn.
+///
+/// Live Android: stash on `window.__hopspotPendingCopy` and log a marker so Kotlin
+/// can `evaluateJavascript` + ClipboardManager after navigation paints. Calling
+/// bridge/clipboard/`WebView.onPause` during the click froze the WASM UI on
+/// RNS Config (even `on_done` before copy never painted).
+#[cfg(target_arch = "wasm32")]
+pub fn schedule_copy(text: &str) {
     if is_live() {
-        call_bridge("copyRnsConfig", None);
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let _ = js_sys::Reflect::set(
+            &window,
+            &"__hopspotPendingCopy".into(),
+            &wasm_bindgen::JsValue::from_str(text),
+        );
+        web_sys::console::log_1(&"HOPSPOT_COPY_READY".into());
         return;
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = start_clipboard_write(text);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = text;
-    }
+    let _ = start_clipboard_write(text);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn schedule_copy(_text: &str) {}
 
 #[cfg(target_arch = "wasm32")]
 fn start_clipboard_write(text: &str) -> bool {

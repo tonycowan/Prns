@@ -4,7 +4,10 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::backend;
-use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind};
+use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind, Notice};
+
+/// Visible on RNS Config so we can confirm the phone is running this binary.
+const UI_BUILD: &str = "2026-08-27a ble-group-edit";
 
 #[derive(Clone, Debug, PartialEq)]
 enum Screen {
@@ -152,8 +155,8 @@ pub fn App() -> Element {
                             },
                             show_copy: true,
                             on_copy: move |_| {
-                                backend::copy_rns_config(&state.read().rns_config);
-                                flash("Copied".into());
+                                let text = state.read().rns_config.clone();
+                                backend::schedule_copy(&text);
                             },
                             on_menu: move |_| sheet_open.set(true),
                         }
@@ -296,6 +299,13 @@ fn InterfaceDetail(
     let id = card.id.clone();
     let powered = card.connection.is_powered_on();
     let power_label = if powered { "Turn off" } else { "Turn on" };
+    let is_ble = card.kind == InterfaceKind::Ble;
+    let initial_group = state
+        .read()
+        .ble_discovery_group
+        .clone()
+        .unwrap_or_else(|| "reticulum".into());
+    let mut group_draft = use_signal(|| initial_group);
 
     rsx! {
         div { class: "content",
@@ -332,6 +342,52 @@ fn InterfaceDetail(
                 }
                 for line in card.detail_lines.iter() {
                     p { class: "muted", "{line}" }
+                }
+            }
+
+            if is_ble {
+                h2 { class: "section-title", "Discovery group" }
+                section { class: "status-card group-editor",
+                    p { class: "muted",
+                        "Peers only discover each other when they share this group id."
+                    }
+                    label { class: "field-label", r#for: "ble-group", "group_id" }
+                    input {
+                        id: "ble-group",
+                        class: "text-input mono",
+                        r#type: "text",
+                        maxlength: "64",
+                        value: "{group_draft}",
+                        oninput: move |event| group_draft.set(event.value()),
+                    }
+                    div { class: "detail-actions",
+                        button {
+                            class: "btn primary",
+                            r#type: "button",
+                            onclick: move |_| {
+                                let next = group_draft();
+                                if state.write().set_ble_discovery_group(&next) {
+                                    on_flash.call(format!("Group set to {next}"));
+                                } else {
+                                    on_flash.call("Could not update group".into());
+                                }
+                            },
+                            "Save group"
+                        }
+                        button {
+                            class: "btn",
+                            r#type: "button",
+                            onclick: move |_| {
+                                group_draft.set("reticulum".into());
+                                if state.write().set_ble_discovery_group("reticulum") {
+                                    on_flash.call("Group set to reticulum".into());
+                                } else {
+                                    on_flash.call("Could not update group".into());
+                                }
+                            },
+                            "Use reticulum"
+                        }
+                    }
                 }
             }
 

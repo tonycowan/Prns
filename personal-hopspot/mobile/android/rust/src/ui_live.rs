@@ -11,8 +11,8 @@ use personal_rns::storage::{GrowableHeap, StorageCapacity, StorageLayout};
 use serde::Serialize;
 
 use crate::engine::{
-    classify, engine_state, interface_snapshots, last_failure, rpc_key_hex, runtime_health,
-    LOCAL_RNS_PORT, RPC_PORT,
+    ble_discovery_group, classify, engine_state, interface_snapshots, last_failure, rpc_key_hex,
+    runtime_health, LOCAL_RNS_PORT, RPC_PORT,
 };
 
 const MAX_CARDS: usize = 16;
@@ -29,6 +29,8 @@ pub struct UiLiveSnapshot {
     pub local_rns_port: u16,
     pub rpc_port: u16,
     pub rpc_key_hex: Option<String>,
+    /// Current BLE Auto discovery group id (persisted on Android).
+    pub ble_discovery_group: Option<String>,
     pub cards: Vec<UiLiveCard>,
     pub limits: Vec<UiLiveLimit>,
     pub rns_config: String,
@@ -84,6 +86,7 @@ pub fn capture_ui_live_snapshot() -> UiLiveSnapshot {
         .iter()
         .map(|card| map_card(card, &snapshots))
         .collect();
+    let ble_group = ble_discovery_group();
 
     UiLiveSnapshot {
         engine,
@@ -99,6 +102,7 @@ pub fn capture_ui_live_snapshot() -> UiLiveSnapshot {
         local_rns_port: LOCAL_RNS_PORT,
         rpc_port: RPC_PORT,
         rpc_key_hex: rpc_key.clone(),
+        ble_discovery_group: ble_group,
         cards: live_cards,
         limits: static_limits(),
         rns_config: rns_config_template(rpc_key.as_deref()),
@@ -183,6 +187,10 @@ fn detail_lines_for(card: &Card) -> Vec<String> {
         ],
         CardKind::Peer if card.label() == "App" => {
             vec!["Local client of this shared instance".into()]
+        }
+        CardKind::Ble => {
+            let group = ble_discovery_group().unwrap_or_else(|| "reticulum".into());
+            vec![format!("grp {group}")]
         }
         _ => Vec::new(),
     }
