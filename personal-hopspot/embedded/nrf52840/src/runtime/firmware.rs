@@ -388,7 +388,8 @@ pub async fn run(spawner: Spawner) -> ! {
             }
 
             let _ = panel.clear(EpdColor::White);
-            let mut interface_menu_details = hopspot::snapshots_to_interface_menu_details(
+            let mut interface_menu_details = hopspot::ble_interface_menu_details(
+                Some(super::bluetooth_auto::local_discovery_group()),
                 ui_state.selected_card(content.cards),
                 &snapshots,
             );
