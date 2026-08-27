@@ -2,18 +2,23 @@ use personal_rns::runtime::NoPersistence;
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use personal_hopspot_core::{
     load_host_ble_identity, load_host_node_identity, HopspotDestinationSet, IdentityPersistence,
     MobileEngineFailure, BLE_IDENTITY_STORAGE, NODE_IDENTITY_STORAGE,
 };
 use personal_rns::bluetooth_auto::BluetoothAuto;
+use personal_rns::engine::{AnnounceIngressOutcome, AnnounceOrigin, AnnounceSourceKind};
 use personal_rns::interfaces::bluetooth_auto::{
     AndroidHost, Endpoint, LinkCapabilities, BLE_HW_MTU,
 };
 use personal_rns::interfaces::wifi_direct::GoIntent;
-use personal_rns::runtime::{Diagnostic, ManuallyAttached, PrnsEvent, PrnsNode, PrnsNodeRecipe};
+use personal_rns::interfaces::InterfaceKind;
+use personal_rns::runtime::{
+    AnnounceEgressOutcome, Diagnostic, ManuallyAttached, PrnsEvent, PrnsNode, PrnsNodeHandle,
+    PrnsNodeRecipe,
+};
 use personal_rns::shared_instance::rns_rpc::{SharedInstanceCredentials, SharedInstanceRpcServer};
 use personal_rns::shared_instance::SharedInstanceServer;
 use personal_rns::storage::GrowableHeap;
@@ -76,7 +81,15 @@ async fn run_engine(input: WorkerInput) -> WorkerExit {
         return fail_start(ready_tx, EngineStartError::StorageConfiguration);
     }
     let node_identity = node_bootstrap.into_identity();
-    let credentials = SharedInstanceCredentials::from_identity_secret(node_identity.secret());
+    let local_rpc_key = match super::local_rpc_key::load_or_create_local_rpc_key(&storage_dir) {
+        Ok(key) => key,
+        Err(error) => {
+            log::error!("hopspot local RPC key unavailable: {error}");
+            return fail_start(ready_tx, EngineStartError::StorageConfiguration);
+        }
+    };
+    let credentials = SharedInstanceCredentials::from_identity_secret(node_identity.secret())
+        .with_rpc_key(local_rpc_key.to_vec());
     let node_identity_hash = credentials.transport_identity_hash();
     let rpc_key = credentials.rpc_key().clone();
     let transport_secret = node_identity.transport_secret();
@@ -115,8 +128,155 @@ async fn run_engine(input: WorkerInput) -> WorkerExit {
         interfaces: ManuallyAttached,
         persistence: NoPersistence,
         on_event: move |event, _state: &()| {
-            if let PrnsEvent::Diagnostic(Diagnostic::SelfRatchetRotated { destination }) = event {
-                let _ = rotated_tx.send(destination);
+            match event {
+                PrnsEvent::Diagnostic(Diagnostic::SelfRatchetRotated { destination }) => {
+                    let _ = rotated_tx.send(destination);
+                }
+                PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard {
+                    destination,
+                    hops,
+                    source_interface,
+                    app_data,
+                }) => {
+                    log_announce_relay(
+                        source_interface.kind(),
+                        hops,
+                        app_data.len(),
+                        destination.as_bytes(),
+                        source_interface.as_bytes(),
+                    );
+                }
+                PrnsEvent::Diagnostic(Diagnostic::AnnounceHeldDropped {
+                    destination,
+                    source_interface,
+                    cause,
+                }) => {
+                    if is_sideband_or_ble(source_interface.kind()) {
+                        let dest = destination.as_bytes();
+                        log::warn!(
+                            "hopspot: announce held-dropped from={:?} cause={cause:?} dest={:02x}{:02x}{:02x}{:02x}",
+                            source_interface.kind(),
+                            dest[0],
+                            dest[1],
+                            dest[2],
+                            dest[3],
+                        );
+                    }
+                }
+                PrnsEvent::Diagnostic(Diagnostic::AnnounceIngestRejected {
+                    destination,
+                    source_interface,
+                    reason,
+                }) => {
+                    if is_sideband_or_ble(source_interface.kind()) {
+                        let dest = destination.as_bytes();
+                        log::info!(
+                            "hopspot: sideband announce REJECTED reason={reason:?} dest={:02x}{:02x}{:02x}{:02x} iface={:02x}{:02x}",
+                            dest[0],
+                            dest[1],
+                            dest[2],
+                            dest[3],
+                            source_interface.as_bytes()[0],
+                            source_interface.as_bytes()[1],
+                        );
+                    } else {
+                        let dest = destination.as_bytes();
+                        log::debug!(
+                            "hopspot: announce REJECTED kind={:?} reason={reason:?} dest={:02x}{:02x}{:02x}{:02x}",
+                            source_interface.kind(),
+                            dest[0],
+                            dest[1],
+                            dest[2],
+                            dest[3],
+                        );
+                    }
+                }
+                PrnsEvent::Diagnostic(Diagnostic::PacketForwarded {
+                    source_interface,
+                    fire_on,
+                    destination,
+                    hops,
+                    packet_type,
+                }) => {
+                    if is_sideband_or_ble(source_interface.kind())
+                        || is_sideband_or_ble(fire_on.kind())
+                    {
+                        let dest = destination.as_bytes();
+                        log::info!(
+                            "hopspot: packet FORWARD src={:?} -> dst_iface={:?} hops={hops} type={} dest={:02x}{:02x}{:02x}{:02x}",
+                            source_interface.kind(),
+                            fire_on.kind(),
+                            packet_type_name(packet_type),
+                            dest[0],
+                            dest[1],
+                            dest[2],
+                            dest[3],
+                        );
+                    }
+                }
+                PrnsEvent::Diagnostic(Diagnostic::PacketForwardBlocked {
+                    source_interface,
+                    fire_on,
+                    destination,
+                    hops,
+                    packet_type,
+                }) => {
+                    if is_sideband_or_ble(source_interface.kind())
+                        || is_sideband_or_ble(fire_on.kind())
+                    {
+                        let dest = destination.as_bytes();
+                        log::warn!(
+                            "hopspot: packet FORWARD-BLOCKED src={:?} -> dst_iface={:?} hops={hops} type={} dest={:02x}{:02x}{:02x}{:02x} (egress ineligible)",
+                            source_interface.kind(),
+                            fire_on.kind(),
+                            packet_type_name(packet_type),
+                            dest[0],
+                            dest[1],
+                            dest[2],
+                            dest[3],
+                        );
+                    }
+                }
+                PrnsEvent::Diagnostic(Diagnostic::PacketIgnored {
+                    source_interface,
+                    reason,
+                }) => {
+                    if is_sideband_or_ble(source_interface.kind()) {
+                        log::info!(
+                            "hopspot: packet IGNORED from={:?} reason={reason:?}",
+                            source_interface.kind(),
+                        );
+                    }
+                }
+                PrnsEvent::Diagnostic(Diagnostic::PacketReceived {
+                    source_interface,
+                    packet_type,
+                    destination,
+                    bytes,
+                }) => {
+                    if source_interface.kind() == Some(InterfaceKind::LocalClient) {
+                        match destination {
+                            Some(dest) => {
+                                let d = dest.as_bytes();
+                                log::info!(
+                                    "hopspot: LocalClient RX type={} bytes={bytes} dest={:02x}{:02x}{:02x}{:02x}",
+                                    packet_type_name(packet_type),
+                                    d[0],
+                                    d[1],
+                                    d[2],
+                                    d[3],
+                                );
+                            }
+                            None => {
+                                log::info!(
+                                    "hopspot: LocalClient RX type={} bytes={bytes} dest=?",
+                                    packet_type_name(packet_type),
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         },
     })
@@ -149,13 +309,36 @@ async fn run_engine(input: WorkerInput) -> WorkerExit {
     let usb_status = usb.status();
     handle.add_interface(usb);
 
-    let local = match SharedInstanceServer::with_port(ports.local).bind().await {
-        Ok(local) => local,
+    let local_server = SharedInstanceServer::with_port(ports.local);
+    #[cfg(target_os = "android")]
+    let local_server = if ports.local != 0 {
+        // Stock Sideband on Android uses AF_UNIX `\0rns/default`, not TCP 37428.
+        local_server.also_listen_on_abstract_unix("default")
+    } else {
+        local_server
+    };
+    let local = match local_server.bind().await {
+        Ok(local) => {
+            #[cfg(target_os = "android")]
+            if ports.local != 0 {
+                if local.listens_on_abstract_unix() {
+                    log::info!(
+                        "hopspot: shared instance bus on TCP 127.0.0.1:{} and abstract unix rns/default",
+                        ports.local
+                    );
+                } else {
+                    log::warn!(
+                        "hopspot: abstract unix rns/default unavailable; stock Sideband will not join this instance"
+                    );
+                }
+            }
+            local
+        }
         Err(_) => return fail_start(ready_tx, EngineStartError::LocalListenerBind),
     };
     handle.supervise(local);
 
-    let rpc = match SharedInstanceRpcServer::tcp(credentials, ports.rpc, handle.clone())
+    let rpc = match SharedInstanceRpcServer::tcp(credentials.clone(), ports.rpc, handle.clone())
         .bind()
         .await
     {
@@ -163,6 +346,7 @@ async fn run_engine(input: WorkerInput) -> WorkerExit {
         Err(_) => return fail_start(ready_tx, EngineStartError::RpcListenerBind),
     };
     tokio::spawn(rpc.run());
+    spawn_android_abstract_unix_rpc(credentials, ports.rpc, handle.clone());
 
     let service_discovery = match platform.service_discovery.take_service_discovery() {
         Ok(service_discovery) => service_discovery,
@@ -241,6 +425,8 @@ async fn run_engine(input: WorkerInput) -> WorkerExit {
         return WorkerExit::Stopped;
     }
 
+    spawn_sideband_announce_diag(handle.clone());
+
     let persistence_run = persistence.run(shutdown_rx);
     tokio::pin!(persistence_run);
     tokio::select! {
@@ -260,12 +446,232 @@ async fn run_engine(input: WorkerInput) -> WorkerExit {
     }
 }
 
+fn spawn_sideband_announce_diag(handle: PrnsNodeHandle) {
+    tokio::spawn(async move {
+        log::info!(
+            "hopspot: sideband/BLE packet diagnostics enabled (adb logcat -s HopspotRust:I)"
+        );
+        let mut prev = SidebandAnnounceDiag::default();
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let Some(snapshot) = handle.metrics_snapshot().await else {
+                continue;
+            };
+            let next = SidebandAnnounceDiag::from_metrics(&snapshot);
+            if next == prev {
+                continue;
+            }
+            log::info!(
+                "hopspot: sideband announce metrics ingress accepted={} ignored={} held={} blackholed={} sched_reject={} | egress enqueued={} unavailable={} lane_full={} lane_missing={} ifac_reject={} pacer_reject={} | pacer_depth={} scheduled_depth={} held_depth={}",
+                next.ingress_accepted,
+                next.ingress_ignored,
+                next.ingress_held,
+                next.ingress_blackholed,
+                next.ingress_sched_reject,
+                next.egress_enqueued,
+                next.egress_unavailable,
+                next.egress_lane_full,
+                next.egress_lane_missing,
+                next.egress_ifac_reject,
+                next.egress_pacer_reject,
+                next.pacer_depth,
+                next.scheduled_depth,
+                next.held_depth,
+            );
+            if !next.interface_lines.is_empty() {
+                for line in &next.interface_lines {
+                    log::info!("hopspot: announce iface {line}");
+                }
+            }
+            prev = next;
+        }
+    });
+}
+
+#[derive(Default, Clone, PartialEq, Eq)]
+struct SidebandAnnounceDiag {
+    ingress_accepted: u64,
+    ingress_ignored: u64,
+    ingress_held: u64,
+    ingress_blackholed: u64,
+    ingress_sched_reject: u64,
+    egress_enqueued: u64,
+    egress_unavailable: u64,
+    egress_lane_full: u64,
+    egress_lane_missing: u64,
+    egress_ifac_reject: u64,
+    egress_pacer_reject: u64,
+    pacer_depth: u32,
+    scheduled_depth: u32,
+    held_depth: u32,
+    interface_lines: std::vec::Vec<String>,
+}
+
+impl SidebandAnnounceDiag {
+    fn from_metrics(snapshot: &personal_rns::runtime::RuntimeMetricsSnapshot) -> Self {
+        let ingress = &snapshot.engine.announces.ingress;
+        let shared = AnnounceSourceKind::SharedClient;
+        let egress = &snapshot.egress.announces;
+        let origin = AnnounceOrigin::SharedClient;
+        let mut interface_lines = std::vec::Vec::new();
+        for entry in &egress.interfaces {
+            let depth = entry.pacer_queue_depth;
+            let enqueued = entry
+                .outcomes
+                .get(origin, AnnounceEgressOutcome::Enqueued);
+            let unavailable = entry
+                .outcomes
+                .get(origin, AnnounceEgressOutcome::InterfaceUnavailable);
+            let full = entry.outcomes.get(origin, AnnounceEgressOutcome::LaneFull);
+            let missing = entry
+                .outcomes
+                .get(origin, AnnounceEgressOutcome::LaneMissing);
+            if depth == 0 && enqueued == 0 && unavailable == 0 && full == 0 && missing == 0 {
+                continue;
+            }
+            let id = entry.interface.as_bytes();
+            interface_lines.push(format!(
+                "kind={:?} id={:02x}{:02x} pacer={depth} enq={enqueued} unavail={unavailable} full={full} missing={missing}",
+                entry.interface.kind(),
+                id[0],
+                id[1],
+            ));
+        }
+        for entry in &snapshot.engine.announces.interfaces {
+            if entry.held_depth == 0 && entry.scheduled_depth == 0 {
+                continue;
+            }
+            let id = entry.interface.as_bytes();
+            interface_lines.push(format!(
+                "kind={:?} id={:02x}{:02x} held_depth={} scheduled_depth={}",
+                entry.interface.kind(),
+                id[0],
+                id[1],
+                entry.held_depth,
+                entry.scheduled_depth,
+            ));
+        }
+        interface_lines.sort();
+        Self {
+            ingress_accepted: ingress.get(shared, AnnounceIngressOutcome::Accepted),
+            ingress_ignored: ingress.get(shared, AnnounceIngressOutcome::Ignored),
+            ingress_held: ingress.get(shared, AnnounceIngressOutcome::Held),
+            ingress_blackholed: ingress.get(shared, AnnounceIngressOutcome::Blackholed),
+            ingress_sched_reject: ingress.get(
+                shared,
+                AnnounceIngressOutcome::AcceptedScheduleRejectedQueueFull,
+            ),
+            egress_enqueued: egress.outcomes.get(origin, AnnounceEgressOutcome::Enqueued),
+            egress_unavailable: egress
+                .outcomes
+                .get(origin, AnnounceEgressOutcome::InterfaceUnavailable),
+            egress_lane_full: egress.outcomes.get(origin, AnnounceEgressOutcome::LaneFull),
+            egress_lane_missing: egress
+                .outcomes
+                .get(origin, AnnounceEgressOutcome::LaneMissing),
+            egress_ifac_reject: egress
+                .outcomes
+                .get(origin, AnnounceEgressOutcome::IfacRejected),
+            egress_pacer_reject: egress
+                .outcomes
+                .get(origin, AnnounceEgressOutcome::PacerRejected),
+            pacer_depth: egress.pacer_queue_depth,
+            scheduled_depth: snapshot.engine.announces.scheduled_depth,
+            held_depth: snapshot.engine.announces.held_depth,
+            interface_lines,
+        }
+    }
+}
+
+fn spawn_android_abstract_unix_rpc(
+    credentials: SharedInstanceCredentials,
+    rpc_port: u16,
+    handle: PrnsNodeHandle,
+) {
+    #[cfg(target_os = "android")]
+    {
+        if rpc_port == 0 {
+            return;
+        }
+        tokio::spawn(async move {
+            match SharedInstanceRpcServer::abstract_unix(credentials, "default", handle)
+                .bind()
+                .await
+            {
+                Ok(rpc) => {
+                    log::info!("hopspot: shared instance RPC on abstract unix rns/default/rpc");
+                    rpc.run().await;
+                }
+                Err(error) => {
+                    log::warn!(
+                        "hopspot: abstract unix RPC rns/default/rpc unavailable: {error:?}"
+                    )
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (credentials, rpc_port, handle);
+    }
+}
+
 fn fail_start(
     ready_tx: Sender<Result<EngineResources, EngineStartError>>,
     error: EngineStartError,
 ) -> WorkerExit {
     let _ = ready_tx.send(Err(error));
     WorkerExit::Failed(error.failure())
+}
+
+fn is_sideband_or_ble(kind: Option<InterfaceKind>) -> bool {
+    matches!(
+        kind,
+        Some(InterfaceKind::LocalClient | InterfaceKind::BluetoothAuto)
+    )
+}
+
+fn packet_type_name(packet_type: u8) -> &'static str {
+    match packet_type {
+        0 => "data",
+        1 => "announce",
+        2 => "link_request",
+        3 => "proof",
+        _ => "unknown",
+    }
+}
+
+fn log_announce_relay(
+    source_kind: Option<InterfaceKind>,
+    hops: u8,
+    app_data_bytes: usize,
+    dest: &[u8],
+    iface: &[u8],
+) {
+    if !is_sideband_or_ble(source_kind) {
+        log::debug!(
+            "hopspot: announce heard kind={source_kind:?} hops={hops} app_data_bytes={app_data_bytes} dest={:02x}{:02x}{:02x}{:02x}",
+            dest.first().copied().unwrap_or(0),
+            dest.get(1).copied().unwrap_or(0),
+            dest.get(2).copied().unwrap_or(0),
+            dest.get(3).copied().unwrap_or(0),
+        );
+        return;
+    }
+    let label = match source_kind {
+        Some(InterfaceKind::LocalClient) => "sideband",
+        Some(InterfaceKind::BluetoothAuto) => "ble",
+        _ => "peer",
+    };
+    log::info!(
+        "hopspot: {label} announce heard hops={hops} app_data_bytes={app_data_bytes} dest={:02x}{:02x}{:02x}{:02x} iface={:02x}{:02x}",
+        dest.first().copied().unwrap_or(0),
+        dest.get(1).copied().unwrap_or(0),
+        dest.get(2).copied().unwrap_or(0),
+        dest.get(3).copied().unwrap_or(0),
+        iface.first().copied().unwrap_or(0),
+        iface.get(1).copied().unwrap_or(0),
+    );
 }
 
 fn log_identity_persistence(

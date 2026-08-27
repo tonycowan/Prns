@@ -506,6 +506,7 @@ fn accepted_announce_observers_receive_the_complete_observation() {
         &Journaled::AnnounceHeard {
             observation,
             rate_accounting: crate::routing::announce::AnnounceRateAccounting::NotApplied,
+            rebroadcast: crate::routing::ingress::RebroadcastDecision::Scheduled,
         },
     );
 

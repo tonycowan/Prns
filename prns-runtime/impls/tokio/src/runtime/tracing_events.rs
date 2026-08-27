@@ -198,6 +198,18 @@ fn emit_diagnostic(diagnostic: &Diagnostic<'_>) {
             destination = ?destination.as_bytes(),
             interface_id = ?source_interface.as_bytes(),
         ),
+        Diagnostic::AnnounceIngestRejected {
+            destination,
+            source_interface,
+            reason,
+        } => tracing::debug!(
+            target: "prns.runtime",
+            event = "announce_ingest_rejected",
+            reason = ?reason,
+            interface_kind = ?source_interface.kind(),
+            destination = ?destination.as_bytes(),
+            interface_id = ?source_interface.as_bytes(),
+        ),
         Diagnostic::CommandSettled { id, settlement } => tracing::debug!(
             target: "prns.runtime",
             event = "command_settled",
@@ -290,6 +302,58 @@ fn emit_diagnostic(diagnostic: &Diagnostic<'_>) {
             event = "route_removed",
             cause = ?cause,
             destination = ?destination.as_bytes(),
+        ),
+        Diagnostic::PacketForwarded {
+            source_interface,
+            fire_on,
+            destination,
+            hops,
+            packet_type,
+        } => tracing::info!(
+            target: "prns.runtime",
+            event = "packet_forwarded",
+            hops = hops,
+            packet_type = packet_type,
+            source = ?source_interface.kind(),
+            fire_on = ?fire_on.kind(),
+            destination = ?destination.as_bytes(),
+        ),
+        Diagnostic::PacketForwardBlocked {
+            source_interface,
+            fire_on,
+            destination,
+            hops,
+            packet_type,
+        } => tracing::warn!(
+            target: "prns.runtime",
+            event = "packet_forward_blocked",
+            hops = hops,
+            packet_type = packet_type,
+            source = ?source_interface.kind(),
+            fire_on = ?fire_on.kind(),
+            destination = ?destination.as_bytes(),
+        ),
+        Diagnostic::PacketIgnored {
+            source_interface,
+            reason,
+        } => tracing::info!(
+            target: "prns.runtime",
+            event = "packet_ignored",
+            reason = ?reason,
+            source = ?source_interface.kind(),
+        ),
+        Diagnostic::PacketReceived {
+            source_interface,
+            packet_type,
+            destination,
+            bytes,
+        } => tracing::info!(
+            target: "prns.runtime",
+            event = "packet_received",
+            packet_type = packet_type,
+            bytes = bytes,
+            source = ?source_interface.kind(),
+            destination = ?destination.as_ref().map(|d| d.as_bytes()),
         ),
     }
 }

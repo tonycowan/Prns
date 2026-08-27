@@ -33,6 +33,7 @@ pub(crate) struct IngestEffects<'a> {
     pub destination_identity_expiry: Option<InstantMillis>,
     pub accepted_announce: Option<AcceptedAnnounceEffect<'a>>,
     pub held_announce_release: WakeSchedule,
+    pub ignored_announce: Option<IgnoredAnnounceEffect>,
 }
 
 impl Default for IngestEffects<'_> {
@@ -41,6 +42,7 @@ impl Default for IngestEffects<'_> {
             destination_identity_expiry: None,
             accepted_announce: None,
             held_announce_release: WakeSchedule::Unchanged,
+            ignored_announce: None,
         }
     }
 }
@@ -51,6 +53,21 @@ pub(crate) struct AcceptedAnnounceEffect<'a> {
     pub rate_accounting: AnnounceRateAccounting,
 }
 
+/// Why an announce was not Accepted (silent at INFO before this effect was added).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceIgnoreReason {
+    Acceptance(crate::routing::announce::RejectReason),
+    PublicKeyChanged,
+    Blackholed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IgnoredAnnounceEffect {
+    pub destination: DestinationHash,
+    pub source_interface: InterfaceId,
+    pub reason: AnnounceIgnoreReason,
+}
+
 impl IngestEffects<'_> {
     pub(crate) fn note_destination_identity_expiry(&mut self, expiry: Option<InstantMillis>) {
         if let Some(expiry) = expiry {
@@ -59,6 +76,19 @@ impl IngestEffects<'_> {
                     .map_or(expiry, |current| current.min(expiry)),
             );
         }
+    }
+
+    pub(crate) fn note_ignored_announce(
+        &mut self,
+        destination: DestinationHash,
+        source_interface: InterfaceId,
+        reason: AnnounceIgnoreReason,
+    ) {
+        self.ignored_announce = Some(IgnoredAnnounceEffect {
+            destination,
+            source_interface,
+            reason,
+        });
     }
 }
 

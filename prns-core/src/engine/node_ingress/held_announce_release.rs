@@ -79,9 +79,14 @@ impl<S: StorageLayout> EngineState<S> {
                 rate_accounting,
             }) = effects.accepted_announce.take()
             {
+                let rebroadcast = match ingest {
+                    AnnounceIngest::Accepted(accepted) => accepted.rebroadcast,
+                    _ => crate::routing::ingress::RebroadcastDecision::NotATransportNode,
+                };
                 sink(EngineReaction::Journaled(Journaled::AnnounceHeard {
                     observation,
                     rate_accounting,
+                    rebroadcast,
                 }));
             }
             if let Some(expiry) = effects.destination_identity_expiry {

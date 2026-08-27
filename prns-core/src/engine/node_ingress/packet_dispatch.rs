@@ -13,8 +13,8 @@ use crate::engine::{
 };
 use crate::identity::{IdentitySigner, ENCRYPTION_IV_LEN};
 use crate::interfaces::AttachedInterfaces;
-use crate::interfaces::{Egress, InboundPacket};
-use crate::routing::ingress::{ClassifiedInboundPacket, IngestEffects};
+use crate::interfaces::{Egress, InboundPacket, InterfaceKind};
+use crate::routing::ingress::{ClassifiedInboundPacket, Ingress, IngestEffects};
 use crate::routing::links::channel::receive::receive as channel_receive;
 use crate::routing::links::establish::link_mtu_ceiling;
 use crate::routing::links::handshake::{negotiated_link_mtu, LinkProofSignOwed};
@@ -24,7 +24,7 @@ use crate::routing::proof::{
     DeferredProofSign, ProofRequest, EXPLICIT_PROOF_WIRE_LEN, LINK_PROOF_WIRE_LEN,
 };
 use crate::storage::StorageLayout;
-use crate::wire::{BROADCAST_MTU, HEADER_MAX_LEN};
+use crate::wire::{BROADCAST_MTU, DestinationHash, HEADER_MAX_LEN, HEADER_MIN_LEN, PacketType};
 
 pub struct IngestIo<'a, FillEntropy, OnProofRequest, OnResourceOffer, Sink>
 where
@@ -199,6 +199,15 @@ impl<S: StorageLayout> EngineState<S> {
             sink,
         } = io;
         let (source, ingress) = packet.into_parts();
+        if source.kind() == Some(InterfaceKind::LocalClient) {
+            let (packet_type, destination, bytes) = local_client_receipt(&ingress);
+            sink(EngineReaction::Journaled(Journaled::PacketReceived {
+                source_interface: source,
+                packet_type,
+                destination,
+                bytes,
+            }));
+        }
         let mut wake_schedule_changes = WakeSchedules::UNCHANGED;
         let mut effects = IngestEffects::default();
         let outcome = self.ingest_classified_with_effects(
@@ -212,6 +221,13 @@ impl<S: StorageLayout> EngineState<S> {
         let protocol_violation = ProtocolViolationKind::of_outcome(&outcome);
         wake_schedule_changes.held_announce_release = effects.held_announce_release;
         let accepted_observation = effects.accepted_announce.take();
+        if let Some(ignored) = effects.ignored_announce.take() {
+            sink(EngineReaction::Journaled(Journaled::AnnounceIngestRejected {
+                destination: ignored.destination,
+                source_interface: ignored.source_interface,
+                reason: ignored.reason,
+            }));
+        }
         if let Some(expiry) = effects.destination_identity_expiry {
             wake_schedule_changes.expired_destination_identities = WakeSchedule::AtMost(expiry);
         }
@@ -277,13 +293,32 @@ impl<S: StorageLayout> EngineState<S> {
                 }
             }
             IngestPacketOutcome::Forward(forward) => {
+                let destination =
+                    crate::wire::DestinationHash::from_address(forward.header.address);
+                let hops = forward.header.hops;
+                let packet_type = forward.header.packet_type as u8;
                 if interfaces.is_egress_eligible(forward.fire_on, Egress::Transport) {
+                    sink(EngineReaction::Journaled(Journaled::PacketForwarded {
+                        source_interface: source,
+                        fire_on: forward.fire_on,
+                        destination,
+                        hops,
+                        packet_type,
+                    }));
                     let size_hint = HEADER_MAX_LEN + forward.payload.len();
                     let mut fill = |slot: &mut [u8]| forward.to_wire(slot).ok();
                     sink(EngineReaction::Directive(Directive::EmitFrame {
                         target: forward.fire_on,
                         size_hint,
                         fill: &mut fill,
+                    }));
+                } else {
+                    sink(EngineReaction::Journaled(Journaled::PacketForwardBlocked {
+                        source_interface: source,
+                        fire_on: forward.fire_on,
+                        destination,
+                        hops,
+                        packet_type,
                     }));
                 }
             }
@@ -760,9 +795,28 @@ impl<S: StorageLayout> EngineState<S> {
             IngestPacketOutcome::TunnelObserved { expires } => {
                 wake_schedule_changes.expired_routes = WakeSchedule::AtMost(expires);
             }
-            IngestPacketOutcome::Ignored(_reason) => {
+            IngestPacketOutcome::Ignored(reason) => {
                 #[cfg(feature = "runtime-metrics")]
-                self.ignored_packet_counts.record(_reason);
+                self.ignored_packet_counts.record(reason);
+                // Surface ignore decisions from shared-instance clients and BLE Auto so
+                // hosts can see Sideband↔radio relay drops (duplicates stay quiet).
+                let interesting = matches!(
+                    source.kind(),
+                    Some(
+                        crate::interfaces::InterfaceKind::LocalClient
+                            | crate::interfaces::InterfaceKind::BluetoothAuto
+                    )
+                ) && !matches!(
+                    reason,
+                    crate::routing::ingress::IgnoreReason::Duplicate
+                        | crate::routing::ingress::IgnoreReason::Consumed
+                );
+                if interesting {
+                    sink(EngineReaction::Journaled(Journaled::PacketIgnored {
+                        source_interface: source,
+                        reason,
+                    }));
+                }
             }
         }
         wake_schedule_changes.link_deadlines = self.link_deadlines_wake();
@@ -771,4 +825,50 @@ impl<S: StorageLayout> EngineState<S> {
             protocol_violation,
         }
     }
+}
+
+/// Receipt fields for a LocalClient frame, before accept/reject/forward.
+fn local_client_receipt(ingress: &Ingress<'_>) -> (u8, Option<DestinationHash>, u16) {
+    match ingress {
+        Ingress::Announce {
+            announce,
+            payload,
+            header,
+            ..
+        } => (
+            PacketType::Announce as u8,
+            Some(announce.destination),
+            wire_len_hint(header, payload.len()),
+        ),
+        Ingress::Data { data, .. } => (
+            PacketType::Data as u8,
+            Some(DestinationHash::from_address(data.header.address)),
+            wire_len_hint(&data.header, data.payload.len()),
+        ),
+        Ingress::LinkRequest {
+            header, payload, ..
+        } => (
+            PacketType::LinkRequest as u8,
+            Some(DestinationHash::from_address(header.address)),
+            wire_len_hint(header, payload.len()),
+        ),
+        Ingress::Proof {
+            address, payload, ..
+        } => (
+            PacketType::Proof as u8,
+            Some(DestinationHash::from_address(*address)),
+            // Proof wire length is payload-dominated; header size is not on this variant.
+            payload.len().min(u16::MAX as usize) as u16,
+        ),
+        Ingress::Malformed | Ingress::IfacRefused => (0xFF, None, 0),
+    }
+}
+
+fn wire_len_hint(header: &crate::wire::WirePacketHeader, payload_len: usize) -> u16 {
+    let header_len = if header.transport_id.is_some() {
+        HEADER_MAX_LEN
+    } else {
+        HEADER_MIN_LEN
+    };
+    (header_len.saturating_add(payload_len)).min(u16::MAX as usize) as u16
 }
