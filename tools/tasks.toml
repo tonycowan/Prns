@@ -55,27 +55,6 @@ entrypoint = ["bash", "tools/build/android.sh"]
 requires = ["bash", "cargo"]
 
 [[task]]
-id = "build.prnsd.release"
-summary = "Build prnsd release into this worktree's prnsd/target (ignores CARGO_TARGET_DIR)."
-domain = "build"
-effect = "workspace-write"
-platforms = ["linux", "macos"]
-audience = ["developer"]
-entrypoint = ["bash", "tools/build/prnsd-release.sh"]
-requires = ["bash", "cargo"]
-
-[[task]]
-id = "build.hopspot.android.jni"
-summary = "Build Hopspot Android JNI libraries into this worktree's jniLibs tree."
-domain = "build"
-effect = "workspace-write"
-platforms = ["linux", "macos"]
-audience = ["developer"]
-entrypoint = ["bash", "tools/build/hopspot-android-jni.sh", "arm64-v8a"]
-requires = ["bash", "cargo", "cargo-ndk"]
-setup = "Install the Android NDK and cargo-ndk; see personal-hopspot/mobile/android/README.md."
-
-[[task]]
 id = "build.esp32s3-wpa3-radio"
 summary = "Rebuild and verify the pinned ESP32-S3 WPA3-SAE radio archives."
 domain = "build"
