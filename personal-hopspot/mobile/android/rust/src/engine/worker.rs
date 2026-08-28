@@ -15,9 +15,14 @@ use personal_rns::interfaces::bluetooth_auto::{
 };
 use personal_rns::interfaces::wifi_direct::GoIntent;
 use personal_rns::interfaces::InterfaceKind;
+use personal_rns::interfaces::InterfaceStatus;
+use personal_rns::remote_control::{
+    RemoteControlInitialAccess, RemoteControlPublicAppData, RemoteControlSelfAnnouncement,
+    RemoteControlService,
+};
 use personal_rns::runtime::{
     AnnounceEgressOutcome, Diagnostic, ManuallyAttached, PrnsEvent, PrnsNode, PrnsNodeHandle,
-    PrnsNodeRecipe,
+    PrnsNodeRecipe, RemoteControlIdentityDirectory,
 };
 use personal_rns::shared_instance::rns_rpc::{SharedInstanceCredentials, SharedInstanceRpcServer};
 use personal_rns::shared_instance::SharedInstanceServer;
@@ -114,6 +119,24 @@ async fn run_engine(input: WorkerInput) -> WorkerExit {
         .destination_hashes()
         .expect("the hopspot destination names are valid");
 
+    let remote_control_bootstrap =
+        match RemoteControlIdentityDirectory::new(storage_dir.join("remote_control"))
+            .load_or_generate()
+        {
+            Ok(bootstrap) => bootstrap,
+            Err(error) => {
+                log::error!("hopspot remote control identity unavailable: {error}");
+                return fail_start(ready_tx, EngineStartError::StorageConfiguration);
+            }
+        };
+    let (remote_control_identity_secrets, _) = remote_control_bootstrap.into_parts();
+    let remote_control = RemoteControlService::new(
+        remote_control_identity_secrets,
+        RemoteControlPublicAppData::empty(),
+        RemoteControlInitialAccess::Nobody,
+        RemoteControlSelfAnnouncement::Destination(destination_hashes.node_page),
+    );
+
     let persistence_store = match persistence::open(&storage_dir) {
         Ok(persistence_store) => persistence_store,
         Err(error) => {
@@ -125,6 +148,7 @@ async fn run_engine(input: WorkerInput) -> WorkerExit {
     let (rotated_tx, rotated_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut node = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: Some(transport_secret),
+        remote_control,
         pre_configured_destinations: destinations.into_preconfigured_destinations(),
         app_state: (),
         storage: GrowableHeap,

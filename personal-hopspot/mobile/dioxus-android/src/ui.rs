@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::backend;
-use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind, Notice};
+use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind};
 
 /// Visible on RNS Config so we can confirm the phone is running this binary.
 const UI_BUILD: &str = "2026-08-27a ble-group-edit";
