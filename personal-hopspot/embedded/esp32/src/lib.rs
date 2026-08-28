@@ -33,15 +33,15 @@ pub mod s3;
     target_arch = "riscv32",
     not(all(
         feature = "bluetooth-auto",
-        feature = "esp-now",
-        feature = "usb",
+        feature = "wifi-auto",
+        not(feature = "esp-now"),
+        not(feature = "usb"),
         not(feature = "lora"),
         not(feature = "tcp"),
-        not(feature = "wifi-auto")
     ))
 ))]
 compile_error!(
-    "ESP32-C6 firmware is built through its board package, which selects bluetooth-auto, esp-now, and usb"
+    "ESP32-C6 firmware is built through its board package, which selects bluetooth-auto + wifi-auto only (no ESP-NOW/USB/TCP/LoRa)"
 );
 
 #[cfg(all(
@@ -52,11 +52,11 @@ pub mod bluetooth_auto;
 #[cfg(all(
     target_arch = "riscv32",
     feature = "bluetooth-auto",
-    feature = "esp-now",
-    feature = "usb",
+    feature = "wifi-auto",
+    not(feature = "esp-now"),
+    not(feature = "usb"),
     not(feature = "lora"),
     not(feature = "tcp"),
-    not(feature = "wifi-auto")
 ))]
 pub mod c6;
 #[cfg(any(target_arch = "riscv32", target_arch = "xtensa"))]

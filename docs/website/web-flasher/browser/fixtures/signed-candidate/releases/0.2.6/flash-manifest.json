@@ -13,7 +13,14 @@
       "board_slug": "heltec-v4",
       "display_name": "Heltec LoRa 32 V4",
       "silicon": "ESP32-S3 + SX1262",
-      "interfaces": ["Wi-Fi Auto", "TCP Client", "BLE Auto", "LoRa", "ESP-NOW", "USB Auto"],
+      "interfaces": [
+        "Wi-Fi Auto",
+        "TCP Client",
+        "BLE Auto",
+        "LoRa",
+        "ESP-NOW",
+        "USB Auto"
+      ],
       "transport": "esp-serial",
       "expected_chip": "esp32s3",
       "flash_size": 16777216,
@@ -59,7 +66,14 @@
       "board_slug": "t-beam-supreme",
       "display_name": "LilyGO T-Beam Supreme",
       "silicon": "ESP32-S3 + SX1262 + AXP2101",
-      "interfaces": ["Wi-Fi Auto", "TCP Client", "BLE Auto", "LoRa", "ESP-NOW", "USB Auto"],
+      "interfaces": [
+        "Wi-Fi Auto",
+        "TCP Client",
+        "BLE Auto",
+        "LoRa",
+        "ESP-NOW",
+        "USB Auto"
+      ],
       "transport": "esp-serial",
       "expected_chip": "esp32s3",
       "flash_size": 8388608,
@@ -105,7 +119,10 @@
       "board_slug": "xiao-esp32-c6",
       "display_name": "Seeed XIAO ESP32-C6",
       "silicon": "ESP32-C6",
-      "interfaces": ["ESP-NOW", "BLE Auto", "USB Auto"],
+      "interfaces": [
+        "BLE Auto",
+        "Wi-Fi Auto"
+      ],
       "transport": "esp-serial",
       "expected_chip": "esp32c6",
       "flash_size": 4194304,
@@ -144,7 +161,11 @@
       "board_slug": "t-echo",
       "display_name": "LilyGO T-Echo",
       "silicon": "nRF52840 + SX1262",
-      "interfaces": ["BLE Auto", "LoRa", "USB Auto"],
+      "interfaces": [
+        "BLE Auto",
+        "LoRa",
+        "USB Auto"
+      ],
       "transport": "uf2-mass-storage",
       "expected_chip": null,
       "flash_size": null,

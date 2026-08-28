@@ -21,6 +21,9 @@ esp-radio = { path = "vendor/esp-radio-0.18.0" }
 esp-wifi-sys-esp32s3 = { path = "vendor/esp-wifi-sys-esp32s3-0.2.0" }
 esp-radio-rtos-driver = { path = "vendor/esp-radio-rtos-driver-0.3.0" }
 esp-phy = { path = "vendor/esp-phy-0.2.0" }
+# Overlay libble_app.a from IDF#16984 (null-check in r_ble_lll_conn_txbuf_insert_after).
+# Stock esp-wifi-sys-esp32c6 0.2.0 / IDF v5.5.5 public bt-lib still lack that guard.
+esp-wifi-sys-esp32c6 = { path = "vendor/esp-wifi-sys-esp32c6-0.2.0" }
 # Backport esp-rs/esp-hal#6027 and #6032 until these fixes are published. The affected 0.3.0
 # runtime tracks the two S3 main stacks at four times their actual size, misses idle-stack overflow
 # checks, enters Xtensa interrupt handlers with an inconsistent processor mode, and can free a
@@ -37,8 +40,8 @@ path = "src/lib.rs"
 
 [features]
 default = []
-bluetooth-auto = ["dep:trouble-host", "dep:prns-interfaces-embassy", "esp-radio/ble", "esp-radio/coex", "esp-rtos/esp-radio", "personal-rns/bluetooth-auto"]
-wifi-auto = ["esp-radio/wifi", "esp-radio/coex", "esp-rtos/esp-radio", "personal-rns/wifi-auto"]
+bluetooth-auto = ["dep:trouble-host", "dep:prns-interfaces-embassy", "esp-radio/ble", "esp-rtos/esp-radio", "personal-rns/bluetooth-auto"]
+wifi-auto = ["esp-radio/wifi", "esp-radio/coex", "esp-rtos/esp-radio", "personal-rns/wifi-auto", "dep:prns-interfaces-embassy"]
 esp-now = ["esp-radio/esp-now", "esp-radio/coex", "esp-rtos/esp-radio", "personal-rns/esp-now"]
 lora = ["personal-rns/lora"]
 usb = ["personal-rns/usb"]
@@ -105,9 +108,11 @@ embassy-executor = { version = "0.10", default-features = false }
 embassy-time = { version = "0.5", default-features = false }
 embassy-sync = { version = "0.8", default-features = false }
 embassy-futures = { version = "0.1", default-features = false }
+embassy-net = { version = "0.9.1", default-features = false, features = ["proto-ipv4", "proto-ipv6", "dhcpv4", "medium-ethernet", "multicast", "udp"] }
 embedded-io = { version = "0.7", default-features = false }
 embedded-io-async = { version = "0.7", default-features = false }
-trouble-host = { version = "0.6.0", optional = true, default-features = false, features = ["default-packet-pool-size-32"] }
+# 8 packets: size-16 crashed at BLE bring-up under Wi-Fi coex; keep lean and soften timing instead.
+trouble-host = { version = "0.6.0", optional = true, default-features = false, features = ["default-packet-pool-size-8"] }
 esp-radio = { version = "0.18", default-features = false, features = ["esp32c6", "unstable", "esp-alloc"] }
 
 [profile.release]

@@ -123,7 +123,7 @@
       "slug": "xiao-esp32-c6",
       "display_name": "Seeed XIAO ESP32-C6",
       "silicon": "ESP32-C6",
-      "interfaces": ["ESP-NOW", "BLE Auto", "USB Auto"],
+      "interfaces": ["BLE Auto", "Wi-Fi Auto"],
       "icon": "espressif",
       "transport": "esp-serial",
       "expected_chip": "esp32c6",
