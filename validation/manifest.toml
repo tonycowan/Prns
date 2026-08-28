@@ -67,6 +67,7 @@ cargo_manifests = [
     "personal-hopspot/core/Cargo.toml",
     "personal-hopspot/desktop/Cargo.toml",
     "personal-hopspot/embedded/esp32/Cargo.toml",
+    "personal-hopspot/embedded/esp32/boards/heltec-e290/Cargo.toml",
     "personal-hopspot/embedded/esp32/boards/heltec-v4/Cargo.toml",
     "personal-hopspot/embedded/esp32/boards/heltec-v4-r8/Cargo.toml",
     "personal-hopspot/embedded/esp32/boards/t-beam-supreme/Cargo.toml",
@@ -77,6 +78,7 @@ cargo_manifests = [
     "personal-hopspot/embedded/esp32/vendor/esp-radio-0.18.0/Cargo.toml",
     "personal-hopspot/embedded/esp32/vendor/esp-radio-rtos-driver-0.3.0/Cargo.toml",
     "personal-hopspot/embedded/esp32/vendor/esp-rtos-0.3.0/Cargo.toml",
+    "personal-hopspot/embedded/esp32/vendor/esp-wifi-sys-esp32s3-0.2.0/Cargo.toml",
     "personal-hopspot/embedded/esp32/vendor/trouble-host-0.6.0/Cargo.toml",
     "personal-hopspot/embedded/esp32/vendor/xtensa-lx-rt-0.22.0/Cargo.toml",
     "personal-hopspot/embedded/nrf52840/Cargo.toml",
@@ -144,6 +146,16 @@ format_manifests = [
 
 [registry.format_package_overrides]
 "personal-hopspot/embedded/nrf52840/Cargo.toml" = ["t-echo"]
+
+[[registry.cargo_check_delegations]]
+workspace = "personal-hopspot/embedded/esp32"
+suite = "esp32-firmware-check"
+reason = "The ESP Rust fork and real Xtensa/RISC-V targets own this workspace more truthfully than a host check."
+
+[[registry.cargo_check_delegations]]
+workspace = "personal-hopspot/embedded/nrf52840"
+suite = "embedded-builds"
+reason = "The complete Nordic board and SoftDevice matrix is compiled for thumbv7em-none-eabihf by its PR suite."
 
 [[registry.asset_exemptions]]
 path = "prns-wasm/smoke/smoke.ts"
@@ -399,7 +411,7 @@ platform = "any"
 toolchain = "python"
 timeout_seconds = 120
 command = ["__RUNNER_PYTHON__", "tools/prns", "verify"]
-inputs = ["tools/prns", "tools/tasks.toml", "tools/README.md", ".githooks/pre-push"]
+inputs = ["tools/prns", "tools/tasks.toml", "tools/repo/cargo-check.py", "tools/README.md", ".githooks/pre-push"]
 artifacts = "validation-artifacts/results/tool-registry"
 
 [[suite]]
@@ -685,6 +697,24 @@ timeout_seconds = 3600
 command = ["bash", "validation/platforms/embedded.sh"]
 inputs = ["validation/platforms/embedded.sh", "validation/platforms/no-std-esp-build.sh"]
 artifacts = "validation-artifacts/results/embedded-builds"
+
+[[suite]]
+id = "esp32-firmware-check"
+domain = "platform"
+group = "esp"
+tiers = ["pr"]
+platform = "linux"
+toolchain = "esp"
+timeout_seconds = 5400
+command = ["bash", "validation/platforms/esp32-firmware-check.sh"]
+inputs = [
+  "validation/platforms/esp32-firmware-check.sh",
+  "personal-hopspot/embedded/esp32",
+  "tools/release/install-release-esp-toolchain.sh",
+  "tools/release/release-esp-toolchain-identity.sh",
+  "tools/release/verify-release-esp-toolchain.sh",
+]
+artifacts = "validation-artifacts/results/esp32-firmware-check"
 
 [[suite]]
 id = "shipping-firmware"
@@ -1539,6 +1569,18 @@ path = "fuzz_targets/gnss_nmea_stream.rs"
 group = "gnss"
 tiers = ["release", "scheduled"]
 
+[[fuzz_target]]
+name = "remote_control_messages_parse"
+path = "fuzz_targets/remote_control_messages_parse.rs"
+group = "remote-control"
+tiers = ["release", "scheduled"]
+
+[[fuzz_target]]
+name = "remote_control_access_snapshot"
+path = "fuzz_targets/remote_control_access_snapshot.rs"
+group = "remote-control"
+tiers = ["release", "scheduled"]
+
 [[kani]]
 name = "hops_above_pathfinder_m_always_reject_before_any_other_gate"
 source = "prns-core/src/routing/announce/acceptance.rs"
@@ -1657,4 +1699,22 @@ tiers = ["release", "scheduled"]
 name = "every_scaled_coordinate_output_respects_its_axis_bound"
 source = "prns-core/src/capabilities/positioning/gnss.rs"
 group = "gnss"
+tiers = ["release", "scheduled"]
+
+[[kani]]
+name = "remote_control_request_parse_terminates_for_every_distinct_wire_shape"
+source = "prns-core/src/remote_control/message.rs"
+group = "remote-control"
+tiers = ["release", "scheduled"]
+
+[[kani]]
+name = "remote_control_response_parse_terminates_for_every_distinct_wire_shape"
+source = "prns-core/src/remote_control/message.rs"
+group = "remote-control"
+tiers = ["release", "scheduled"]
+
+[[kani]]
+name = "request_set_intersection_preserves_exact_membership"
+source = "prns-core/src/remote_control/message.rs"
+group = "remote-control"
 tiers = ["release", "scheduled"]

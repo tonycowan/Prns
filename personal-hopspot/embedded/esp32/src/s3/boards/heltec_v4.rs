@@ -1,5 +1,5 @@
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation};
-use esp_hal::gpio::{Flex, Input, InputConfig, Level, Output, OutputConfig};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
@@ -19,10 +19,10 @@ use personal_rns::radios::sx126x::{BoardConfig, Sx126x, TcxoVoltage};
 
 use personal_hopspot_core as screen;
 
-use super::{HELTEC_GC1109_RX_GAIN_DB, HELTEC_KCT8103L_RX_GAIN_DB};
+use super::heltec_frontend;
 use crate::s3::{
-    self, BoardDisplay, BoardFace, Esp32S3Board, GnssProvider, GnssShared, S3BoardHardware,
-    S3InterfaceHardware, S3ManifoldHardware,
+    self, BoardFace, Esp32S3Board, GnssProvider, GnssShared, ImmediateBoardDisplay,
+    ImmediateDisplayDevice, S3BoardHardware, S3InterfaceHardware, S3ManifoldHardware,
 };
 
 /// This board's USB-auto interface id (the always-present top-level wire on pool slot 0).
@@ -98,11 +98,50 @@ impl screen::BatterySource for HeltecBattery {
     }
 }
 
-type HeltecDisplay = Ssd1306<
+type HeltecController = Ssd1306<
     I2CInterface<I2c<'static, esp_hal::Blocking>>,
     DisplaySize128x64,
     BufferedGraphicsMode<DisplaySize128x64>,
 >;
+
+pub struct HeltecDisplay(HeltecController);
+
+impl ImmediateDisplayDevice for HeltecDisplay {
+    fn present(
+        &mut self,
+        frame: &screen::face_64x128::Frame,
+    ) -> screen::display::PresentationOutcome {
+        if let Err(error) = crate::immediate_display::draw_canonical_frame(&mut self.0, frame) {
+            log::error!("OLED frame conversion failed: {error:?}");
+            return screen::display::PresentationOutcome::Failed;
+        }
+        match self.0.flush() {
+            Ok(()) => screen::display::PresentationOutcome::Succeeded,
+            Err(error) => {
+                log::error!("OLED render failed: {error:?}");
+                screen::display::PresentationOutcome::Failed
+            }
+        }
+    }
+
+    fn apply_blanking(
+        &mut self,
+        command: screen::display::BlankingCommand,
+    ) -> screen::display::BlankingOutcome {
+        let on = command == screen::display::BlankingCommand::Restore;
+        let result = match self.0.set_display_on(on) {
+            Ok(()) => screen::display::BlankingResult::Succeeded,
+            Err(error) => {
+                log::error!("OLED blanking failed: {error:?}");
+                screen::display::BlankingResult::Failed
+            }
+        };
+        screen::display::BlankingOutcome {
+            result,
+            buffer_retention: screen::display::BufferRetention::Preserved,
+        }
+    }
+}
 
 /// The standard V4's L76K transport and electrical controls. NMEA parsing and public positioning
 /// types stay in `prns-core`; this adapter owns only the Heltec pin policy and ESP-HAL UART.
@@ -209,19 +248,9 @@ impl Esp32S3Board for HeltecBoard {
     const BOOT_BANNER: &'static str = "HOPSPOT_HELTECV4";
     const USB_INTERFACE_ID: InterfaceId = USB_INTERFACE_ID;
     const FLASH_LAYOUT: screen::HopspotS3FlashLayout = screen::S3_16_MIB_FLASH_LAYOUT;
-    type Display = HeltecDisplay;
+    type Display = ImmediateBoardDisplay<HeltecDisplay>;
     type Battery = HeltecBattery;
     type Gnss = HeltecV4Gnss;
-
-    fn flush(display: &mut Self::Display) {
-        if let Err(error) = display.flush() {
-            log::error!("OLED render failed: {error:?}");
-        }
-    }
-
-    fn set_display_awake(display: &mut Self::Display, awake: bool) {
-        let _ = display.set_display_on(awake);
-    }
 
     async fn bringup(
         p: esp_hal::peripherals::Peripherals,
@@ -254,7 +283,7 @@ impl Esp32S3Board for HeltecBoard {
             _pulse_per_second: gnss_pps,
         };
 
-        s3::boot_stage(s3::BootPhase::OledBegin);
+        s3::boot_stage(s3::BootPhase::DisplayHardwareBegin);
         // OLED (Heltec V4: Vext active-low gates panel power; pulse RST; I2C0 on 17/18).
         let mut _vext = Output::new(p.GPIO36, Level::Low, OutputConfig::default());
         let mut rst = Output::new(p.GPIO21, Level::High, OutputConfig::default());
@@ -277,21 +306,21 @@ impl Esp32S3Board for HeltecBoard {
         .into_buffered_graphics_mode();
         let oled_ok = match display.init() {
             Ok(()) => {
-                s3::boot_stage(s3::BootPhase::OledReady);
+                s3::boot_stage(s3::BootPhase::DisplayHardwareReady);
                 log::info!("OLED initialized");
                 true
             }
             Err(error) => {
-                s3::boot_stage(s3::BootPhase::OledFailed);
+                s3::boot_stage(s3::BootPhase::DisplayHardwareFailed);
                 log::error!("OLED initialization failed: {error:?}");
                 false
             }
         };
+        let mut display = HeltecDisplay(display);
         if oled_ok {
-            screen::splash(&mut display, screen::SplashContent::Brand);
-            if let Err(error) = display.flush() {
-                log::error!("OLED splash failed: {error:?}");
-            }
+            let mut frame = screen::face_64x128::Frame::new();
+            screen::face_64x128::splash(&mut frame, screen::face_64x128::SplashContent::Brand);
+            let _ = display.present(&frame);
         }
 
         let lora_radio = {
@@ -310,23 +339,7 @@ impl Esp32S3Board for HeltecBoard {
             let lora_reset = Output::new(p.GPIO12, Level::High, OutputConfig::default());
             let lora_busy = Input::new(p.GPIO13, InputConfig::default());
             let lora_dio1 = Input::new(p.GPIO14, InputConfig::default());
-            let _lora_pa_pwr = Output::new(p.GPIO7, Level::High, OutputConfig::default());
-            let mut lora_csd = Flex::new(p.GPIO2);
-            lora_csd.apply_input_config(&InputConfig::default());
-            lora_csd.set_input_enable(true);
-            let lora_is_kct8103l = lora_csd.is_high();
-            let lora_rx_gain_db = if lora_is_kct8103l {
-                HELTEC_KCT8103L_RX_GAIN_DB
-            } else {
-                HELTEC_GC1109_RX_GAIN_DB
-            };
-            lora_csd.set_output_enable(true);
-            lora_csd.set_high();
-            let _lora_fem_switch = if lora_is_kct8103l {
-                Output::new(p.GPIO5, Level::High, OutputConfig::default())
-            } else {
-                Output::new(p.GPIO46, Level::High, OutputConfig::default())
-            };
+            let lora_frontend = heltec_frontend::initialize(p.GPIO7, p.GPIO2, p.GPIO46, p.GPIO5);
             Sx126x::new(
                 lora_spi_device,
                 lora_busy,
@@ -338,10 +351,9 @@ impl Esp32S3Board for HeltecBoard {
                     use_dcdc: true,
                     rx_boost: true,
                     dio2_as_rf_switch: true,
-                    external_rx_gain_db: lora_rx_gain_db,
+                    external_rx_gain_db: lora_frontend.rx_gain_db(),
                     external_power_amplifier: None,
-                    enter_transmit: None,
-                    enter_receive: None,
+                    frontend_control: lora_frontend.control(),
                 },
             )
         };
@@ -363,9 +375,10 @@ impl Esp32S3Board for HeltecBoard {
 
         S3BoardHardware {
             face: BoardFace {
-                display: BoardDisplay {
-                    device: display,
-                    initialized: oled_ok,
+                display: if oled_ok {
+                    ImmediateBoardDisplay::initialized(display)
+                } else {
+                    ImmediateBoardDisplay::initialization_failed(display)
                 },
                 battery,
                 button: Input::new(

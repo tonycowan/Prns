@@ -15,10 +15,9 @@ use personal_rns::config::{
 };
 use personal_rns::engine::{
     AllowRequester, AllowRequesterFailure, AllowRequesterRejection, AnnounceAppData, AnnounceNow,
-    AnnounceNowFailure, AnnounceNowRejection, AnnounceTarget,
-    DeliveryEvidence as EngineDeliveryEvidence, DeliveryProof, EstablishLinkFailure,
-    EstablishLinkRejection, IdentifyFailure, IdentifyRejection,
-    LinkClosedReason as EngineLinkClosedReason,
+    AnnounceNowRejection, AnnounceTarget, DeliveryEvidence as EngineDeliveryEvidence,
+    DeliveryProof, EstablishLinkFailure, EstablishLinkRejection, IdentifyFailure,
+    IdentifyRejection, LinkClosedReason as EngineLinkClosedReason,
     PersistenceFlushCause as EnginePersistenceFlushCause,
     PersistenceFlushTarget as EnginePersistenceFlushTarget, RequestPathFailure,
     RequestResponseTimeout, RouteRemovalCause, SendRequestFailure, SendRequestRejection,
@@ -36,8 +35,8 @@ use personal_rns::routing::request_handlers::RequestPolicy as EngineRequestPolic
 use personal_rns::routing::{LinkRequestPolicy, ProofStrategy};
 use personal_rns::runtime::request_endpoints::RespondToken;
 use personal_rns::runtime::{
-    Diagnostic, Message, NodePersistence, PersistenceIntent, PrnsEvent, RequestOptions,
-    RequestPathError, ResourceSendError, SegmentCompression,
+    AnnounceNowError, Diagnostic, Message, NodePersistence, PersistenceIntent, PrnsEvent,
+    RequestOptions, RequestPathError, ResourceSendError, SegmentCompression,
 };
 use personal_rns::storage::GrowableHeap;
 use personal_rns::tcp::{TcpClientInterface, TcpServer};
@@ -1110,6 +1109,7 @@ async fn run(
         app_state: (),
         storage: GrowableHeap,
         request_endpoints: request_endpoints![],
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable,
         interfaces: ManuallyAttached,
         persistence,
         on_event: move |event, _state: &()| {
@@ -2465,18 +2465,17 @@ fn engine_bitrate(bitrate: Bitrate) -> Result<BitrateBps, CommandFailure> {
     }
 }
 
-fn announce_failure(error: SendError<AnnounceNowFailure>) -> CommandFailure {
+fn announce_failure(error: AnnounceNowError) -> CommandFailure {
     match error {
-        SendError::NodeStopped => CommandFailure::NodeStopped,
-        SendError::Busy => CommandFailure::Busy,
-        SendError::PayloadTooLarge => CommandFailure::AnnounceAppDataTooLong,
-        SendError::Failed(AnnounceNowFailure::Rejected(rejection)) => match rejection {
+        AnnounceNowError::NodeStopped => CommandFailure::NodeStopped,
+        AnnounceNowError::Busy => CommandFailure::Busy,
+        AnnounceNowError::Rejected(rejection) => match rejection {
             AnnounceNowRejection::UnknownDestination => CommandFailure::UnknownDestination,
             AnnounceNowRejection::NotASingleDestination => CommandFailure::NotSingleDestination,
             AnnounceNowRejection::AppDataTooLong => CommandFailure::AnnounceAppDataTooLong,
             AnnounceNowRejection::UnknownInterface => CommandFailure::UnknownInterface,
         },
-        SendError::Failed(AnnounceNowFailure::WriteFailed(error)) => CommandFailure::WriteFailed {
+        AnnounceNowError::WriteFailed(error) => CommandFailure::WriteFailed {
             detail: format!("{error:?}"),
         },
     }

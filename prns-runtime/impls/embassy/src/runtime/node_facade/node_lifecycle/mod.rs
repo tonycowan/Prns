@@ -11,10 +11,12 @@ use static_cell::StaticCell;
 use crate::engine::{IssuedCommand, ProofRequest, MAX_SEND_REQUEST_DATA_LEN};
 use crate::interfaces::{InterfaceDescriptor, InterfaceId, InterfaceIfac};
 use crate::manifold::driver::{
-    run_pooled, InterfaceLifecycle, PooledEgress, PooledWiring, ResumableHost,
+    run_pooled, EmbassyInterfaceStatus, InterfaceLifecycle, PooledEgress, PooledWiring,
+    ResumableHost,
 };
 use crate::manifold::grant::ManifoldLaneReader;
 use crate::manifold::Host;
+use crate::remote_control::{RemoteControlEndpoint, RemoteControlNodeIdentities};
 use crate::storage::StorageLayout;
 
 use super::super::request_endpoints::RequestEndpointSet;
@@ -43,6 +45,7 @@ pub struct ManifoldWiring<
     M: RawMutex + 'static,
 {
     pub(super) inbound: HeaplessVec<(InterfaceId, &'static mut dyn ManifoldLaneReader), LANE_COUNT>,
+    pub(super) frame_accounting_statuses: HeaplessVec<&'static EmbassyInterfaceStatus, LANE_COUNT>,
     pub(super) egress: PooledEgress<LANE_COUNT>,
     pub(super) initial: HeaplessVec<InterfaceDescriptor, LANE_COUNT>,
     pub(super) ifacs: HeaplessVec<InterfaceIfac, LANE_COUNT>,
@@ -76,6 +79,7 @@ pub struct PrnsNode<
 {
     node: AssembledNode<St, R, F, S>,
     inbound: HeaplessVec<(InterfaceId, &'static mut dyn ManifoldLaneReader), LANE_COUNT>,
+    frame_accounting_statuses: HeaplessVec<&'static EmbassyInterfaceStatus, LANE_COUNT>,
     egress: PooledEgress<LANE_COUNT>,
     notify: Receiver<'static, M, InterfaceId, NOTIFY>,
     commands: Receiver<'static, M, IssuedCommand, COMMANDS>,
@@ -147,7 +151,7 @@ where
     M: RawMutex + 'static,
 {
     pub fn new<'d, D>(
-        recipe: PrnsNodeRecipe<D, St, R, F, ManuallyAttached, S>,
+        recipe: PrnsNodeRecipe<'d, D, St, R, F, ManuallyAttached, S>,
         wiring: ManifoldWiring<
             M,
             LANE_COUNT,
@@ -212,7 +216,7 @@ where
 {
     pub fn init_static<'d, D>(
         cell: &'static StaticCell<Self>,
-        recipe: PrnsNodeRecipe<D, St, R, F, ManuallyAttached, S>,
+        recipe: PrnsNodeRecipe<'d, D, St, R, F, ManuallyAttached, S>,
         wiring: ManifoldWiring<
             M,
             LANE_COUNT,
@@ -240,7 +244,7 @@ where
     )]
     pub fn init_static_with_persistence<'d, D, P>(
         cell: &'static StaticCell<Self>,
-        recipe: PrnsNodeRecipe<D, St, R, F, ManuallyAttached, S, P>,
+        recipe: PrnsNodeRecipe<'d, D, St, R, F, ManuallyAttached, S, P>,
         wiring: ManifoldWiring<
             M,
             LANE_COUNT,
@@ -265,6 +269,7 @@ where
         let slot = cell.uninit();
         let ManifoldWiring {
             inbound,
+            frame_accounting_statuses,
             egress,
             initial,
             ifacs,
@@ -279,6 +284,8 @@ where
                 .cast::<MaybeUninit<AssembledNode<St, R, F, S>>>();
             let (_, ManuallyAttached, persistence) = assemble_node_in_place(assembled, recipe);
             core::ptr::addr_of_mut!((*node).inbound).write(inbound);
+            core::ptr::addr_of_mut!((*node).frame_accounting_statuses)
+                .write(frame_accounting_statuses);
             core::ptr::addr_of_mut!((*node).egress).write(egress);
             core::ptr::addr_of_mut!((*node).notify).write(notify);
             core::ptr::addr_of_mut!((*node).commands).write(commands);
@@ -299,7 +306,7 @@ where
     }
 
     pub fn new_with_request_capacity<'d, D>(
-        recipe: PrnsNodeRecipe<D, St, R, F, ManuallyAttached, S>,
+        recipe: PrnsNodeRecipe<'d, D, St, R, F, ManuallyAttached, S>,
         wiring: ManifoldWiring<
             M,
             LANE_COUNT,
@@ -320,7 +327,7 @@ where
     }
 
     fn build<'d, D>(
-        recipe: PrnsNodeRecipe<D, St, R, F, ManuallyAttached, S>,
+        recipe: PrnsNodeRecipe<'d, D, St, R, F, ManuallyAttached, S>,
         wiring: ManifoldWiring<
             M,
             LANE_COUNT,
@@ -353,6 +360,7 @@ where
         PrnsNode {
             node,
             inbound: wiring.inbound,
+            frame_accounting_statuses: wiring.frame_accounting_statuses,
             egress: wiring.egress,
             notify: wiring.notify,
             commands: wiring.commands,
@@ -374,6 +382,16 @@ where
     ) -> PrnsNodeHandle<'static, M, COMMANDS, COMPLETIONS, REQUEST_COMPLETIONS, RESPONSE_BYTES>
     {
         self.handle
+    }
+
+    #[must_use]
+    pub const fn remote_control_identities(&self) -> Option<&RemoteControlNodeIdentities> {
+        self.node.remote_control.identities()
+    }
+
+    #[must_use]
+    pub const fn remote_control_target_endpoint(&self) -> Option<RemoteControlEndpoint> {
+        self.node.remote_control.target_endpoint()
     }
 
     /// Runs the manifold with the caller's interface and supervisor tasks.
@@ -464,6 +482,7 @@ where
         let PrnsNode {
             node,
             mut inbound,
+            frame_accounting_statuses,
             mut egress,
             notify,
             commands,
@@ -475,6 +494,7 @@ where
         } = self;
         let AssembledNode {
             mut engine,
+            mut remote_control,
             state,
             mut on_event,
             request_endpoints: _,
@@ -490,6 +510,7 @@ where
                 descriptors: &mut descriptors,
                 ifacs: &mut ifacs,
                 inbound: &mut inbound,
+                frame_accounting_statuses: &frame_accounting_statuses,
                 egress: &mut egress,
                 notify,
                 commands,
@@ -521,7 +542,12 @@ where
             RESPONSE_BYTES,
             ROUTED_REQUESTS,
             ROUTED_REQUEST_BYTES,
-        >(&state, request_channel.receiver(), handle);
+        >(
+            &state,
+            &mut remote_control,
+            request_channel.receiver(),
+            handle,
+        );
         join(join(manifold, router), drive).await;
     }
 
@@ -714,6 +740,7 @@ where
         let PrnsNode {
             node,
             inbound,
+            frame_accounting_statuses,
             egress,
             notify,
             commands,
@@ -725,6 +752,7 @@ where
         } = self;
         let AssembledNode {
             engine,
+            remote_control,
             state,
             on_event,
             request_endpoints: _,
@@ -739,6 +767,7 @@ where
                 descriptors,
                 ifacs,
                 inbound,
+                frame_accounting_statuses,
                 egress,
                 notify: *notify,
                 commands: *commands,
@@ -770,7 +799,7 @@ where
             RESPONSE_BYTES,
             ROUTED_REQUESTS,
             ROUTED_REQUEST_BYTES,
-        >(state, request_channel.receiver(), *handle);
+        >(state, remote_control, request_channel.receiver(), *handle);
         join(manifold, router).await;
     }
 }

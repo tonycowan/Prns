@@ -10,9 +10,10 @@ use embassy_nrf::usb::Driver;
 use embassy_nrf::{bind_interrupts, config, peripherals, usb, Peri};
 use embassy_time::{Delay, Duration, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
-use epd_waveshare::epd1in54_v2::Display1in54;
-use personal_rns::radios::sx126x::{BoardConfig, Sx126x, TcxoVoltage};
+use personal_rns::radios::sx126x::{BoardConfig, FrontendControl, Sx126x, TcxoVoltage};
 use static_cell::StaticCell;
+
+use crate::retained_display::BoardDisplay;
 
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
@@ -26,13 +27,8 @@ type TechoSpiDevice = ExclusiveDevice<Spim<'static>, Output<'static>, Delay>;
 pub(crate) type TechoRadio =
     Sx126x<TechoSpiDevice, Input<'static>, Input<'static>, Output<'static>, Delay>;
 
-pub(crate) type TechoEink = super::ssd1681::Ssd1681<
-    TechoSpiDevice,
-    Input<'static>,
-    Output<'static>,
-    Output<'static>,
-    Delay,
->;
+pub(crate) type TechoEink =
+    super::ssd1681::Ssd1681<TechoSpiDevice, Input<'static>, Output<'static>, Output<'static>>;
 
 pub(crate) struct TechoUsbHardware {
     pub(crate) driver: Driver<'static, &'static SoftwareVbusDetect>,
@@ -56,8 +52,7 @@ pub(crate) struct TechoControls {
 }
 
 pub(crate) struct TechoDisplayHardware {
-    pub(crate) driver: Option<TechoEink>,
-    pub(crate) panel: Display1in54,
+    pub(crate) device: BoardDisplay<super::display::TechoDisplayDevice>,
     pub(crate) _rail: Output<'static>,
 }
 
@@ -117,8 +112,7 @@ impl TechoBoard {
         interrupt::SAADC.set_priority(Priority::P3);
 
         static SOFTWARE_VBUS: StaticCell<SoftwareVbusDetect> = StaticCell::new();
-        let vbus: &'static SoftwareVbusDetect =
-            &*SOFTWARE_VBUS.init(SoftwareVbusDetect::new(true, true));
+        let vbus = crate::runtime::software_vbus::initialize(&SOFTWARE_VBUS);
         let usb_driver = Driver::new(peripherals.USBD, Irqs, vbus);
 
         // Battery sense: VBAT on a 2:1 divider into AIN2 (P0.04), sampled by the SAADC against the 3.0 V
@@ -200,8 +194,7 @@ impl TechoDeferredHardware {
                 dio2_as_rf_switch: true,
                 external_rx_gain_db: 0,
                 external_power_amplifier: None,
-                enter_transmit: None,
-                enter_receive: None,
+                frontend_control: FrontendControl::NoDynamicControl,
             },
         );
 
@@ -221,15 +214,19 @@ impl TechoDeferredHardware {
         let eink_busy = Input::new(self.eink_busy, Pull::None);
         Timer::after(Duration::from_millis(150)).await;
         let eink_spi = ExclusiveDevice::new(eink_bus, eink_cs, Delay).unwrap();
-        let panel = Display1in54::default();
-        let eink =
-            super::ssd1681::Ssd1681::new(eink_spi, eink_busy, eink_dc, eink_reset, Delay).ok();
+        let mut eink = super::ssd1681::Ssd1681::new(eink_spi, eink_busy, eink_dc, eink_reset);
+        let initialized = eink.initialize().await.is_ok();
+        let device = super::display::TechoDisplayDevice::new(eink);
+        let device = if initialized {
+            BoardDisplay::initialized(device)
+        } else {
+            BoardDisplay::initialization_failed(device)
+        };
 
         TechoRuntimeHardware {
             radio,
             display: TechoDisplayHardware {
-                driver: eink,
-                panel,
+                device,
                 _rail: self.eink_rail,
             },
             controls: TechoControls {

@@ -9,13 +9,8 @@ pub(crate) type LoraRadio = Sx126x<
     Delay,
 >;
 
-pub(crate) struct BoardDisplay<D> {
-    pub(crate) device: D,
-    pub(crate) initialized: bool,
-}
-
 pub(crate) struct BoardFace<D, B> {
-    pub(crate) display: BoardDisplay<D>,
+    pub(crate) display: D,
     pub(crate) battery: B,
     pub(crate) button: Input<'static>,
 }
@@ -49,12 +44,10 @@ pub(crate) trait Esp32S3Board {
     const BOOT_BANNER: &'static str;
     const USB_INTERFACE_ID: InterfaceId;
     const FLASH_LAYOUT: screen::HopspotS3FlashLayout;
-    type Display: DrawTarget<Color = BinaryColor>;
+    type Display: crate::display_runtime::S3BoardDisplay;
     type Battery: screen::BatterySource;
     type Gnss: GnssProvider;
 
-    fn flush(display: &mut Self::Display);
-    fn set_display_awake(display: &mut Self::Display, awake: bool);
     async fn bringup(
         peripherals: esp_hal::peripherals::Peripherals,
     ) -> S3BoardHardware<Self::Display, Self::Battery, Self::Gnss>;

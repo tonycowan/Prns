@@ -1,12 +1,14 @@
 #[cfg(any(
     feature = "board-t-echo",
     feature = "board-t096",
+    feature = "board-t114",
     feature = "board-mesh-tower-v2"
 ))]
 mod bluetooth_auto;
 #[cfg(any(
     feature = "board-t-echo",
     feature = "board-t096",
+    feature = "board-t114",
     feature = "board-mesh-tower-v2"
 ))]
 mod bluetooth_gatt_server;
@@ -29,10 +31,19 @@ pub(crate) mod gnss;
     feature = "board-mesh-tower-v2"
 ))]
 mod headless;
+mod heartbeat;
 #[cfg(feature = "board-t-echo")]
 mod interface_cards;
+mod learned_state;
 #[cfg(feature = "board-t-echo")]
 pub(crate) mod node;
+#[cfg(any(
+    feature = "board-t-echo",
+    feature = "board-t096",
+    feature = "board-t114",
+    feature = "board-mesh-tower-v2"
+))]
+pub(crate) mod software_vbus;
 
 #[cfg(feature = "board-t-echo")]
 pub use firmware::run;

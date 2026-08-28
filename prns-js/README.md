@@ -12,7 +12,7 @@ For a published registry release:
 npm install personal-rns
 ```
 
-Prns 0.3.6 is available as a public GitHub prerelease. Registry publication has an independent qualification gate, so use the [source-checkout instructions](../docs/sdks.md#typescript-and-javascript) when you need the exact candidate before that gate completes.
+Prns 0.3.7 is available as a public GitHub prerelease. Registry publication has an independent qualification gate, so use the [source-checkout instructions](../docs/sdks.md#typescript-and-javascript) when you need the exact candidate before that gate completes.
 
 ## Create a host
 
@@ -48,6 +48,28 @@ const node = created.data;
 console.log(node.backendInfo);
 await node.stop();
 ```
+
+Web Bluetooth connects the browser as a GATT central to a native or embedded
+Prns node advertising the shared Bluetooth Auto service. Start the chooser
+from a user action in a supported secure-context browser:
+
+```ts
+connectButton.addEventListener("click", async () => {
+  const connected = await node.interfaces.bluetooth.connect();
+  if (connected.tag !== "Connected") {
+    reportBluetoothFailure(connected);
+    return;
+  }
+
+  const session = connected.data;
+  showInterface(session.interfaceId);
+});
+```
+
+The session carries Reticulum packets in both directions over the shared GATT
+control and data characteristics. Browser instances do not advertise this
+service, so a browser-to-browser Bluetooth link still requires a native or
+embedded Prns transport node nearby.
 
 ## Handle events and commands
 
@@ -156,4 +178,4 @@ match(sent.data, {
 
 ## More examples
 
-[`examples/native-lifecycle.ts`](examples/native-lifecycle.ts) is a complete native lifecycle program with a self-contained loopback interface. The [browser transport playground](../prns-wasm/examples/browser-playground/README.md) runs a live node with permission-gated WebUSB and Wi-Fi controls.
+[`examples/native-lifecycle.ts`](examples/native-lifecycle.ts) is a complete native lifecycle program with a self-contained loopback interface. The [browser transport playground](../prns-wasm/examples/browser-playground/README.md) runs a live node with permission-gated Web Bluetooth, WebUSB, and Wi-Fi controls.

@@ -55,6 +55,17 @@ entrypoint = ["bash", "tools/build/android.sh"]
 requires = ["bash", "cargo"]
 
 [[task]]
+id = "build.esp32s3-wpa3-radio"
+summary = "Rebuild and verify the pinned ESP32-S3 WPA3-SAE radio archives."
+domain = "build"
+effect = "workspace-write"
+platforms = ["linux", "macos"]
+audience = ["developer", "ci", "release"]
+entrypoint = ["bash", "tools/build/esp32s3-wpa3-radio.sh"]
+requires = ["bash", "cmake", "git", "make", "python3", "xtensa-esp-elf-gcc"]
+setup = "Set IDF_PATH to the exact ESP-IDF checkout named by the committed recipe, source its export.sh, and install that ESP-IDF release's pinned esp32s3 tools."
+
+[[task]]
 id = "build.hopspot.t096"
 summary = "Build the Heltec T096 firmware and package its recovery-compatible developer UF2."
 domain = "build"
@@ -67,7 +78,7 @@ setup = "Install Rust with rustup so the nRF52840 target and llvm-tools-preview 
 
 [[task]]
 id = "build.hopspot.t114"
-summary = "Build the headless Heltec T114 firmware and package its recovery-compatible developer UF2."
+summary = "Build the display-equipped Heltec T114 firmware with S140 6.1.1 Bluetooth Auto and package its recovery-compatible developer UF2."
 domain = "build"
 effect = "workspace-write"
 platforms = ["linux", "macos"]
@@ -270,6 +281,16 @@ platforms = ["any"]
 audience = ["developer"]
 entrypoint = ["python", "tools/device/hopspot-dev-flasher.py"]
 requires = ["cargo", "dx", "git", "npm", "python"]
+
+[[task]]
+id = "repo.cargo-check"
+summary = "Compile-check every host-compatible first-party Cargo workspace in parallel."
+domain = "repo"
+effect = "workspace-write"
+platforms = ["any"]
+audience = ["developer", "ci"]
+entrypoint = ["python", "tools/repo/cargo-check.py"]
+requires = ["cargo", "python"]
 
 [[task]]
 id = "repo.host-contract.generate"
@@ -582,6 +603,16 @@ entrypoint = ["python3", "tools/release/flasher-release-record.py"]
 requires = ["python3"]
 
 [[task]]
+id = "release.manifest.artifacts"
+summary = "List every transport-specific firmware artifact in a signed flash manifest."
+domain = "release"
+effect = "read-only"
+platforms = ["any"]
+audience = ["ci", "operator", "release"]
+entrypoint = ["python3", "tools/release/list-flasher-manifest-artifacts.py"]
+requires = ["python3"]
+
+[[task]]
 id = "release.rollback"
 summary = "Stage, validate, record, or compare-and-swap a release rollback plan."
 domain = "release"
@@ -599,6 +630,16 @@ effect = "workspace-write"
 platforms = ["any"]
 audience = ["ci", "release"]
 entrypoint = ["python3", "tools/release/flasher-website-history.py"]
+requires = ["python3"]
+
+[[task]]
+id = "release.hotfix"
+summary = "Resolve, compose, or verify a target-scoped flasher hotfix."
+domain = "release"
+effect = "workspace-write"
+platforms = ["any"]
+audience = ["ci", "operator", "release"]
+entrypoint = ["python3", "tools/release/flasher_hotfix.py"]
 requires = ["python3"]
 
 [[task]]

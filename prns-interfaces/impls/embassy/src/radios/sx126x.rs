@@ -198,6 +198,34 @@ pub struct ExternalPowerAmplifier {
     pub chip_power_dbm: fn(i8) -> i8,
 }
 
+/// Board-owned front-end switching that must surround every SX126x TX/RX transition.
+///
+/// The callbacks are one unit because a front-end that can enter transmit must also have a
+/// defined path back to receive. Boards with no software-driven transition use
+/// [`Self::NoDynamicControl`].
+#[derive(Debug, Clone, Copy)]
+pub enum FrontendControl {
+    NoDynamicControl,
+    TxRx {
+        enter_transmit: fn(),
+        enter_receive: fn(),
+    },
+}
+
+impl FrontendControl {
+    fn enter_transmit(self) {
+        if let Self::TxRx { enter_transmit, .. } = self {
+            enter_transmit();
+        }
+    }
+
+    fn enter_receive(self) {
+        if let Self::TxRx { enter_receive, .. } = self {
+            enter_receive();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BoardConfig {
     /// `Some(v)` if a TCXO is fed from DIO3 at voltage `v`; `None` for a bare XTAL.
@@ -211,10 +239,7 @@ pub struct BoardConfig {
     /// External transmit PA behavior. When present, profiles remain antenna-referred while the
     /// driver programs the lower chip power required to produce that output through the PA.
     pub external_power_amplifier: Option<ExternalPowerAmplifier>,
-    /// Optional external PA/LNA switch into transmit. Invoked immediately before `SetTx`.
-    pub enter_transmit: Option<fn()>,
-    /// Optional external PA/LNA switch into receive. Invoked immediately before `SetRx`.
-    pub enter_receive: Option<fn()>,
+    pub frontend_control: FrontendControl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +247,7 @@ pub enum Error {
     Spi,
     Busy,
     Dio1,
+    UnexpectedTransmitInterrupt(u16),
     Reset,
     Crc,
     Timeout,
@@ -483,7 +509,7 @@ where
             .await?;
         self.configure().await?;
         self.route_irqs_and_tune_rx().await?;
-        invoke_frontend(self.config.enter_receive);
+        self.config.frontend_control.enter_receive();
         Ok(())
     }
 
@@ -528,11 +554,14 @@ where
         // EasyDMA (and most SPI DMA) can only source from RAM; the caller's payload may be flash-resident (`&'static`), so stage it through the RAM `tx_staging` field.
         self.tx_staging[..len].copy_from_slice(payload);
 
-        invoke_frontend(self.config.enter_transmit);
+        self.config.frontend_control.enter_transmit();
         self.standby().await?;
         self.set_packet_params(len as u8).await?;
         self.write_tx_payload(len).await?;
         self.clear_irq(irq::ALL).await?;
+        // Clearing a receive IRQ can leave DIO1 physically high briefly. SetTx must not start until
+        // that stale level releases, or the TxDone wait can consume it as a false completion.
+        self.wait_for_dio1_release().await?;
         // SetTx with timeout 0 = single shot, no chip timeout — so the TxDone wait is bounded here ([`TX_DONE_TIMEOUT_MS`]); a TX that never completes must not trap the radio task forever.
         self.command(&[op::SET_TX, 0x00, 0x00, 0x00]).await?;
         {
@@ -552,12 +581,15 @@ where
         if flags & irq::TIMEOUT != 0 {
             return Err(Error::Timeout);
         }
+        if flags & irq::TX_DONE == 0 {
+            return Err(Error::UnexpectedTransmitInterrupt(flags));
+        }
         Ok(())
     }
 
     /// Arm continuous RX: restamp the RX-side max payload length, clear stale IRQs, enter SetRx continuous. [`read_frame`](Self::read_frame) waits WITHOUT re-arming, so a host-side select that cancels the read mid-listen leaves the radio receiving (the RxDone IRQ latches) rather than guillotining an in-flight multi-hundred-ms LoRa frame.
     pub async fn arm_rx(&mut self) -> Result<(), Error> {
-        invoke_frontend(self.config.enter_receive);
+        self.config.frontend_control.enter_receive();
         self.standby().await?;
         self.set_packet_params(0xFF).await?;
         self.clear_irq(irq::ALL).await?;
@@ -777,9 +809,12 @@ where
 
     fn recovery(error: &Self::Error) -> RadioRecovery {
         match error {
-            Error::Spi | Error::Busy | Error::Dio1 | Error::Reset | Error::Timeout => {
-                RadioRecovery::Reinitialize
-            }
+            Error::Spi
+            | Error::Busy
+            | Error::Dio1
+            | Error::UnexpectedTransmitInterrupt(_)
+            | Error::Reset
+            | Error::Timeout => RadioRecovery::Reinitialize,
             Error::Crc | Error::BufferTooSmall => RadioRecovery::Continue,
         }
     }
@@ -885,12 +920,6 @@ fn decode_rssi_dbm(encoded: u8) -> i16 {
     -i16::from(encoded) / 2
 }
 
-fn invoke_frontend(hook: Option<fn()>) {
-    if let Some(enter) = hook {
-        enter();
-    }
-}
-
 fn antenna_referred_rssi_dbm(encoded: u8, external_rx_gain_db: u8) -> i16 {
     decode_rssi_dbm(encoded).saturating_sub(i16::from(external_rx_gain_db))
 }
@@ -920,6 +949,7 @@ fn pa_config(power_dbm: i8) -> PaConfig {
 mod tests {
     use super::*;
     use core::future::Future;
+    use core::sync::atomic::{AtomicU8, Ordering};
     use core::task::{Context, Poll, Waker};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -952,6 +982,19 @@ mod tests {
 
     struct MockSpi {
         log: Log,
+        irq_flags: u16,
+    }
+    impl MockSpi {
+        fn new(log: Log) -> Self {
+            Self {
+                log,
+                irq_flags: irq::TX_DONE | irq::RX_DONE,
+            }
+        }
+
+        fn with_irq(log: Log, irq_flags: u16) -> Self {
+            Self { log, irq_flags }
+        }
     }
     impl SpiErrorType for MockSpi {
         type Error = MockErr;
@@ -976,20 +1019,21 @@ mod tests {
             }
             for op in ops.iter_mut() {
                 if let Operation::Read(buf) = op {
-                    fill_read(&header, buf);
+                    fill_read(&header, buf, self.irq_flags);
                 }
             }
             Ok(())
         }
     }
 
-    fn fill_read(header: &[u8], buf: &mut [u8]) {
+    fn fill_read(header: &[u8], buf: &mut [u8], irq_flags: u16) {
         match header.first().copied().unwrap_or(0) {
             op::GET_IRQ_STATUS => {
                 if buf.len() >= 3 {
                     buf[0] = 0x00;
-                    buf[1] = 0x00;
-                    buf[2] = 0x03;
+                    let encoded = irq_flags.to_be_bytes();
+                    buf[1] = encoded[0];
+                    buf[2] = encoded[1];
                 }
             }
             op::GET_RX_BUFFER_STATUS => {
@@ -1067,9 +1111,7 @@ mod tests {
 
     fn mock_radio() -> MockRadio {
         Sx126x::new(
-            MockSpi {
-                log: Rc::new(RefCell::new(Vec::new())),
-            },
+            MockSpi::new(Rc::new(RefCell::new(Vec::new()))),
             MockWait,
             MockWait,
             MockOut,
@@ -1126,6 +1168,35 @@ mod tests {
     impl DigErrorType for Dio1NeverReleases {
         type Error = MockErr;
     }
+
+    struct Dio1ReleasesOnce {
+        low_waits: u8,
+    }
+    impl DigErrorType for Dio1ReleasesOnce {
+        type Error = MockErr;
+    }
+    impl Wait for Dio1ReleasesOnce {
+        async fn wait_for_high(&mut self) -> Result<(), MockErr> {
+            Ok(())
+        }
+        async fn wait_for_low(&mut self) -> Result<(), MockErr> {
+            if self.low_waits == 0 {
+                self.low_waits = 1;
+                Ok(())
+            } else {
+                core::future::pending::<Result<(), MockErr>>().await
+            }
+        }
+        async fn wait_for_rising_edge(&mut self) -> Result<(), MockErr> {
+            Ok(())
+        }
+        async fn wait_for_falling_edge(&mut self) -> Result<(), MockErr> {
+            core::future::pending::<Result<(), MockErr>>().await
+        }
+        async fn wait_for_any_edge(&mut self) -> Result<(), MockErr> {
+            Ok(())
+        }
+    }
     impl Wait for Dio1NeverReleases {
         async fn wait_for_high(&mut self) -> Result<(), MockErr> {
             Ok(())
@@ -1152,8 +1223,7 @@ mod tests {
             dio2_as_rf_switch: true,
             external_rx_gain_db: 0,
             external_power_amplifier: None,
-            enter_transmit: None,
-            enter_receive: None,
+            frontend_control: FrontendControl::NoDynamicControl,
         }
     }
 
@@ -1196,6 +1266,31 @@ mod tests {
     }
 
     #[test]
+    fn external_frontend_control_keeps_tx_and_rx_transitions_together() {
+        static FRONTEND_STATE: AtomicU8 = AtomicU8::new(0);
+
+        fn enter_transmit() {
+            FRONTEND_STATE.store(1, Ordering::Relaxed);
+        }
+
+        fn enter_receive() {
+            FRONTEND_STATE.store(2, Ordering::Relaxed);
+        }
+
+        let control = FrontendControl::TxRx {
+            enter_transmit,
+            enter_receive,
+        };
+        control.enter_transmit();
+        assert_eq!(FRONTEND_STATE.load(Ordering::Relaxed), 1);
+        control.enter_receive();
+        assert_eq!(FRONTEND_STATE.load(Ordering::Relaxed), 2);
+
+        FrontendControl::NoDynamicControl.enter_transmit();
+        assert_eq!(FRONTEND_STATE.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn sx126x_owns_its_transmit_power_compatibility() {
         let radio = mock_radio();
         let mut profile = DEFAULT_915_PROFILE;
@@ -1227,7 +1322,7 @@ mod tests {
         });
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let mut radio = Sx126x::new(
-            MockSpi { log: log.clone() },
+            MockSpi::new(log.clone()),
             MockWait,
             MockWait,
             MockOut,
@@ -1264,6 +1359,7 @@ mod tests {
             Error::Spi,
             Error::Busy,
             Error::Dio1,
+            Error::UnexpectedTransmitInterrupt(irq::HEADER_ERR),
             Error::Reset,
             Error::Timeout,
         ] {
@@ -1284,11 +1380,10 @@ mod tests {
             dio2_as_rf_switch: true,
             external_rx_gain_db: 0,
             external_power_amplifier: None,
-            enter_transmit: None,
-            enter_receive: None,
+            frontend_control: FrontendControl::NoDynamicControl,
         };
         let mut radio = Sx126x::new(
-            MockSpi { log: log.clone() },
+            MockSpi::new(log.clone()),
             MockWait,
             MockWait,
             MockOut,
@@ -1423,9 +1518,7 @@ mod tests {
         let mut board = board();
         board.external_rx_gain_db = 17;
         let mut radio = Sx126x::new(
-            MockSpi {
-                log: Rc::new(RefCell::new(Vec::new())),
-            },
+            MockSpi::new(Rc::new(RefCell::new(Vec::new()))),
             MockWait,
             MockWait,
             MockOut,
@@ -1467,7 +1560,7 @@ mod tests {
     fn a_wedged_busy_line_times_out_instead_of_hanging() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let mut radio = Sx126x::new(
-            MockSpi { log },
+            MockSpi::new(log),
             BusyNeverLow,
             MockWait,
             MockOut,
@@ -1482,7 +1575,7 @@ mod tests {
     fn a_txdone_that_never_fires_times_out_instead_of_hanging() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let mut radio = Sx126x::new(
-            MockSpi { log },
+            MockSpi::new(log),
             MockWait,
             Dio1NeverHigh,
             MockOut,
@@ -1497,7 +1590,22 @@ mod tests {
     fn a_txdone_that_never_releases_times_out_instead_of_reentering_receive() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let mut radio = Sx126x::new(
-            MockSpi { log },
+            MockSpi::new(log),
+            MockWait,
+            Dio1ReleasesOnce { low_waits: 0 },
+            MockOut,
+            MockDelay,
+            board(),
+        );
+        let result = block_on(radio.transmit(b"PRNS-HELTEC-SMOK"));
+        assert_eq!(result, Err(Error::Timeout));
+    }
+
+    #[test]
+    fn a_stale_dio1_level_must_release_before_set_tx() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mut radio = Sx126x::new(
+            MockSpi::new(log.clone()),
             MockWait,
             Dio1NeverReleases,
             MockOut,
@@ -1506,5 +1614,29 @@ mod tests {
         );
         let result = block_on(radio.transmit(b"PRNS-HELTEC-SMOK"));
         assert_eq!(result, Err(Error::Timeout));
+        assert!(
+            !log.borrow()
+                .iter()
+                .any(|command| command.as_slice() == [op::SET_TX, 0x00, 0x00, 0x00]),
+            "SetTx must not start while DIO1 reports a stale IRQ"
+        );
+    }
+
+    #[test]
+    fn a_non_txdone_interrupt_cannot_report_transmit_success() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mut radio = Sx126x::new(
+            MockSpi::with_irq(log, irq::HEADER_ERR),
+            MockWait,
+            MockWait,
+            MockOut,
+            MockDelay,
+            board(),
+        );
+        let result = block_on(radio.transmit(b"PRNS-HELTEC-SMOK"));
+        assert_eq!(
+            result,
+            Err(Error::UnexpectedTransmitInterrupt(irq::HEADER_ERR))
+        );
     }
 }

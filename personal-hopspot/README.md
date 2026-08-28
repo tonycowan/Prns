@@ -4,14 +4,16 @@ Personal Hopspot is one Reticulum-based node application across desktop, mobile,
 and embedded platforms. It provides a status and control surface where the
 platform has a display or interactive shell.
 
-The `core` directory holds the platform-agnostic screen renderer. Each entry
-under `desktop/`, `mobile/`, and `embedded/` binds the shared application and
-Reticulum node to the platform's display, input, eligible interfaces, and power
-readings.
+The `core` directory owns the platform-agnostic application state, canonical
+64×128 monochrome face, display presentation policy, and renderer. Each entry
+under `desktop/`, `mobile/`, and `embedded/` converts that canonical frame into
+native pixels and binds the shared application and Reticulum node to its input,
+eligible interfaces, controller I/O, power rails, and power readings.
 
 Personal Hopspot is also the board-backed embedded reference application. A
-screen is optional: headless boards run the node and expose their supported
-remote controls without compiling a display surface.
+screen is optional: display-bearing standalone workspaces explicitly enable
+core's `display` feature, while headless boards run the node and expose their
+supported remote controls without compiling the face or presentation surface.
 
 ## Public packages
 
@@ -66,14 +68,22 @@ compatibility aliases.
 
 ESP32 firmware, from `embedded/esp32/` with the board on USB:
 
+    cargo heltec-e290-flash
     cargo heltec-v4-flash
     cargo heltec-v4-r8-flash
     cargo tbeam-supreme-flash
     cargo c6-flash
 
+
 T-Echo firmware:
 
     ./tools/prns device techo flash
+
+Heltec T096 and T114 developer firmware provide their factory TFT status and
+control faces, Bluetooth Auto, and a 60-second display auto-off:
+
+    ./tools/prns build hopspot t096
+    ./tools/prns build hopspot t114
 
 ## Local developer web flasher
 
@@ -108,5 +118,7 @@ signed release. Qualification receipts and their remaining limits live under
 ## Embedded flash-layout upgrade
 
 LoRa-capable firmware persists the selected radio profile in a dedicated two-page store. Reset records a durable choice to follow the firmware default, while an explicitly saved profile remains fixed across updates. Sparse firmware updates preserve the profile store; a full-chip erase clears it.
+
+Every embedded Hopspot board target journals learned routes and retained self-ratchet history. Route writes are batched to conserve flash and battery, while critical ratchet state receives the shorter durability window. T114 uses the established T096 journal map, and MeshTower V2 reserves its own six-page journal below the existing profile and identity pages. Their first persistence-capable update starts with empty learned state; later reboots and sparse firmware updates restore it. A full-chip erase clears it.
 
 The first firmware update carrying the board-sized flash layout moves learned-state persistence on the 16 MiB Heltec V4 and V4 R8 from the lower 8 MiB region to the physical flash tail. Node identity, Bluetooth identity, and Wi-Fi provisioning remain intact, but learned routes and retained self-ratchet history from older firmware are reset once and rebuild from network activity. The 8 MiB T-Beam Supreme journal remains in place. T-Echo keeps its journal timebase and arena starts while reserving the former final arena page, reducing the second arena from 20 pages to 19.
