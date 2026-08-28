@@ -511,6 +511,7 @@ async fn run_session(state: Arc<Shared>) -> SessionEnd {
     let event_state = state.clone();
     let node = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: None,
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable,
         pre_configured_destinations: [destination],
         app_state: (),
         storage: GrowableHeap,
