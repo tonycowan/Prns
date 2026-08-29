@@ -7,7 +7,7 @@ use crate::backend;
 use crate::model::{fmt_bytes, DemoState, InterfaceCard, InterfaceKind};
 
 /// Visible on RNS Config so we can confirm the phone is running this binary.
-const UI_BUILD: &str = "2026-08-27a ble-group-edit";
+const UI_BUILD: &str = "2026-08-28 discovery-group-ui";
 
 #[derive(Clone, Debug, PartialEq)]
 enum Screen {
@@ -82,7 +82,7 @@ pub fn App() -> Element {
                     }
                     div { class: "fab-bar",
                         button {
-                            class: "btn primary",
+                            class: "btn",
                             r#type: "button",
                             onclick: move |_| {
                                 state.write().announce();
@@ -300,12 +300,26 @@ fn InterfaceDetail(
     let powered = card.connection.is_powered_on();
     let power_label = if powered { "Turn off" } else { "Turn on" };
     let is_ble = card.kind == InterfaceKind::Ble;
-    let initial_group = state
+    let saved_group = state
         .read()
         .ble_discovery_group
         .clone()
         .unwrap_or_else(|| "reticulum".into());
-    let mut group_draft = use_signal(|| initial_group);
+    let mut group_draft = use_signal(|| saved_group.clone());
+    let draft_value = group_draft();
+    let draft_trimmed = draft_value.trim().to_string();
+    let dirty = draft_trimmed != saved_group.trim();
+    let can_save = dirty && !draft_trimmed.is_empty();
+    let can_use_default = draft_trimmed != "reticulum";
+    let status_detail_lines: Vec<String> = if is_ble {
+        card.detail_lines
+            .iter()
+            .filter(|line| !line.starts_with("grp "))
+            .cloned()
+            .collect()
+    } else {
+        card.detail_lines.clone()
+    };
 
     rsx! {
         div { class: "content",
@@ -340,7 +354,7 @@ fn InterfaceDetail(
                 if let Some(age) = &card.activity_age {
                     p { class: "muted", "Last activity {age} ago" }
                 }
-                for line in card.detail_lines.iter() {
+                for line in status_detail_lines.iter() {
                     p { class: "muted", "{line}" }
                 }
             }
@@ -348,10 +362,6 @@ fn InterfaceDetail(
             if is_ble {
                 h2 { class: "section-title", "Discovery group" }
                 section { class: "status-card group-editor",
-                    p { class: "muted",
-                        "Peers only discover each other when they share this group id."
-                    }
-                    label { class: "field-label", r#for: "ble-group", "group_id" }
                     input {
                         id: "ble-group",
                         class: "text-input mono",
@@ -360,23 +370,11 @@ fn InterfaceDetail(
                         value: "{group_draft}",
                         oninput: move |event| group_draft.set(event.value()),
                     }
-                    div { class: "detail-actions",
-                        button {
-                            class: "btn primary",
-                            r#type: "button",
-                            onclick: move |_| {
-                                let next = group_draft();
-                                if state.write().set_ble_discovery_group(&next) {
-                                    on_flash.call(format!("Group set to {next}"));
-                                } else {
-                                    on_flash.call("Could not update group".into());
-                                }
-                            },
-                            "Save group"
-                        }
+                    div { class: "detail-actions group-actions",
                         button {
                             class: "btn",
                             r#type: "button",
+                            disabled: !can_use_default,
                             onclick: move |_| {
                                 group_draft.set("reticulum".into());
                                 if state.write().set_ble_discovery_group("reticulum") {
@@ -385,7 +383,22 @@ fn InterfaceDetail(
                                     on_flash.call("Could not update group".into());
                                 }
                             },
-                            "Use reticulum"
+                            "Use default"
+                        }
+                        button {
+                            class: "btn",
+                            r#type: "button",
+                            disabled: !can_save,
+                            onclick: move |_| {
+                                let next = group_draft().trim().to_string();
+                                group_draft.set(next.clone());
+                                if state.write().set_ble_discovery_group(&next) {
+                                    on_flash.call(format!("Group set to {next}"));
+                                } else {
+                                    on_flash.call("Could not update group".into());
+                                }
+                            },
+                            "Save"
                         }
                     }
                 }
@@ -419,7 +432,7 @@ fn InterfaceDetail(
             h2 { class: "section-title", "Actions" }
             div { class: "detail-actions",
                 button {
-                    class: if powered { "btn danger" } else { "btn primary" },
+                    class: "btn",
                     r#type: "button",
                     onclick: move |_| {
                         let label = state

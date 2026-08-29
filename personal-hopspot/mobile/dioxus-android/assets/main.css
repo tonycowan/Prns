@@ -279,6 +279,14 @@ button {
   margin-top: 4px;
 }
 
+.detail-actions.group-actions {
+  flex-direction: row;
+}
+
+.detail-actions.group-actions .btn {
+  flex: 1;
+}
+
 .btn {
   display: flex;
   align-items: center;
@@ -288,23 +296,14 @@ button {
   padding: 12px 16px;
   border-radius: 12px;
   font-weight: 600;
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
-}
-
-.btn.primary {
+  border: 1px solid transparent;
   background: var(--accent);
-  border-color: transparent;
-  color: #061018;
-}
-
-.btn.danger {
-  color: var(--bad);
-  border-color: color-mix(in srgb, var(--bad) 40%, var(--border));
+  color: var(--text);
 }
 
 .btn:disabled {
-  opacity: 0.45;
+  background: color-mix(in srgb, var(--accent) 38%, var(--bg-row));
+  color: color-mix(in srgb, var(--text) 55%, transparent);
   cursor: not-allowed;
 }
 

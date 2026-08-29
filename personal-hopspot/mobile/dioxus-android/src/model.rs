@@ -310,19 +310,9 @@ impl DemoState {
                 return false;
             }
             self.ble_discovery_group = Some(group_id.to_string());
-            for card in &mut self.cards {
-                if card.kind == InterfaceKind::Ble {
-                    card.detail_lines = vec![format!("grp {group_id}")];
-                }
-            }
             return true;
         }
         self.ble_discovery_group = Some(group_id.to_string());
-        for card in &mut self.cards {
-            if card.kind == InterfaceKind::Ble {
-                card.detail_lines = vec![format!("grp {group_id}")];
-            }
-        }
         true
     }
 
@@ -532,7 +522,7 @@ fn sample_cards() -> Vec<InterfaceCard> {
             peers: Some(1),
             destinations: 3,
             activity_age: Some("4s".into()),
-            detail_lines: vec!["grp reticulum".into()],
+            detail_lines: vec![],
             peer_list: vec![PeerInfo::new("MacBook", ConnectionState::Connected)],
         },
         InterfaceCard {

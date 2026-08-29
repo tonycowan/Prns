@@ -188,10 +188,7 @@ fn detail_lines_for(card: &Card) -> Vec<String> {
         CardKind::Peer if card.label() == "App" => {
             vec!["Local client of this shared instance".into()]
         }
-        CardKind::Ble => {
-            let group = ble_discovery_group().unwrap_or_else(|| "reticulum".into());
-            vec![format!("grp {group}")]
-        }
+        CardKind::Ble => Vec::new(),
         _ => Vec::new(),
     }
 }
