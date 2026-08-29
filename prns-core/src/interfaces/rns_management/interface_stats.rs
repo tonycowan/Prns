@@ -8,6 +8,7 @@ use crate::interfaces::IfacSize;
 use crate::interfaces::{
     ConnectionState, InterfaceId, InterfaceMode, InterfaceSnapshot, TransferRates,
 };
+use crate::wire::DestinationHash;
 
 use super::message_pack::MessagePackEncoder;
 use super::wire_names::{interface, transport};
@@ -77,6 +78,7 @@ pub struct RnsTransportStatus {
     transport_identity: IdentityHash,
     network_identity: Option<IdentityHash>,
     uptime: Duration,
+    probe_responder: Option<DestinationHash>,
     software_version: Option<String>,
 }
 
@@ -90,8 +92,15 @@ impl RnsTransportStatus {
             transport_identity,
             network_identity,
             uptime,
+            probe_responder: None,
             software_version: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_probe_responder(mut self, probe_responder: Option<DestinationHash>) -> Self {
+        self.probe_responder = probe_responder;
+        self
     }
 
     pub fn with_software_version(mut self, software_version: impl Into<String>) -> Self {
@@ -192,7 +201,10 @@ impl RnsInterfaceStats {
             encoder.field(transport::UPTIME)?;
             encoder.float(status.uptime.as_secs_f64());
             encoder.field(transport::PROBE_RESPONDER)?;
-            encoder.nil();
+            match status.probe_responder {
+                Some(destination) => encoder.binary(destination.as_bytes())?,
+                None => encoder.nil(),
+            }
             if let Some(software_version) = &status.software_version {
                 encoder.string_field(transport::SOFTWARE_VERSION, software_version)?;
             }

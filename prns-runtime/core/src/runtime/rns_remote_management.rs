@@ -24,6 +24,7 @@ pub struct RemoteTransportStatus {
     pub transport_identity: IdentityHash,
     pub network_identity: Option<IdentityHash>,
     pub uptime: Duration,
+    pub probe_responder: Option<prns_core::wire::DestinationHash>,
     pub software_version: Option<String>,
 }
 
@@ -39,7 +40,8 @@ pub fn encode_status_response(
             transport.transport_identity,
             transport.network_identity,
             transport.uptime,
-        );
+        )
+        .with_probe_responder(transport.probe_responder);
         if let Some(software_version) = transport.software_version {
             status = status.with_software_version(software_version);
         }
@@ -114,6 +116,7 @@ mod tests {
                 transport_identity: IdentityHash::new([0x11; 16]),
                 network_identity: Some(IdentityHash::new([0x22; 16])),
                 uptime: Duration::from_millis(1_500),
+                probe_responder: None,
                 software_version: None,
             }),
         )
