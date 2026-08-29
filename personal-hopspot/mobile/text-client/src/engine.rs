@@ -6,17 +6,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use personal_rns::engine::{AnnounceAppData, AnnounceNow, AnnounceTarget, RatchetPolicy};
+use personal_rns::engine::{
+    AnnounceAppData, AnnounceNow, AnnounceTarget, DeliveryEvidence, RatchetPolicy,
+    SendSinglePacketFailure,
+};
 use personal_rns::identity::in_memory::InMemoryNodeIdentity;
 use personal_rns::identity::{Zeroizing, IDENTITY_SECRET_KEY_LEN};
 use personal_rns::interfaces::{
     shared_instance::configured_policy, ConfiguredInterfacePolicy, InterfaceId,
 };
+use personal_rns::node_introspection::NodeIntrospection;
 use personal_rns::request_endpoints;
 use personal_rns::routing::{LinkRequestPolicy, ProofStrategy};
 use personal_rns::runtime::{
     load_or_create_identity_secret, Diagnostic, ManuallyAttached, Message, NoPersistence,
-    PreConfiguredDestination, PrnsEvent, PrnsNode, PrnsNodeRecipe, ServeMyRequestEndpoints,
+    PreConfiguredDestination, PrnsEvent, PrnsNode, PrnsNodeRecipe, RequestPathError,
+    ServeMyRequestEndpoints, SendError,
 };
 use personal_rns::shared_instance::{
     connect_existing_shared_instance, SharedInstanceClientIntent, SharedInstanceTransport,
@@ -38,6 +43,9 @@ const BUS_PORT: u16 = 37428;
 const MAX_HEARD: usize = 40;
 const MAX_MESSAGES: usize = 80;
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(12);
+/// Opaque probe size matching stock `rnprobe` / `prnsd probe` default (`-s 16`).
+const PROBE_PAYLOAD_LEN: usize = 16;
 
 /// Compact label for an announce source interface: kind name + channel-tag hash.
 fn format_source_interface(id: InterfaceId) -> String {
@@ -49,6 +57,7 @@ fn format_source_interface(id: InterfaceId) -> String {
 enum Command {
     Announce,
     Send { peer_hex: String, text: String },
+    Probe { destination_hex: String },
 }
 
 struct Shared {
@@ -63,6 +72,7 @@ struct Shared {
     pending_range_prompt: Mutex<Option<RangePrompt>>,
     pending_auto_reply: Mutex<Option<RangePrompt>>,
     auto_range: Mutex<Option<AutoRangeSession>>,
+    probe_toast: Mutex<Option<String>>,
     commands: Mutex<Option<mpsc::UnboundedSender<Command>>>,
 }
 
@@ -80,6 +90,7 @@ impl Shared {
             pending_range_prompt: Mutex::new(None),
             pending_auto_reply: Mutex::new(None),
             auto_range: Mutex::new(None),
+            probe_toast: Mutex::new(None),
             commands: Mutex::new(None),
         }
     }
@@ -152,6 +163,47 @@ impl Shared {
             while messages.len() > MAX_MESSAGES {
                 messages.pop_back();
             }
+        }
+    }
+
+    fn push_probed(&self, destination: DestinationHash, hops: u8, rtt_ms: u64) {
+        let seq = {
+            let Ok(mut seq) = self.heard_seq.lock() else {
+                return;
+            };
+            *seq += 1;
+            *seq
+        };
+        let at = format_message_time();
+        let interface = format!("probe · {rtt_ms} ms RTT");
+        let entry = HeardAnnounce {
+            destination_hex: hex_bytes(destination.as_bytes()),
+            hops,
+            interface,
+            at: at.clone(),
+            seq,
+        };
+        if let Ok(mut heard) = self.heard.lock() {
+            if let Some(existing) = heard
+                .iter_mut()
+                .find(|h| h.destination_hex == entry.destination_hex)
+            {
+                existing.hops = entry.hops;
+                existing.interface = entry.interface;
+                existing.at = at;
+                existing.seq = entry.seq;
+                return;
+            }
+            heard.push_front(entry);
+            while heard.len() > MAX_HEARD {
+                heard.pop_back();
+            }
+        }
+    }
+
+    fn set_probe_toast(&self, message: String) {
+        if let Ok(mut toast) = self.probe_toast.lock() {
+            *toast = Some(message);
         }
     }
 }
@@ -391,6 +443,91 @@ pub fn set_auto_range_session(session: Option<AutoRangeSession>) {
     }
 }
 
+pub fn request_probe(destination_hex: String) -> Result<(), String> {
+    let _ = parse_dest_hex(&destination_hex)?;
+    require_connected_commands()?
+        .send(Command::Probe { destination_hex })
+        .map_err(|_| "Engine stopped.".to_string())
+}
+
+pub fn take_probe_toast() -> Option<String> {
+    shared()
+        .probe_toast
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+}
+
+async fn run_probe(
+    handle: &personal_rns::PrnsNodeHandle,
+    state: &Shared,
+    destination: DestinationHash,
+) -> String {
+    let hops = if let Some(route) = handle.route(destination).await {
+        route.hops
+    } else {
+        match tokio::time::timeout(PROBE_TIMEOUT, handle.request_path(destination)).await {
+            Ok(Ok(path)) => path.hops.0,
+            Ok(Err(RequestPathError::NodeStopped)) => return "Engine stopped.".into(),
+            Ok(Err(RequestPathError::Failed(_))) => return "Path lookup failed.".into(),
+            Ok(Err(RequestPathError::EntropyUnavailable)) => {
+                return "Path lookup unavailable.".into();
+            }
+            Err(_) => return "Path lookup timed out.".into(),
+        }
+    };
+
+    // Opaque payload, same size as stock rnprobe default; contents are not meaningful.
+    let payload = [0x01u8; PROBE_PAYLOAD_LEN];
+    let delivery = tokio::time::timeout(
+        PROBE_TIMEOUT,
+        handle.send_single_packet(destination, &payload),
+    )
+    .await;
+
+    match delivery {
+        Err(_) => "Probe timed out.".into(),
+        Ok(Err(SendError::NodeStopped)) => "Engine stopped.".into(),
+        Ok(Err(SendError::PayloadTooLarge)) => "Probe payload too large.".into(),
+        Ok(Err(SendError::Busy)) => "Engine busy — try again.".into(),
+        Ok(Err(SendError::Failed(
+            SendSinglePacketFailure::Timeout | SendSinglePacketFailure::Culled,
+        ))) => "Probe timed out.".into(),
+        Ok(Err(SendError::Failed(error))) => format!("Probe failed: {error:?}"),
+        Ok(Ok(delivered)) => match delivered.evidence {
+            DeliveryEvidence::Proof(_) => {
+                let rtt_ms = delivered.rtt.millis();
+                let hops = handle
+                    .route(destination)
+                    .await
+                    .map(|route| route.hops)
+                    .unwrap_or(hops);
+                state.push_probed(destination, hops, rtt_ms);
+                format!("Found peer — {rtt_ms} ms RTT, {hops} hop(s)")
+            }
+            DeliveryEvidence::Response => "Unexpected probe response.".into(),
+        },
+    }
+}
+
+fn ingest_delivery(state: &Shared, delivery: Delivery<'_>) {
+    let plaintext = match &delivery {
+        Delivery::Single(single) => single.plaintext,
+        Delivery::Link(link) => link.plaintext,
+        Delivery::Plain(plain) => plain.payload,
+        Delivery::Group(group) => group.plaintext,
+    };
+    // Opaque probes (and other non-LXMF singles) must not spam Chats as "unparsed".
+    // Without a sender address in the payload we also cannot list the prober on Others.
+    if matches!(delivery, Delivery::Single(_))
+        && plaintext.len() <= PROBE_PAYLOAD_LEN
+        && lxmf::unpack_lxmf_bytes(plaintext).is_none()
+    {
+        return;
+    }
+    ingest_lxmf_bytes(state, plaintext, "packet");
+}
+
 fn ingest_lxmf_bytes(state: &Shared, data: &[u8], via: &str) {
     if let Some(parsed) = lxmf::unpack_lxmf_bytes(data) {
         let text = if parsed.title.is_empty() {
@@ -528,13 +665,7 @@ async fn run_session(state: Arc<Shared>) -> SessionEnd {
                 event_state.push_heard(destination, hops, source_interface);
             }
             PrnsEvent::Message(Message::Delivered(delivery)) => {
-                let plaintext = match &delivery {
-                    Delivery::Single(single) => single.plaintext,
-                    Delivery::Link(link) => link.plaintext,
-                    Delivery::Plain(plain) => plain.payload,
-                    Delivery::Group(group) => group.plaintext,
-                };
-                ingest_lxmf_bytes(&event_state, plaintext, "packet");
+                ingest_delivery(&event_state, delivery);
             }
             PrnsEvent::Message(Message::Resource { data, .. }) => {
                 ingest_lxmf_bytes(&event_state, data, "resource");
@@ -638,6 +769,18 @@ async fn run_session(state: Arc<Shared>) -> SessionEnd {
                             );
                         }
                     }
+                }
+                Command::Probe { destination_hex } => {
+                    let peer_bytes = match parse_dest_hex(&destination_hex) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            cmd_state.set_probe_toast(error);
+                            continue;
+                        }
+                    };
+                    let destination = DestinationHash::new(peer_bytes);
+                    let message = run_probe(&cmd_handle, &cmd_state, destination).await;
+                    cmd_state.set_probe_toast(message);
                 }
             }
         }

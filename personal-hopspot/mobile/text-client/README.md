@@ -46,6 +46,7 @@ Requires OS location permission (declared in `Dioxus.toml`). Desktop uses CoreLo
 
 **Others tab details**
 
+- Paste a **32-character destination hash** in the row at the top and tap **Find** to path-probe a peer (like `prnsd probe`). A successful probe adds them to the list with hop count and round-trip time.
 - Each peer gets a default alias (`Alias 1`, `Alias 2`, …). Tap the alias to rename it.
 - Tap anywhere else on the row to open that peer in **Chats**.
 - The tab badge clears when you visit **Others**; unread message dots clear when you open that peer’s chat.

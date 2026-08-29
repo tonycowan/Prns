@@ -41,6 +41,8 @@ pub fn App() -> Element {
     let mut peers_seeded = use_signal(|| false);
     let mut viewed_inbound_seq = use_signal(HashMap::<String, u64>::new);
     let mut range_busy = use_signal(|| false);
+    let mut probe_address = use_signal(String::new);
+    let mut probe_busy = use_signal(|| false);
 
     use_future(move || async move {
         let mut saw_auto_peer = false;
@@ -91,6 +93,11 @@ pub fn App() -> Element {
                     #[cfg(feature = "live")]
                     crate::engine::restore_auto_reply(prompt);
                 }
+            }
+
+            if let Some(message) = backend::take_probe_toast() {
+                probe_busy.set(false);
+                show_toast(toast, message);
             }
 
             snap.set(next);
@@ -278,6 +285,25 @@ pub fn App() -> Element {
         });
     };
 
+    let find_peer = move |_| {
+        if probe_busy() {
+            return;
+        }
+        let address = probe_address().trim().to_string();
+        if address.is_empty() {
+            flash("Paste a destination hash first.".to_string());
+            return;
+        }
+        probe_busy.set(true);
+        match backend::request_probe(address) {
+            Ok(()) => {}
+            Err(error) => {
+                probe_busy.set(false);
+                flash(error);
+            }
+        }
+    };
+
     rsx! {
         div { class: "app",
             header { class: "top",
@@ -326,6 +352,11 @@ pub fn App() -> Element {
                             selected: peer_now.clone(),
                             unread: unread_peers.clone(),
                             editing: editing_alias(),
+                            probe_address,
+                            probe_busy: probe_busy(),
+                            connected,
+                            on_probe_address: move |value| probe_address.set(value),
+                            on_find: find_peer,
                             on_select: select_peer,
                             on_edit_alias: move |hex| editing_alias.set(Some(hex)),
                             on_save_alias: set_alias,
@@ -700,20 +731,44 @@ fn OthersTab(
     selected: String,
     unread: HashSet<String>,
     editing: Option<String>,
+    probe_address: Signal<String>,
+    probe_busy: bool,
+    connected: bool,
+    on_probe_address: EventHandler<String>,
+    on_find: EventHandler<()>,
     on_select: EventHandler<String>,
     on_edit_alias: EventHandler<String>,
     on_save_alias: EventHandler<(String, String)>,
     on_cancel_edit: EventHandler<()>,
 ) -> Element {
     let rows = build_other_rows(&heard, &messages);
+    let can_find = connected && !probe_busy && !probe_address().trim().is_empty();
 
     rsx! {
         div { class: "tab-pane others-pane",
-            if rows.is_empty() {
-                p { class: "empty", "None yet — announce from another peer on the mesh." }
-            } else {
-                ul { class: "heard-list",
-                    for row in rows.iter() {
+            ul { class: "heard-list",
+                li { class: "probe-row",
+                    input {
+                        class: "probe-input",
+                        r#type: "text",
+                        placeholder: "Destination hash (32 hex)…",
+                        value: "{probe_address}",
+                        disabled: !connected || probe_busy,
+                        oninput: move |event| on_probe_address.call(event.value()),
+                        onkeydown: move |event| {
+                            if event.key() == Key::Enter && can_find {
+                                on_find.call(());
+                            }
+                        },
+                    }
+                    button {
+                        class: "probe-find",
+                        disabled: !can_find,
+                        onclick: move |_| on_find.call(()),
+                        if probe_busy { "…" } else { "Find" }
+                    }
+                }
+                for row in rows.iter() {
                         {
                             let (hex, announced) = match row {
                                 OtherRow::Announced(entry) => {
@@ -798,8 +853,10 @@ fn OthersTab(
                                 }
                             }
                         }
-                    }
                 }
+            }
+            if rows.is_empty() {
+                p { class: "empty", "None yet — paste a hash above or wait for an announce." }
             }
         }
     }

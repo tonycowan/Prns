@@ -95,3 +95,26 @@ pub fn set_auto_range_session(session: Option<AutoRangeSession>) {
         let _ = session;
     }
 }
+
+pub fn request_probe(destination_hex: String) -> Result<(), String> {
+    #[cfg(feature = "live")]
+    {
+        return engine::request_probe(destination_hex);
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        let _ = destination_hex;
+        Err("Probe needs the desktop/mobile build (Hopspot LocalClient).".into())
+    }
+}
+
+pub fn take_probe_toast() -> Option<String> {
+    #[cfg(feature = "live")]
+    {
+        return engine::take_probe_toast();
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        None
+    }
+}

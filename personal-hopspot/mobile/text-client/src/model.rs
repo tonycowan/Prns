@@ -135,8 +135,19 @@ pub fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
+/// Strip whitespace and optional angle brackets from a pasted destination hash.
+pub fn normalize_dest_hex(input: &str) -> String {
+    input
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
 pub fn parse_dest_hex(hex: &str) -> Result<[u8; 16], String> {
-    let hex = hex.trim();
+    let hex = normalize_dest_hex(hex);
     if hex.len() != 32 {
         return Err("Destination hash must be 32 hex characters.".into());
     }
@@ -146,4 +157,23 @@ pub fn parse_dest_hex(hex: &str) -> Result<[u8; 16], String> {
         out[i] = u8::from_str_radix(s, 16).map_err(|_| format!("bad hex at byte {i}"))?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_dest_hex_strips_brackets_and_spaces() {
+        assert_eq!(
+            normalize_dest_hex("  <86c08aa4 a982a566 aca7425b e56ae478>  "),
+            "86c08aa4a982a566aca7425be56ae478"
+        );
+    }
+
+    #[test]
+    fn parse_dest_hex_accepts_bracketed_paste() {
+        let bytes = parse_dest_hex("<86c08aa4a982a566aca7425be56ae478>").expect("parse");
+        assert_eq!(hex_bytes(&bytes), "86c08aa4a982a566aca7425be56ae478");
+    }
 }
