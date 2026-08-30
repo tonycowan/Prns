@@ -64,7 +64,7 @@ pub enum RangePromptKind {
 /// Role in an auto range-check session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum AutoRangeRole {
-    /// Initiator: sends `Range check` every 10s.
+    /// Initiator: sends `Range check` 10s after each completed ping.
     Driver,
     /// Acceptor: silent auto-replies only (does not ping).
     Responder,

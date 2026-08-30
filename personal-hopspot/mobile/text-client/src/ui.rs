@@ -104,35 +104,56 @@ pub fn App() -> Element {
         }
     });
 
-    // Only the initiating Driver sends Range check every 10s.
+    // Driver: one Range check at a time; wait 10s after each completed send
+    // (GPS + delivery proof) before starting the next.
     use_future(move || async move {
+        // Peer for which we already applied the post-start gap (opening
+        // "Auto range check" counts as the first completed send).
+        let mut gap_armed_for: Option<String> = None;
         loop {
-            sleep_ms(range_check::AUTO_RANGE_INTERVAL_MS).await;
-            let Some(peer) = snap.read().auto_range.as_ref().and_then(|session| {
+            let peer = snap.read().auto_range.as_ref().and_then(|session| {
                 (session.role == AutoRangeRole::Driver).then(|| session.peer_hex.clone())
-            }) else {
+            });
+            let Some(peer) = peer else {
+                gap_armed_for = None;
+                sleep_ms(250).await;
                 continue;
             };
-            if range_busy() {
-                continue;
-            }
             if !matches!(snap.read().phase, ConnectionPhase::Connected) {
+                sleep_ms(250).await;
                 continue;
             }
-            range_busy.set(true);
-            spawn(async move {
-                match location::current_fix().await {
-                    Ok(point) => {
-                        let wired = range_check::format_request(point);
-                        match backend::request_send(peer, wired) {
-                            Ok(()) => {}
-                            Err(error) => show_toast(toast, error),
-                        }
-                    }
-                    Err(error) => show_toast(toast, error.label()),
+            if range_busy() {
+                sleep_ms(250).await;
+                continue;
+            }
+
+            // Opening Auto range check completed and armed the session — wait a
+            // full gap before the first cycle ping. Interruptible on stop.
+            if gap_armed_for.as_ref() != Some(&peer) {
+                gap_armed_for = Some(peer.clone());
+                if !sleep_auto_gap(snap, &peer).await {
+                    gap_armed_for = None;
                 }
-                range_busy.set(false);
-            });
+                continue;
+            }
+
+            range_busy.set(true);
+            match location::current_fix().await {
+                Ok(point) => {
+                    let wired = range_check::format_request(point);
+                    match backend::request_send_wait(peer.clone(), wired).await {
+                        Ok(()) => {}
+                        Err(error) => show_toast(toast, error),
+                    }
+                }
+                Err(error) => show_toast(toast, error.label()),
+            }
+            range_busy.set(false);
+
+            if !sleep_auto_gap(snap, &peer).await {
+                gap_armed_for = None;
+            }
         }
     });
 
@@ -203,7 +224,9 @@ pub fn App() -> Element {
                 match location::current_fix().await {
                     Ok(point) => {
                         let wired = range_check::format_auto_request(point);
-                        match backend::request_send(peer.clone(), wired) {
+                        // Await proof so the session (and 10s cycle gap) starts
+                        // only after the opening ping has actually completed.
+                        match backend::request_send_wait(peer.clone(), wired).await {
                             Ok(()) => {
                                 backend::set_auto_range_session(Some(AutoRangeSession {
                                     peer_hex: peer,
@@ -422,6 +445,26 @@ fn show_toast(mut toast: Signal<Option<String>>, message: String) {
         sleep_ms(2_000).await;
         toast.set(None);
     });
+}
+
+fn still_auto_driver(snap: Signal<Snapshot>, peer: &str) -> bool {
+    snap.read().auto_range.as_ref().is_some_and(|session| {
+        session.role == AutoRangeRole::Driver && session.peer_hex == peer
+    })
+}
+
+/// Sleep the auto-range gap in short slices so `stop` is noticed quickly.
+/// Returns false if the Driver session ended during the wait.
+async fn sleep_auto_gap(snap: Signal<Snapshot>, peer: &str) -> bool {
+    let mut waited = 0u64;
+    while waited < range_check::AUTO_RANGE_INTERVAL_MS {
+        if !still_auto_driver(snap, peer) {
+            return false;
+        }
+        sleep_ms(250).await;
+        waited += 250;
+    }
+    still_auto_driver(snap, peer)
 }
 
 async fn send_range_reply(
@@ -994,7 +1037,7 @@ fn ChatsTab(
                 if auto_active {
                     div { class: "auto-range-banner",
                         if auto_driving {
-                            "Auto range check: sending every 10s — send stop to end"
+                            "Auto range check: next ping 10s after each completes — send stop to end"
                         } else {
                             "Auto range check: auto-replying — send stop to end"
                         }

@@ -12,7 +12,7 @@ pub const RANGE_CHECK_PHRASE: &str = "Range check";
 pub const AUTO_RANGE_CHECK_PHRASE: &str = "Auto range check";
 /// Phrase that stops an auto range-check session.
 pub const STOP_PHRASE: &str = "stop";
-/// Interval between auto cycle pings.
+/// Pause after a completed auto cycle ping before starting the next one.
 pub const AUTO_RANGE_INTERVAL_MS: u64 = 10_000;
 
 const EARTH_RADIUS_M: f64 = 6_371_000.0;

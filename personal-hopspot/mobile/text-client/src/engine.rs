@@ -56,7 +56,13 @@ fn format_source_interface(id: InterfaceId) -> String {
 
 enum Command {
     Announce,
-    Send { peer_hex: String, text: String },
+    Send {
+        peer_hex: String,
+        text: String,
+        /// When set, notified after `send_single_packet` finishes (proof or error).
+        /// Uses std mpsc so UI futures (Dioxus) can poll without a Tokio runtime handle.
+        done: Option<std::sync::mpsc::Sender<Result<(), String>>>,
+    },
     Probe { destination_hex: String },
 }
 
@@ -311,7 +317,7 @@ pub fn request_announce() -> Result<(), String> {
         .map_err(|_| "Engine stopped.".to_string())
 }
 
-pub fn request_send(peer_hex: String, text: String) -> Result<(), String> {
+fn prepare_send(peer_hex: &str, text: &str) -> Result<String, String> {
     let text = text.trim().to_string();
     if text.is_empty() {
         return Err("Message is empty.".into());
@@ -319,14 +325,47 @@ pub fn request_send(peer_hex: String, text: String) -> Result<(), String> {
     if text.len() > 240 {
         return Err("Keep messages under ~240 characters for opportunistic LXMF.".into());
     }
-    let _ = parse_dest_hex(&peer_hex)?;
+    let _ = parse_dest_hex(peer_hex)?;
     let state = shared();
-    if range_check::is_stop(&text) && auto_peer_matches(&state, &peer_hex) {
+    if range_check::is_stop(&text) && auto_peer_matches(&state, peer_hex) {
         clear_auto_session(&state);
     }
+    Ok(text)
+}
+
+pub fn request_send(peer_hex: String, text: String) -> Result<(), String> {
+    let text = prepare_send(&peer_hex, &text)?;
     require_connected_commands()?
-        .send(Command::Send { peer_hex, text })
+        .send(Command::Send {
+            peer_hex,
+            text,
+            done: None,
+        })
         .map_err(|_| "Engine stopped.".to_string())
+}
+
+/// Queue a send and wait until delivery proof (or send failure) is recorded.
+pub async fn request_send_wait(peer_hex: String, text: String) -> Result<(), String> {
+    let text = prepare_send(&peer_hex, &text)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    require_connected_commands()?
+        .send(Command::Send {
+            peer_hex,
+            text,
+            done: Some(tx),
+        })
+        .map_err(|_| "Engine stopped.".to_string())?;
+    loop {
+        match rx.try_recv() {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                crate::timeutil::sleep_ms(50).await;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err("Engine stopped.".into());
+            }
+        }
+    }
 }
 
 fn auto_peer_matches(state: &Shared, peer_hex: &str) -> bool {
@@ -719,16 +758,27 @@ async fn run_session(state: Arc<Shared>) -> SessionEnd {
                         }
                     }
                 }
-                Command::Send { peer_hex, text } => {
+                Command::Send {
+                    peer_hex,
+                    text,
+                    done,
+                } => {
+                    let finish = |result: Result<(), String>| {
+                        if let Some(done) = done {
+                            let _ = done.send(result);
+                        }
+                    };
                     let peer_bytes = match parse_dest_hex(&peer_hex) {
                         Ok(bytes) => bytes,
                         Err(error) => {
+                            let status = format!("bad peer: {error}");
                             cmd_state.push_message(
                                 ChatDirection::Out,
                                 peer_hex,
                                 text,
-                                format!("bad peer: {error}"),
+                                status.clone(),
                             );
+                            finish(Err(status));
                             continue;
                         }
                     };
@@ -742,12 +792,14 @@ async fn run_session(state: Arc<Shared>) -> SessionEnd {
                     ) {
                         Ok(packed) => packed,
                         Err(error) => {
+                            let status = format!("pack: {error}");
                             cmd_state.push_message(
                                 ChatDirection::Out,
                                 peer_hex,
                                 text,
-                                format!("pack: {error}"),
+                                status.clone(),
                             );
+                            finish(Err(status));
                             continue;
                         }
                     };
@@ -759,14 +811,17 @@ async fn run_session(state: Arc<Shared>) -> SessionEnd {
                                 text,
                                 "sent".into(),
                             );
+                            finish(Ok(()));
                         }
                         Err(error) => {
+                            let status = format!("send: {error:?}");
                             cmd_state.push_message(
                                 ChatDirection::Out,
                                 peer_hex,
                                 text,
-                                format!("send: {error:?}"),
+                                status.clone(),
                             );
+                            finish(Err(status));
                         }
                     }
                 }

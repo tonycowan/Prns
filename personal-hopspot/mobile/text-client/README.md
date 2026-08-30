@@ -149,7 +149,7 @@ Identity is created on first launch and reused on later runs (stable destination
 | Heard | Lists `AnnounceHeard` diagnostics; Others rows show last-heard time, hop count, and a compact source-interface label (`kind · channel-hash`) |
 | Send / receive | Opportunistic and direct LXMF (Sideband-compatible short texts) |
 | Range check | Sender attaches GPS; receiver Accept replies with `(lat, lon) - distance` |
-| Auto range check | Initiator pings every 10s; peer auto-replies until either side sends `stop` |
+| Auto range check | Initiator pings 10s after each completed send; peer auto-replies until either side sends `stop` |
 
 ## Out of scope (for now)
 

@@ -60,6 +60,20 @@ pub fn request_send(peer_hex: String, text: String) -> Result<(), String> {
     }
 }
 
+/// Await delivery proof (or send failure). Used by auto range so the next ping
+/// starts only after the previous one has finished.
+pub async fn request_send_wait(peer_hex: String, text: String) -> Result<(), String> {
+    #[cfg(feature = "live")]
+    {
+        return engine::request_send_wait(peer_hex, text).await;
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        let _ = (peer_hex, text);
+        Err("Send needs the desktop/mobile build (Hopspot LocalClient).".into())
+    }
+}
+
 pub fn clear_range_prompt() {
     #[cfg(feature = "live")]
     engine::clear_range_prompt();
