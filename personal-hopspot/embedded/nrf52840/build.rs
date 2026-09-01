@@ -63,6 +63,7 @@ fn main() {
     println!("cargo:rustc-link-arg=-Tlink.x");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PRNS_LORA_PROFILE");
+    println!("cargo:rerun-if-env-changed=PRNS_BLE_DISCOVERY_GROUP");
 }
 
 fn write_nrf52840_memory(out: &Path, layout: Nrf52840FirmwareMemory) {

@@ -3,11 +3,18 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 crate="$root/personal-hopspot/embedded/nrf52840"
-# Optional lab override: PRNS_LORA_PROFILE=montreal for the Montreal LoRa mesh channel.
+# Optional lab overrides:
+#   PRNS_LORA_PROFILE=montreal for the Montreal LoRa mesh channel.
+#   PRNS_BLE_DISCOVERY_GROUP=mt-leg-a|mt-leg-b (or any string).
+# BLE group hashes into the SoftDevice ADV tag; it does not change BLE identity flash.
 lora_profile="${PRNS_LORA_PROFILE:-}"
+discovery_group="${PRNS_BLE_DISCOVERY_GROUP:-}"
 artifact_suffix=""
 if [[ -n "$lora_profile" && "$lora_profile" != "default" ]]; then
     artifact_suffix="-${lora_profile//[^A-Za-z0-9._-]/_}"
+fi
+if [[ -n "$discovery_group" ]]; then
+    artifact_suffix="${artifact_suffix}-${discovery_group//[^A-Za-z0-9._-]/_}"
 fi
 output="$root/target/hopspot-mesh-tower-v2${artifact_suffix}"
 cargo_target="$output/cargo"
@@ -45,6 +52,12 @@ mkdir -p "$output"
         printf 'MeshTower V2 LoRa profile: %s\n' "$lora_profile"
     else
         unset PRNS_LORA_PROFILE
+    fi
+    if [[ -n "$discovery_group" ]]; then
+        export PRNS_BLE_DISCOVERY_GROUP="$discovery_group"
+        printf 'MeshTower V2 BLE discovery group: %s\n' "$discovery_group"
+    else
+        unset PRNS_BLE_DISCOVERY_GROUP
     fi
     cargo build --release --locked --no-default-features \
         --features board-mesh-tower-v2,softdevice-s140-v6 \
