@@ -213,7 +213,9 @@ fn drive_ready_work(
                         interfaces,
                         now,
                         &mut |bytes| entropy.fill(bytes),
-                        &mut |reaction| capture.absorb(reaction, scratch),
+                        &mut |reaction: EngineReaction<'_, OwedWork<'_>>| {
+                            capture.absorb(reaction, scratch)
+                        },
                     );
                 }
                 CryptoOwed::TunnelSynthesizeVerify(owed) => {

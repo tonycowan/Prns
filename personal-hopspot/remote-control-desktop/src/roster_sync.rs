@@ -1100,7 +1100,11 @@ impl RequestEndpoint<ControllerAppState> for RosterSync {
                 };
                 context.respond(reply)
             }
-            Some(RosterInbound::Error(_)) | None => {
+            Some(RosterInbound::Error(code)) => {
+                drop(shared);
+                context.respond([RosterMessageKind::Error as u8, code])
+            }
+            None => {
                 drop(shared);
                 context.respond([
                     RosterMessageKind::Error as u8,

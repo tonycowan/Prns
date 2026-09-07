@@ -93,6 +93,7 @@ const ROSTER_ANNOUNCE_GAP: Duration = Duration::from_secs(30);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteControlAnnounceWait {
     UntilHeard,
+    #[allow(dead_code)]
     UntilRefreshed,
 }
 
@@ -886,11 +887,6 @@ impl RemoteControlBackend {
                 Ok(())
             }
         }
-    }
-
-    pub async fn interfaces(&self, target_id: &str) -> Result<Vec<InterfaceEntry>, BackendError> {
-        self.interfaces_after_announce(target_id, RemoteControlAnnounceWait::UntilHeard)
-            .await
     }
 
     pub async fn interfaces_after_announce(
@@ -4361,6 +4357,7 @@ fn format_hop_count(hops: u8) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn format_target_announce(path: Option<&TargetPath>) -> String {
     match path {
         Some(path) => format!("Last announce {}", path.announced_at),

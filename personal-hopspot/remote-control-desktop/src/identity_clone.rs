@@ -154,7 +154,7 @@ impl IdentityCloneConfirmationCode {
 
 impl core::fmt::Display for IdentityCloneConfirmationCode {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(formatter, "{:06}", self.0)
+        write!(formatter, "{:06}", self.value())
     }
 }
 

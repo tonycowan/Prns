@@ -1,4 +1,6 @@
-use crate::interfaces::{InterfaceDescriptor, InterfaceId, InterfaceMode};
+#[cfg(feature = "alloc")]
+use crate::interfaces::InterfaceMode;
+use crate::interfaces::{InterfaceDescriptor, InterfaceId};
 #[cfg(feature = "alloc")]
 use crate::lemire_index::HeapLemireIndex;
 
