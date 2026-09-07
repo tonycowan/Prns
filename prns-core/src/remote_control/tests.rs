@@ -422,7 +422,10 @@ fn protocol_discriminants_are_stable_typed_values() {
         RemoteControlRequestKind::AuthorizeController.wire_value(),
         0x0F
     );
-    assert_eq!(RemoteControlRequestKind::RevokeController.wire_value(), 0x10);
+    assert_eq!(
+        RemoteControlRequestKind::RevokeController.wire_value(),
+        0x10
+    );
     assert_eq!(RemoteControlResponseKind::Describe.wire_value(), 0x01);
     assert_eq!(RemoteControlResponseKind::AnnounceSelf.wire_value(), 0x02);
     assert_eq!(

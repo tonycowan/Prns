@@ -1,15 +1,15 @@
 //! Compact interface inventory carried by Remote Control InventoryInterfaces responses.
 
-use crate::identity::{IdentityHash, PublicIdentityMaterial, IDENTITY_PUBLIC_KEY_LEN};
-use crate::interfaces::lora::RadioProfile;
-use crate::interfaces::{
-    ConnectionState, InterfaceId, InterfaceKind, InterfaceMode, RadioIndication, INTERFACE_ID_LEN,
-};
 use super::{
     RemoteControlControllerGrant, RemoteControlControllerGrantTable,
     RemoteControlControllerIdentity, RemoteControlRequestSet, RevokeRemoteControlControllerOutcome,
     SetRemoteControlControllerGrantError, SetRemoteControlControllerGrantOutcome,
     DEFAULT_MAX_REMOTE_CONTROL_CONTROLLER_GRANTS,
+};
+use crate::identity::{IdentityHash, PublicIdentityMaterial, IDENTITY_PUBLIC_KEY_LEN};
+use crate::interfaces::lora::RadioProfile;
+use crate::interfaces::{
+    ConnectionState, InterfaceId, InterfaceKind, InterfaceMode, RadioIndication, INTERFACE_ID_LEN,
 };
 use crate::wire::TRUNCATED_HASH_BYTE_LEN;
 
@@ -873,10 +873,9 @@ pub struct RemoteControlControllerInventory {
 }
 
 impl RemoteControlControllerInventory {
-    pub const MAX_ENCODED_LEN: usize =
-        1usize.saturating_add(DEFAULT_MAX_REMOTE_CONTROL_CONTROLLER_GRANTS.saturating_mul(
-            TRUNCATED_HASH_BYTE_LEN,
-        ));
+    pub const MAX_ENCODED_LEN: usize = 1usize.saturating_add(
+        DEFAULT_MAX_REMOTE_CONTROL_CONTROLLER_GRANTS.saturating_mul(TRUNCATED_HASH_BYTE_LEN),
+    );
 
     #[must_use]
     pub fn empty() -> Self {
