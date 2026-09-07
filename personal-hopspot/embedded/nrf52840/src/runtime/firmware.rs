@@ -17,7 +17,7 @@ use personal_rns::engine::{AnnounceAppData, AnnounceNow, AnnounceTarget, PrnsCom
 use personal_rns::interfaces::bluetooth_auto::{Endpoint, LinkCapabilities, Nrf52Host, BLE_HW_MTU};
 use personal_rns::interfaces::lora::{AirtimePolicy, RadioProfile, DEFAULT_915_PROFILE};
 use personal_rns::interfaces::usb_auto::{WEBUSB_PRODUCT_ID, WEBUSB_VENDOR_ID};
-use personal_rns::interfaces::{ConnectionState, InterfaceId};
+use personal_rns::interfaces::{ConnectionState, InterfaceId, InterfaceStatus};
 use personal_rns::lora::{LoRaApplyOutcome, LoRaInterface, LoRaInterfaceInput, LoRaSpectrumStatus};
 use personal_rns::manifold::embassy::{EmbassyHost, EmbassyInterfaceStatus};
 use personal_rns::manifold::interface_seam::Interface;
