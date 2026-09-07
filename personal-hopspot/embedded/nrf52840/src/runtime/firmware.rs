@@ -549,7 +549,9 @@ pub async fn run(spawner: Spawner) -> ! {
         let mut battery_gauge = hopspot::BatteryGauge::lipo();
         let mut persistence_notice = hopspot::PersistenceNotice::new();
         let mut controller_sleep_pending = false;
-        let mut pending_remote_pairing = None;
+        let mut pending_remote_pairing: Option<
+            personal_rns::runtime::RemoteControlTargetPairingConfirmation,
+        > = None;
         loop {
             if controller_sleep_pending && display.deep_sleep().await.is_ok() {
                 controller_sleep_pending = false;

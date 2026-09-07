@@ -767,7 +767,9 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         let mut first_render_pending = true;
         let mut first_render_started = false;
         let mut presentation_urgency = PresentationUrgency::Immediate;
-        let mut pending_remote_pairing = None;
+        let mut pending_remote_pairing: Option<
+            personal_rns::runtime::RemoteControlTargetPairingConfirmation,
+        > = None;
         loop {
             if ticks_to_battery_sample == 0 {
                 sampled_battery_state = battery_gauge.sample(&mut battery_source);
