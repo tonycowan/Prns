@@ -540,7 +540,9 @@ fn describe_build_carries_a_length_prefixed_version_and_rejects_trailers() {
     let response = RemoteControlResponse::DescribeBuild(version);
     let mut response_bytes = [0u8; RemoteControlResponse::MAX_ENCODED_LEN];
     let written = response.write_into(&mut response_bytes).unwrap();
-    let encoded = response_bytes.get(..written).expect("encode stays in buffer");
+    let encoded = response_bytes
+        .get(..written)
+        .expect("encode stays in buffer");
     assert_eq!(RemoteControlResponse::parse(encoded), Ok(response));
     let mut trailing = encoded.to_vec();
     trailing.push(0x00);
