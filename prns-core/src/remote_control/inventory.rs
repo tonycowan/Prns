@@ -157,7 +157,6 @@ impl RemoteControlInterfaceCard {
 impl RemoteControlInterfaceEntry {
     pub const ENCODED_LEN: usize = REMOTE_CONTROL_INTERFACE_ENTRY_ENCODED_LEN;
 
-    #[must_use]
     pub fn write_into(
         self,
         out: &mut [u8],
@@ -465,6 +464,7 @@ impl RemoteControlInterfacePeerPage {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteControlInterfacePeersOutcome {
     Page(RemoteControlInterfacePeerPage),
@@ -574,6 +574,7 @@ impl RemoteControlInterfacePeersOutcome {
 const INTERFACE_CONFIG_CARD_TAG: u8 = 0x01;
 const INTERFACE_CONFIG_UNKNOWN_TAG: u8 = 0x02;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteControlInterfaceConfigOutcome {
     Card(RemoteControlInterfaceCard),

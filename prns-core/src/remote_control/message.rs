@@ -1043,6 +1043,7 @@ impl From<RemoteControlRequestParseError> for RemoteControlProtocolError {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteControlResponse {
     Describe(RemoteControlDescription),

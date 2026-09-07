@@ -159,7 +159,7 @@ impl RadioIndication {
         }
     }
 
-    pub fn write_into<'a>(self, out: &'a mut [u8]) -> Option<&'a mut [u8]> {
+    pub fn write_into(self, out: &mut [u8]) -> Option<&mut [u8]> {
         let (tag_out, rest) = out.split_first_mut()?;
         match self {
             Self::NotRadio => {

@@ -540,11 +540,9 @@ fn describe_build_carries_a_length_prefixed_version_and_rejects_trailers() {
     let response = RemoteControlResponse::DescribeBuild(version);
     let mut response_bytes = [0u8; RemoteControlResponse::MAX_ENCODED_LEN];
     let written = response.write_into(&mut response_bytes).unwrap();
-    assert_eq!(
-        RemoteControlResponse::parse(&response_bytes[..written]),
-        Ok(response)
-    );
-    let mut trailing = response_bytes[..written].to_vec();
+    let encoded = response_bytes.get(..written).expect("encode stays in buffer");
+    assert_eq!(RemoteControlResponse::parse(encoded), Ok(response));
+    let mut trailing = encoded.to_vec();
     trailing.push(0x00);
     assert_eq!(
         RemoteControlResponse::parse(&trailing),
@@ -982,7 +980,7 @@ fn message_writers_use_only_their_reported_prefix_and_refuse_short_buffers() {
     expected.push(0x5A);
     assert_eq!(response_bytes, expected);
     assert_eq!(
-        response.write_into(&mut response_bytes[..3]),
+        response.write_into(response_bytes.get_mut(..3).expect("3-byte prefix exists")),
         Err(RemoteControlMessageWriteError::BufferTooShort),
     );
 }
@@ -1049,7 +1047,10 @@ fn inventory_power_and_sleep_messages_round_trip() {
     ] {
         let mut bytes = [0u8; RemoteControlRequest::MAX_ENCODED_LEN];
         let written = request.write_into(&mut bytes).unwrap();
-        assert_eq!(RemoteControlRequest::parse(&bytes[..written]), Ok(request));
+        assert_eq!(
+            RemoteControlRequest::parse(bytes.get(..written).expect("encode stays in buffer")),
+            Ok(request)
+        );
     }
 
     let mut inventory = RemoteControlInterfaceInventory::empty();
@@ -1144,7 +1145,7 @@ fn inventory_power_and_sleep_messages_round_trip() {
         let mut bytes = [0u8; RemoteControlResponse::MAX_ENCODED_LEN];
         let written = response.write_into(&mut bytes).unwrap();
         assert_eq!(
-            RemoteControlResponse::parse(&bytes[..written]),
+            RemoteControlResponse::parse(bytes.get(..written).expect("encode stays in buffer")),
             Ok(response)
         );
     }
@@ -1189,7 +1190,7 @@ fn inventory_power_and_sleep_messages_round_trip() {
         .write_into(&mut bytes)
         .unwrap();
     assert_eq!(
-        RemoteControlResponse::parse(&bytes[..written]),
+        RemoteControlResponse::parse(bytes.get(..written).expect("encode stays in buffer")),
         Ok(RemoteControlResponse::InventoryInterfaces(detailed))
     );
 }
