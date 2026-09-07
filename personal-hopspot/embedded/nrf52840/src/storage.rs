@@ -60,6 +60,7 @@ impl Nrf52840Storage {
     const REQUEST_HANDLERS: usize =
         <personal_hopspot_core::node_pages::NodePageRoutes as RequestEndpointSet<()>>::REGISTRATIONS
             .len() + REMOTE_CONTROL_STORAGE.request_handlers();
+    // Remote Control advertises two handlers: live `/remote-control` plus Pair remote.
     pub const LINK_SESSIONS: usize = 32;
     const TRANSPORTED_LINKS: usize = 4;
     const CHANNELS: usize = 1;

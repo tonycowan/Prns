@@ -62,6 +62,8 @@ struct ListenerState {
     no_auth: bool,
 }
 
+impl personal_rns::runtime::RemoteControlHostControls for ListenerState {}
+
 enum ListenerEvent {
     Established(LinkId),
     Identified(LinkId, IdentityHash),

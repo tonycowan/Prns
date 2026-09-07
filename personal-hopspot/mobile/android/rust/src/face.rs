@@ -94,7 +94,10 @@ impl HopspotFace {
             | UiAction::OpenLoRaEditor
             | UiAction::SetLoRaProfile(_)
             | UiAction::ResetLoRaProfile
-            | UiAction::SwapRadioMode => {}
+            | UiAction::SwapRadioMode
+            | UiAction::OpenRemotePairing
+            | UiAction::ApproveRemotePairing
+            | UiAction::RejectRemotePairing => {}
         }
         action
     }
@@ -208,6 +211,7 @@ mod tests {
             links,
             transported_links: 0,
             membership: Membership::Independent,
+            radio: personal_rns::interfaces::RadioIndication::NotRadio,
         }
     }
 

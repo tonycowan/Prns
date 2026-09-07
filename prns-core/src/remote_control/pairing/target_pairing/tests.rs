@@ -888,11 +888,7 @@ fn persisted_authorization_retains_one_exact_replayable_completion_until_its_dea
             &fixture.target_signer,
             InstantMillis(AUTHORIZATION_PERSISTED_AT.0 + 1),
         ),
-        PersistRemoteControlTargetPairingAuthorizationOutcome::CompletionOwed {
-            attempt_id,
-            responder: initial_responder,
-            completed,
-        },
+        PersistRemoteControlTargetPairingAuthorizationOutcome::AlreadyDispatched { attempt_id },
     );
     let retried_responder = fixture.commit(0x62).responder();
     assert_eq!(

@@ -35,7 +35,9 @@ fn embedded_cargo_command() -> Command {
     let mut command = Command::new("cargo");
     command
         .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTFLAGS");
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR");
     command
 }
 
@@ -297,8 +299,8 @@ fn build_esp_parts(
     partition_table: &Path,
     version: &str,
 ) -> Result<Vec<BuiltPart>, AppError> {
-    let elf = crate_dir
-        .join("target")
+    let target_dir = crate_dir.join("target");
+    let elf = target_dir
         .join(&build.rust_target)
         .join("release")
         .join(&build.binary);
@@ -313,6 +315,8 @@ fn build_esp_parts(
         .arg(&build.binary)
         .arg("--target")
         .arg(&build.rust_target)
+        .arg("--target-dir")
+        .arg(&target_dir)
         .arg("-Zbuild-std=core,alloc")
         .env("PRNS_BUILD_VERSION", version)
         .current_dir(crate_dir);
@@ -1028,6 +1032,8 @@ mod tests {
         assert_eq!(
             environments,
             BTreeMap::from([
+                (OsStr::new("CARGO_BUILD_TARGET_DIR"), None),
+                (OsStr::new("CARGO_TARGET_DIR"), None),
                 (OsStr::new("RUSTFLAGS"), None),
                 (OsStr::new("RUSTUP_TOOLCHAIN"), None),
             ])

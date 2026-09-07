@@ -95,7 +95,10 @@ impl HopspotFace {
             | UiAction::OpenDocs
             | UiAction::SetLoRaProfile(_)
             | UiAction::ResetLoRaProfile
-            | UiAction::SwapRadioMode => {}
+            | UiAction::SwapRadioMode
+            | UiAction::OpenRemotePairing
+            | UiAction::ApproveRemotePairing
+            | UiAction::RejectRemotePairing => {}
         }
         action
     }

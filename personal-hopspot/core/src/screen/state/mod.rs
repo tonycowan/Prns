@@ -24,10 +24,11 @@ pub(in crate::screen) enum GlobalMenuItem {
     DisplayAutoOff,
     Sleep,
     RadioMode,
+    PairRemote,
     Back,
 }
 
-const GLOBAL_MENU_ORDER: [GlobalMenuItem; 8] = [
+const GLOBAL_MENU_ORDER: [GlobalMenuItem; 9] = [
     GlobalMenuItem::Announce,
     GlobalMenuItem::Limits,
     GlobalMenuItem::Gnss,
@@ -35,6 +36,7 @@ const GLOBAL_MENU_ORDER: [GlobalMenuItem; 8] = [
     GlobalMenuItem::DisplayAutoOff,
     GlobalMenuItem::Sleep,
     GlobalMenuItem::RadioMode,
+    GlobalMenuItem::PairRemote,
     GlobalMenuItem::Back,
 ];
 
@@ -103,6 +105,9 @@ pub enum UiAction {
     SetLoRaProfile(RadioProfile),
     ResetLoRaProfile,
     SwapRadioMode,
+    OpenRemotePairing,
+    ApproveRemotePairing,
+    RejectRemotePairing,
     OpenDocs,
     CopySharedInstanceConfig,
 }
@@ -387,6 +392,13 @@ pub(in crate::screen) enum UiMode {
     ConfirmRadioSwap {
         confirm: bool,
     },
+    RemotePairingInvitation {
+        code: u32,
+    },
+    ConfirmRemotePairing {
+        code: u32,
+        confirm: bool,
+    },
 }
 
 impl UiState {
@@ -455,7 +467,9 @@ impl UiState {
             | UiMode::Sleeping
             | UiMode::InterfaceMenu { .. }
             | UiMode::LoRaEditor { .. }
-            | UiMode::ConfirmRadioSwap { .. } => None,
+            | UiMode::ConfirmRadioSwap { .. }
+            | UiMode::RemotePairingInvitation { .. }
+            | UiMode::ConfirmRemotePairing { .. } => None,
         }
     }
 
@@ -467,7 +481,9 @@ impl UiState {
             | UiMode::LimitsPage { .. }
             | UiMode::Sleeping
             | UiMode::LoRaEditor { .. }
-            | UiMode::ConfirmRadioSwap { .. } => None,
+            | UiMode::ConfirmRadioSwap { .. }
+            | UiMode::RemotePairingInvitation { .. }
+            | UiMode::ConfirmRemotePairing { .. } => None,
         }
     }
 
@@ -477,6 +493,17 @@ impl UiState {
                 cursor: region_index(profile.region),
             },
             profile,
+        };
+    }
+
+    pub fn show_remote_pairing_invitation(&mut self, code: u32) {
+        self.mode = UiMode::RemotePairingInvitation { code };
+    }
+
+    pub fn show_remote_pairing_confirmation(&mut self, code: u32) {
+        self.mode = UiMode::ConfirmRemotePairing {
+            code,
+            confirm: false,
         };
     }
 
@@ -501,6 +528,7 @@ impl UiState {
             GlobalMenuItem::Announce
             | GlobalMenuItem::Limits
             | GlobalMenuItem::Sleep
+            | GlobalMenuItem::PairRemote
             | GlobalMenuItem::Back => true,
         }
     }
@@ -530,6 +558,7 @@ impl UiState {
                 AccessPointState::Inactive => "AP Mode",
                 AccessPointState::Unsupported => "Radio Mode",
             },
+            GlobalMenuItem::PairRemote => "Pair remote",
             GlobalMenuItem::Back => "Back",
         }
     }
@@ -545,7 +574,9 @@ impl UiState {
             | UiMode::LimitsPage { .. }
             | UiMode::Sleeping
             | UiMode::LoRaEditor { .. }
-            | UiMode::ConfirmRadioSwap { .. } => {}
+            | UiMode::ConfirmRadioSwap { .. }
+            | UiMode::RemotePairingInvitation { .. }
+            | UiMode::ConfirmRemotePairing { .. } => {}
             UiMode::InterfaceMenu { .. } if self.selected_card(content.cards).is_none() => {
                 self.mode = UiMode::Cards;
             }
@@ -660,6 +691,10 @@ impl UiState {
                         self.mode = UiMode::ConfirmRadioSwap { confirm: false };
                         UiAction::None
                     }
+                    Some(GlobalMenuItem::PairRemote) => {
+                        self.mode = UiMode::Cards;
+                        UiAction::OpenRemotePairing
+                    }
                     Some(GlobalMenuItem::Back) | None => {
                         self.mode = UiMode::Cards;
                         UiAction::None
@@ -676,6 +711,26 @@ impl UiState {
                     UiAction::SwapRadioMode
                 } else {
                     UiAction::None
+                }
+            }
+            (InputEvent::ShortPress, UiMode::RemotePairingInvitation { .. }) => UiAction::None,
+            (InputEvent::LongPress, UiMode::RemotePairingInvitation { .. }) => {
+                self.mode = UiMode::Cards;
+                UiAction::None
+            }
+            (InputEvent::ShortPress, UiMode::ConfirmRemotePairing { code, confirm }) => {
+                self.mode = UiMode::ConfirmRemotePairing {
+                    code,
+                    confirm: !confirm,
+                };
+                UiAction::None
+            }
+            (InputEvent::LongPress, UiMode::ConfirmRemotePairing { confirm, .. }) => {
+                self.mode = UiMode::Cards;
+                if confirm {
+                    UiAction::ApproveRemotePairing
+                } else {
+                    UiAction::RejectRemotePairing
                 }
             }
             (

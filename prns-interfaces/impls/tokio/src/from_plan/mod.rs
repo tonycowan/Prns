@@ -775,6 +775,13 @@ fn report_up<'a>(
     report: &mut impl FnMut(PlanOutcome<'a>),
 ) {
     let _ = handle.set_interface_name(id, interface.name.clone());
+    if let PlannedMedium::AutoWifi(auto) = &interface.medium {
+        if let Some(group) =
+            prns_core::remote_control::RemoteControlInterfaceGroup::parse(auto.group_id().as_str())
+        {
+            let _ = handle.set_interface_group(id, group);
+        }
+    }
     report(PlanOutcome::Up { interface, id });
 }
 

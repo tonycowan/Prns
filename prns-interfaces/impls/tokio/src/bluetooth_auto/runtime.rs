@@ -217,6 +217,7 @@ enum Step<L: BleLink> {
     Handshake(HandshakeDone<L>),
     Closed(BleIdentity, BleAddress),
     Disabled,
+    GroupChanged,
 }
 
 pub struct BluetoothAuto<B, const MAX_PEERS: usize> {
@@ -282,9 +283,12 @@ pub struct BluetoothAutoStatus {
     shared: Arc<BluetoothAutoShared>,
 }
 
+const DEFAULT_DISCOVERY_GROUP: &[u8] = b"reticulum";
+
 struct BluetoothAutoShared {
     id: InterfaceId,
     enabled: watch::Sender<bool>,
+    group_id: watch::Sender<std::vec::Vec<u8>>,
     up: AtomicBool,
     failed: AtomicBool,
     failure_reason: Mutex<Option<&'static str>>,
@@ -295,10 +299,12 @@ struct BluetoothAutoShared {
 impl BluetoothAutoStatus {
     pub(crate) fn new() -> Self {
         let (enabled, _) = watch::channel(true);
+        let (group_id, _) = watch::channel(DEFAULT_DISCOVERY_GROUP.to_vec());
         Self {
             shared: Arc::new(BluetoothAutoShared {
                 id: InterfaceId::from_channel_tag(InterfaceKind::BluetoothAuto, contract::GROUP_ID),
                 enabled,
+                group_id,
                 up: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
                 failure_reason: Mutex::new(None),
@@ -325,6 +331,24 @@ impl BluetoothAutoStatus {
         if let Ok(mut slot) = self.shared.failure_reason.lock() {
             *slot = None;
         }
+    }
+
+    pub fn set_group_id(&self, group: &[u8]) -> bool {
+        if group.is_empty() || group.len() > 32 {
+            return false;
+        }
+        self.shared.group_id.send_if_modified(|current| {
+            if current.as_slice() == group {
+                return false;
+            }
+            *current = group.to_vec();
+            true
+        });
+        true
+    }
+
+    fn subscribe_group(&self) -> watch::Receiver<std::vec::Vec<u8>> {
+        self.shared.group_id.subscribe()
     }
 
     pub fn enable(&self) {
@@ -489,6 +513,7 @@ where
         status.mark_up();
         manager.start(&mut |action| pending.push(action));
         apply_radio::<B, MAX_PEERS>(&mut pending, &mut members, &mut backend).await;
+        let mut group_rx = status.subscribe_group();
         loop {
             if !status.is_enabled() {
                 let _ = backend.set_advertising(AdvertisingMode::Off).await;
@@ -513,10 +538,30 @@ where
                 event = backend.next_event() => Step::Event(event),
                 Some(done) = handshakes.next(), if !handshakes.is_empty() => Step::Handshake(done),
                 Some((identity, address)) = closed_rx.recv() => Step::Closed(identity, address),
+                changed = group_rx.changed() => {
+                    if changed.is_ok() {
+                        let _ = group_rx.borrow_and_update();
+                        Step::GroupChanged
+                    } else {
+                        continue;
+                    }
+                }
                 () = status.wait_until_disabled() => Step::Disabled,
             };
             match step {
                 Step::Disabled => {}
+                Step::GroupChanged => {
+                    for (_, member) in members.drain() {
+                        member.attached.teardown();
+                        backend.on_link_closed(member.address).await;
+                    }
+                    handshakes = FuturesUnordered::new();
+                    pending.clear();
+                    status.set_members(std::vec::Vec::new());
+                    manager = ConnectionPolicy::<MAX_PEERS, DIAL_TRACK>::new(local);
+                    manager.start(&mut |action| pending.push(action));
+                    apply_radio::<B, MAX_PEERS>(&mut pending, &mut members, &mut backend).await;
+                }
                 Step::Event(BleEvent::Sighting { address, .. }) => {
                     let now_ms = started.elapsed().as_millis() as u64;
                     manager.handle(PolicyInput::Sighting { address, now_ms }, &mut |action| {
@@ -592,6 +637,7 @@ where
                                 &mut members,
                                 &mut backend,
                                 policy,
+                                established.peer_rssi,
                             )
                             .await;
                         }
@@ -705,6 +751,7 @@ async fn apply_settle<B, const MAX_PEERS: usize>(
     members: &mut HashMap<BleIdentity, TokioMember>,
     backend: &mut B,
     policy: EffectiveInterfacePolicy,
+    peer_rssi: Option<i8>,
 ) where
     B: BleBackend<MAX_PEERS>,
     B::Link: 'static,
@@ -726,6 +773,9 @@ async fn apply_settle<B, const MAX_PEERS: usize>(
                     let (source, sink) = held.into_data();
                     let member = BluetoothPeer::with_policy(identity, source, sink, policy)
                         .report_close_to(address, closed.clone());
+                    member.status().set_radio(
+                        prns_core::interfaces::RadioIndication::from_bluetooth_rssi(peer_rssi),
+                    );
                     let status = member.status();
                     let attached = fleet.add(member);
                     members.insert(
@@ -887,6 +937,16 @@ mod tests {
 
         tokio::time::sleep(RECENT_MEMBER_GRACE + Duration::from_millis(10)).await;
         assert_eq!(status.connection(), ConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn set_group_id_rejects_empty_and_oversized_names() {
+        let status = BluetoothAutoStatus::new();
+        assert!(!status.set_group_id(b""));
+        assert!(!status.set_group_id(&[b'x'; 33]));
+        assert!(status.set_group_id(b"field-mesh"));
+        assert_eq!(status.subscribe_group().borrow().as_slice(), b"field-mesh");
+        assert!(status.set_group_id(b"field-mesh"));
     }
 
     #[test]

@@ -257,7 +257,14 @@ pub(crate) fn fulfill_ready_work(
                         } else {
                             LinkIdentityVerification::Invalid
                         };
-                    engine.resume_link_identity_verify(owed, verification, sink);
+                    engine.resume_link_identity_verify(
+                        owed,
+                        verification,
+                        interfaces,
+                        now,
+                        fill_random,
+                        sink,
+                    );
                 }
                 CryptoOwed::TunnelSynthesizeVerify(owed) => {
                     let verification =

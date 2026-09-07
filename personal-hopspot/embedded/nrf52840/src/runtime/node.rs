@@ -50,9 +50,9 @@ type InterfaceStore = EmbassyInterfaceStore<
     PACKET_PHY_INDEX_BUCKETS,
 >;
 pub(super) type Node = PrnsNode<
-    (),
+    super::firmware::HopspotRemoteControlState,
     personal_hopspot_core::node_pages::NodePageRoutes,
-    for<'a> fn(PrnsEvent<'a>, &()),
+    for<'a> fn(PrnsEvent<'a>, &super::firmware::HopspotRemoteControlState),
     EngineStorageType,
     EmbassyHost<Mtx, super::entropy::NrfEntropySource>,
     Mtx,
@@ -71,6 +71,11 @@ pub(super) static COMMANDS: Channel<Mtx, IssuedCommand, COMMANDS_CAP> = Channel:
 pub(super) static LIFECYCLE: Channel<Mtx, InterfaceLifecycle, LIFECYCLE_CAP> = Channel::new();
 pub(super) static COMPLETION: CompletionPool<Mtx, COMPLETIONS_CAP> = CompletionPool::new();
 pub(super) static INTERFACE_STORE: InterfaceStore = EmbassyInterfaceStore::new();
+pub(super) static REMOTE_PAIRING_EVENTS: Channel<
+    Mtx,
+    personal_rns::runtime::RemoteControlTargetPairingConfirmation,
+    1,
+> = Channel::new();
 pub(super) static LORA_MANIFOLD_LANE: StaticManifoldLane<
     Mtx,
     LORA_MAX_PAYLOAD,
@@ -88,5 +93,3 @@ pub(super) static USB_MANIFOLD_LANE: StaticManifoldLane<
     EMBEDDED_MAX_WIRE_FRAME_LEN,
     LANE_DEPTH,
 > = StaticManifoldLane::new();
-
-pub(super) fn ignore_events(_event: PrnsEvent<'_>, _state: &()) {}

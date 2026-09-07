@@ -62,6 +62,8 @@ pub(crate) fn restore<R, F, S>(
     let destination_identities = node.seed_destination_identities_from_store(inputs.store);
     let tunnels = node.seed_tunnels_from_store(inputs.store);
     let ratchets = node.seed_self_ratchets_from_vault(inputs.vault);
+    let controller_grants = node.seed_remote_control_controller_grants_from_store(inputs.store);
+    let target_accesses = node.seed_remote_control_target_accesses_from_store(inputs.store);
     if let Some(progress) = inputs.progress {
         progress.finish();
     }
@@ -72,15 +74,21 @@ pub(crate) fn restore<R, F, S>(
         destination_identities = destination_identities.seeded_count,
         tunnels = tunnels.seeded_count,
         ratchets = ratchets.seeded_count,
+        remote_control_controller_grants = controller_grants.restored_count,
+        remote_control_target_accesses = target_accesses.restored_count,
         refused = blackholes.refused_count
             + routes.refused_count
             + destination_identities.refused_count
             + tunnels.refused_count
-            + ratchets.refused_count,
+            + ratchets.refused_count
+            + controller_grants.refused_count
+            + target_accesses.refused_count,
         dropped = blackholes.dropped_count
             + routes.dropped_count
             + destination_identities.dropped_count
             + tunnels.dropped_count
-            + ratchets.dropped_count,
+            + ratchets.dropped_count
+            + controller_grants.dropped_count
+            + target_accesses.dropped_count,
     );
 }

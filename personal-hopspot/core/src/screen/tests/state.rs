@@ -380,7 +380,7 @@ fn long_press_on_back_closes_the_global_menu() {
     let content = test_content(&cards);
     let mut state = test_ui_state();
     state.handle_input(InputEvent::LongPress, content);
-    for _ in 0..3 {
+    for _ in 0..4 {
         state.handle_input(InputEvent::ShortPress, content);
     }
 
@@ -406,7 +406,45 @@ fn global_menu_cycles_only_actionable_items() {
     state.handle_input(InputEvent::ShortPress, content);
     assert_eq!(state.global_menu_selected_item(), Some(3));
     state.handle_input(InputEvent::ShortPress, content);
+    assert_eq!(state.global_menu_selected_item(), Some(4));
+    state.handle_input(InputEvent::ShortPress, content);
     assert_eq!(state.global_menu_selected_item(), Some(0));
+}
+
+#[test]
+fn pair_remote_opens_invitation_and_confirmation_flows() {
+    let cards = test_cards::<1>(CardKind::Usb);
+    let content = test_content(&cards);
+    let mut state = test_ui_state();
+    state.handle_input(InputEvent::LongPress, content);
+    for _ in 0..3 {
+        state.handle_input(InputEvent::ShortPress, content);
+    }
+    assert_eq!(
+        state.handle_input(InputEvent::LongPress, content),
+        UiAction::OpenRemotePairing
+    );
+
+    state.show_remote_pairing_invitation(0x1234_ABCD);
+    assert_eq!(
+        state.handle_input(InputEvent::LongPress, content),
+        UiAction::None
+    );
+
+    state.show_remote_pairing_confirmation(123_456);
+    assert_eq!(
+        state.handle_input(InputEvent::LongPress, content),
+        UiAction::RejectRemotePairing
+    );
+    state.show_remote_pairing_confirmation(123_456);
+    assert_eq!(
+        state.handle_input(InputEvent::ShortPress, content),
+        UiAction::None
+    );
+    assert_eq!(
+        state.handle_input(InputEvent::LongPress, content),
+        UiAction::ApproveRemotePairing
+    );
 }
 
 #[test]

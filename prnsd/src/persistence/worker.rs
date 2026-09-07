@@ -77,6 +77,12 @@ impl PersistenceWorker {
     pub(super) fn new(worker: personal_rns::runtime::PersistenceWorker) -> Self {
         Self { worker }
     }
+
+    pub(crate) fn authorization_persistence(
+        &self,
+    ) -> personal_rns::runtime::RemoteControlAuthorizationPersistence {
+        self.worker.remote_control_authorization_persistence()
+    }
 }
 
 pub(super) async fn run_until_shutdown(

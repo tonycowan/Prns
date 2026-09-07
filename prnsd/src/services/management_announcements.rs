@@ -21,6 +21,7 @@ pub(crate) struct AnnouncedDestination {
 
 pub(crate) enum AnnouncementSchedule {
     Fixed(Duration),
+    ImmediateThenFixed(Duration),
     NnPages(tokio::sync::watch::Receiver<NnPagesSettings>),
 }
 
@@ -61,19 +62,26 @@ async fn run_announcement_loop(handle: PrnsNodeHandle, destination: AnnouncedDes
     } = destination;
     match schedule {
         AnnouncementSchedule::Fixed(interval) => {
-            let start = tokio::time::Instant::now() + INITIAL_DELAY;
-            let mut ticker = tokio::time::interval_at(start, interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                announce_if_available(
-                    &handle,
-                    hash,
-                    available_when.as_deref(),
-                    name_file.as_deref(),
-                )
-                .await;
-            }
+            run_fixed_announcements(
+                handle,
+                hash,
+                available_when,
+                name_file,
+                tokio::time::Instant::now() + INITIAL_DELAY,
+                interval,
+            )
+            .await;
+        }
+        AnnouncementSchedule::ImmediateThenFixed(interval) => {
+            run_fixed_announcements(
+                handle,
+                hash,
+                available_when,
+                name_file,
+                tokio::time::Instant::now(),
+                interval,
+            )
+            .await;
         }
         AnnouncementSchedule::NnPages(mut settings) => {
             let mut active = *settings.borrow_and_update();
@@ -145,6 +153,28 @@ fn updated_deadline(
         return Some(now + INITIAL_DELAY);
     }
     Some(now + replacement.announce_interval())
+}
+
+async fn run_fixed_announcements(
+    handle: PrnsNodeHandle,
+    hash: DestinationHash,
+    available_when: Option<PathBuf>,
+    name_file: Option<PathBuf>,
+    start: tokio::time::Instant,
+    interval: Duration,
+) {
+    let mut ticker = tokio::time::interval_at(start, interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        announce_if_available(
+            &handle,
+            hash,
+            available_when.as_deref(),
+            name_file.as_deref(),
+        )
+        .await;
+    }
 }
 
 async fn announce_if_available(

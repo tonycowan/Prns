@@ -14,7 +14,8 @@ use crate::engine::Departure;
 use crate::interfaces::IfacContext;
 use crate::interfaces::{
     ConnectionView, FrameAccounting, FrameAccountingRecorder, InterfaceDescriptor, InterfaceId,
-    InterfaceKind, InterfaceOriginKind, InterfaceSnapshot, Membership, ReportsStatus, StatusView,
+    InterfaceKind, InterfaceMode, InterfaceOriginKind, InterfaceSnapshot, Membership,
+    ReportsStatus, StatusView,
 };
 use crate::manifold::driver::{
     tokio_grant_lane, AddInterfaceCommand, HostCommand, TokioInterfaceSeam,
@@ -22,6 +23,9 @@ use crate::manifold::driver::{
 use crate::manifold::interface_seam::{frame_cap_for, Interface};
 use crate::node_introspection::{
     FrameAccountingCoverage, InterfaceIfacSnapshot, InterfaceInventoryEntry,
+};
+use crate::remote_control::{
+    RemoteControlGroupOutcome, RemoteControlInterfaceGroup, RemoteControlModeOutcome,
 };
 
 use super::super::ManuallyAttached;
@@ -184,6 +188,8 @@ impl PrnsNodeHandle {
                 gravity: descriptor.gravity,
                 ifac: ifac.as_ref().map(RuntimeIfac::snapshot),
                 name,
+                group: None,
+                group_apply: None,
                 byte_accounting: ByteAccounting::OwnTraffic,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -204,6 +210,7 @@ impl PrnsNodeHandle {
                 let placement = registered.placement;
                 let ifac = registered.ifac.clone();
                 let name = registered.name.clone();
+                let group = registered.group.clone();
                 let byte_accounting = registered.byte_accounting;
                 let retired = registered.retired_member_bytes;
                 let retired_frame_accounting = registered.retired_member_frame_accounting;
@@ -244,8 +251,10 @@ impl PrnsNodeHandle {
                             links: counts.links,
                             transported_links: counts.transported_links,
                             membership: placement.membership,
+                            radio: vitals.radio,
                         },
                         ifac: ifac.clone(),
+                        group: group.clone(),
                     }
                 })
             })
@@ -288,6 +297,106 @@ impl PrnsNodeHandle {
         };
         interface.name = Some(name.into());
         true
+    }
+
+    pub fn register_interface_group_apply(
+        &self,
+        id: InterfaceId,
+        apply: impl Fn(&[u8]) -> bool + Send + Sync + 'static,
+    ) -> bool {
+        let Ok(mut interfaces) = self.interfaces.lock() else {
+            return false;
+        };
+        let Some(interface) = interfaces.get_mut(&id) else {
+            return false;
+        };
+        interface.group_apply = Some(std::sync::Arc::new(apply));
+        true
+    }
+
+    #[must_use]
+    pub fn set_interface_group(
+        &self,
+        id: InterfaceId,
+        group: RemoteControlInterfaceGroup,
+    ) -> RemoteControlGroupOutcome {
+        let Some(text) = group.as_str() else {
+            return RemoteControlGroupOutcome::Failed;
+        };
+        let Ok(mut interfaces) = self.interfaces.lock() else {
+            return RemoteControlGroupOutcome::Failed;
+        };
+        let Some(interface) = interfaces.get_mut(&id) else {
+            return RemoteControlGroupOutcome::UnknownInterface;
+        };
+        if !matches!(
+            id.kind(),
+            Some(
+                crate::interfaces::InterfaceKind::AutoWifi
+                    | crate::interfaces::InterfaceKind::BluetoothAuto
+            )
+        ) {
+            return RemoteControlGroupOutcome::Failed;
+        }
+        let previous = interface.group.clone();
+        interface.group = Some(text.to_string());
+        let apply = interface.group_apply.clone();
+        drop(interfaces);
+        if let Some(apply) = apply {
+            if !apply(group.as_bytes()) {
+                if let Ok(mut interfaces) = self.interfaces.lock() {
+                    if let Some(interface) = interfaces.get_mut(&id) {
+                        interface.group = previous;
+                    }
+                }
+                return RemoteControlGroupOutcome::Failed;
+            }
+        }
+        RemoteControlGroupOutcome::Applied
+    }
+
+    #[must_use]
+    pub fn set_interface_mode(
+        &self,
+        id: InterfaceId,
+        mode: InterfaceMode,
+    ) -> RemoteControlModeOutcome {
+        let Ok(mut map) = self.interfaces.lock() else {
+            return RemoteControlModeOutcome::Failed;
+        };
+        if !map.contains_key(&id) {
+            return RemoteControlModeOutcome::UnknownInterface;
+        }
+        let mut ids = std::vec![id];
+        for (member_id, registered) in map.iter() {
+            if let Membership::FleetMember { supervisor_id } = registered.placement.membership {
+                if supervisor_id == id && *member_id != id {
+                    ids.push(*member_id);
+                }
+            }
+        }
+        for update_id in &ids {
+            if let Some(registered) = map.get_mut(update_id) {
+                registered.mode = mode;
+                if let Some(descriptor) = registered.descriptor.as_mut() {
+                    descriptor.mode = mode;
+                }
+            }
+        }
+        drop(map);
+        for update_id in ids {
+            if self
+                .commands
+                .send(HostCommand::SetInterfaceMode {
+                    id: update_id,
+                    mode,
+                })
+                .is_err()
+            {
+                return RemoteControlModeOutcome::Failed;
+            }
+        }
+        RemoteControlModeOutcome::Applied
     }
 
     /// Every interface attached through this handle, as a complete [`InterfaceSnapshot`]: live vitals read at call time joined with the engine counts and fleet position. The raw fleet an inspection face can project for its own presentation, with no app-side bookkeeping.
@@ -373,6 +482,8 @@ impl PrnsNodeHandle {
                 gravity: policy.gravity,
                 ifac: ifac_status,
                 name: None,
+                group: None,
+                group_apply: None,
                 byte_accounting: ByteAccounting::FleetAggregate,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -577,7 +688,12 @@ impl Fleet {
         let view = interface.status_view();
         let connection = interface.connection_view();
         let frame_accounting = interface.frame_accounting_recorder();
-        let descriptor = interface.descriptor();
+        let mut descriptor = interface.descriptor();
+        if let Ok(map) = self.interfaces.lock() {
+            if let Some(supervisor) = map.get(&self.supervisor_id) {
+                descriptor.mode = supervisor.mode;
+            }
+        }
         let attachment_epoch = self.attachment_epochs.fetch_add(1, Ordering::Relaxed);
         let placement = InterfacePlacement {
             membership: Membership::FleetMember {
@@ -609,6 +725,8 @@ impl Fleet {
                 gravity: descriptor.gravity,
                 ifac: self.ifac.as_ref().map(RuntimeIfac::snapshot),
                 name: None,
+                group: None,
+                group_apply: None,
                 byte_accounting: ByteAccounting::OwnTraffic,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -774,6 +892,8 @@ pub(super) struct RegisteredInterface {
     gravity: crate::interfaces::InterfaceGravity,
     ifac: Option<InterfaceIfacSnapshot>,
     name: Option<String>,
+    group: Option<String>,
+    group_apply: Option<std::sync::Arc<dyn Fn(&[u8]) -> bool + Send + Sync>>,
     byte_accounting: ByteAccounting,
     retired_member_bytes: RetiredMemberBytes,
     retired_member_frame_accounting: RetiredMemberFrameAccounting,

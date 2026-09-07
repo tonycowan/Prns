@@ -105,9 +105,16 @@ where
                 } else {
                     LinkIdentityVerification::Invalid
                 };
-                engine.resume_link_identity_verify(owed, verification, &mut |reaction| {
-                    sink(reaction.map_work(|never| match never {}))
-                });
+                wake.compose(engine.resume_link_identity_verify(
+                    owed,
+                    verification,
+                    interfaces,
+                    now,
+                    fill_random,
+                    &mut |reaction: EngineReaction<'_, crate::engine::NoOwedWork>| {
+                        sink(reaction.map_work(|never| match never {}))
+                    },
+                ));
             }
             CryptoOwed::TunnelSynthesizeVerify(owed) => {
                 let verification =

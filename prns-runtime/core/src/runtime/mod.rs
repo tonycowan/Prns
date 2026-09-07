@@ -54,8 +54,14 @@ pub use node::{
     PrnsNodeRecipe, ServeMyRequestEndpoints,
 };
 pub use remote_control::{
-    RemoteControlAnnounceSelf, RemoteControlAnnounceSelfFailure, RemoteControlDescribe,
-    RemoteControlError,
+    RemoteControlAnnounceSelf, RemoteControlAnnounceSelfFailure, RemoteControlAuthorizeController,
+    RemoteControlDescribe, RemoteControlDescribeBuild, RemoteControlError,
+    RemoteControlHostControls, RemoteControlInventoryControllers,
+    RemoteControlInventoryInterfaceConfig, RemoteControlInventoryInterfacePeers,
+    RemoteControlInventoryInterfaces, RemoteControlRevokeController,
+    RemoteControlSetInterfaceGroup, RemoteControlSetInterfaceLoRaProfile,
+    RemoteControlSetInterfaceMode, RemoteControlSetInterfacePower,
+    RemoteControlSetInterfaceWifiStation, RemoteControlSleepRadios, RemoteControlWakeRadios,
 };
 pub use remote_control_authorizations::{
     RemoteControlAuthorizationRestoreError, RemoteControlAuthorizationRestoreOutcome,

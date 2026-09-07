@@ -498,10 +498,11 @@ impl AutoWifi {
         settings: AutoWifiSettings,
     ) -> Self {
         let id = InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, &settings.instance_tag);
+        let group_id = settings.group_id.clone();
         Self {
             policy,
             settings,
-            status: AutoWifiStatus::new(id),
+            status: AutoWifiStatus::new(id, group_id),
             service_discovery: None,
             rendezvous_listener: None,
             network_discovery_owner: NetworkDiscoveryOwner::Host,
@@ -552,6 +553,7 @@ struct AutoWifiShared {
     id: InterfaceId,
     enabled: watch::Sender<bool>,
     member_updates: watch::Sender<std::vec::Vec<TokioInterfaceStatus>>,
+    group_id: watch::Sender<std::vec::Vec<u8>>,
     accounting: Mutex<AutoWifiAccounting>,
 }
 
@@ -574,20 +576,40 @@ impl CompletedTraffic {
 }
 
 impl AutoWifiStatus {
-    fn new(id: InterfaceId) -> Self {
+    fn new(id: InterfaceId, group_id: std::vec::Vec<u8>) -> Self {
         let (enabled, _) = watch::channel(true);
         let (member_updates, _) = watch::channel(std::vec::Vec::new());
+        let (group_id, _) = watch::channel(group_id);
         Self {
             shared: Arc::new(AutoWifiShared {
                 id,
                 enabled,
                 member_updates,
+                group_id,
                 accounting: Mutex::new(AutoWifiAccounting {
                     completed: CompletedTraffic::default(),
                     members: std::vec::Vec::new(),
                 }),
             }),
         }
+    }
+
+    pub fn set_group_id(&self, group: &[u8]) -> bool {
+        if group.is_empty() || group.len() > 32 {
+            return false;
+        }
+        self.shared.group_id.send_if_modified(|current| {
+            if current.as_slice() == group {
+                return false;
+            }
+            *current = group.to_vec();
+            true
+        });
+        true
+    }
+
+    fn subscribe_group(&self) -> watch::Receiver<std::vec::Vec<u8>> {
+        self.shared.group_id.subscribe()
     }
 
     pub fn enable(&self) {
@@ -786,6 +808,7 @@ impl InterfaceSupervisor for AutoWifi {
             completed: CompletedTraffic::default(),
         };
         supervisor.publish_status();
+        let mut group_rx = supervisor.status.subscribe_group();
 
         let runtime_started_at = tokio::time::Instant::now();
         let mut beacon_interval = tokio::time::interval(BEACON_INTERVAL);
@@ -853,6 +876,17 @@ impl InterfaceSupervisor for AutoWifi {
                 rendezvous_claim_schedule = RendezvousClaimSchedule::Waiting;
             }
             tokio::select! {
+                changed = group_rx.changed() => {
+                    if changed.is_ok() {
+                        let group = group_rx.borrow_and_update().clone();
+                        supervisor.apply_discovery_group(
+                            group,
+                            &mut nics,
+                            &mut sockets,
+                            network_discovery_owner,
+                        );
+                    }
+                }
                 accepted_connection = accept_maybe(&rendezvous_listener) => {
                     supervisor.accept_rendezvous_connection(accepted_connection);
                 }
@@ -1508,6 +1542,23 @@ impl Supervisor {
                 *sockets = None;
             }
         }
+    }
+
+    fn apply_discovery_group(
+        &mut self,
+        group_id: std::vec::Vec<u8>,
+        nics: &mut std::vec::Vec<Nic>,
+        sockets: &mut Option<Sockets>,
+        network_discovery_owner: NetworkDiscoveryOwner,
+    ) {
+        if self.settings.group_id == group_id {
+            return;
+        }
+        self.settings.group_id = group_id;
+        self.disable_members();
+        drop(sockets.take());
+        nics.clear();
+        let _activation = self.ensure_network_active(nics, sockets, network_discovery_owner);
     }
 
     fn activate_network(&mut self, nics: &[Nic], sockets: Option<&Sockets>) {
@@ -2662,8 +2713,8 @@ mod tests {
             fleet,
             data: Some(Arc::new(UdpSocket::from_std(data).expect("into tokio"))),
             policy: contract::configured_policy(Default::default()),
-            settings,
-            status: AutoWifiStatus::new(id),
+            settings: settings.clone(),
+            status: AutoWifiStatus::new(id, settings.group_id.clone()),
             completed: CompletedTraffic::default(),
         };
         (supervisor, guard)
@@ -3311,7 +3362,7 @@ mod tests {
     #[test]
     fn the_parent_connection_follows_the_best_live_child_state() {
         let id = InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, contract::GROUP_ID);
-        let status = AutoWifiStatus::new(id);
+        let status = AutoWifiStatus::new(id, contract::GROUP_ID.to_vec());
         let first = TokioInterfaceStatus::new_unaccounted(
             InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, b"first"),
             ConnectionState::Initializing,
@@ -3337,9 +3388,20 @@ mod tests {
     }
 
     #[test]
+    fn set_group_id_rejects_empty_and_oversized_names() {
+        let id = InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, b"group");
+        let status = AutoWifiStatus::new(id, contract::GROUP_ID.to_vec());
+        assert!(!status.set_group_id(b""));
+        assert!(!status.set_group_id(&[b'a'; 33]));
+        assert!(status.set_group_id(b"field-mesh"));
+        assert_eq!(status.subscribe_group().borrow().as_slice(), b"field-mesh");
+        assert!(status.set_group_id(b"field-mesh"));
+    }
+
+    #[test]
     fn completed_and_reconnected_member_traffic_is_monotonic() {
         let id = InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, b"accounting");
-        let status = AutoWifiStatus::new(id);
+        let status = AutoWifiStatus::new(id, contract::GROUP_ID.to_vec());
         let first = TokioInterfaceStatus::new_unaccounted(
             InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, b"peer"),
             ConnectionState::Connected,

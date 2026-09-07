@@ -173,19 +173,26 @@ where
             }
             CryptoResult::LinkIdentityVerified { owed, verification } => {
                 let link_id = owed.link_id;
-                engine.resume_link_identity_verify(owed, verification, &mut |reaction| {
-                    route_completed_reaction_without_work(
-                        reaction,
-                        &mut topology.egress,
-                        &topology.ifacs,
-                        &mut topology.pacers,
-                        wire_scratch,
-                        journal,
-                        now,
-                    )
-                });
+                let wake = engine.resume_link_identity_verify(
+                    owed,
+                    verification,
+                    topology.interfaces.view(),
+                    now,
+                    &mut |entropy| host.fill_random(entropy),
+                    &mut |reaction| {
+                        route_completed_reaction_without_work(
+                            reaction,
+                            &mut topology.egress,
+                            &topology.ifacs,
+                            &mut topology.pacers,
+                            wire_scratch,
+                            journal,
+                            now,
+                        )
+                    },
+                );
                 inbound.release_link_identity_barrier(link_id);
-                CryptoCompletionEffect::NoWakeChange
+                CryptoCompletionEffect::WakeSchedules(wake)
             }
             CryptoResult::TunnelSynthesizeVerified { owed, verification } => {
                 CryptoCompletionEffect::WakeSchedules(

@@ -25,7 +25,9 @@ pub(crate) use management_announcements::{
 pub(crate) use node_page::destination_hash as node_page_destination_hash;
 pub(crate) use remote_management::{PathRoute, StatusRoute};
 pub(crate) use request_routes::DaemonRequestRoutes;
-pub(crate) use request_state::{DaemonRequestState, TransportStatusIdentity};
+pub(crate) use request_state::{
+    DaemonRequestState, SoftInterfacePowerRegistry, TransportStatusIdentity,
+};
 
 pub(crate) struct ManagementDestinations {
     announced: Vec<AnnouncedDestination>,
@@ -42,6 +44,19 @@ impl ManagementDestinations {
 
     pub(crate) fn node_page_destination(&self) -> Option<personal_rns::wire::DestinationHash> {
         self.nnpages.as_ref().map(|destination| destination.hash)
+    }
+
+    pub(crate) fn with_remote_control_endpoint(
+        mut self,
+        hash: personal_rns::wire::DestinationHash,
+    ) -> Self {
+        self.announced.push(AnnouncedDestination {
+            hash,
+            available_when: None,
+            name_file: None,
+            schedule: AnnouncementSchedule::ImmediateThenFixed(Duration::from_secs(60)),
+        });
+        self
     }
 }
 

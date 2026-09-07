@@ -147,6 +147,7 @@ pub(super) async fn run_router<
 ) where
     R: RequestEndpointSet<St>,
     M: RawMutex,
+    St: prns_runtime::runtime::RemoteControlHostControls,
 {
     let mut authorization_transaction = RemoteControlPairingAuthorizationTransactionState::new();
     let mut pairing_persistence = RemoteControlPairingPersistenceProgress::new();
@@ -260,7 +261,7 @@ pub(super) async fn run_router<
                 let outcome = if authorization_transaction.is_active() {
                     Err(super::ForgetRemoteControlTargetServiceError::TransactionInProgress)
                 } else {
-                    remote_control.forget_target(&target)
+                    remote_control.forget_target_by_hash(target)
                 };
                 let _settled = commands.settle_remote_control_target_access(
                     id,
@@ -320,12 +321,13 @@ async fn dispatch<
     const REQUEST_BYTES: usize,
 >(
     state: &St,
-    remote_control: &AssembledRemoteControl,
+    remote_control: &mut AssembledRemoteControl,
     commands: PrnsNodeHandle<'_, M, COMMANDS, COMPLETIONS, REQUEST_COMPLETIONS, RESPONSE_BYTES>,
     request: RunnerRequest<REQUEST_BYTES>,
 ) where
     R: RequestEndpointSet<St>,
     M: RawMutex,
+    St: prns_runtime::runtime::RemoteControlHostControls,
 {
     let inbound = InboundRequest::new(
         request.destination,
@@ -339,7 +341,7 @@ async fn dispatch<
     let responder = inbound.respond_token();
     let mut body = RunnerResponse::Buffered(RespondData::new());
     let dispatched = if let Some((controller_grants, available_requests, self_announcement)) =
-        remote_control.request_configuration(request.destination, request.path_hash)
+        remote_control.request_configuration_mut(request.destination, request.path_hash)
     {
         dispatch_remote_control_request(
             state,
@@ -480,7 +482,7 @@ mod tests {
         let channel = Channel::<M, crate::engine::IssuedCommand, 1>::new();
         let completions = crate::runtime::CompletionPool::<M, 1>::new();
         let handle = PrnsNodeHandle::new(channel.sender(), &completions);
-        let remote_control = remote_control();
+        let mut remote_control = remote_control();
         let request = RunnerRequest {
             destination: DestinationHash::new([0x5A; 16]),
             link_id: LinkId::new([1; 16]),
@@ -494,7 +496,7 @@ mod tests {
 
         block_on(dispatch::<(), StaticRoutes, M, 1, 1, 0, 0, 16>(
             &(),
-            &remote_control,
+            &mut remote_control,
             handle,
             request,
         ));
@@ -520,7 +522,7 @@ mod tests {
         let channel = Channel::<M, crate::engine::IssuedCommand, 1>::new();
         let completions = crate::runtime::CompletionPool::<M, 1>::new();
         let handle = PrnsNodeHandle::new(channel.sender(), &completions);
-        let remote_control = remote_control();
+        let mut remote_control = remote_control();
         let destination = DestinationHash::new([0x5a; 16]);
         let request = RunnerRequest {
             destination,
@@ -535,7 +537,7 @@ mod tests {
 
         block_on(dispatch::<(), DestinationRoutes, M, 1, 1, 0, 0, 16>(
             &(),
-            &remote_control,
+            &mut remote_control,
             handle,
             request,
         ));
@@ -746,6 +748,12 @@ mod tests {
             Either::First(()) => {}
             Either::Second(()) => panic!("router returned"),
         }
-        assert!(remote_control.controller_grants().unwrap().is_empty());
+        assert_eq!(
+            remote_control
+                .controller_grants()
+                .unwrap()
+                .grants_in_identity_hash_order(),
+            &[pairing_grant],
+        );
     }
 }

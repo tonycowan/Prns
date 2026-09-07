@@ -3,7 +3,10 @@ use super::super::captive_portal::{
     HTTP_SERVER_WORKERS,
 };
 use super::super::*;
-use super::station::{net_task, network_ready_task, wifi_connect_task, StationCredentials};
+use super::station::{
+    install_station_credentials, net_task, network_ready_task, wifi_connect_task,
+    StationCredentials,
+};
 use alloc::boxed::Box;
 
 fn psram_udp_socket<
@@ -144,6 +147,10 @@ pub(in crate::s3) fn build_wifi(
         .with_tx_queue_size(WIFI_TX_QUEUE_FRAMES)
         .with_static_tx_buf_num(WIFI_STATIC_TX_BUFFERS)
         .with_dynamic_tx_buf_num(WIFI_DYNAMIC_TX_BUFFERS);
+    install_station_credentials(StationCredentials {
+        ssid: config.ssid.clone(),
+        password: config.password.clone(),
+    });
     let Ok((mut controller, interfaces)) = esp_radio::wifi::new(wifi, wifi_config) else {
         super::super::entropy::install(boot_entropy);
         return (None, None, None);
@@ -196,15 +203,10 @@ pub(in crate::s3) fn build_wifi(
         let data = wifi_auto_data_socket(stack);
         let wifi_status = AutoWifiStatus::new(&WIFI_SHARED);
         start_udp_service_discovery(spawner, stack, link_local, wifi_status);
-        let station_credentials = StationCredentials {
-            ssid: config.ssid.clone(),
-            password: config.password.clone(),
-        };
         spawner.spawn(net_task(runner).expect("net task fits"));
         spawner.spawn(network_ready_task(stack).expect("network readiness task fits"));
         spawner.spawn(
-            wifi_connect_task(controller, wifi_status, station_credentials, ap_enabled)
-                .expect("wifi connect task fits"),
+            wifi_connect_task(controller, wifi_status, ap_enabled).expect("wifi connect task fits"),
         );
         Some(AutoWifiSegment {
             stack,

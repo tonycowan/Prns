@@ -64,7 +64,10 @@ impl MobileActionCode {
             | UiAction::OpenLoRaEditor
             | UiAction::SetLoRaProfile(_)
             | UiAction::ResetLoRaProfile
-            | UiAction::SwapRadioMode => Self::None,
+            | UiAction::SwapRadioMode
+            | UiAction::OpenRemotePairing
+            | UiAction::ApproveRemotePairing
+            | UiAction::RejectRemotePairing => Self::None,
         }
     }
 

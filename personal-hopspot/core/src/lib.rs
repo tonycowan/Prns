@@ -15,6 +15,7 @@ mod mobile;
 pub mod node_pages;
 mod persistence;
 mod radio_profile_store;
+mod remote_control_inventory;
 #[cfg(feature = "display")]
 mod screen;
 mod soft_ap;
@@ -73,6 +74,11 @@ pub use prns_core::capabilities::power::{
 pub use radio_profile_store::{
     LoadedRadioProfile, RadioProfileLoadNotice, RadioProfileStore, RadioProfileStoreError,
 };
+pub use remote_control_inventory::{
+    decorate_hopspot_remote_control_card, hopspot_remote_control_build_version,
+    remote_control_interface_config_from_snapshots, remote_control_interface_peers_from_snapshots,
+    remote_control_inventory_from_snapshots,
+};
 #[cfg(feature = "display")]
 pub use screen::{
     apply_and_persist_radio_profile, card_label, card_label_max_chars, tcp_card_label,
@@ -92,6 +98,7 @@ use personal_rns::engine::{
 };
 #[cfg(feature = "display")]
 use personal_rns::interfaces::{ConnectionState, InterfaceId, InterfaceSnapshot, Membership};
+use personal_rns::units::DurationMillis;
 
 pub const EMBEDDED_HOPSPOT_PROTOCOL_POLICY: EngineProtocolPolicy = EngineProtocolPolicy {
     proof_form: ProofForm::Implicit,
@@ -99,6 +106,14 @@ pub const EMBEDDED_HOPSPOT_PROTOCOL_POLICY: EngineProtocolPolicy = EngineProtoco
     local_hop_count_override: LocalHopCountOverride::Disabled,
     recursive_path_request_default: RecursivePathRequestDefault::Enabled,
 };
+
+/// Same windows as `prnsd pairing open`. The open window must be strictly
+/// longer than the attempt timeout so Begin still fits after the operator
+/// types the invitation. A 30s attempt window is too short for two-sided
+/// approval plus grant persist; persist after that deadline rolls the grant
+/// back and never sends Completed.
+pub const REMOTE_CONTROL_PAIRING_EXPIRES_AFTER: DurationMillis = DurationMillis(180_000);
+pub const REMOTE_CONTROL_PAIRING_ATTEMPT_TIMEOUT: DurationMillis = DurationMillis(120_000);
 
 /// The faces' redraw-coalescing window, in milliseconds. A burst of engine changes inside this span
 /// folds into one repaint (~30 fps). It bounds how fast a face repaints when things change; it is not
@@ -256,6 +271,7 @@ mod tests {
             links: 0,
             transported_links: 0,
             membership: Membership::Independent,
+            radio: personal_rns::interfaces::RadioIndication::for_kind(Some(kind)),
         }
     }
 

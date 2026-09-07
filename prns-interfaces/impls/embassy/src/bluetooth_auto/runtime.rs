@@ -153,10 +153,40 @@ impl InterfaceStatus for BluetoothMemberStatus {
     }
 }
 
+const DISCOVERY_GROUP_CAP: usize = 32;
+
+#[derive(Clone, Copy)]
+struct DiscoveryGroup {
+    bytes: [u8; DISCOVERY_GROUP_CAP],
+    len: u8,
+}
+
+impl DiscoveryGroup {
+    const fn reticulum() -> Self {
+        let src = b"reticulum";
+        let mut bytes = [0u8; DISCOVERY_GROUP_CAP];
+        let mut index = 0;
+        while index < src.len() {
+            bytes[index] = src[index];
+            index += 1;
+        }
+        Self {
+            bytes,
+            len: src.len() as u8,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.bytes.get(..usize::from(self.len)).unwrap_or(&[])
+    }
+}
+
 pub struct BluetoothAutoShared<const MEMBERS: usize> {
     id: InterfaceId,
     enabled: AtomicBool,
     enabled_changed: Signal<CriticalSectionRawMutex, bool>,
+    group: CriticalSectionMutex<Cell<DiscoveryGroup>>,
+    group_changed: Signal<CriticalSectionRawMutex, ()>,
     up: AtomicBool,
     failed: AtomicBool,
     fatal_failure_reason: CriticalSectionMutex<Cell<Option<&'static str>>>,
@@ -173,6 +203,8 @@ impl<const MEMBERS: usize> BluetoothAutoShared<MEMBERS> {
             id,
             enabled: AtomicBool::new(true),
             enabled_changed: Signal::new(),
+            group: CriticalSectionMutex::new(Cell::new(DiscoveryGroup::reticulum())),
+            group_changed: Signal::new(),
             up: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             fatal_failure_reason: CriticalSectionMutex::new(Cell::new(None)),
@@ -290,6 +322,42 @@ impl<const MEMBERS: usize> BluetoothAutoStatus<MEMBERS> {
 
     fn is_failed(&self) -> bool {
         self.shared.failed.load(Ordering::Relaxed)
+    }
+
+    pub fn set_group_id(&self, group: &[u8]) -> bool {
+        if group.is_empty() || group.len() > DISCOVERY_GROUP_CAP {
+            return false;
+        }
+        let mut stored = [0u8; DISCOVERY_GROUP_CAP];
+        stored[..group.len()].copy_from_slice(group);
+        let changed = self.shared.group.lock(|cell| {
+            if cell.get().as_bytes() == group {
+                return false;
+            }
+            cell.set(DiscoveryGroup {
+                bytes: stored,
+                len: group.len() as u8,
+            });
+            true
+        });
+        if changed {
+            self.shared.group_changed.signal(());
+        }
+        true
+    }
+
+    pub fn copy_group<'a>(&self, buf: &'a mut [u8; DISCOVERY_GROUP_CAP]) -> Option<&'a str> {
+        let len = self.shared.group.lock(|cell| {
+            let group = cell.get();
+            let len = usize::from(group.len);
+            buf[..len].copy_from_slice(&group.bytes[..len]);
+            len
+        });
+        core::str::from_utf8(buf.get(..len)?).ok()
+    }
+
+    async fn wait_until_group_changed(&self) {
+        self.shared.group_changed.wait().await;
     }
 
     pub fn enable(&self) {
@@ -532,6 +600,7 @@ enum SendState {
 
 enum SupervisorStep<L: BleLink> {
     Disabled,
+    RebindGroup,
     Handshake(HandshakeStep<L>),
     Backend(BleEvent<L>),
     Inbound(usize, Result<usize, <L::Source as BleSource>::Error>),
@@ -665,6 +734,27 @@ where
             let now_ms = Instant::now().as_millis();
             match step {
                 SupervisorStep::Disabled => {}
+                SupervisorStep::RebindGroup => {
+                    handshakes.fill_with(|| None);
+                    disable_members(&status, &mut fleet, &mut backend, &mut members).await;
+                    pending.clear();
+                    local = configured_local;
+                    prepare_radio(&mut backend, &mut local, configured_capabilities, &status).await;
+                    if status.is_failed() {
+                        continue;
+                    }
+                    manager = ConnectionPolicy::<MEMBERS, DIAL_TRACK>::new(local);
+                    manager.start(&mut |action| pending.push(action));
+                    apply_radio(
+                        &mut pending,
+                        &mut manager,
+                        &status,
+                        &mut fleet,
+                        &mut backend,
+                        &mut members,
+                    )
+                    .await;
+                }
                 SupervisorStep::Handshake(HandshakeStep::Advanced) => {}
                 SupervisorStep::Handshake(HandshakeStep::Done(HandshakeDone {
                     address,
@@ -824,7 +914,7 @@ where
 {
     if outbound_first {
         return match select5(
-            status.wait_until_disabled(),
+            wait_until_disabled_or_group_changed(status),
             fleet.outbound_ready(),
             advance_handshakes(handshakes, local),
             backend.next_event(),
@@ -832,7 +922,8 @@ where
         )
         .await
         {
-            Either5::First(()) => SupervisorStep::Disabled,
+            Either5::First(PowerOrGroup::Disabled) => SupervisorStep::Disabled,
+            Either5::First(PowerOrGroup::RebindGroup) => SupervisorStep::RebindGroup,
             Either5::Second(()) => SupervisorStep::Outbound,
             Either5::Third(step) => SupervisorStep::Handshake(step),
             Either5::Fourth(event) => SupervisorStep::Backend(event),
@@ -840,7 +931,7 @@ where
         };
     }
     match select5(
-        status.wait_until_disabled(),
+        wait_until_disabled_or_group_changed(status),
         advance_handshakes(handshakes, local),
         backend.next_event(),
         recv_any(members, inbufs),
@@ -848,11 +939,31 @@ where
     )
     .await
     {
-        Either5::First(()) => SupervisorStep::Disabled,
+        Either5::First(PowerOrGroup::Disabled) => SupervisorStep::Disabled,
+        Either5::First(PowerOrGroup::RebindGroup) => SupervisorStep::RebindGroup,
         Either5::Second(step) => SupervisorStep::Handshake(step),
         Either5::Third(event) => SupervisorStep::Backend(event),
         Either5::Fourth((index, received)) => SupervisorStep::Inbound(index, received),
         Either5::Fifth(()) => SupervisorStep::Outbound,
+    }
+}
+
+enum PowerOrGroup {
+    Disabled,
+    RebindGroup,
+}
+
+async fn wait_until_disabled_or_group_changed<const MEMBERS: usize>(
+    status: &BluetoothAutoStatus<MEMBERS>,
+) -> PowerOrGroup {
+    match select(
+        status.wait_until_disabled(),
+        status.wait_until_group_changed(),
+    )
+    .await
+    {
+        Either::First(()) => PowerOrGroup::Disabled,
+        Either::Second(()) => PowerOrGroup::RebindGroup,
     }
 }
 
@@ -1675,6 +1786,18 @@ mod tests {
         });
 
         assert!(matches!(states, [SendState::Sent, SendState::Pending]));
+    }
+
+    #[test]
+    fn set_group_id_rejects_empty_and_oversized_names() {
+        static SHARED: BluetoothAutoShared<1> = BluetoothAutoShared::new(InterfaceId::new([8; 8]));
+        let status = BluetoothAutoStatus::new(&SHARED);
+        assert!(!status.set_group_id(b""));
+        assert!(!status.set_group_id(&[b'x'; 33]));
+        assert!(status.set_group_id(b"field-mesh"));
+        let mut group = [0u8; DISCOVERY_GROUP_CAP];
+        assert_eq!(status.copy_group(&mut group), Some("field-mesh"));
+        assert!(status.set_group_id(b"field-mesh"));
     }
 
     #[test]

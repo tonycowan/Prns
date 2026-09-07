@@ -30,12 +30,14 @@ impl<S: StorageLayout> EngineState<S> {
                 Ok(RemoteControlTargetPairingApproval::AwaitingControllerCommit { attempt_id })
             }
             ApproveRemoteControlTargetPairingOutcome::AuthorizationOwed { attempt_id, grant } => {
-                sink(EngineReaction::Journaled(
-                    crate::engine::Journaled::RemoteControlTargetPairingAuthorizationRequired {
-                        attempt_id,
-                        grant,
-                    },
-                ));
+                self.start_remote_control_target_pairing_authorization(
+                    attempt_id,
+                    grant,
+                    interfaces,
+                    now,
+                    fill_entropy,
+                    sink,
+                );
                 Ok(RemoteControlTargetPairingApproval::AuthorizationOwed { attempt_id, grant })
             }
             ApproveRemoteControlTargetPairingOutcome::Expired { expired } => {

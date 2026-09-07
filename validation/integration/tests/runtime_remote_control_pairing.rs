@@ -681,10 +681,46 @@ async fn describe_through_restored_pairing(persistence: &PairingPersistenceDirec
             .describe()
             .await
             .expect("the restored controller grant admits RemoteControl describe");
-        assert_eq!(
-            description.available_requests(),
-            &RemoteControlRequestSet::only(RemoteControlRequestKind::Describe),
-        );
+        let mut expected = RemoteControlRequestSet::only(RemoteControlRequestKind::Describe);
+        assert!(expected.insert(RemoteControlRequestKind::InventoryInterfaces));
+        assert!(expected.insert(RemoteControlRequestKind::SetInterfacePower));
+        assert!(expected.insert(RemoteControlRequestKind::SleepRadios));
+        assert!(expected.insert(RemoteControlRequestKind::WakeRadios));
+        assert!(expected.insert(RemoteControlRequestKind::SetInterfaceMode));
+        assert!(expected.insert(RemoteControlRequestKind::SetInterfaceGroup));
+        assert!(expected.insert(RemoteControlRequestKind::InventoryInterfacePeers));
+        assert!(expected.insert(RemoteControlRequestKind::InventoryInterfaceConfig));
+        assert!(expected.insert(RemoteControlRequestKind::SetInterfaceLoRaProfile));
+        assert!(expected.insert(RemoteControlRequestKind::DescribeBuild));
+        assert_eq!(description.available_requests(), &expected);
+
+        let (inventory, _rtt) = remote_control
+            .inventory_interfaces()
+            .await
+            .expect("paired InventoryInterfaces is admitted");
+        assert!(inventory.entries().len() <= 16);
+
+        let (sleep_outcome, _rtt) = remote_control
+            .sleep_radios()
+            .await
+            .expect("paired SleepRadios is admitted");
+        assert!(matches!(
+            sleep_outcome,
+            personal_rns::remote_control::RemoteControlSleepOutcome::Applied
+                | personal_rns::remote_control::RemoteControlSleepOutcome::Unavailable
+                | personal_rns::remote_control::RemoteControlSleepOutcome::Failed
+        ));
+
+        let (wake_outcome, _rtt) = remote_control
+            .wake_radios()
+            .await
+            .expect("paired WakeRadios is admitted");
+        assert!(matches!(
+            wake_outcome,
+            personal_rns::remote_control::RemoteControlSleepOutcome::Applied
+                | personal_rns::remote_control::RemoteControlSleepOutcome::Unavailable
+                | personal_rns::remote_control::RemoteControlSleepOutcome::Failed
+        ));
     };
 
     let outcome = tokio::select! {

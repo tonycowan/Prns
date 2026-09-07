@@ -14,8 +14,7 @@ pub enum SpreadingFactor {
 }
 
 impl SpreadingFactor {
-    #[cfg(feature = "alloc")]
-    pub(crate) const fn from_number(value: u8) -> Option<Self> {
+    pub const fn from_number(value: u8) -> Option<Self> {
         match value {
             5 => Some(Self::Sf5),
             6 => Some(Self::Sf6),
@@ -72,6 +71,15 @@ impl LoraBandwidth {
         }
     }
 
+    pub const fn from_khz(khz: u32) -> Option<Self> {
+        match khz {
+            125 => Some(Self::Bw125kHz),
+            250 => Some(Self::Bw250kHz),
+            500 => Some(Self::Bw500kHz),
+            _ => None,
+        }
+    }
+
     pub const fn next(self) -> Self {
         match self {
             Self::Bw125kHz => Self::Bw250kHz,
@@ -93,6 +101,16 @@ pub enum CodingRate {
 impl CodingRate {
     pub const fn denominator(self) -> u8 {
         self as u8
+    }
+
+    pub const fn from_denominator(value: u8) -> Option<Self> {
+        match value {
+            5 => Some(Self::Cr45),
+            6 => Some(Self::Cr46),
+            7 => Some(Self::Cr47),
+            8 => Some(Self::Cr48),
+            _ => None,
+        }
     }
 
     pub const fn next(self) -> Self {

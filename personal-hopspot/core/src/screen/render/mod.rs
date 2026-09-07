@@ -24,7 +24,7 @@ use layout::*;
 use menus::lora::draw_lora_editor;
 use menus::{
     draw_global_menu, draw_interface_menu, draw_limits_page, draw_notice, draw_radio_confirm,
-    draw_sleeping,
+    draw_remote_pairing_confirm, draw_remote_pairing_invitation, draw_sleeping,
 };
 
 pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(
@@ -66,6 +66,16 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(
 
     if let UiMode::ConfirmRadioSwap { confirm } = state.mode {
         draw_radio_confirm(display, confirm, state.access_point);
+        return;
+    }
+
+    if let UiMode::RemotePairingInvitation { code } = state.mode {
+        draw_remote_pairing_invitation(display, code);
+        return;
+    }
+
+    if let UiMode::ConfirmRemotePairing { code, confirm } = state.mode {
+        draw_remote_pairing_confirm(display, code, confirm);
         return;
     }
 

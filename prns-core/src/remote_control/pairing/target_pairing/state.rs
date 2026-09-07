@@ -626,10 +626,8 @@ impl RemoteControlTargetPairingState {
                         active,
                     };
                 }
-                PersistRemoteControlTargetPairingAuthorizationOutcome::CompletionOwed {
+                PersistRemoteControlTargetPairingAuthorizationOutcome::AlreadyDispatched {
                     attempt_id: active,
-                    responder,
-                    completed,
                 }
             }
             phase @ (RemoteControlTargetPairingPhase::Idle
@@ -662,9 +660,27 @@ impl RemoteControlTargetPairingState {
                     responder,
                 }
             }
+            RemoteControlTargetPairingPhase::Completing {
+                attempt,
+                responder,
+                completed,
+            } => {
+                let attempt_id = attempt.attempt_id();
+                self.phase = RemoteControlTargetPairingPhase::Completing {
+                    attempt,
+                    responder,
+                    completed,
+                };
+                if settled != attempt_id {
+                    return FailRemoteControlTargetPairingAuthorizationOutcome::AttemptMismatch {
+                        settled,
+                        active: attempt_id,
+                    };
+                }
+                FailRemoteControlTargetPairingAuthorizationOutcome::AlreadyFinalized { attempt_id }
+            }
             phase @ (RemoteControlTargetPairingPhase::Idle
-            | RemoteControlTargetPairingPhase::Active { .. }
-            | RemoteControlTargetPairingPhase::Completing { .. }) => {
+            | RemoteControlTargetPairingPhase::Active { .. }) => {
                 self.phase = phase;
                 FailRemoteControlTargetPairingAuthorizationOutcome::NoAuthorizationOwed
             }

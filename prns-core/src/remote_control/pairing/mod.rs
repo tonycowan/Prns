@@ -1,5 +1,10 @@
+use heapless::Vec as HeaplessVec;
+
 use crate::identity::IdentityHash;
 use crate::routing::announce::{derive_destination_hash, DottedNameHash};
+use crate::routing::links::request::RequestId;
+use crate::routing::links::LinkId;
+use crate::routing::request_handlers::RequestPathHash;
 use crate::units::InstantMillis;
 use crate::wire::DestinationHash;
 
@@ -261,9 +266,22 @@ pub enum RemoteControlPairingView<'a> {
     Open(&'a RemoteControlPairingSession),
 }
 
+const PARKED_UNIDENTIFIED_PAIRING_REQUEST_DATA_LEN: usize =
+    RemoteControlPairingRequest::MAX_ENCODED_LEN.saturating_add(8);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParkedUnidentifiedRemoteControlPairingRequest {
+    pub destination: DestinationHash,
+    pub link_id: LinkId,
+    pub request_id: RequestId,
+    pub path_hash: RequestPathHash,
+    pub data: HeaplessVec<u8, PARKED_UNIDENTIFIED_PAIRING_REQUEST_DATA_LEN>,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct RemoteControlPairingState {
     phase: RemoteControlPairingPhase,
+    parked_unidentified_request: Option<ParkedUnidentifiedRemoteControlPairingRequest>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -296,6 +314,39 @@ impl RemoteControlPairingState {
     pub(crate) const fn available(target_identity: IdentityHash) -> Self {
         Self {
             phase: RemoteControlPairingPhase::Closed { target_identity },
+            parked_unidentified_request: None,
+        }
+    }
+
+    pub(crate) fn park_unidentified_request(
+        &mut self,
+        destination: DestinationHash,
+        link_id: LinkId,
+        request_id: RequestId,
+        path_hash: RequestPathHash,
+        data: &[u8],
+    ) -> bool {
+        let mut parked_data = HeaplessVec::new();
+        if parked_data.extend_from_slice(data).is_err() {
+            return false;
+        }
+        self.parked_unidentified_request = Some(ParkedUnidentifiedRemoteControlPairingRequest {
+            destination,
+            link_id,
+            request_id,
+            path_hash,
+            data: parked_data,
+        });
+        true
+    }
+
+    pub(crate) fn take_parked_unidentified_request_for(
+        &mut self,
+        link_id: LinkId,
+    ) -> Option<ParkedUnidentifiedRemoteControlPairingRequest> {
+        match self.parked_unidentified_request.as_ref() {
+            Some(parked) if parked.link_id == link_id => self.parked_unidentified_request.take(),
+            Some(_) | None => None,
         }
     }
 
@@ -338,6 +389,7 @@ impl RemoteControlPairingState {
             RemoteControlPairingPhase::Closed { target_identity }
                 if now < session.window.expires_at =>
             {
+                self.parked_unidentified_request = None;
                 self.phase = RemoteControlPairingPhase::Open {
                     target_identity,
                     session,
@@ -354,6 +406,7 @@ impl RemoteControlPairingState {
     }
 
     pub(crate) fn close(&mut self) -> CloseRemoteControlPairingOutcome {
+        self.parked_unidentified_request = None;
         match core::mem::take(&mut self.phase) {
             RemoteControlPairingPhase::Unavailable => CloseRemoteControlPairingOutcome::Unavailable,
             RemoteControlPairingPhase::Closed { target_identity } => {

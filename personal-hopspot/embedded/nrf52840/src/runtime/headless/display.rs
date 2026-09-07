@@ -372,6 +372,9 @@ pub(super) fn face(input: FaceInput) -> impl Future {
                         hopspot::UiAction::None
                         | hopspot::UiAction::ToggleStationUplink
                         | hopspot::UiAction::SwapRadioMode
+                        | hopspot::UiAction::OpenRemotePairing
+                        | hopspot::UiAction::ApproveRemotePairing
+                        | hopspot::UiAction::RejectRemotePairing
                         | hopspot::UiAction::OpenDocs
                         | hopspot::UiAction::CopySharedInstanceConfig => {}
                     }
@@ -448,6 +451,7 @@ fn snapshots(
             links: counts.links,
             transported_links: counts.transported_links,
             membership: *membership,
+            radio: status.radio(),
         });
     }
     snapshots

@@ -1,7 +1,8 @@
 use prns_core::interfaces::IfacSize;
 use prns_core::interfaces::{
     BitrateBps, ConnectionState, FrameAccounting, InterfaceCapabilities, InterfaceGravity,
-    InterfaceId, InterfaceMode, InterfaceOriginKind, InterfaceSnapshot, Membership, TransferRates,
+    InterfaceId, InterfaceMode, InterfaceOriginKind, InterfaceSnapshot, Membership,
+    RadioIndication, TransferRates,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub struct InterfaceInventoryEntry<Label> {
     pub frame_accounting: FrameAccountingCoverage,
     pub snapshot: InterfaceSnapshot,
     pub ifac: Option<InterfaceIfacSnapshot<Label>>,
+    pub group: Option<Label>,
 }
 
 struct FoldedInterface<Label> {
@@ -54,6 +56,7 @@ struct FoldedInterface<Label> {
     root_attachment_epoch: Option<u64>,
     root_frame_accounting: FrameAccountingCoverage,
     ifac: Option<InterfaceIfacSnapshot<Label>>,
+    group: Option<Label>,
     member_connection: ConnectionState,
     member_mode: Option<InterfaceMode>,
     member_gravity: Option<InterfaceGravity>,
@@ -80,6 +83,7 @@ impl<Label> FoldedInterface<Label> {
             root_attachment_epoch: None,
             root_frame_accounting: FrameAccountingCoverage::Unavailable,
             ifac: None,
+            group: None,
             member_connection: ConnectionState::Unknown,
             member_mode: None,
             member_gravity: None,
@@ -115,6 +119,9 @@ impl<Label> FoldedInterface<Label> {
                 }
                 if entry.ifac.is_some() {
                     self.ifac = entry.ifac.take();
+                }
+                if entry.group.is_some() {
+                    self.group = entry.group.take();
                 }
             }
             Membership::FleetMember { .. } => {
@@ -153,6 +160,9 @@ impl<Label> FoldedInterface<Label> {
                 }
                 if self.ifac.is_none() {
                     self.ifac = entry.ifac.take();
+                }
+                if self.group.is_none() {
+                    self.group = entry.group.take();
                 }
             }
         }
@@ -225,8 +235,13 @@ impl<Label> FoldedInterface<Label> {
                 links: self.links,
                 transported_links: self.transported_links,
                 membership: Membership::Independent,
+                radio: match self.root {
+                    Some(snapshot) => snapshot.radio,
+                    None => RadioIndication::for_kind(self.id.kind()),
+                },
             },
             ifac: self.ifac,
+            group: self.group,
         }
     }
 }
@@ -337,8 +352,10 @@ mod tests {
                 links,
                 transported_links: 0,
                 membership,
+                radio: RadioIndication::for_kind(id.kind()),
             },
             ifac: None,
+            group: None,
         }
     }
 

@@ -149,6 +149,32 @@ pub struct NnPagesRenameArgs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Args)]
+pub struct PairingArgs {
+    #[command(subcommand)]
+    pub command: PairingCommand,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
+pub enum PairingCommand {
+    #[command(about = "Open Remote Control pairing for 60 seconds")]
+    Open(PairingCommandArgs),
+    #[command(about = "Close Remote Control pairing")]
+    Close(PairingCommandArgs),
+    #[command(about = "Approve the latest pending controller")]
+    Approve(PairingCommandArgs),
+    #[command(about = "Reject the latest pending controller")]
+    Reject(PairingCommandArgs),
+    #[command(about = "Show the live Remote Control pairing state")]
+    Status(PairingCommandArgs),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Args)]
+pub struct PairingCommandArgs {
+    #[arg(long, value_name = "DIR")]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Args)]
 pub struct I2pArgs {
     #[command(subcommand)]
     pub command: I2pCommand,
@@ -226,6 +252,8 @@ pub enum Command {
     Interfaces(Box<InterfacesArgs>),
     #[command(name = "nnpages", about = "Manage hosted NomadNet pages")]
     NnPages(NnPagesArgs),
+    #[command(about = "Manage live Remote Control pairing")]
+    Pairing(PairingArgs),
     #[command(about = "Show Reticulum interface and transport status")]
     Status(RnstatusArgs),
     #[command(about = "Inspect and manage Reticulum paths")]
@@ -262,6 +290,7 @@ pub fn parse_from(args: impl IntoIterator<Item = OsString>) -> Result<Command, c
                     | "i2p"
                     | "interfaces"
                     | "nnpages"
+                    | "pairing"
                     | "status"
                     | "path"
                     | "probe"
@@ -499,6 +528,47 @@ mod tests {
                 }),
             })
         );
+    }
+
+    #[test]
+    fn pairing_commands_accept_the_daemon_configuration_directory() {
+        for (name, expected) in [
+            (
+                "open",
+                PairingCommand::Open(PairingCommandArgs {
+                    config: Some(PathBuf::from("/node")),
+                }),
+            ),
+            (
+                "close",
+                PairingCommand::Close(PairingCommandArgs {
+                    config: Some(PathBuf::from("/node")),
+                }),
+            ),
+            (
+                "approve",
+                PairingCommand::Approve(PairingCommandArgs {
+                    config: Some(PathBuf::from("/node")),
+                }),
+            ),
+            (
+                "reject",
+                PairingCommand::Reject(PairingCommandArgs {
+                    config: Some(PathBuf::from("/node")),
+                }),
+            ),
+            (
+                "status",
+                PairingCommand::Status(PairingCommandArgs {
+                    config: Some(PathBuf::from("/node")),
+                }),
+            ),
+        ] {
+            assert_eq!(
+                parse(&["prnsd", "pairing", name, "--config", "/node"]),
+                Command::Pairing(PairingArgs { command: expected }),
+            );
+        }
     }
 
     #[test]

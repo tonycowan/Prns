@@ -674,6 +674,9 @@ pub(super) fn run_window(handles: WindowHandles) {
             *working_lora_profile = DEFAULT_915_PROFILE;
         }
         UiAction::SwapRadioMode => {}
+        UiAction::OpenRemotePairing
+        | UiAction::ApproveRemotePairing
+        | UiAction::RejectRemotePairing => {}
         UiAction::OpenDocs => {}
         UiAction::CopySharedInstanceConfig => {}
     };
@@ -898,6 +901,7 @@ mod tests {
                 links: 0,
                 transported_links: 0,
                 membership: Membership::Independent,
+                radio: personal_rns::interfaces::RadioIndication::NotRadio,
             }],
             |_| Some((screen::CardKind::Usb, screen::card_label("USB"))),
         )

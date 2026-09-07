@@ -506,6 +506,9 @@ pub enum PersistRemoteControlTargetPairingAuthorizationOutcome {
     CompletionRetentionExpired {
         expired: RemoteControlTargetPairingCompletionRetentionExpired,
     },
+    AlreadyDispatched {
+        attempt_id: RemoteControlPairingAttemptId,
+    },
     NoAuthorizationOwed,
     AttemptMismatch {
         settled: RemoteControlPairingAttemptId,
@@ -519,6 +522,9 @@ pub enum FailRemoteControlTargetPairingAuthorizationOutcome {
         attempt_id: RemoteControlPairingAttemptId,
         context: RemoteControlPairingContext,
         responder: RemoteControlTargetPairingResponder,
+    },
+    AlreadyFinalized {
+        attempt_id: RemoteControlPairingAttemptId,
     },
     NoAuthorizationOwed,
     AttemptMismatch {

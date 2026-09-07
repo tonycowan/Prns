@@ -9,8 +9,9 @@ use tokio::sync::oneshot;
 
 use crate::engine::Departure;
 use crate::interfaces::{
-    ConnectionView, FrameAccounting, InterfaceId, InterfaceKind, InterfaceOriginKind,
-    InterfaceSnapshot, InterfaceStatus, InterfaceVitals, Membership, ReportsStatus, StatusView,
+    ConnectionView, FrameAccounting, InterfaceId, InterfaceKind, InterfaceMode,
+    InterfaceOriginKind, InterfaceSnapshot, InterfaceStatus, InterfaceVitals, Membership,
+    ReportsStatus, StatusView,
 };
 use crate::interfaces::{IfacContext, IfacSize};
 use crate::manifold::driver::{HostCommand, TokioInterfaceStatus};
@@ -18,6 +19,7 @@ use crate::manifold::interface_seam::Interface;
 use crate::node_introspection::{
     FrameAccountingCoverage, InterfaceIfacSnapshot, InterfaceInventoryEntry,
 };
+use crate::remote_control::RemoteControlModeOutcome;
 use prns_runtime::runtime::node_introspection::fold_logical_interface_inventory;
 
 use super::super::PrnsNodeHandle;
@@ -156,13 +158,51 @@ async fn runtime_attachment_carries_ifac_wire_and_status_metadata() {
                 links: 0,
                 transported_links: 0,
                 membership: Membership::Independent,
+                radio: crate::interfaces::RadioIndication::for_kind(id.kind()),
             },
             ifac: Some(InterfaceIfacSnapshot {
                 signature,
                 size: IfacSize::WIDE,
                 network_name: Some("private-net".into()),
             }),
+            group: None,
         }]
+    );
+}
+
+#[tokio::test]
+async fn set_interface_mode_updates_inventory_and_commands_the_engine() {
+    let (handle, mut command_rx) = handle();
+    let interface = StatusInterface::new(b"mode-wire");
+    let id = interface.id();
+    let _attached = handle.add_interface(interface);
+    let HostCommand::AddInterface(_) = command_rx.recv().await.unwrap() else {
+        panic!("expected an interface add");
+    };
+
+    assert_eq!(
+        handle.set_interface_mode(id, InterfaceMode::Gateway),
+        RemoteControlModeOutcome::Applied,
+    );
+    let HostCommand::SetInterfaceMode {
+        id: commanded,
+        mode,
+    } = command_rx.recv().await.unwrap()
+    else {
+        panic!("expected a mode update");
+    };
+    assert_eq!(commanded, id);
+    assert_eq!(mode, InterfaceMode::Gateway);
+    assert_eq!(
+        handle
+            .interface_inventory()
+            .first()
+            .map(|entry| entry.snapshot.mode),
+        Some(InterfaceMode::Gateway),
+    );
+    assert_eq!(
+        handle.set_interface_mode(InterfaceId::new([0x9A; 8]), InterfaceMode::Roaming),
+        RemoteControlModeOutcome::UnknownInterface,
     );
 }
 
@@ -209,6 +249,8 @@ fn registered_status(view: StatusView, membership: Membership) -> RegisteredInte
         gravity: crate::interfaces::InterfaceGravity::new(-27),
         ifac: None,
         name: None,
+        group: None,
+        group_apply: None,
         byte_accounting: ByteAccounting::OwnTraffic,
         retired_member_bytes: RetiredMemberBytes::default(),
         retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),

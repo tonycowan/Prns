@@ -52,8 +52,9 @@ pub use policy::{
     TRAVERSED_NETWORK_BITRATE_ESTIMATE,
 };
 pub use status::{
-    AirtimeUtilization, ConnectionState, FrameAccounting, InterfaceSnapshot, InterfaceStatus,
-    InterfaceVitals, Membership, TransferRates,
+    AirtimeUtilization, BluetoothIndication, ConnectionState, FrameAccounting, InterfaceSnapshot,
+    InterfaceStatus, InterfaceVitals, LoRaIndication, Membership, RadioFamily, RadioIndication,
+    TransferRates, WifiIndication,
 };
 #[cfg(feature = "tokio-host")]
 pub use status::{

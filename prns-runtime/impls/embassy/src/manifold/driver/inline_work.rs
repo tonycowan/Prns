@@ -153,9 +153,16 @@ where
                         } else {
                             LinkIdentityVerification::Invalid
                         };
-                    engine.resume_link_identity_verify(owed, verification, &mut |reaction| {
-                        route_reaction(reaction, egress, ifacs, pacers, now, on_journaled);
-                    });
+                    wake.compose(engine.resume_link_identity_verify(
+                        owed,
+                        verification,
+                        interfaces,
+                        now,
+                        &mut |entropy| host.fill_random(entropy),
+                        &mut |reaction| {
+                            route_reaction(reaction, egress, ifacs, pacers, now, on_journaled);
+                        },
+                    ));
                 }
                 CryptoOwed::TunnelSynthesizeVerify(owed) => {
                     let verification =

@@ -245,6 +245,80 @@ pub(super) fn draw_radio_confirm<D: DrawTarget<Color = BinaryColor>>(
     draw_menu_item(display, MENU_ITEM_TOP + 44, "Yes", confirm);
 }
 
+pub(super) fn draw_remote_pairing_invitation<D: DrawTarget<Color = BinaryColor>>(
+    display: &mut D,
+    code: u32,
+) {
+    let header = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let body = MonoTextStyle::new(&FONT_5X8, BinaryColor::On);
+    let mut code_text: HString<8> = HString::new();
+    let _ = write!(code_text, "{code:08X}");
+    let _ = Text::with_baseline(
+        "Pair remote",
+        Point::new(2, MENU_HEADER_Y),
+        header,
+        Baseline::Top,
+    )
+    .draw(display);
+    line(
+        display,
+        Point::new(0, MENU_DIVIDER_Y),
+        Point::new(WIDTH - 1, MENU_DIVIDER_Y),
+    );
+    let _ = Text::with_baseline(
+        "Invite code",
+        Point::new(2, MENU_ITEM_TOP),
+        body,
+        Baseline::Top,
+    )
+    .draw(display);
+    let _ = Text::with_baseline(
+        &code_text,
+        Point::new(7, MENU_ITEM_TOP + 16),
+        header,
+        Baseline::Top,
+    )
+    .draw(display);
+    let _ = Text::with_baseline(
+        "hold to close",
+        Point::new(2, MENU_ITEM_TOP + 40),
+        body,
+        Baseline::Top,
+    )
+    .draw(display);
+}
+
+pub(super) fn draw_remote_pairing_confirm<D: DrawTarget<Color = BinaryColor>>(
+    display: &mut D,
+    code: u32,
+    confirm: bool,
+) {
+    let header = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let mut code_text: HString<6> = HString::new();
+    let _ = write!(code_text, "{code:06}");
+    let _ = Text::with_baseline(
+        "Confirm",
+        Point::new(2, MENU_HEADER_Y),
+        header,
+        Baseline::Top,
+    )
+    .draw(display);
+    line(
+        display,
+        Point::new(0, MENU_DIVIDER_Y),
+        Point::new(WIDTH - 1, MENU_DIVIDER_Y),
+    );
+    let _ = Text::with_baseline(
+        &code_text,
+        Point::new(13, MENU_ITEM_TOP),
+        header,
+        Baseline::Top,
+    )
+    .draw(display);
+    draw_menu_item(display, MENU_ITEM_TOP + 25, "Reject", !confirm);
+    draw_menu_item(display, MENU_ITEM_TOP + 38, "Approve", confirm);
+}
+
 fn fmt_limit_value(value: LimitValue) -> HString<12> {
     let mut s = HString::new();
     match value {

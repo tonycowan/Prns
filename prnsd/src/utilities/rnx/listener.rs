@@ -42,6 +42,8 @@ struct ListenerState {
     execution_slots: Semaphore,
 }
 
+impl personal_rns::runtime::RemoteControlHostControls for ListenerState {}
+
 struct RnxCommand;
 struct PublicRnxCommand;
 type RnxEndpoint = RnxRequestEndpoint<RnxCommand>;

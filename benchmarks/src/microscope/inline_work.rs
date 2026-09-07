@@ -207,9 +207,14 @@ fn drive_ready_work(
                         } else {
                             LinkIdentityVerification::Invalid
                         };
-                    engine.resume_link_identity_verify(owed, verification, &mut |reaction| {
-                        capture.absorb(reaction, scratch)
-                    });
+                    engine.resume_link_identity_verify(
+                        owed,
+                        verification,
+                        interfaces,
+                        now,
+                        &mut |bytes| entropy.fill(bytes),
+                        &mut |reaction| capture.absorb(reaction, scratch),
+                    );
                 }
                 CryptoOwed::TunnelSynthesizeVerify(owed) => {
                     let verification =
