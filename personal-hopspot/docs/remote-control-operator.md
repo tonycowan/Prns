@@ -3,8 +3,14 @@
 Desktop controller app: `personal-hopspot/remote-control-desktop/`
 (Dioxus 0.7.5, Tokio `personal-rns` controller). The window title is
 **PRNS Controller**. The top bar switches views: the nodes icon on the
-left opens **Managed Nodes** (the default), and the settings icon on the
-right opens **Settings**.
+left opens **Managed Nodes** (the default), the lightning icon beside it
+opens **Flash** (desktop only), and the settings icon on the
+right opens **Settings**. Flash lists the device catalog, writes this
+checkout’s firmware, and enrolls UF2 and ESP boards as Managed Nodes for
+this Operator so they are ready to manage without an invitation. MeshTower
+V2 is in that catalog as an explicit pick: it shares the T114 UF2 Board-ID
+(`HT-n5262`), so you choose MeshTower rather than letting auto-detect
+guess.
 
 The desktop app **embeds its own Personal Reticulum node**. It does not join
 a `prnsd` shared instance on this machine, and it does not reuse that
@@ -68,8 +74,8 @@ Settings, then Pair remote.
 
 Heard announcements appear under **Managed Nodes** as “Awaiting pairing”. Expand one
 to enter the invitation code and finish pairing there (there is no separate
-Pairing screen). The firmware / PRNS version appears next to the node title
-after the controller first reaches that target. Paired targets expand into a
+Pairing screen). The firmware / PRNS version appears on its own line above
+Address after the controller first reaches that target. Paired targets expand into a
 list of interfaces; expand an interface to manage that feature.
 
 ## Pair with local prnsd
@@ -221,28 +227,67 @@ list of interfaces; expand an interface to manage that feature.
    target from the controller's stored
    access list and local name file; pair again to bring it back.
 
+## Flash a catalog board
+
+On desktop, open **Flash**, select a catalog board to slide out its
+flash info and options, then **Flash and enroll**. The form can write a
+station SSID/password and an optional TCP client on ESP boards, and a
+LoRa region/preset that is applied once the node is reachable. Leave
+Wi-Fi blank to keep whatever is already in the provisioning slot.
+hopspot-flash builds this checkout and writes a Remote Control identity
+plus this Operator’s grant onto UF2 and ESP boards. The node then
+appears under Managed Nodes — no invitation code. The T1000-E serial
+DFU path flashes firmware only; pair that board after it boots. An
+unprovisioned HV4 with no station SSID boots SoftAP so the LAN card is
+on the face and in the node list.
+
 ## Pair with a Hopspot board
 
-1. Flash ESP32 (HV4-R8) or nRF firmware that includes Remote Control.
+1. Flash ESP32 (HV4-R8) or nRF firmware that includes Remote Control
+   (desktop **Flash**, including MeshTower, or `./tools/prns build hopspot`).
 2. Start the desktop controller on a shared transport (BLE Auto starts
    on; enable USB, Auto Wi-Fi, or TCP from Settings, or set
    `HOPSPOT_RC_USB=1` / `HOPSPOT_RC_AUTO_WIFI=1` / `HOPSPOT_RC_TCP=…`). For MeshTower / T1000-E, wait until Settings shows a
    BLE peer before pairing.
-3. Start the desktop app first so it can hear the hop-0 pairing ad. On
-   the OLED Global menu, choose **Pair remote**. Note the invitation code
-   on the screen now — a previous code will not work.
+3. Start the desktop app first so it can hear the hop-0 pairing ad. Then
+   open pairing on the target:
+   - OLED Hopspot (ESP32 / T-Echo): Global menu **Pair remote**.
+     Note the eight hex digits on the screen now — a previous code will not work.
+   - MeshTower V2 (no screen): long-press the user button. The status LED
+     repeats the invitation: one long flash, a pause, then eight hex
+     nibbles (a long flash is `0`; `1`–`F` are that many short flashes).
+     A later long-press cancels the window. The awaiting row is labeled
+     `MeshTower`.
 4. On **Managed Nodes**, expand the newest awaiting Hopspot row (the label
    includes a short dest suffix), enter the code, and complete six-digit
-   confirm on both the face and the desktop app (Approve / Reject).
-   Either order is fine; both approvals plus the board writing the grant
-   must finish inside about two minutes after the confirmation digits
-   appear. Older Hopspot firmware used a 30s attempt window and fails
-   Approve with `Timeout` / `AwaitingCompletion` if you Yes the board
-   first and then walk back to the app.
+   confirm. On a face, Approve / Reject on screen. On MeshTower, short-press
+   approves and long-press rejects while the LED double-pulses. Either
+   order is fine; both approvals plus the board writing the grant must
+   finish inside about two minutes after the confirmation digits appear.
+   Older Hopspot firmware used a 30s attempt window and fails Approve with
+   `Timeout` / `AwaitingCompletion` if you Yes the board first and then
+   walk back to the app.
 5. Drive inventory, power, and mode from the expanded target and interface sections.
+   MeshTower LoRa profile changes apply until reboot; that board has no second
+   radio-profile flash page to persist them.
 
 ## Lab seed grants
 
 For automated benches without pairing, seed controller grants as in
 `personal-rns/examples/remote_control.rs`. Product path remains pairing with
 empty grants at boot (`RemoteControlInitialControllerGrants::Nobody`).
+
+MeshTower V2 can bake one Controller into the UF2 at build. Copy the 128-character
+allow-list key from PRNS Controller Settings (not the 32-character Operator hash)
+and build:
+
+```console
+HOPSPOT_RC_CONTROLLER_KEY=<128 hex characters> \
+  ./tools/prns build hopspot mesh-tower-v2
+```
+
+That writes the grant the same way pairing would. It does not enroll the tower
+on the phone: Managed Nodes still gets the control destination from pairing
+(or another Controller-side import). A board that already persisted an empty
+or different allow-list keeps the journal copy after reflash unless that
+journal is erased. Pairing remains available when the key is omitted.

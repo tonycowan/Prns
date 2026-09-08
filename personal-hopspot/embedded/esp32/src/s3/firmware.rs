@@ -488,11 +488,12 @@ pub(super) async fn run_core<B: Esp32S3Board>(
     let node_identity = node_bootstrap.into_identity();
     let transport_secret = node_identity.transport_secret();
     let destination_secret = node_identity.into_destination_secret();
+    let factory_grant = remote_control_bootstrap.factory_grant;
     let (remote_control_identity_secrets, _remote_control_identity_origins) =
-        remote_control_bootstrap.into_parts();
+        remote_control_bootstrap.bootstrap.into_parts();
     let remote_control = RemoteControlService::new(
         remote_control_identity_secrets,
-        RemoteControlInitialControllerGrants::Nobody,
+        crate::identity::factory_or_fallback_grants(factory_grant),
         RemoteControlSelfAnnouncement::Destination(destination_hashes.node_page),
     );
     let destinations = personal_hopspot_core::HopspotDestinationSet::new(

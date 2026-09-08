@@ -39,6 +39,9 @@ mkdir -p "$output"
         --bin heltec-mesh-tower-v2 \
         --target-dir "$cargo_target"
 )
+if [[ -n "${HOPSPOT_RC_CONTROLLER_KEY:-}" ]]; then
+    printf 'MeshTower V2 UF2 includes a flashed controller grant.\n'
+fi
 
 application_base=""
 while read -r section_index section_name section_size section_vma section_rest; do

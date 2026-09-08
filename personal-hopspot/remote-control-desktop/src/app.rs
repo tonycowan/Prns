@@ -14,9 +14,19 @@ use crate::edits::{
     put_draft, revert_drafts, saved_group, InterfaceDraft, InterfaceField, LoRaTuneControl,
     LORA_TX_POWER_MIN_DBM,
 };
+#[cfg(not(target_os = "android"))]
+use crate::flash::{FlashDraft, FlashProgress, FlashRunOutcome, FlashStage, FlashStageState};
 use crate::identity_clone::{IdentityCloneView, SiblingControllerView};
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FlashProgress;
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FlashDraft;
 use personal_rns::interfaces::lora::{
-    CodingRate, LoraBandwidth, ModemPreset, Modulation, Region, SpreadingFactor,
+    CodingRate, LoraBandwidth, ModemPreset, Modulation, RadioProfile, Region, SpreadingFactor,
 };
 use personal_rns::interfaces::InterfaceMode;
 
@@ -30,7 +40,8 @@ body { margin: 0; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
 .shell { min-height: 100vh; display: flex; flex-direction: column; }
-.app-bar { display: grid; grid-template-columns: 48px 1fr 48px; align-items: center; gap: 12px; padding: 12px 18px; background: #183d2b; color: #f5faf6; }
+.app-bar { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 12px 18px; background: #183d2b; color: #f5faf6; }
+.app-bar-nav { display: flex; align-items: center; gap: 4px; }
 .app-bar h1 { margin: 0; font-size: 20px; font-weight: 700; text-align: center; letter-spacing: .01em; }
 .app-bar button { border: 0; background: transparent; color: #dbe9df; width: 40px; height: 40px; border-radius: 8px; padding: 8px; display: grid; place-items: center; }
 .app-bar button:hover, .app-bar button.active { color: white; background: #2d6046; }
@@ -47,6 +58,30 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
 .section-intro .info-note { margin: 10px 0 0; }
 .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .card { background: white; border: 1px solid #d7e0d9; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(24, 61, 43, .05); }
+.flash-board { cursor: pointer; text-align: left; width: 100%; border: 1px solid #d7e0d9; background: white; border-radius: 10px; padding: 16px 18px; }
+.flash-board.selected, .flash-board:hover { border-color: #2d6046; background: #f4f8f5; }
+.flash-board.probable { border-color: #2d6046; box-shadow: 0 0 0 2px rgba(45, 96, 70, .22); }
+.flash-board h3 { margin: 0 0 4px; font-size: 17px; }
+.flash-board .meta { color: #5a6a60; font-size: 13px; margin: 0; }
+.flash-board .detected { margin: 8px 0 0; font-size: 12px; font-weight: 600; color: #183d2b; }
+.accordion-item.probable { border-color: #2d6046; box-shadow: 0 0 0 2px rgba(45, 96, 70, .22); }
+.flash-actions { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; margin-top: 4px; }
+.flash-stages { list-style: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 18px 0 0; padding: 0; }
+.flash-stages[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.flash-stage { position: relative; display: grid; justify-items: center; gap: 8px; text-align: center; }
+.flash-stage::before { content: ""; position: absolute; top: 11px; right: calc(50% + 16px); left: calc(-50% + 16px); height: 2px; background: #d7e0d9; }
+.flash-stage:first-child::before { content: none; }
+.flash-stage.done::before, .flash-stage.current::before { background: #2d6046; }
+.flash-stage.failed::before { background: #8a2f2f; }
+.flash-stage .dot { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #d7e0d9; background: white; }
+.flash-stage.current .dot { border-color: #2d6046; background: #2d6046; box-shadow: 0 0 0 4px rgba(45, 96, 70, .18); }
+.flash-stage.done .dot { border-color: #2d6046; background: #2d6046; }
+.flash-stage.failed .dot { border-color: #8a2f2f; background: #8a2f2f; }
+.flash-stage.skipped .dot { border-style: dashed; }
+.flash-stage .label { font-size: 12px; font-weight: 600; color: #5a6a60; }
+.flash-stage.current .label, .flash-stage.done .label { color: #183d2b; }
+.flash-stage.failed .label { color: #8a2f2f; }
+.flash-stage-detail { margin: 10px 0 0; }
 .card h2, .card h3 { margin-top: 0; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .heading-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -106,7 +141,9 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
 .unsaved-dialog p { margin: 0 0 16px; }
 label { color: #425348; font-size: 14px; font-weight: 600; }
 input { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius: 7px; padding: 10px 11px; background: #fbfdfb; }
-select { width: 100%; border: 1px solid #bfcac2; border-radius: 7px; padding: 6px 8px; background: #fbfdfb; }
+select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius: 7px; padding: 10px 11px; background: #fbfdfb; }
+.flash-check { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.flash-check input { width: auto; margin: 0; padding: 0; }
 .digits { font-size: 30px; font-weight: 700; letter-spacing: .22em; }
 .toggle { min-width: 58px; }
 .note { color: #66766c; font-size: 14px; }
@@ -149,6 +186,8 @@ select { width: 100%; border: 1px solid #bfcac2; border-radius: 7px; padding: 6p
 .whitelist-hash { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: transparent; padding: 0; text-align: left; color: #17221b; font: inherit; font-variant-numeric: tabular-nums; }
 .whitelist-hash:hover { text-decoration: underline; }
 .whitelist-alias { min-width: 0; width: 100%; height: 30px; margin: 0; border: 1px solid #bfcac2; border-radius: 7px; padding: 0 8px; background: #fbfdfb; }
+.whitelist-alias-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #17221b; }
+.whitelist-alias-text.placeholder { color: #64736a; }
 .whitelist-remove { min-width: 92px; }
 .hash-popup { max-width: 520px; }
 .hash-popup .twisty-address { word-break: break-all; }
@@ -206,6 +245,7 @@ impl InterfaceHost {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Nodes,
+    Flash,
     Settings,
 }
 
@@ -227,6 +267,12 @@ enum LoadedWhitelist {
     Loading,
     Ready(Vec<String>),
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WhitelistTableKind {
+    Status,
+    Configure,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,6 +318,11 @@ pub fn App() -> Element {
     let interfaces_info = use_signal(|| false);
     let settings_info = use_signal(|| false);
     let nodes_info = use_signal(|| false);
+    let flash_info = use_signal(|| false);
+    let selected_flash_board = use_signal(|| None::<String>);
+    let flash_status = use_signal(String::new);
+    let flashing = use_signal(|| false);
+    let flash_progress = use_signal(|| None::<FlashProgress>);
     let mut clone_view = use_signal(|| backend().identity_clone().ok());
 
     use_effect(move || {
@@ -282,7 +333,8 @@ pub fn App() -> Element {
                 return;
             }
             let mut auto_probed = HashSet::<String>::new();
-            let mut version_probed = HashSet::<String>::new();
+            let version_inflight =
+                std::sync::Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
             loop {
                 let _ = backend.advance_clone().await;
                 if let Ok(view) = backend.identity_clone() {
@@ -345,7 +397,9 @@ pub fn App() -> Element {
                             .retain(|id, _| id == CONTROLLER_SCOPE || live_ids.contains(id));
                         expanded_targets.write().retain(|id| live_ids.contains(id));
                         auto_probed.retain(|id| live_ids.contains(id));
-                        version_probed.retain(|id| live_ids.contains(id));
+                        if let Ok(mut inflight) = version_inflight.lock() {
+                            inflight.retain(|id| live_ids.contains(id));
+                        }
                         for item in &items {
                             if item.status == TargetStatus::AwaitingPairing
                                 || item.path.is_some()
@@ -362,14 +416,26 @@ pub fn App() -> Element {
                         for item in &items {
                             if item.status == TargetStatus::AwaitingPairing
                                 || item.build_version.is_some()
-                                || !version_probed.insert(item.id.clone())
+                                || (item.path.is_none() && item.status != TargetStatus::Online)
                             {
                                 continue;
                             }
+                            {
+                                let Ok(mut inflight) = version_inflight.lock() else {
+                                    continue;
+                                };
+                                if !inflight.insert(item.id.clone()) {
+                                    continue;
+                                }
+                            }
                             let backend = backend.clone();
+                            let inflight = version_inflight.clone();
                             let id = item.id.clone();
                             spawn(async move {
                                 let _ = backend.refresh_build_version(&id).await;
+                                if let Ok(mut inflight) = inflight.lock() {
+                                    inflight.remove(&id);
+                                }
                             });
                         }
                         adopt_missing_aliases(target_aliases, backend.target_aliases());
@@ -386,25 +452,47 @@ pub fn App() -> Element {
         style { {STYLES} }
         div { class: "shell",
             header { class: "app-bar",
-                button {
-                    class: if screen() == Screen::Nodes { "active" } else { "" },
-                    title: "Managed Nodes",
-                    aria_label: "Managed Nodes",
-                    onclick: move |_| {
-                        request_screen(
-                            Screen::Nodes,
-                            screen,
-                            drafts,
-                            interfaces_by_target,
-                            unsaved,
-                        );
-                    },
-                    svg {
-                        view_box: "0 0 24 24",
-                        circle { cx: "12", cy: "5", r: "2.2" }
-                        circle { cx: "6", cy: "18", r: "2.2" }
-                        circle { cx: "18", cy: "18", r: "2.2" }
-                        path { d: "M12 7.2v3.4M10.3 12.2 7.4 16.2M13.7 12.2l2.9 4" }
+                div { class: "app-bar-nav",
+                    button {
+                        class: if screen() == Screen::Nodes { "active" } else { "" },
+                        title: "Managed Nodes",
+                        aria_label: "Managed Nodes",
+                        onclick: move |_| {
+                            request_screen(
+                                Screen::Nodes,
+                                screen,
+                                drafts,
+                                interfaces_by_target,
+                                unsaved,
+                            );
+                        },
+                        svg {
+                            view_box: "0 0 24 24",
+                            circle { cx: "12", cy: "5", r: "2.2" }
+                            circle { cx: "6", cy: "18", r: "2.2" }
+                            circle { cx: "18", cy: "18", r: "2.2" }
+                            path { d: "M12 7.2v3.4M10.3 12.2 7.4 16.2M13.7 12.2l2.9 4" }
+                        }
+                    }
+                    if cfg!(not(target_os = "android")) {
+                        button {
+                            class: if screen() == Screen::Flash { "active" } else { "" },
+                            title: "Flash",
+                            aria_label: "Flash",
+                            onclick: move |_| {
+                                request_screen(
+                                    Screen::Flash,
+                                    screen,
+                                    drafts,
+                                    interfaces_by_target,
+                                    unsaved,
+                                );
+                            },
+                            svg {
+                                view_box: "0 0 24 24",
+                                path { d: "M13 2 4 14h7l-1 8 10-14h-7l0-6z" }
+                            }
+                        }
                     }
                 }
                 h1 { "PRNS Controller" }
@@ -430,6 +518,21 @@ pub fn App() -> Element {
             }
             main { class: "content",
                 match screen() {
+                    Screen::Flash => rsx! {
+                        FlashSection {
+                            backend,
+                            screen,
+                            drafts,
+                            interfaces_by_target,
+                            unsaved,
+                            targets,
+                            selected_flash_board,
+                            flash_status,
+                            flashing,
+                            flash_progress,
+                            flash_info,
+                        }
+                    },
                     Screen::Settings => rsx! {
                         div { class: "heading-row",
                             h1 { "Settings" }
@@ -620,11 +723,6 @@ pub fn App() -> Element {
                                             div { class: "target-main",
                                                 div { class: "target-title",
                                                     span { class: "name", "{target_display_name(&target)}" }
-                                                    if let Some(version) = target.build_version.as_deref() {
-                                                        if !version.is_empty() {
-                                                            span { class: "build", "{version}" }
-                                                        }
-                                                    }
                                                     if !awaiting {
                                                         input {
                                                             class: "peer-alias",
@@ -708,6 +806,9 @@ pub fn App() -> Element {
                                             }
                                                 }
                                                 dl { class: "facts",
+                                                    if let Some(version) = target.build_version.as_deref().filter(|text| !text.is_empty()) {
+                                                        div { dt { "PRNS" } dd { "{version}" } }
+                                                    }
                                                     div { dt { "Address" } dd { "{target.id}" } }
                                                     div {
                                                         dt { "Announce" }
@@ -1175,7 +1276,7 @@ fn whitelist_status_pane(
             backend,
             activity_log,
             loaded,
-            false,
+            WhitelistTableKind::Status,
         ),
     }
 }
@@ -1217,7 +1318,7 @@ fn whitelist_configure_pane(
                     backend,
                     activity_log,
                     loaded,
-                    true,
+                    WhitelistTableKind::Configure,
                 ),
             }
             label { "Allow-list key"
@@ -1235,7 +1336,7 @@ fn whitelist_configure_pane(
             }
             div { class: "actions",
                 button {
-                    class: "button primary",
+                    class: "button",
                     r#type: "button",
                     disabled: busy() || add_key().trim().is_empty(),
                     onclick: {
@@ -1301,13 +1402,14 @@ fn whitelist_manager_table(
     backend: Signal<RemoteControlBackend>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
     loaded: Signal<LoadedWhitelist>,
-    show_remove: bool,
+    kind: WhitelistTableKind,
 ) -> Element {
+    let configure = kind == WhitelistTableKind::Configure;
     rsx! {
-        div { class: if show_remove { "whitelist-table can-remove" } else { "whitelist-table" },
+        div { class: if configure { "whitelist-table can-remove" } else { "whitelist-table" },
             span { class: "whitelist-head", "Manager Address Hash" }
             span { class: "whitelist-head", "Alias" }
-            if show_remove {
+            if configure {
                 span { class: "whitelist-head", aria_hidden: "true" }
             }
             for hash in hashes {
@@ -1316,6 +1418,12 @@ fn whitelist_manager_table(
                     let alias = manager_aliases().get(&hash).cloned().unwrap_or_default();
                     let hash_for_alias = hash.clone();
                     let hash_for_remove = hash.clone();
+                    let alias_placeholder = if self_entry { "This controller" } else { "Alias" };
+                    let alias_display = if alias.is_empty() {
+                        alias_placeholder.to_string()
+                    } else {
+                        alias.clone()
+                    };
                     rsx! {
                         button {
                             class: "whitelist-hash",
@@ -1328,38 +1436,27 @@ fn whitelist_manager_table(
                             },
                             "{hash}"
                         }
-                        input {
-                            class: "whitelist-alias",
-                            r#type: "text",
-                            placeholder: if self_entry { "This controller" } else { "Alias" },
-                            value: "{alias}",
-                            aria_label: "Alias for {hash}",
-                            oninput: {
-                                let hash = hash_for_alias.clone();
-                                move |event| {
-                                    let value = event.value();
-                                    if value.is_empty() {
-                                        manager_aliases.write().remove(&hash);
-                                    } else {
-                                        manager_aliases.write().insert(hash.clone(), value);
+                        if configure {
+                            input {
+                                class: "whitelist-alias",
+                                r#type: "text",
+                                placeholder: "{alias_placeholder}",
+                                value: "{alias}",
+                                aria_label: "Alias for {hash}",
+                                oninput: {
+                                    let hash = hash_for_alias.clone();
+                                    move |event| {
+                                        let value = event.value();
+                                        if value.is_empty() {
+                                            manager_aliases.write().remove(&hash);
+                                        } else {
+                                            manager_aliases.write().insert(hash.clone(), value);
+                                        }
                                     }
-                                }
-                            },
-                            onblur: {
-                                let hash = hash_for_alias.clone();
-                                move |_| {
-                                    persist_manager_alias(
-                                        hash.clone(),
-                                        backend(),
-                                        manager_aliases,
-                                        activity_log,
-                                    );
-                                }
-                            },
-                            onkeydown: {
-                                let hash = hash_for_alias;
-                                move |event| {
-                                    if event.key() == Key::Enter {
+                                },
+                                onblur: {
+                                    let hash = hash_for_alias.clone();
+                                    move |_| {
                                         persist_manager_alias(
                                             hash.clone(),
                                             backend(),
@@ -1367,10 +1464,28 @@ fn whitelist_manager_table(
                                             activity_log,
                                         );
                                     }
-                                }
-                            },
+                                },
+                                onkeydown: {
+                                    let hash = hash_for_alias;
+                                    move |event| {
+                                        if event.key() == Key::Enter {
+                                            persist_manager_alias(
+                                                hash.clone(),
+                                                backend(),
+                                                manager_aliases,
+                                                activity_log,
+                                            );
+                                        }
+                                    }
+                                },
+                            }
+                        } else {
+                            span {
+                                class: if alias.is_empty() { "whitelist-alias-text placeholder" } else { "whitelist-alias-text" },
+                                "{alias_display}"
+                            }
                         }
-                        if show_remove {
+                        if configure {
                             button {
                                 class: "button danger whitelist-remove",
                                 r#type: "button",
@@ -2633,6 +2748,671 @@ fn load_interfaces_for_target(
             }
         }
     });
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn FlashSection(
+    backend: Signal<RemoteControlBackend>,
+    screen: Signal<Screen>,
+    drafts: Signal<HashMap<String, InterfaceDraft>>,
+    interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    unsaved: Signal<Option<UnsavedPrompt>>,
+    mut targets: Signal<Vec<TargetAccess>>,
+    mut selected_flash_board: Signal<Option<String>>,
+    mut flash_status: Signal<String>,
+    mut flashing: Signal<bool>,
+    flash_progress: Signal<Option<FlashProgress>>,
+    flash_info: Signal<bool>,
+) -> Element {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (
+            backend,
+            screen,
+            drafts,
+            interfaces_by_target,
+            unsaved,
+            targets,
+            selected_flash_board,
+            flash_status,
+            flashing,
+            flash_progress,
+            flash_info,
+        );
+        return rsx! {
+            h1 { "Flash" }
+            p { class: "lead", "Flashing and enrollment are available in the desktop PRNS Controller." }
+        };
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut probable_slugs = use_signal(Vec::<String>::new);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = cancelled.clone();
+        let poll = cancelled.clone();
+        use_drop(move || {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        use_effect(move || {
+            let cancelled = poll.clone();
+            spawn(async move {
+                while !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    let found = tokio::task::spawn_blocking(crate::flash::detect_probable_slugs)
+                        .await
+                        .unwrap_or_default();
+                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    probable_slugs.set(found);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            });
+        });
+        let probable = probable_slugs();
+        let mut boards = crate::flash::catalog_boards().unwrap_or_default();
+        boards.sort_by_key(|board| !probable.iter().any(|slug| slug == &board.slug));
+        let flash_forms = use_signal(HashMap::<String, FlashDraft>::new);
+        let mut flash_configuring = use_signal(|| false);
+        rsx! {
+            div { class: "heading-row",
+                h1 { "Flash" }
+                InfoHint {
+                    label: "About Flash".to_string(),
+                    open: flash_info,
+                }
+            }
+            div { class: "section-intro",
+                p { class: "lead", "Select a board to open its flash options. Fill in station Wi-Fi, LoRa, and any TCP target, then flash this checkout’s firmware. The board is enrolled as a Managed Node for this Operator — no invitation code." }
+                if !probable.is_empty() {
+                    p { class: "note", "A connected bootloader or USB device matches the highlighted boards. Confirm the model if more than one lights up — some boards share a Board-ID or an ESP USB identity." }
+                }
+                if flash_info() {
+                    p { class: "note info-note", "Desktop only. Firmware is built from this repository via hopspot-flash. UF2 and ESP boards also receive a Remote Control identity and this app’s allow-list grant. The T1000-E serial DFU path flashes firmware but still needs pairing for enrollment. Highlighted rows are a connected UF2 drive or USB identity, not a firmware choice. ESP detection uses Espressif native USB and does not reset the chip. An empty SSID leaves any existing station credentials in place." }
+                }
+            }
+            div { class: "accordion",
+                for board in boards {
+                    {
+                        let slug = board.slug.clone();
+                        let selected_slug = selected_flash_board();
+                        let is_selected = selected_slug.as_deref() == Some(slug.as_str());
+                        let is_probable = probable.iter().any(|seen| seen == &slug);
+                        let configuring = is_selected && flash_configuring();
+                        let form = flash_forms()
+                            .get(&slug)
+                            .cloned()
+                            .unwrap_or_default();
+                        let interfaces = board.interfaces.join(", ");
+                        let item_class = match (is_selected, is_probable) {
+                            (true, true) => "accordion-item open probable",
+                            (true, false) => "accordion-item open",
+                            (false, true) => "accordion-item probable",
+                            (false, false) => "accordion-item",
+                        };
+                        rsx! {
+                            section {
+                                class: "{item_class}",
+                                button {
+                                    class: "twisty-row",
+                                    aria_expanded: if is_selected { "true" } else { "false" },
+                                    onclick: {
+                                        let slug = slug.clone();
+                                        move |_| {
+                                            if selected_flash_board().as_deref() == Some(slug.as_str()) {
+                                                selected_flash_board.set(None);
+                                                flash_configuring.set(false);
+                                            } else {
+                                                selected_flash_board.set(Some(slug.clone()));
+                                                flash_configuring.set(false);
+                                            }
+                                        }
+                                    },
+                                    span { class: if is_selected { "twisty open" } else { "twisty" }, aria_hidden: "true" }
+                                    div { class: "twisty-copy",
+                                        span { class: "twisty-title", "{board.display_name}" }
+                                        span { class: "twisty-address", "{board.silicon} · {board.transport} · {board.availability}" }
+                                    }
+                                    if is_probable {
+                                        span { class: "status online", "Connected" }
+                                    }
+                                }
+                                if is_selected {
+                                    div { class: "accordion-body",
+                                        div { class: if configuring { "interface-toolbar editing" } else { "interface-toolbar" },
+                                            div { class: "toolbar-track",
+                                                div { class: "toolbar-pane",
+                                                    button {
+                                                        class: "button",
+                                                        r#type: "button",
+                                                        disabled: flashing(),
+                                                        onclick: move |_| flash_configuring.set(true),
+                                                        "Configure and flash"
+                                                    }
+                                                }
+                                                div { class: "toolbar-pane",
+                                                    button {
+                                                        class: "button",
+                                                        r#type: "button",
+                                                        disabled: flashing(),
+                                                        onclick: move |_| flash_configuring.set(false),
+                                                        "Back"
+                                                    }
+                                                    button {
+                                                        class: if flashing() { "button busy" } else { "button" },
+                                                        r#type: "button",
+                                                        disabled: flashing(),
+                                                        aria_busy: if flashing() { "true" } else { "false" },
+                                                        onclick: {
+                                                            let board = board.clone();
+                                                            let form = form.clone();
+                                                            move |_| {
+                                                                start_flash(
+                                                                    board.slug.clone(),
+                                                                    board.display_name.clone(),
+                                                                    board.enrollable
+                                                                        && form.enrol_for_management,
+                                                                    board.supports_wifi,
+                                                                    board.supports_tcp,
+                                                                    form.clone(),
+                                                                    backend,
+                                                                    screen,
+                                                                    drafts,
+                                                                    interfaces_by_target,
+                                                                    unsaved,
+                                                                    targets,
+                                                                    flash_status,
+                                                                    flashing,
+                                                                    flash_progress,
+                                                                );
+                                                            }
+                                                        },
+                                                        if flashing() {
+                                                            span { class: "spinner", aria_hidden: "true" }
+                                                            "Flashing"
+                                                        } else {
+                                                            "Flash"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        div { class: if configuring { "deck editing" } else { "deck" },
+                                            div { class: "deck-track",
+                                                div { class: "deck-pane",
+                                                    dl { class: "facts",
+                                                        div { dt { "Silicon" } dd { "{board.silicon}" } }
+                                                        div { dt { "Transport" } dd { "{board.transport}" } }
+                                                        div { dt { "Interfaces" } dd { "{interfaces}" } }
+                                                    }
+                                                    ul {
+                                                        for step in crate::flash::preparation_steps(&board.preparation_profile) {
+                                                            li { "{step}" }
+                                                        }
+                                                    }
+                                                    p { class: "note",
+                                                        if board.enrollable {
+                                                            "Flash writes firmware plus this Operator’s grant. The node appears under Managed Nodes when the flash succeeds."
+                                                        } else {
+                                                            "This transport cannot write the enrollment vault. Flash firmware here, then pair the node from Managed Nodes."
+                                                        }
+                                                    }
+                                                }
+                                                div { class: "deck-pane",
+                                                    {flash_options_form(
+                                                        board.clone(),
+                                                        slug.clone(),
+                                                        form.clone(),
+                                                        flashing(),
+                                                        flash_forms,
+                                                    )}
+                                                }
+                                            }
+                                        }
+                                        if configuring {
+                                        if let Some(progress) = flash_progress() {
+                                            {
+                                                let stages = FlashStage::stages(progress.enrollable);
+                                                rsx! {
+                                                    ol {
+                                                        class: "flash-stages",
+                                                        "data-count": "{stages.len()}",
+                                                        for stage in stages {
+                                                            {
+                                                                let state = progress.stage_state(*stage);
+                                                                let class = match state {
+                                                                    FlashStageState::Pending => "flash-stage pending",
+                                                                    FlashStageState::Current => "flash-stage current",
+                                                                    FlashStageState::Done => "flash-stage done",
+                                                                    FlashStageState::Failed => "flash-stage failed",
+                                                                    FlashStageState::Skipped => "flash-stage skipped",
+                                                                };
+                                                                rsx! {
+                                                                    li { class,
+                                                                        span { class: "dot" }
+                                                                        span { class: "label", "{stage.label()}" }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    p { class: "note flash-stage-detail",
+                                                        if let Some(percent) = progress.write_percent {
+                                                            "{progress.detail} ({percent}%)"
+                                                        } else {
+                                                            "{progress.detail}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        {
+                                            let status = flash_status();
+                                            let repeats_progress = flash_progress().as_ref().is_some_and(|progress| {
+                                                progress.detail == status
+                                            });
+                                            rsx! {
+                                                if !status.is_empty() && !repeats_progress {
+                                                    p { class: "note", "{status}" }
+                                                }
+                                            }
+                                        }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn flash_options_form(
+    board: crate::flash::CatalogBoard,
+    slug: String,
+    form: FlashDraft,
+    busy: bool,
+    mut flash_forms: Signal<HashMap<String, FlashDraft>>,
+) -> Element {
+    rsx! {
+        div { class: "edit-card",
+            h3 { "Flash options" }
+            p { class: "note", "These settings are written with the firmware. Leave Wi-Fi blank to keep whatever is already on the board." }
+            if board.enrollable {
+                label {
+                    class: "flash-check",
+                    input {
+                        r#type: "checkbox",
+                        checked: form.enrol_for_management,
+                        disabled: busy,
+                        onchange: {
+                            let slug = slug.clone();
+                            move |event| {
+                                let mut next = flash_forms()
+                                    .get(&slug)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                next.enrol_for_management = event.checked();
+                                flash_forms.write().insert(slug.clone(), next);
+                            }
+                        },
+                    }
+                    "Enrol for management"
+                }
+            }
+            if board.supports_wifi {
+                label { "Station SSID"
+                    input {
+                        r#type: "text",
+                        value: "{form.wifi_ssid}",
+                        maxlength: "32",
+                        placeholder: "Leave empty to preserve existing Wi-Fi",
+                        disabled: busy,
+                        oninput: {
+                            let slug = slug.clone();
+                            move |event| {
+                                let mut next = flash_forms()
+                                    .get(&slug)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                next.wifi_ssid = event.value();
+                                flash_forms.write().insert(slug.clone(), next);
+                            }
+                        },
+                    }
+                }
+                label { "Station password"
+                    input {
+                        r#type: "password",
+                        value: "{form.wifi_password}",
+                        maxlength: "64",
+                        placeholder: "empty for an open network",
+                        disabled: busy,
+                        oninput: {
+                            let slug = slug.clone();
+                            move |event| {
+                                let mut next = flash_forms()
+                                    .get(&slug)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                next.wifi_password = event.value();
+                                flash_forms.write().insert(slug.clone(), next);
+                            }
+                        },
+                    }
+                }
+            }
+            if board.supports_tcp {
+                label { "TCP client"
+                    input {
+                        r#type: "text",
+                        value: "{form.tcp_client}",
+                        placeholder: "Optional IPv4, hostname, or host:port",
+                        disabled: busy,
+                        oninput: {
+                            let slug = slug.clone();
+                            move |event| {
+                                let mut next = flash_forms()
+                                    .get(&slug)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                next.tcp_client = event.value();
+                                flash_forms.write().insert(slug.clone(), next);
+                            }
+                        },
+                    }
+                }
+            }
+            if board.has_lora {
+                label { "LoRa region"
+                    select {
+                        value: "{form.lora_region.label()}",
+                        disabled: busy,
+                        onchange: {
+                            let slug = slug.clone();
+                            move |event| {
+                                let Some(region) = Region::ALL
+                                    .into_iter()
+                                    .find(|region| region.label() == event.value())
+                                else {
+                                    return;
+                                };
+                                let mut next = flash_forms()
+                                    .get(&slug)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                next.lora_region = region;
+                                flash_forms.write().insert(slug.clone(), next);
+                            }
+                        },
+                        for region in Region::ALL {
+                            option {
+                                value: "{region.label()}",
+                                selected: form.lora_region == region,
+                                "{region.label()}"
+                            }
+                        }
+                    }
+                }
+                label { "LoRa preset"
+                    select {
+                        value: "{form.lora_preset.label()}",
+                        disabled: busy,
+                        onchange: {
+                            let slug = slug.clone();
+                            move |event| {
+                                let Some(preset) = ModemPreset::ALL
+                                    .into_iter()
+                                    .find(|preset| preset.label() == event.value())
+                                else {
+                                    return;
+                                };
+                                let mut next = flash_forms()
+                                    .get(&slug)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                next.lora_preset = preset;
+                                flash_forms.write().insert(slug.clone(), next);
+                            }
+                        },
+                        for preset in ModemPreset::ALL {
+                            option {
+                                value: "{preset.label()}",
+                                selected: form.lora_preset == preset,
+                                "{preset.label()}"
+                            }
+                        }
+                    }
+                }
+                p { class: "note", "US 915 MediumFast is the firmware default. A different region or preset is applied after the node comes up." }
+            }
+            if !board.supports_wifi && !board.has_lora {
+                p { class: "note", "This board has no flash-time station or LoRa options." }
+            }
+        }
+    }
+}
+
+fn start_flash(
+    slug: String,
+    display_name: String,
+    enrollable: bool,
+    supports_wifi: bool,
+    supports_tcp: bool,
+    form: FlashDraft,
+    backend: Signal<RemoteControlBackend>,
+    screen: Signal<Screen>,
+    drafts: Signal<HashMap<String, InterfaceDraft>>,
+    interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    unsaved: Signal<Option<UnsavedPrompt>>,
+    mut targets: Signal<Vec<TargetAccess>>,
+    mut flash_status: Signal<String>,
+    mut flashing: Signal<bool>,
+    mut flash_progress: Signal<Option<FlashProgress>>,
+) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (
+            slug,
+            display_name,
+            enrollable,
+            supports_wifi,
+            supports_tcp,
+            form,
+            backend,
+            screen,
+            drafts,
+            interfaces_by_target,
+            unsaved,
+            targets,
+            flash_status,
+            flashing,
+            flash_progress,
+        );
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (screen, drafts, interfaces_by_target, unsaved);
+        if flashing() {
+            return;
+        }
+        let wifi = match crate::flash::wifi_flash_plan(&form, supports_wifi, supports_tcp) {
+            Ok(plan) => plan,
+            Err(error) => {
+                flash_status.set(format!("Flash failed: {error}"));
+                return;
+            }
+        };
+        let lora = form.custom_lora_profile();
+        flashing.set(true);
+        flash_status.set(String::new());
+        let first_stage = if enrollable {
+            FlashStage::Enroll
+        } else {
+            FlashStage::Compile
+        };
+        flash_progress.set(Some(FlashProgress::running(
+            enrollable,
+            first_stage,
+            first_stage.label(),
+        )));
+        let backend = backend();
+        let allow_list_key = match backend.controller_identity() {
+            Ok(identity) => identity.allow_list_key,
+            Err(error) => {
+                flashing.set(false);
+                flash_status.set(format!("Flash failed: {error}"));
+                return;
+            }
+        };
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        spawn(async move {
+            while let Some(progress) = progress_rx.recv().await {
+                flash_progress.set(Some(progress));
+            }
+        });
+        spawn(async move {
+            let flash_result = tokio::task::spawn_blocking({
+                let slug = slug.clone();
+                let allow_list_key = allow_list_key.clone();
+                let progress_tx = progress_tx.clone();
+                let wifi = wifi.clone();
+                move || -> Result<Option<crate::flash::Enrollment>, crate::flash::FlashError> {
+                    let enrollment = if enrollable {
+                        let _ = progress_tx.send(FlashProgress::running(
+                            enrollable,
+                            FlashStage::Enroll,
+                            FlashStage::Enroll.label(),
+                        ));
+                        Some(crate::flash::mint_enrollment(&allow_list_key)?)
+                    } else {
+                        None
+                    };
+                    let _ = progress_tx.send(FlashProgress::running(
+                        enrollable,
+                        FlashStage::Compile,
+                        FlashStage::Compile.label(),
+                    ));
+                    crate::flash::flash_enrolled_board(
+                        &slug,
+                        enrollment.as_ref().map(|item| item.vault_page.as_slice()),
+                        enrollable,
+                        &wifi,
+                        |progress| {
+                            let _ = progress_tx.send(progress);
+                        },
+                    )?;
+                    Ok(enrollment)
+                }
+            })
+            .await;
+            match flash_result {
+                Ok(Ok(Some(enrollment))) => {
+                    match backend
+                        .enroll_flashed_target(enrollment.access, &display_name)
+                        .await
+                    {
+                        Ok(_) => {
+                            let mut detail = format!(
+                                "{display_name} is flashed and listed under Managed Nodes."
+                            );
+                            if let Some(profile) = lora {
+                                match apply_flashed_lora(&backend, &enrollment.target_id, profile)
+                                    .await
+                                {
+                                    Ok(()) => {
+                                        detail.push_str(" Custom LoRa settings were applied.");
+                                    }
+                                    Err(error) => {
+                                        detail.push_str(&format!(
+                                            " Set LoRa from the node’s LoRa card if needed ({error})."
+                                        ));
+                                    }
+                                }
+                            }
+                            flash_status.set(detail.clone());
+                            flash_progress.set(Some(FlashProgress {
+                                enrollable,
+                                stage: FlashStage::Complete,
+                                detail,
+                                write_percent: None,
+                                outcome: FlashRunOutcome::Succeeded,
+                            }));
+                            if let Ok(items) = backend.targets().await {
+                                targets.set(items);
+                            }
+                        }
+                        Err(error) => {
+                            flash_status.set(format!(
+                                "Flashed {display_name}, but listing it under Managed Nodes failed: {error}"
+                            ));
+                            flash_progress.set(Some(FlashProgress {
+                                enrollable,
+                                stage: FlashStage::Complete,
+                                detail: error.to_string(),
+                                write_percent: None,
+                                outcome: FlashRunOutcome::Failed,
+                            }));
+                        }
+                    }
+                }
+                Ok(Ok(None)) => {
+                    let detail = format!(
+                        "{display_name} firmware flashed. Pair it from Managed Nodes to manage it."
+                    );
+                    flash_status.set(detail.clone());
+                    flash_progress.set(Some(FlashProgress {
+                        enrollable,
+                        stage: FlashStage::Complete,
+                        detail,
+                        write_percent: None,
+                        outcome: FlashRunOutcome::Succeeded,
+                    }));
+                }
+                Ok(Err(error)) => {
+                    flash_status.set(format!("Flash failed: {error}"));
+                    if let Some(mut progress) = flash_progress() {
+                        progress.outcome = FlashRunOutcome::Failed;
+                        progress.detail = error.to_string();
+                        flash_progress.set(Some(progress));
+                    }
+                }
+                Err(error) => {
+                    flash_status.set(format!("Flash failed: {error}"));
+                    if let Some(mut progress) = flash_progress() {
+                        progress.outcome = FlashRunOutcome::Failed;
+                        progress.detail = error.to_string();
+                        flash_progress.set(Some(progress));
+                    }
+                }
+            }
+            flashing.set(false);
+        });
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+async fn apply_flashed_lora(
+    backend: &RemoteControlBackend,
+    target_id: &str,
+    profile: RadioProfile,
+) -> Result<(), BackendError> {
+    let interfaces = backend
+        .interfaces_after_announce(target_id, RemoteControlAnnounceWait::UntilHeard)
+        .await?;
+    let Some(lora) = interfaces.iter().find(|entry| entry.kind == "lora") else {
+        return Err(BackendError::Operation {
+            operation: "set interface LoRa profile",
+            detail: "the flashed node has no LoRa card yet".to_string(),
+        });
+    };
+    backend
+        .set_interface_lora_profile(target_id, &lora.id, profile)
+        .await
 }
 
 fn request_screen(

@@ -1,12 +1,14 @@
 mod hardware;
 mod identity;
 
+use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::Input;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use personal_rns::interfaces::InterfaceId;
 
+pub(crate) use crate::boards::status_led::StatusLed;
 pub(crate) use crate::storage::Nrf52840Storage as Storage;
 pub(crate) use hardware::{
     MeshTowerV2Board as Board, MeshTowerV2Hardware as Hardware,
@@ -28,8 +30,15 @@ pub(crate) const ANNOUNCE_APP_DATA: &[u8] = b"\x92\xc4\x1dPersonal Hopspot MeshT
 pub(crate) const NODE_ANNOUNCE_APP_DATA: &[u8] = b"Personal Hopspot MeshTower V2";
 
 const BUTTON_DEBOUNCE: Duration = Duration::from_millis(25);
+const LONG_PRESS: Duration = Duration::from_millis(500);
 
-pub(crate) static BUTTON_PRESSES: Channel<CriticalSectionRawMutex, (), 4> = Channel::new();
+#[derive(Clone, Copy)]
+pub(crate) enum ButtonEvent {
+    ShortPress,
+    LongPress,
+}
+
+pub(crate) static BUTTON_EVENTS: Channel<CriticalSectionRawMutex, ButtonEvent, 4> = Channel::new();
 
 pub(crate) async fn maintain() {
     hardware::pet_watchdog();
@@ -37,7 +46,8 @@ pub(crate) async fn maintain() {
     hardware::release_watchdog();
 }
 
-/// MeshTower user button is P1.10, active-low with pull-up. Any press announces.
+/// MeshTower user button is P1.10, active-low with pull-up.
+/// Short press announces or approves pairing; long press opens or cancels pairing.
 pub(crate) async fn drive_button(mut button: Input<'static>) -> ! {
     loop {
         button.wait_for_falling_edge().await;
@@ -45,8 +55,13 @@ pub(crate) async fn drive_button(mut button: Input<'static>) -> ! {
         if !button.is_low() {
             continue;
         }
-        BUTTON_PRESSES.send(()).await;
-        button.wait_for_rising_edge().await;
+        match select(button.wait_for_rising_edge(), Timer::after(LONG_PRESS)).await {
+            Either::First(()) => BUTTON_EVENTS.send(ButtonEvent::ShortPress).await,
+            Either::Second(()) => {
+                BUTTON_EVENTS.send(ButtonEvent::LongPress).await;
+                button.wait_for_rising_edge().await;
+            }
+        }
         Timer::after(BUTTON_DEBOUNCE).await;
     }
 }

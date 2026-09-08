@@ -172,6 +172,8 @@ fn run(cli: Cli, reporter: Reporter) -> Result<(), AppError> {
             local_build,
             candidate,
             mount,
+            rc_vault,
+            rc_vault_offset,
         }) => {
             let board = find_board(&catalog, &board)?;
             let interactive = !json && ui::interactive_terminal();
@@ -204,6 +206,7 @@ fn run(cli: Cli, reporter: Reporter) -> Result<(), AppError> {
                     local_build,
                     candidate: candidate.as_deref(),
                     mount: mount.as_deref(),
+                    rc_vault: read_rc_vault(rc_vault.as_deref(), rc_vault_offset.as_deref())?,
                 },
                 reporter,
             )
@@ -222,6 +225,47 @@ struct FlashRequest<'a> {
     local_build: bool,
     candidate: Option<&'a Path>,
     mount: Option<&'a Path>,
+    rc_vault: Option<RcVault>,
+}
+
+struct RcVault {
+    offset: u32,
+    bytes: Vec<u8>,
+}
+
+fn read_rc_vault(path: Option<&Path>, offset: Option<&str>) -> Result<Option<RcVault>, AppError> {
+    let (Some(path), Some(offset)) = (path, offset) else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(path).map_err(|error| {
+        AppError::arguments(format!(
+            "could not read Remote Control vault {}: {error}",
+            path.display()
+        ))
+    })?;
+    if bytes.is_empty() {
+        return Err(AppError::arguments(
+            "the Remote Control vault file is empty",
+        ));
+    }
+    let offset = parse_flash_offset(offset)?;
+    Ok(Some(RcVault { offset, bytes }))
+}
+
+fn parse_flash_offset(value: &str) -> Result<u32, AppError> {
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16)
+    } else {
+        value.parse()
+    };
+    parsed.map_err(|_| {
+        AppError::arguments(format!(
+            "Remote Control vault offset {value:?} is not a decimal or 0x hexadecimal integer"
+        ))
+    })
 }
 
 fn execute_flash(
@@ -306,6 +350,10 @@ fn execute_flash(
             &request.provisioning,
             request.port,
             request.monitor,
+            request
+                .rc_vault
+                .as_ref()
+                .map(|vault| (vault.offset, vault.bytes.as_slice())),
             reporter,
         ),
         (Transport::Uf2MassStorage, PreparedTarget::Uf2(prepared)) => {
@@ -318,7 +366,16 @@ fn execute_flash(
             let device = detected_uf2.ok_or_else(|| {
                 AppError::device_identity("UF2 device selection disappeared before delivery")
             })?;
-            uf2::flash(board, &prepared, device, reporter)
+            uf2::flash(
+                board,
+                &prepared,
+                device,
+                request
+                    .rc_vault
+                    .as_ref()
+                    .map(|vault| (vault.offset, vault.bytes.as_slice())),
+                reporter,
+            )
         }
         (Transport::NrfSerialDfu, PreparedTarget::NrfSerialDfu(prepared)) => {
             if !matches!(request.provisioning, ProvisioningAction::Preserve) {
@@ -331,6 +388,12 @@ fn execute_flash(
                 return Err(AppError::unsupported_operation(
                     "Nordic serial DFU does not provide a post-flash serial monitor",
                 ));
+            }
+            if request.rc_vault.is_some() {
+                return Err(AppError::unsupported_operation(format!(
+                    "{} serial DFU cannot write the Remote Control enrollment vault; pair after flash or use a UF2 board",
+                    board.display_name
+                )));
             }
             nrf_serial_dfu::flash(board, &prepared, request.port, reporter)
         }
@@ -409,6 +472,7 @@ fn guided(catalog: &BoardCatalog, reporter: Reporter) -> Result<(), AppError> {
             local_build: false,
             candidate: None,
             mount: None,
+            rc_vault: None,
         },
         reporter,
     )

@@ -15,6 +15,7 @@ const BOARD_MESH_TOWER_V2_FEATURE: &str = "CARGO_FEATURE_BOARD_MESH_TOWER_V2";
 const S140_V6_FEATURE: &str = "CARGO_FEATURE_SOFTDEVICE_S140_V6";
 const S140_V7_FEATURE: &str = "CARGO_FEATURE_SOFTDEVICE_S140_V7";
 
+#[derive(Clone, Copy)]
 enum Board {
     TEcho,
     T096,
@@ -62,6 +63,32 @@ fn main() {
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rustc-link-arg=-Tlink.x");
     println!("cargo:rerun-if-changed=build.rs");
+    publish_mesh_tower_controller_key(board);
+}
+
+const MESH_TOWER_CONTROLLER_KEY_ENV: &str = "HOPSPOT_RC_CONTROLLER_KEY";
+const MESH_TOWER_CONTROLLER_KEY_HEX_LEN: usize = 128;
+
+fn publish_mesh_tower_controller_key(board: Board) {
+    println!("cargo:rerun-if-env-changed={MESH_TOWER_CONTROLLER_KEY_ENV}");
+    if !matches!(board, Board::MeshTowerV2) {
+        return;
+    }
+    let Ok(raw) = env::var(MESH_TOWER_CONTROLLER_KEY_ENV) else {
+        return;
+    };
+    let key = raw
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '-')
+        .collect::<String>();
+    if key.len() != MESH_TOWER_CONTROLLER_KEY_HEX_LEN
+        || !key.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        panic!(
+            "{MESH_TOWER_CONTROLLER_KEY_ENV} must be the 128 hex-character allow-list key from PRNS Controller Settings"
+        );
+    }
+    println!("cargo:rustc-env={MESH_TOWER_CONTROLLER_KEY_ENV}={key}");
 }
 
 fn write_nrf52840_memory(out: &Path, layout: Nrf52840FirmwareMemory) {

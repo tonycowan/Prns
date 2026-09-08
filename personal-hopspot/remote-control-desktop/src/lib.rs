@@ -3,6 +3,8 @@ mod android;
 mod app;
 mod backend;
 mod edits;
+#[cfg(not(target_os = "android"))]
+mod flash;
 mod identity_clone;
 mod roster_sync;
 

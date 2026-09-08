@@ -609,19 +609,33 @@ const RADIO_MODE_BLE: u32 = 0x424C_4501;
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static mut RADIO_MODE_FLAG: u32 = 0;
 
-fn boot_radio_mode(_station_configured: bool) -> RadioMode {
+fn boot_radio_mode(station_configured: bool) -> RadioMode {
     #[cfg(feature = "wifi-security-probe")]
-    return RadioMode::AccessPoint;
+    {
+        let _ = station_configured;
+        return RadioMode::AccessPoint;
+    }
 
     // SAFETY: Boot reads the aligned RTC-fast persistent word before concurrent tasks start;
     // volatile semantics are not required because reset is the only cross-execution boundary.
     #[cfg(not(feature = "wifi-security-probe"))]
     let flag = unsafe { core::ptr::addr_of!(RADIO_MODE_FLAG).read() };
     #[cfg(not(feature = "wifi-security-probe"))]
+    radio_mode_from_flag(flag, station_configured)
+}
+
+/// Power-on and fresh flash leave the RTC flag at 0. SoftAP is the setup
+/// path so the LAN card exists before a station SSID is written; an
+/// explicit BLE choice or a provisioned station keeps BLE.
+const fn radio_mode_from_flag(flag: u32, station_configured: bool) -> RadioMode {
     if flag == RADIO_MODE_AP {
         RadioMode::AccessPoint
-    } else {
+    } else if flag == RADIO_MODE_BLE {
         RadioMode::Ble
+    } else if station_configured {
+        RadioMode::Ble
+    } else {
+        RadioMode::AccessPoint
     }
 }
 
@@ -638,3 +652,32 @@ fn request_radio_mode(mode: RadioMode) -> ! {
 
 mod firmware;
 pub(super) use firmware::run;
+
+#[cfg(test)]
+mod radio_mode_tests {
+    use super::{radio_mode_from_flag, RadioMode, RADIO_MODE_AP, RADIO_MODE_BLE};
+
+    #[test]
+    fn unset_flag_without_station_uses_softap() {
+        assert_eq!(radio_mode_from_flag(0, false), RadioMode::AccessPoint);
+    }
+
+    #[test]
+    fn unset_flag_with_station_uses_ble() {
+        assert_eq!(radio_mode_from_flag(0, true), RadioMode::Ble);
+    }
+
+    #[test]
+    fn explicit_flags_win() {
+        assert_eq!(
+            radio_mode_from_flag(RADIO_MODE_AP, false),
+            RadioMode::AccessPoint
+        );
+        assert_eq!(radio_mode_from_flag(RADIO_MODE_BLE, false), RadioMode::Ble);
+        assert_eq!(
+            radio_mode_from_flag(RADIO_MODE_AP, true),
+            RadioMode::AccessPoint
+        );
+        assert_eq!(radio_mode_from_flag(RADIO_MODE_BLE, true), RadioMode::Ble);
+    }
+}

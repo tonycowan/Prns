@@ -103,6 +103,12 @@ pub(crate) enum CommandMode {
         /// Explicit mounted UF2 bootloader directory.
         #[arg(long, value_name = "DIR", hide = true)]
         mount: Option<PathBuf>,
+        /// Raw Remote Control identity vault page written during this flash.
+        #[arg(long, value_name = "PATH", hide = true, requires = "rc_vault_offset")]
+        rc_vault: Option<PathBuf>,
+        /// Flash offset for `--rc-vault`, decimal or `0x` hexadecimal.
+        #[arg(long, value_name = "OFFSET", hide = true, requires = "rc_vault")]
+        rc_vault_offset: Option<String>,
     },
     /// Build sparse developer artifacts for one board.
     #[command(hide = true)]
@@ -204,6 +210,29 @@ mod tests {
     }
 
     #[test]
+    fn rc_vault_requires_an_offset() {
+        assert!(Cli::try_parse_from([
+            "hopspot-flash",
+            "flash",
+            "t114",
+            "--yes",
+            "--rc-vault",
+            "/tmp/vault.bin",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "hopspot-flash",
+            "flash",
+            "t114",
+            "--yes",
+            "--rc-vault",
+            "/tmp/vault.bin",
+            "--rc-vault-offset",
+            "0xe2000",
+        ])
+        .is_ok());
+    }
+
     fn json_and_monitor_remain_valid_individually() {
         assert!(
             Cli::try_parse_from(["hopspot-flash", "flash", "heltec-v4", "--yes", "--json",])

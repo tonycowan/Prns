@@ -35,7 +35,7 @@ use personal_rns::remote_control::{
     RemoteControlLoRaOutcome, RemoteControlLoRaProfile, RemoteControlModeOutcome,
     RemoteControlPairingEndpoint, RemoteControlPairingInvitationCode, RemoteControlPowerOutcome,
     RemoteControlRequestKind, RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome,
-    RemoteControlWifiStation, RemoteControlWifiStationOutcome,
+    RemoteControlTargetAccess, RemoteControlWifiStation, RemoteControlWifiStationOutcome,
 };
 use personal_rns::routing::NextHop;
 use personal_rns::runtime::RequestPathError;
@@ -1147,6 +1147,46 @@ impl RemoteControlBackend {
             pairing.pinned.remove(&id);
         }
         Ok(PairingState::Rejected)
+    }
+
+    pub async fn enroll_flashed_target(
+        &self,
+        access: RemoteControlTargetAccess,
+        announce_name: &str,
+    ) -> Result<String, BackendError> {
+        let session = self.session()?;
+        let target = access.target().identity_hash();
+        let id = encode_hex(target.as_bytes());
+        session
+            .handle
+            .set_remote_control_target_access(access)
+            .await
+            .map_err(|error| operation("enroll flashed target", error))?;
+        {
+            let mut pairing = session
+                .pairing
+                .lock()
+                .expect("pairing state mutex poisoned");
+            pairing.set_announce_name(&id, announce_name);
+        }
+        if let Ok(mut roster) = session.roster.lock() {
+            note_local_upsert(&mut roster.replica, target);
+            note_local_label(
+                &mut roster.replica,
+                RosterLabelKind::TargetName,
+                &id,
+                Some(announce_name),
+            );
+        }
+        persist_session_replica(session);
+        self.refresh_cached_snapshot().await;
+        spawn({
+            let backend = self.clone();
+            async move {
+                let _ = backend.push_roster_to_siblings().await;
+            }
+        });
+        Ok(id)
     }
 
     pub fn target_announce_name(&self, target_id: &str) -> Option<String> {

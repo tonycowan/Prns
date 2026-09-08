@@ -2,8 +2,14 @@
 
 A desktop-first Dioxus client for operating paired Personal Hopspot
 remote-control targets. The window is titled **PRNS Controller**. Use the
-nodes icon (left) and settings icon (right) in the top bar to switch
-between **Managed Nodes** (the default) and **Settings**.
+nodes icon (left), the lightning **Flash** icon beside it (desktop only),
+and the settings icon (right) in the top bar to switch
+between **Managed Nodes** (the default), **Flash**, and **Settings**.
+Flash presents the Hopspot device catalog. Select a board to slide out
+flash info and options (station SSID/password, optional TCP, LoRa
+region/preset), then flash this checkout’s firmware. UF2 and ESP boards
+are enrolled onto Managed Nodes for this Operator. The T1000-E serial
+DFU path flashes firmware but still needs pairing.
 
 ## Prerequisites
 
@@ -101,16 +107,18 @@ the controller first so it is already listening. Heard announcements show up on
    (BLE Auto is on by default; enable USB, Auto Wi-Fi, or TCP on Settings, or set
    `HOPSPOT_RC_USB=1` / `HOPSPOT_RC_AUTO_WIFI=1` / `HOPSPOT_RC_TCP=…`). For MeshTower /
    T1000-E, wait for a BLE peer on Settings, then Pair remote.
-2. Then open pairing on the target: `prnsd pairing open`, or **Pair remote** on
-   a Hopspot face. Note the invitation code.
+2. Then open pairing on the target: `prnsd pairing open`, **Pair remote** on
+   a Hopspot face, or a long-press on MeshTower V2 (the status LED blinks
+   the eight hex nibbles; short-press later approves the six digits). Note
+   the invitation code.
 3. On **Managed Nodes**, expand the awaiting entry and enter that code, then
    **Continue**.
 4. Compare the six confirmation digits on both devices (`prnsd pairing status`
    prints them). Approve on either side, in either order. The desktop
    waits if the target has not finished yet.
 5. Expand the new paired target to see its interfaces. The firmware / PRNS
-   version appears next to the name after the controller first reaches that
-   node. The row keeps the pairing announcement name; type an optional alias
+   version appears on its own line above Address after the controller first
+   reaches that node. The row keeps the pairing announcement name; type an optional alias
    beside it. The list uses any
    heard route to the target's remote-control destination (the pairing
    advertisement does not install that route). If this app Approves
@@ -120,9 +128,10 @@ the controller first so it is already listening. Heard announcements show up on
    The list, each interface's config, and each fleet's peers are separate
    requests so one packet never has to carry every fact.
    After the interface list, **Node Management Whitelist** lists each
-   manager address hash, an optional alias, and Remove. A narrow window
+   manager address hash and its alias as read-only text. A narrow window
    truncates those text fields; click a hash to read it in full. Configure
-   adds a controller with the 128-character allow-list key from Settings.
+   turns the alias into an edit field, adds Remove, and adds a controller
+   with the 128-character allow-list key from Settings.
    Expand an interface for the same card and menu facts Hopspot shows
    (mode, connection, group, IFAC, traffic, rates, links, destinations,
    activity, role/host, drops, per-peer traffic/link/rate/activity, and

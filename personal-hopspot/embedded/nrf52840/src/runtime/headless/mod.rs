@@ -2,6 +2,7 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join4;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+#[cfg(not(feature = "board-mesh-tower-v2"))]
 use embassy_time::Timer;
 use embassy_usb::{Builder, Config as UsbConfig};
 use static_cell::{ConstStaticCell, StaticCell};
@@ -59,6 +60,8 @@ use super::entropy::{runtime_entropy, seed_from_hal};
 ))]
 mod bluetooth;
 #[cfg(feature = "board-mesh-tower-v2")]
+mod remote_control;
+#[cfg(feature = "board-mesh-tower-v2")]
 #[path = "mesh_tower_v2.rs"]
 mod selected;
 #[cfg(any(feature = "board-t096", feature = "board-t114"))]
@@ -109,10 +112,19 @@ type InterfaceStore = EmbassyInterfaceStore<
     PACKET_PHY_RETENTION_CAPACITY,
     PACKET_PHY_INDEX_BUCKETS,
 >;
+#[cfg(feature = "board-mesh-tower-v2")]
+type AppState = remote_control::HopspotRemoteControlState;
+#[cfg(not(feature = "board-mesh-tower-v2"))]
+type AppState = ();
+#[cfg(feature = "board-mesh-tower-v2")]
+type OnEvent = for<'a> fn(PrnsEvent<'a>, &remote_control::HopspotRemoteControlState);
+#[cfg(not(feature = "board-mesh-tower-v2"))]
+type OnEvent = for<'a> fn(PrnsEvent<'a>, &());
+
 type Node = PrnsNode<
-    (),
+    AppState,
     hopspot::node_pages::NodePageRoutes,
-    for<'a> fn(PrnsEvent<'a>, &()),
+    OnEvent,
     Storage,
     EmbassyHost<Mtx, super::entropy::NrfEntropySource>,
     Mtx,
@@ -199,8 +211,9 @@ pub async fn run(spawner: Spawner) -> ! {
     let identity_startup_notice =
         board::identity_startup_notice(node_bootstrap.persistence(), ble_bootstrap.persistence());
     let node_identity = node_bootstrap.into_identity();
+    let factory_grant = remote_control_bootstrap.factory_grant;
     let (remote_control_identity_secrets, _remote_control_identity_origins) =
-        remote_control_bootstrap.into_parts();
+        remote_control_bootstrap.bootstrap.into_parts();
     #[cfg(any(
         feature = "board-t096",
         feature = "board-t114",
@@ -243,7 +256,7 @@ pub async fn run(spawner: Spawner) -> ! {
         usb: usb_driver,
         vbus,
         radio,
-        mut status_led,
+        status_led,
         button,
     } = hardware;
 
@@ -318,7 +331,10 @@ pub async fn run(spawner: Spawner) -> ! {
     let self_announcement = RemoteControlSelfAnnouncement::Destination(node_page_destination);
     let remote_control = RemoteControlService::new(
         remote_control_identity_secrets,
-        RemoteControlInitialControllerGrants::Nobody,
+        crate::boards::factory_or_fallback_grants(
+            factory_grant,
+            seeded_or_empty_controller_grants(),
+        ),
         self_announcement,
     );
     let mut manifold_lanes = ManifoldLanes::new();
@@ -402,11 +418,21 @@ pub async fn run(spawner: Spawner) -> ! {
             NODE_ANNOUNCE_APP_DATA,
         )
         .into_preconfigured_destinations(),
+        #[cfg(feature = "board-mesh-tower-v2")]
+        app_state: remote_control::HopspotRemoteControlState {
+            lora: lora_status,
+            usb: usb_status,
+        },
+        #[cfg(not(feature = "board-mesh-tower-v2"))]
         app_state: (),
         storage: Storage,
         request_endpoints: hopspot::node_pages::NodePageRoutes,
         interfaces: personal_rns::runtime::ManuallyAttached,
         persistence,
+        #[cfg(feature = "board-mesh-tower-v2")]
+        on_event: remote_control::on_event
+            as for<'a> fn(PrnsEvent<'a>, &remote_control::HopspotRemoteControlState),
+        #[cfg(not(feature = "board-mesh-tower-v2"))]
         on_event: ignore_events as for<'a> fn(PrnsEvent<'a>, &()),
     };
     let (node, persistence) =
@@ -424,6 +450,7 @@ pub async fn run(spawner: Spawner) -> ! {
         feature = "board-mesh-tower-v2"
     ))]
     let bluetooth = bluetooth::prepare(ble_identity, ble_supervisor_lane);
+    #[cfg(not(feature = "board-mesh-tower-v2"))]
     let heartbeat = async move {
         loop {
             status_led.illuminate();
@@ -434,10 +461,22 @@ pub async fn run(spawner: Spawner) -> ! {
             selected::maintain().await;
         }
     };
+    #[cfg(not(feature = "board-mesh-tower-v2"))]
     let io = join4(
         usb.run(),
         usb_device.run(usb_seam),
         heartbeat,
+        super::bootloader_entry::wait(),
+    );
+    #[cfg(feature = "board-mesh-tower-v2")]
+    let io = join4(
+        usb.run(),
+        usb_device.run(usb_seam),
+        async {
+            loop {
+                selected::maintain().await;
+            }
+        },
         super::bootloader_entry::wait(),
     );
     #[cfg(feature = "board-t096")]
@@ -495,10 +534,22 @@ pub async fn run(spawner: Spawner) -> ! {
         lora.run(lora_seam),
         bluetooth::run(sd, bluetooth),
         button,
+        status_led,
         node_page_destination,
     )
     .await;
     core::future::pending().await
 }
 
+#[cfg(feature = "board-mesh-tower-v2")]
+fn seeded_or_empty_controller_grants() -> RemoteControlInitialControllerGrants<'static> {
+    remote_control::initial_controller_grants()
+}
+
+#[cfg(not(feature = "board-mesh-tower-v2"))]
+fn seeded_or_empty_controller_grants() -> RemoteControlInitialControllerGrants<'static> {
+    RemoteControlInitialControllerGrants::Nobody
+}
+
+#[cfg(not(feature = "board-mesh-tower-v2"))]
 fn ignore_events(_event: PrnsEvent<'_>, _state: &()) {}

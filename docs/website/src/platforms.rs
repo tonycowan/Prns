@@ -306,16 +306,7 @@ pub const UPCOMING_BOARD_TARGETS: &[BoardTarget] = &[
     },
 ];
 
-pub const IN_PROGRESS_BOARD_TARGETS: &[BoardTarget] = &[BoardTarget {
-    name: "Heltec MeshTower V2",
-    slug: "mesh-tower-v2",
-    silicon: "nRF52840 + SX1262 + KCT8103L PA",
-    tier: Tier::Qualification,
-    interfaces: &[],
-    icon: Some("nordicsemiconductor"),
-    preparation_profile: None,
-    flash_target: None,
-}];
+pub const IN_PROGRESS_BOARD_TARGETS: &[BoardTarget] = &[];
 
 pub fn all_board_targets() -> impl Iterator<Item = &'static BoardTarget> {
     SHIPPING_BOARD_TARGETS
@@ -723,7 +714,7 @@ mod tests {
             .iter()
             .map(|board| (board.slug, board.tier, board.image().is_some()))
             .collect::<Vec<_>>();
-        assert_eq!(cards, vec![("mesh-tower-v2", Tier::Qualification, true)]);
+        assert_eq!(cards, Vec::<(&str, Tier, bool)>::new());
     }
 
     #[test]
@@ -733,7 +724,10 @@ mod tests {
                 .iter()
                 .map(|board| (board.slug, board.tier, board.image().is_some()))
                 .collect::<Vec<_>>(),
-            [("heltec-e290", Tier::Qualification, false)]
+            [
+                ("heltec-e290", Tier::Qualification, false),
+                ("mesh-tower-v2", Tier::Qualification, true),
+            ]
         );
         assert_eq!(
             QUALIFICATION_BOARD_TARGETS[0].is_flashable(),

@@ -297,8 +297,9 @@ pub async fn run(spawner: Spawner) -> ! {
     let identity_startup_notice =
         board::identity_startup_notice(node_bootstrap.persistence(), ble_bootstrap.persistence());
     let node_identity = node_bootstrap.into_identity();
+    let factory_grant = remote_control_bootstrap.factory_grant;
     let (remote_control_identity_secrets, _remote_control_identity_origins) =
-        remote_control_bootstrap.into_parts();
+        remote_control_bootstrap.bootstrap.into_parts();
     let ble_identity = Some(ble_bootstrap.into_identity());
 
     let EarlyHardware {
@@ -396,7 +397,10 @@ pub async fn run(spawner: Spawner) -> ! {
     let node_page_destination = destination_hashes.node_page;
     let remote_control = RemoteControlService::new(
         remote_control_identity_secrets,
-        RemoteControlInitialControllerGrants::Nobody,
+        crate::boards::factory_or_fallback_grants(
+            factory_grant,
+            RemoteControlInitialControllerGrants::Nobody,
+        ),
         RemoteControlSelfAnnouncement::Destination(node_page_destination),
     );
     let mut manifold_lanes = ManifoldLanes::new();

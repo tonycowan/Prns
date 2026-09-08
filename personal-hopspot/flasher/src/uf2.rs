@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use nusb::{DeviceId, MaybeFuture};
 use prns_flash_manifest::{
     BoardBuild, BoardCatalog, BoardCatalogEntry, SoftdeviceIdentity, Uf2ApplicationUsb,
-    Uf2BoardIdMatch, Uf2BootloaderIdentity, Uf2MountLabel,
+    Uf2BoardDiscovery, Uf2BoardIdMatch, Uf2BootloaderIdentity, Uf2MountLabel,
 };
 
 use crate::error::AppError;
@@ -20,6 +20,44 @@ const APPLICATION_ENUMERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const PRNS_USB_VENDOR_ID: u16 = 0x1209;
 const PRNS_USB_PRODUCT_ID: u16 = 0x0001;
 const INFO_UF2_READ_LIMIT: u64 = 4097;
+const UF2_MAGIC_START0: u32 = 0x0A32_4655;
+const UF2_MAGIC_START1: u32 = 0x9E5D_5157;
+const UF2_MAGIC_END: u32 = 0x0AB1_6F30;
+const UF2_FLAG_FAMILY_ID: u32 = 0x0000_2000;
+const UF2_PAYLOAD: usize = 256;
+const UF2_BLOCK: usize = 512;
+
+fn encode_uf2_payload(data: &[u8], base: u32, family_id: u32) -> Vec<u8> {
+    let mut payload = data.to_vec();
+    let remainder = payload.len() % UF2_PAYLOAD;
+    if remainder != 0 {
+        payload.resize(payload.len() + (UF2_PAYLOAD - remainder), 0);
+    }
+    let blocks = payload.len() / UF2_PAYLOAD;
+    let mut out = Vec::with_capacity(blocks * UF2_BLOCK);
+    for index in 0..blocks {
+        let mut block = [0u8; UF2_BLOCK];
+        let header = [
+            UF2_MAGIC_START0,
+            UF2_MAGIC_START1,
+            UF2_FLAG_FAMILY_ID,
+            base.saturating_add((index * UF2_PAYLOAD) as u32),
+            UF2_PAYLOAD as u32,
+            index as u32,
+            blocks as u32,
+            family_id,
+        ];
+        for (slot, value) in header.into_iter().enumerate() {
+            let at = slot * 4;
+            block[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let start = index * UF2_PAYLOAD;
+        block[32..32 + UF2_PAYLOAD].copy_from_slice(&payload[start..start + UF2_PAYLOAD]);
+        block[UF2_BLOCK - 4..].copy_from_slice(&UF2_MAGIC_END.to_le_bytes());
+        out.extend_from_slice(&block);
+    }
+    out
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct DetectedUf2Device {
@@ -101,6 +139,7 @@ pub(crate) fn flash(
     entry: &BoardCatalogEntry,
     target: &PreparedUf2Target,
     device: DetectedUf2Device,
+    rc_vault: Option<(u32, &[u8])>,
     reporter: Reporter,
 ) -> Result<(), AppError> {
     let board = CatalogedUf2Board::try_from_entry(entry)?;
@@ -118,13 +157,19 @@ pub(crate) fn flash(
         Some(board.slug()),
         &format!("Copying verified UF2 to {}…", destination.display()),
     );
-    let copy_outcome = copy_uf2(
-        &destination,
-        &mount,
-        target.part().bytes(),
-        &board,
-        reporter,
-    )?;
+    let firmware = match rc_vault {
+        Some((offset, bytes)) => {
+            let mut combined = target.part().bytes().to_vec();
+            combined.extend(encode_uf2_payload(
+                bytes,
+                offset,
+                target.compatibility().family_id(),
+            ));
+            combined
+        }
+        None => target.part().bytes().to_vec(),
+    };
+    let copy_outcome = copy_uf2(&destination, &mount, &firmware, &board, reporter)?;
 
     if matches!(copy_outcome, Uf2CopyOutcome::Synchronized) {
         reporter.phase(
@@ -424,9 +469,15 @@ pub(crate) fn detect_any_uf2_mounts(catalog: &BoardCatalog) -> Vec<PathBuf> {
         .boards
         .iter()
         .filter_map(|board| match &board.build {
-            BoardBuild::Uf2(build) => build.board_identity.validated().ok(),
-            BoardBuild::Esp(_) => None,
-            BoardBuild::NrfSerialDfu(build) => build.recovery.board_identity.validated().ok(),
+            BoardBuild::Uf2(build) if build.board_identity.discovery == Uf2BoardDiscovery::Auto => {
+                build.board_identity.validated().ok()
+            }
+            BoardBuild::NrfSerialDfu(build)
+                if build.recovery.board_identity.discovery == Uf2BoardDiscovery::Auto =>
+            {
+                build.recovery.board_identity.validated().ok()
+            }
+            BoardBuild::Esp(_) | BoardBuild::Uf2(_) | BoardBuild::NrfSerialDfu(_) => None,
         })
         .collect::<Vec<_>>();
     scan(&board_id_matches, None)
