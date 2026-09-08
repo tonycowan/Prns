@@ -14930,11 +14930,11 @@
       "name": "personal-hopspot-android",
       "source": "personal-hopspot/mobile/android/rust",
       "unsafe": {
-        "blocks": 20,
+        "blocks": 21,
         "externs": 0,
         "functions": 0,
         "impls": 0,
-        "tokens": 20
+        "tokens": 21
       },
       "version": "0.1.0"
     },

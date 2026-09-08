@@ -67,7 +67,9 @@ impl MobileActionCode {
             | UiAction::SwapRadioMode
             | UiAction::OpenRemotePairing
             | UiAction::ApproveRemotePairing
-            | UiAction::RejectRemotePairing => Self::None,
+            | UiAction::RejectRemotePairing
+            | UiAction::OpenBleGroupEditor
+            | UiAction::SetBleDiscoveryGroup(_) => Self::None,
         }
     }
 

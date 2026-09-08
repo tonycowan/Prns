@@ -117,6 +117,9 @@ async fn interface_stats_renders_each_held_interface_with_its_live_counters() {
                     network_name: Some("private-net".into()),
                 }),
                 group: None,
+                rssi: None,
+                group_id: None,
+                members: std::vec::Vec::new(),
             },
             InterfaceInventoryEntry {
                 name: Some("Remote bridge".into()),
@@ -143,6 +146,9 @@ async fn interface_stats_renders_each_held_interface_with_its_live_counters() {
                 },
                 ifac: None,
                 group: None,
+                rssi: None,
+                group_id: None,
+                members: std::vec::Vec::new(),
             },
         ],
     };

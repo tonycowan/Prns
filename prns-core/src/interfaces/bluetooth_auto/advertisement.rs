@@ -1,4 +1,4 @@
-use super::identity::BleAddress;
+use super::identity::{default_group_tag, BleAddress, BleIdentity, GROUP_TAG_LEN};
 
 pub const MAX_ADVERTISEMENT_LEN: usize = 31;
 
@@ -23,8 +23,14 @@ const AD_SERVICE_UUID128: u8 = 0x07;
 pub(super) const AD_MANUFACTURER_SPECIFIC: u8 = 0xff;
 const FLAGS_LE_GENERAL_DISCOVERABLE: u8 = 0x06;
 const EXPERIMENTAL_ROLE_COMPANY_ID: [u8; 2] = [0xff, 0xff];
-pub(super) const EXPERIMENTAL_ROLE_VERSION: u8 = 0x03;
+/// Oldest manufacturer payload we still parse for role flags.
+pub(super) const EXPERIMENTAL_ROLE_VERSION_MIN: u8 = 0x03;
+/// Manufacturer payload version that carries a discovery group tag.
+pub(super) const EXPERIMENTAL_ROLE_VERSION: u8 = 0x04;
+/// Host manufacturer payload that also carries a dial-election key (first 6 identity bytes).
+pub(super) const EXPERIMENTAL_ROLE_VERSION_WITH_DIAL_KEY: u8 = 0x05;
 pub(super) const EXPERIMENTAL_ROLE_PERIPHERAL_ONLY: u8 = 0x01;
+pub const DIAL_KEY_LEN: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BleUuid {
@@ -45,9 +51,13 @@ pub enum ColumbaConnectionRole {
     Unavailable,
 }
 
+/// Encode a SoftDevice-sized ADV including the Prns service UUID, role flags, and discovery group tag.
+///
+/// Layout fills all 31 classic ADV bytes when successful.
 pub fn encode_advertisement(
     out: &mut [u8],
     role_capabilities: BleRoleCapabilities,
+    group_tag: [u8; GROUP_TAG_LEN],
 ) -> Option<usize> {
     let mut writer = AdWriter::new(out);
     writer.put(AD_FLAGS, &[FLAGS_LE_GENERAL_DISCOVERABLE])?;
@@ -65,6 +75,10 @@ pub fn encode_advertisement(
             EXPERIMENTAL_ROLE_COMPANY_ID[1],
             EXPERIMENTAL_ROLE_VERSION,
             flags,
+            group_tag[0],
+            group_tag[1],
+            group_tag[2],
+            group_tag[3],
         ],
     )?;
     Some(writer.len())
@@ -94,7 +108,7 @@ pub fn columba_role_capabilities_from_manufacturer(
     data: &[u8],
 ) -> Option<BleRoleCapabilities> {
     if company_id != u16::from_le_bytes(EXPERIMENTAL_ROLE_COMPANY_ID)
-        || *data.first()? < EXPERIMENTAL_ROLE_VERSION
+        || *data.first()? < EXPERIMENTAL_ROLE_VERSION_MIN
     {
         return None;
     }
@@ -103,6 +117,126 @@ pub fn columba_role_capabilities_from_manufacturer(
     } else {
         Some(BleRoleCapabilities::PeripheralOnly)
     }
+}
+
+/// Discovery group tag from manufacturer data, or the default group when the peer is legacy (v3).
+pub fn advertisement_group_tag(adv: &[u8]) -> [u8; GROUP_TAG_LEN] {
+    AdReader::new(adv)
+        .find_map(|(ad_type, body)| {
+            if ad_type != AD_MANUFACTURER_SPECIFIC {
+                return None;
+            }
+            let company_id: [u8; 2] = body.get(..2)?.try_into().ok()?;
+            group_tag_from_manufacturer(u16::from_le_bytes(company_id), body.get(2..)?)
+        })
+        .unwrap_or_else(default_group_tag)
+}
+
+/// Group tag from a parsed manufacturer payload (`version | flags | tag…`), if present.
+pub fn group_tag_from_manufacturer(company_id: u16, data: &[u8]) -> Option<[u8; GROUP_TAG_LEN]> {
+    if company_id != u16::from_le_bytes(EXPERIMENTAL_ROLE_COMPANY_ID) {
+        return None;
+    }
+    if *data.first()? < EXPERIMENTAL_ROLE_VERSION {
+        return None;
+    }
+    data.get(2..2 + GROUP_TAG_LEN)?.try_into().ok()
+}
+
+/// Effective discovery group for a manufacturer payload (legacy/missing → default group).
+pub fn manufacturer_discovery_group_tag(company_id: u16, data: &[u8]) -> [u8; GROUP_TAG_LEN] {
+    group_tag_from_manufacturer(company_id, data).unwrap_or_else(default_group_tag)
+}
+
+/// True when the advertisement's discovery group matches `local_tag`.
+///
+/// Legacy (v3) advertisements are treated as the default group, so custom-group
+/// nodes do not peer with untagged firmware.
+pub fn discovery_groups_match(local_tag: [u8; GROUP_TAG_LEN], adv: &[u8]) -> bool {
+    advertisement_group_tag(adv) == local_tag
+}
+
+/// True when a manufacturer payload's discovery group matches `local_tag`.
+pub fn manufacturer_discovery_groups_match(
+    local_tag: [u8; GROUP_TAG_LEN],
+    company_id: u16,
+    data: &[u8],
+) -> bool {
+    manufacturer_discovery_group_tag(company_id, data) == local_tag
+}
+
+/// Manufacturer-specific body for a DualRole advertisement in the local discovery group.
+///
+/// SoftDevice primary ADV is capped at [`MAX_ADVERTISEMENT_LEN`]; this v4 shape fits beside the
+/// 128-bit service UUID. Host stacks that can carry a larger manufacturer field should prefer
+/// [`manufacturer_role_payload_with_dial_key`].
+pub fn manufacturer_role_payload(
+    role_capabilities: BleRoleCapabilities,
+    group_tag: [u8; GROUP_TAG_LEN],
+) -> [u8; 2 + GROUP_TAG_LEN] {
+    let flags = match role_capabilities {
+        BleRoleCapabilities::DualRole => 0,
+        BleRoleCapabilities::PeripheralOnly => EXPERIMENTAL_ROLE_PERIPHERAL_ONLY,
+    };
+    [
+        EXPERIMENTAL_ROLE_VERSION,
+        flags,
+        group_tag[0],
+        group_tag[1],
+        group_tag[2],
+        group_tag[3],
+    ]
+}
+
+/// Host manufacturer payload including a dial-election key shared across address spaces.
+///
+/// CoreBluetooth does not expose peer public MACs, so Mac/Android elect on
+/// [`dial_key_from_identity`] carried here instead of radio addresses.
+pub fn manufacturer_role_payload_with_dial_key(
+    role_capabilities: BleRoleCapabilities,
+    group_tag: [u8; GROUP_TAG_LEN],
+    dial_key: BleAddress,
+) -> [u8; 2 + GROUP_TAG_LEN + DIAL_KEY_LEN] {
+    let flags = match role_capabilities {
+        BleRoleCapabilities::DualRole => 0,
+        BleRoleCapabilities::PeripheralOnly => EXPERIMENTAL_ROLE_PERIPHERAL_ONLY,
+    };
+    let key = *dial_key.octets();
+    [
+        EXPERIMENTAL_ROLE_VERSION_WITH_DIAL_KEY,
+        flags,
+        group_tag[0],
+        group_tag[1],
+        group_tag[2],
+        group_tag[3],
+        key[0],
+        key[1],
+        key[2],
+        key[3],
+        key[4],
+        key[5],
+    ]
+}
+
+/// First six bytes of a Bluetooth Auto identity, used as a cross-platform dial sort key.
+pub fn dial_key_from_identity(identity: BleIdentity) -> BleAddress {
+    let bytes = identity.as_bytes();
+    BleAddress::new([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]])
+}
+
+/// Dial-election key from a manufacturer payload, when the peer advertised v5+.
+pub fn dial_key_from_manufacturer(company_id: u16, data: &[u8]) -> Option<BleAddress> {
+    if company_id != u16::from_le_bytes(EXPERIMENTAL_ROLE_COMPANY_ID) {
+        return None;
+    }
+    if *data.first()? < EXPERIMENTAL_ROLE_VERSION_WITH_DIAL_KEY {
+        return None;
+    }
+    let key: [u8; DIAL_KEY_LEN] = data
+        .get(2 + GROUP_TAG_LEN..2 + GROUP_TAG_LEN + DIAL_KEY_LEN)?
+        .try_into()
+        .ok()?;
+    Some(BleAddress::new(key))
 }
 
 pub fn columba_connection_role(

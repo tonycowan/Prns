@@ -7,7 +7,11 @@ use objc2_core_bluetooth::{
 };
 use objc2_foundation::{NSData, NSDictionary, NSString};
 
-use prns_core::interfaces::bluetooth_auto::columba_role_capabilities_from_manufacturer;
+use prns_core::interfaces::bluetooth_auto::{
+    columba_connection_role, columba_role_capabilities_from_manufacturer, default_group_tag,
+    dial_key_from_manufacturer, manufacturer_discovery_groups_match, BleAddress,
+    BleRoleCapabilities, ColumbaConnectionRole, GROUP_TAG_LEN,
+};
 
 use super::CoreBluetoothPeerId;
 
@@ -22,6 +26,75 @@ const DISCOVERY_GUARD_CAPACITY: usize = 256;
 pub(super) enum CandidateStrength {
     Strong,
     Weak,
+    /// Advertisement is in a different discovery group — never dial or sight.
+    Rejected,
+}
+
+/// Whether a discovery should become an outbound dial sighting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DialSightingAction {
+    /// Forward `BleEvent::Sighting` so policy may dial.
+    Dial,
+    /// Keep the peripheral cached for inbound / later use; do not dial.
+    Accept,
+}
+
+/// Whether CoreBluetooth supplied manufacturer-specific data on this sighting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ManufacturerPresence {
+    Present,
+    Absent,
+}
+
+/// Pre-dial election for CoreBluetooth DualRole peers (option C′).
+///
+/// Dial-key (v5) peers elect with [`columba_connection_role`]. Legacy DualRole
+/// with manufacturer and no dial key fail-opens Dial (SoftDevice / ESP). DualRole
+/// sightings without manufacturer Accept so UUID-only primary ADV does not race
+/// an inbound host dial.
+pub(super) fn dial_sighting_action(
+    local_dial_key: BleAddress,
+    peer_dial_key: Option<BleAddress>,
+    peer_capabilities: BleRoleCapabilities,
+    manufacturer: ManufacturerPresence,
+) -> DialSightingAction {
+    match peer_capabilities {
+        BleRoleCapabilities::PeripheralOnly => DialSightingAction::Dial,
+        BleRoleCapabilities::DualRole => match peer_dial_key {
+            Some(peer) => match columba_connection_role(
+                local_dial_key,
+                BleRoleCapabilities::DualRole,
+                peer,
+                BleRoleCapabilities::DualRole,
+            ) {
+                ColumbaConnectionRole::Dial => DialSightingAction::Dial,
+                ColumbaConnectionRole::Accept | ColumbaConnectionRole::Unavailable => {
+                    DialSightingAction::Accept
+                }
+            },
+            None => match manufacturer {
+                ManufacturerPresence::Present => DialSightingAction::Dial,
+                ManufacturerPresence::Absent => DialSightingAction::Accept,
+            },
+        },
+    }
+}
+
+pub(super) fn peer_role_and_dial_key(
+    manufacturer_data: Option<&[u8]>,
+) -> (BleRoleCapabilities, Option<BleAddress>) {
+    let Some(data) = manufacturer_data else {
+        return (BleRoleCapabilities::DualRole, None);
+    };
+    let Some(company_id) = data.get(..2).and_then(|bytes| bytes.try_into().ok()) else {
+        return (BleRoleCapabilities::DualRole, None);
+    };
+    let company_id = u16::from_le_bytes(company_id);
+    let body = &data[2..];
+    let role = columba_role_capabilities_from_manufacturer(company_id, body)
+        .unwrap_or(BleRoleCapabilities::DualRole);
+    let dial_key = dial_key_from_manufacturer(company_id, body);
+    (role, dial_key)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,17 +183,28 @@ pub(super) const fn discover_disposition(
 pub(super) fn candidate_strength(
     local_name_is_prns: bool,
     manufacturer_data: Option<&[u8]>,
+    local_group_tag: [u8; GROUP_TAG_LEN],
 ) -> CandidateStrength {
-    if local_name_is_prns
-        || manufacturer_data.is_some_and(|data| {
-            let Some(company_id) = data.get(..2).and_then(|bytes| bytes.try_into().ok()) else {
-                return false;
-            };
-            columba_role_capabilities_from_manufacturer(u16::from_le_bytes(company_id), &data[2..])
-                .is_some()
-        })
-    {
-        CandidateStrength::Strong
+    if let Some(data) = manufacturer_data {
+        let Some(company_id) = data.get(..2).and_then(|bytes| bytes.try_into().ok()) else {
+            return CandidateStrength::Weak;
+        };
+        let company_id = u16::from_le_bytes(company_id);
+        let body = &data[2..];
+        if !manufacturer_discovery_groups_match(local_group_tag, company_id, body) {
+            return CandidateStrength::Rejected;
+        }
+        if columba_role_capabilities_from_manufacturer(company_id, body).is_some() {
+            return CandidateStrength::Strong;
+        }
+    }
+    // Legacy name-only advertisements map to the default reticulum group.
+    if local_name_is_prns {
+        if local_group_tag == default_group_tag() {
+            CandidateStrength::Strong
+        } else {
+            CandidateStrength::Rejected
+        }
     } else {
         CandidateStrength::Weak
     }
@@ -128,6 +212,7 @@ pub(super) fn candidate_strength(
 
 pub(super) fn advertisement_candidate_strength(
     advertisement_data: &NSDictionary<NSString, AnyObject>,
+    local_group_tag: [u8; GROUP_TAG_LEN],
 ) -> CandidateStrength {
     // SAFETY: CoreBluetooth exports this dictionary key with process lifetime.
     let local_name_key = unsafe { CBAdvertisementDataLocalNameKey };
@@ -142,7 +227,11 @@ pub(super) fn advertisement_candidate_strength(
     let manufacturer_data = advertisement_data
         .objectForKey(manufacturer_data_key)
         .and_then(|data| data.downcast_ref::<NSData>().map(NSData::to_vec));
-    candidate_strength(local_name_is_prns, manufacturer_data.as_deref())
+    candidate_strength(
+        local_name_is_prns,
+        manufacturer_data.as_deref(),
+        local_group_tag,
+    )
 }
 
 #[derive(Default)]
@@ -159,11 +248,13 @@ impl DiscoveryGuard {
         now: Instant,
     ) -> bool {
         prune_expired(&mut self.weak_candidate_misses, now);
-        if strength == CandidateStrength::Strong {
-            self.weak_candidate_misses.remove(&peer_id);
-            true
-        } else {
-            !self.weak_candidate_misses.contains_key(&peer_id)
+        match strength {
+            CandidateStrength::Rejected => false,
+            CandidateStrength::Strong => {
+                self.weak_candidate_misses.remove(&peer_id);
+                true
+            }
+            CandidateStrength::Weak => !self.weak_candidate_misses.contains_key(&peer_id),
         }
     }
 

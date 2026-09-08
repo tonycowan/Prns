@@ -190,6 +190,8 @@ impl PrnsNodeHandle {
                 name,
                 group: None,
                 group_apply: None,
+                rssi: None,
+                group_id: None,
                 byte_accounting: ByteAccounting::OwnTraffic,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -211,6 +213,10 @@ impl PrnsNodeHandle {
                 let ifac = registered.ifac.clone();
                 let name = registered.name.clone();
                 let group = registered.group.clone();
+                let rssi = registered.rssi;
+                let group_id = registered.group_id.clone();
+                let mode = registered.mode;
+                let gravity = registered.gravity;
                 let byte_accounting = registered.byte_accounting;
                 let retired = registered.retired_member_bytes;
                 let retired_frame_accounting = registered.retired_member_frame_accounting;
@@ -240,8 +246,8 @@ impl PrnsNodeHandle {
                         },
                         snapshot: InterfaceSnapshot {
                             id: vitals.id,
-                            mode: registered.mode,
-                            gravity: registered.gravity,
+                            mode,
+                            gravity,
                             connection: vitals.connection,
                             failure_reason: vitals.failure_reason,
                             rx_bytes,
@@ -255,6 +261,9 @@ impl PrnsNodeHandle {
                         },
                         ifac: ifac.clone(),
                         group: group.clone(),
+                        rssi,
+                        group_id: group_id.clone(),
+                        members: std::vec::Vec::new(),
                     }
                 })
             })
@@ -311,6 +320,18 @@ impl PrnsNodeHandle {
             return false;
         };
         interface.group_apply = Some(std::sync::Arc::new(apply));
+        true
+    }
+
+    #[must_use]
+    pub fn set_interface_group_id(&self, id: InterfaceId, group_id: impl Into<String>) -> bool {
+        let Ok(mut interfaces) = self.interfaces.lock() else {
+            return false;
+        };
+        let Some(interface) = interfaces.get_mut(&id) else {
+            return false;
+        };
+        interface.group_id = Some(group_id.into());
         true
     }
 
@@ -484,6 +505,8 @@ impl PrnsNodeHandle {
                 name: None,
                 group: None,
                 group_apply: None,
+                rssi: None,
+                group_id: None,
                 byte_accounting: ByteAccounting::FleetAggregate,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -685,6 +708,31 @@ impl Fleet {
     where
         I: Interface + ReportsStatus + Send + 'static,
     {
+        self.add_with_peer_status(interface, None, None)
+    }
+
+    /// Stand up a named fleet member, optionally recording link-up RSSI for status nesting.
+    pub fn add_named<I>(
+        &self,
+        interface: I,
+        name: impl Into<String>,
+        rssi: Option<i8>,
+    ) -> AttachedInterface
+    where
+        I: Interface + ReportsStatus + Send + 'static,
+    {
+        self.add_with_peer_status(interface, Some(name.into()), rssi)
+    }
+
+    fn add_with_peer_status<I>(
+        &self,
+        interface: I,
+        name: Option<String>,
+        rssi: Option<i8>,
+    ) -> AttachedInterface
+    where
+        I: Interface + ReportsStatus + Send + 'static,
+    {
         let view = interface.status_view();
         let connection = interface.connection_view();
         let frame_accounting = interface.frame_accounting_recorder();
@@ -724,9 +772,11 @@ impl Fleet {
                 mode: descriptor.mode,
                 gravity: descriptor.gravity,
                 ifac: self.ifac.as_ref().map(RuntimeIfac::snapshot),
-                name: None,
+                name,
                 group: None,
                 group_apply: None,
+                rssi,
+                group_id: None,
                 byte_accounting: ByteAccounting::OwnTraffic,
                 retired_member_bytes: RetiredMemberBytes::default(),
                 retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),
@@ -894,6 +944,8 @@ pub(super) struct RegisteredInterface {
     name: Option<String>,
     group: Option<String>,
     group_apply: Option<std::sync::Arc<dyn Fn(&[u8]) -> bool + Send + Sync>>,
+    rssi: Option<i8>,
+    group_id: Option<String>,
     byte_accounting: ByteAccounting,
     retired_member_bytes: RetiredMemberBytes,
     retired_member_frame_accounting: RetiredMemberFrameAccounting,

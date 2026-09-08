@@ -64,6 +64,7 @@ fn main() {
     println!("cargo:rustc-link-arg=-Tlink.x");
     println!("cargo:rerun-if-changed=build.rs");
     publish_mesh_tower_controller_key(board);
+    println!("cargo:rerun-if-env-changed=PRNS_BLE_DISCOVERY_GROUP");
 }
 
 const MESH_TOWER_CONTROLLER_KEY_ENV: &str = "HOPSPOT_RC_CONTROLLER_KEY";
