@@ -43,7 +43,7 @@ fn open_menu(state: &mut UiState) {
     let cards = test_cards::<1>(CardKind::Ble);
     let content = test_content(&cards);
     state.handle_input(InputEvent::ShortPress, content);
-    state.handle_input(InputEvent::LongPress, content);
+    open_interface_options(state, content);
 }
 
 #[test]

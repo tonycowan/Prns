@@ -69,7 +69,9 @@ impl MobileActionCode {
             | UiAction::ApproveRemotePairing
             | UiAction::RejectRemotePairing
             | UiAction::OpenBleGroupEditor
-            | UiAction::SetBleDiscoveryGroup(_) => Self::None,
+            | UiAction::SetBleDiscoveryGroup(_)
+            | UiAction::OpenInterfaceModeEditor
+            | UiAction::SetInterfaceMode { .. } => Self::None,
         }
     }
 

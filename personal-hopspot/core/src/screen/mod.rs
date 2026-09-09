@@ -15,8 +15,9 @@ pub use model::{
 pub use notice::PresentedNoticeTimer;
 pub use render::cards::card_label_max_chars;
 pub use state::{
-    apply_and_persist_radio_profile, AccessPointState, BleGroupEditor, BleGroupName,
-    GnssAvailability, InputEvent, PersistenceNotice, RadioProfileChangeResult,
+    apply_and_persist_interface_modes, apply_and_persist_radio_profile, interface_mode_slot,
+    AccessPointState, BleGroupEditor, BleGroupName, GnssAvailability, InputEvent,
+    InterfaceDetailFocus, InterfaceModeChangeResult, PersistenceNotice, RadioProfileChangeResult,
     SharedInstanceConfigExport, UiAction, UiConfiguration, UiNotice, UiState, UserBlanking,
     DEFAULT_BLE_GROUP,
 };

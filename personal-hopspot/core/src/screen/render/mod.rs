@@ -24,8 +24,9 @@ use layout::*;
 use menus::ble_group::draw_ble_group_editor;
 use menus::lora::draw_lora_editor;
 use menus::{
-    draw_global_menu, draw_interface_menu, draw_limits_page, draw_notice, draw_radio_confirm,
-    draw_remote_pairing_confirm, draw_remote_pairing_invitation, draw_sleeping,
+    draw_global_menu, draw_interface_detail, draw_interface_mode_editor, draw_interface_options,
+    draw_limits_page, draw_notice, draw_radio_confirm, draw_remote_pairing_confirm,
+    draw_remote_pairing_invitation, draw_sleeping,
 };
 
 pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(
@@ -56,6 +57,11 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(
 
     if let UiMode::BleGroupEditor { screen, name } = state.mode {
         draw_ble_group_editor(display, screen, name);
+        return;
+    }
+
+    if let UiMode::InterfaceModeEditor { cursor, .. } = state.mode {
+        draw_interface_mode_editor(display, cursor);
         return;
     }
 
@@ -90,14 +96,29 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(
         return;
     }
 
-    if let Some(selected_item) = state.interface_menu_selected_item() {
+    if let Some(selected_item) = state.interface_options_selected_item() {
         if let Some(selected_card) = state.selected_card(cards) {
-            draw_interface_menu(
+            draw_interface_options(
                 display,
                 selected_card,
                 selected_item,
                 state.shared_instance_config_export,
                 state.ble_group_editor,
+            );
+            return;
+        }
+    }
+
+    if let UiMode::InterfaceDetail {
+        focus, status_page, ..
+    } = state.mode
+    {
+        if let Some(selected_card) = state.selected_card(cards) {
+            draw_interface_detail(
+                display,
+                selected_card,
+                focus,
+                status_page,
                 interface_menu_details,
             );
             return;
