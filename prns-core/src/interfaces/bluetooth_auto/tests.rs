@@ -189,6 +189,154 @@ fn dial_key_from_identity_is_stable_prefix_and_round_trips_manufacturer_v5() {
 }
 
 #[test]
+fn host_legacy_dual_role_fail_opens_dial() {
+    let local = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            local,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial
+    );
+}
+
+#[test]
+fn uuid_only_dual_role_must_accept() {
+    let local = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            local,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Accept
+    );
+    assert_eq!(
+        dial_sighting_action(
+            local,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::AddressSort {
+                local: BleAddress::new([0; 6]),
+                peer: BleAddress::new([1; 6]),
+            },
+        ),
+        DialSightingAction::Accept,
+        "embedded must not dial UUID-only Android primary ADV"
+    );
+}
+
+#[test]
+fn embedded_legacy_dual_role_keeps_radio_address_sort() {
+    let local_key = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    let lower = BleAddress::new([0, 1, 2, 3, 4, 5]);
+    let higher = BleAddress::new([0, 1, 2, 3, 4, 6]);
+    assert_eq!(
+        dial_sighting_action(
+            local_key,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::AddressSort {
+                local: lower,
+                peer: higher,
+            },
+        ),
+        DialSightingAction::Dial
+    );
+    assert_eq!(
+        dial_sighting_action(
+            local_key,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::AddressSort {
+                local: higher,
+                peer: lower,
+            },
+        ),
+        DialSightingAction::Accept
+    );
+}
+
+#[test]
+fn dial_sighting_elects_on_shared_dial_key() {
+    let phone = dial_key_from_identity(BleIdentity::new([0x10; 16]));
+    let mac = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            mac,
+            Some(phone),
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Accept
+    );
+    assert_eq!(
+        dial_sighting_action(
+            phone,
+            Some(mac),
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial
+    );
+    assert_eq!(
+        dial_sighting_action(
+            mac,
+            None,
+            BleRoleCapabilities::PeripheralOnly,
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial
+    );
+}
+
+#[test]
+fn embedded_sighting_accepts_uuid_only_and_dials_legacy_when_address_wins() {
+    let mut uuid_only = [0u8; 31];
+    let uuid_len = {
+        let mut little_endian = BLE_SERVICE_UUID_BYTES;
+        little_endian.reverse();
+        uuid_only[0] = 2;
+        uuid_only[1] = 0x01;
+        uuid_only[2] = 0x06;
+        uuid_only[3] = 17;
+        uuid_only[4] = 0x07;
+        uuid_only[5..21].copy_from_slice(&little_endian);
+        21
+    };
+    let local_key = dial_key_from_identity(BleIdentity::new([0x10; 16]));
+    let local_radio = BleAddress::new([0; 6]);
+    let peer_radio = BleAddress::new([0xff; 6]);
+    assert_eq!(
+        embedded_dial_sighting_action(local_key, local_radio, peer_radio, &uuid_only[..uuid_len]),
+        DialSightingAction::Accept
+    );
+
+    let mut legacy = [0u8; MAX_ADVERTISEMENT_LEN];
+    let legacy_len = encode_advertisement(
+        &mut legacy,
+        BleRoleCapabilities::DualRole,
+        default_group_tag(),
+    )
+    .expect("v4 ADV fits");
+    assert_eq!(
+        embedded_dial_sighting_action(local_key, local_radio, peer_radio, &legacy[..legacy_len]),
+        DialSightingAction::Dial
+    );
+}
+
+#[test]
 fn hci_addresses_compare_in_display_order() {
     assert_eq!(
         BleAddress::from_hci_bytes([0x17, 0x27, 0x0c, 0x6a, 0x46, 0xfd]),

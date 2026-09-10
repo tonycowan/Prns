@@ -786,6 +786,20 @@ impl Fleet {
         attached
     }
 
+    /// Labels a fleet member in inventory. Auto Wi-Fi uses this for the peer socket
+    /// so the Controller can tell TCP-out / TCP-in / UDP rows apart.
+    #[must_use]
+    pub fn set_member_name(&self, id: InterfaceId, name: impl Into<String>) -> bool {
+        let Ok(mut interfaces) = self.interfaces.lock() else {
+            return false;
+        };
+        let Some(interface) = interfaces.get_mut(&id) else {
+            return false;
+        };
+        interface.name = Some(name.into());
+        true
+    }
+
     /// A [`Fleet`] wired to no manifold: member builds and host commands flow into the returned [`DetachedFleet`] tail and go nowhere. For driving a supervisor by hand (unit tests, a bench harness).
     #[must_use]
     pub fn detached(supervisor_id: InterfaceId) -> (Self, DetachedFleet) {

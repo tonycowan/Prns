@@ -91,9 +91,9 @@ pub use radio_profile_store::{
     LoadedRadioProfile, RadioProfileLoadNotice, RadioProfileStore, RadioProfileStoreError,
 };
 pub use remote_control_inventory::{
-    decorate_hopspot_remote_control_card, hopspot_remote_control_build_version,
-    remote_control_interface_config_from_snapshots, remote_control_interface_peers_from_snapshots,
-    remote_control_inventory_from_snapshots,
+    bluetooth_auto_interface_name, decorate_hopspot_remote_control_card,
+    hopspot_remote_control_build_version, remote_control_interface_config_from_snapshots,
+    remote_control_interface_peers_from_snapshots, remote_control_inventory_from_snapshots,
 };
 #[cfg(feature = "display")]
 pub use screen::{

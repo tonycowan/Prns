@@ -89,4 +89,15 @@ object NativeBridge {
     external fun nativeBleNextDial(buffer: ByteBuffer): Boolean
 
     external fun nativeBleNextL2capOpen(buffer: ByteBuffer): Boolean
+
+    external fun nativeWifiLanShouldHoldMulticastLock(): Boolean
+
+    external fun nativeWifiLanWaitForWork(timeoutMillis: Long)
+
+    external fun nativeWifiLanSetInterfaces(
+        names: Array<String>,
+        indexes: IntArray,
+        addresses: Array<Array<ByteArray>>,
+        prefixLengths: Array<IntArray>,
+    ): Boolean
 }

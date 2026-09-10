@@ -23,10 +23,13 @@ talking, not one process riding the other.
 Only BLE Auto starts on. Set `HOPSPOT_RC_BLE=0` to boot it off; Start on
 Settings turns it back on without restarting the app. USB, Auto Wi-Fi, and
 TCP start off and stay attached so Settings can enable them. `HOPSPOT_RC_USB=1`
-or `HOPSPOT_RC_AUTO_WIFI=1` starts those on. A TCP client is always on
-Settings, default off, dialing `127.0.0.1:4242`.
-`HOPSPOT_RC_TCP=host:port` picks a different target and starts that client
-on. If both this app and local
+or `HOPSPOT_RC_AUTO_WIFI=1` starts those on. Settings lists a **TCP client**
+card, default off, dialing `127.0.0.1:4242`. Configure on that card sets
+this app's outbound `host:port` (IPv4 or DNS; default port 4242), stores it
+in `tcp-target` under the controller data directory, and retargets the live
+client. `HOPSPOT_RC_TCP=host:port` overrides that file at boot and starts
+the client on. The Flash form's TCP field provisions a board, not this app.
+If both this app and local
 `prnsd` enable Auto Wi-Fi, they are independent peers on the LAN; turning
 an interface off on Settings does not change the daemon. Do not run this
 app's BLE and a `prnsd` Bluetooth Auto on the same Mac at once; one
@@ -57,9 +60,22 @@ and is not copied; incoming sibling-alias rows for this Instance are ignored. Ro
 Settings → Activity log records configuration changes made through this
 app (Start/Stop, Save, pairing, Forget, Sleep/Wake, peer and target aliases).
 Peer aliases are stored in `peer-aliases` under the controller data
-directory and key on the full 8-byte interface id. The `P XXXX` label
-is the first two hash bytes of that id; it comes back the same after a
-reboot when the peer identity is unchanged. Target pairing names live in `target-names` (the announcement label
+directory and key on the full 8-byte interface id. Auto Wi-Fi peer rows
+are titled by path (`UDP`, `TCP out`, `TCP in`) plus the socket address
+when the Controller named that member (`To` / `From` / `Peer`). A `To` row
+also shows `From (us)` with this device's address on that link; a `From` row
+shows `To (us)` (Auto Wi-Fi inbound uses rendezvous port 42699). A UDP `Peer`
+row shows `Local (us)` with this device's `fe80` on the same ifindex — the
+address the other node lists as `Peer` for this path. The `P XXXX`
+suffix is the first two hash bytes of the interface id and is used when
+no address is available; it comes back the same after a reboot when the
+peer identity is unchanged. UDP and TCP to the same node are separate
+rows. Stock Auto Wi-Fi also dials the Wi-Fi gateway on port 42699; that
+`TCP out` row is not a mesh node if it never connects. The Auto Wi-Fi
+card title stays `auto-wifi` plus the supervisor id prefix; each IPv4 and
+IPv6 the supervisor is using is a separate fact (`IPv6` link-locals include
+the ifindex). `dummy0` is
+treated as a virtual NIC and is not an Auto Wi-Fi peer. Target pairing names live in `target-names` (the announcement label)
 from pairing). Optional aliases live in `target-aliases` beside that
 name. Pairing does not fill the alias.
 
@@ -186,7 +202,8 @@ list of interfaces; expand an interface to manage that feature.
    preset, SF, bandwidth, CR, TX power, and preamble), Host/Port, drop
    counters, failure reason, and
    each supervisor peer's TX/RX, links, destinations, rate,
-   activity, a `P XXXX` id with an optional alias, and the radio sample that medium actually has (BLE RSSI,
+   activity, a `P XXXX` id with an optional alias, BLE Health (radio
+   session vs a live RNS link — Connected can still be Radio only), and the radio sample that medium actually has (BLE RSSI,
    LoRa RSSI/SNR/quality; Auto Wi-Fi peers have no per-peer RF
    measurement).    After the interface list, **Node Management Whitelist** lists each
    manager address hash, an optional local alias, and Remove. A narrow
@@ -205,12 +222,15 @@ list of interfaces; expand an interface to manage that feature.
    target address are the last
    announce time in local time and a second line with hop count and inbound path. A stored
    target starts Offline after this app restarts because reachability is not
-   persisted. Opening the app (or Find path) sends a path request to the
-   target's stable remote-control destination; the target answers that probe
-   if a shared transport is up. Announce is the opposite direction: it needs
-   a live control link and asks the target to announce. The interface list
-   waits for that control destination (not the one-shot pairing
-   advertisement) before it opens a link. Any heard route to that
+   persisted. Opening the app (or Find path) announces this controller's
+   operator destination and sends a path request to the target's stable
+   remote-control destination. The operator announce gives the target a
+   path back to the controller that is in use, which a target probe cannot
+   choose when several cloned controllers could answer. The target answers
+   the path request if a shared transport is up. Announce is the opposite
+   direction: it needs a live control link and asks the target to announce.
+   The interface list waits for that control destination (not the one-shot
+   pairing advertisement) before it opens a link. Any heard route to that
    address is enough — the boot announce, the extra announce after
    target Approve, or a later one. Find path is only a recovery probe
    after this app restarts Offline.    Approving here first can send
@@ -236,7 +256,8 @@ LoRa region/preset that is applied once the node is reachable. Leave
 Wi-Fi blank to keep whatever is already in the provisioning slot.
 hopspot-flash builds this checkout and writes a Remote Control identity
 plus this Operator’s grant onto UF2 and ESP boards. The node then
-appears under Managed Nodes — no invitation code. The T1000-E serial
+appears under Managed Nodes — no invitation code. After a successful
+enrolled flash, Flash offers to open that node. The T1000-E serial
 DFU path flashes firmware only; pair that board after it boots. An
 unprovisioned HV4 with no station SSID boots SoftAP so the LAN card is
 on the face and in the node list.

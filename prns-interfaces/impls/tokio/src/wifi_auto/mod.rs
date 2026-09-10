@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
@@ -36,6 +37,7 @@ use prns_runtime::runtime::{AttachedInterface, Fleet, InterfaceSupervisor};
 ))]
 mod apple;
 mod discovery;
+mod host_lan;
 #[cfg(feature = "wifi-auto-mdns")]
 mod mdns;
 #[cfg(feature = "wifi-auto-mdns")]
@@ -50,8 +52,12 @@ pub use discovery::{
     DiscoveryLifecycleError, DiscoveryParticipation, ServiceDiscovery, ServiceDiscoveryPublisher,
     SnapshotPublication,
 };
+pub use host_lan::{
+    HostLanAddress, HostLanInterface, HostLanInterfaceError, HostLanInventory,
+    HostLanReplaceOutcome,
+};
 #[cfg(feature = "wifi-auto-mdns")]
-pub use mdns::native_service_discovery;
+pub use mdns::{native_service_discovery, native_service_discovery_with_host_lan};
 
 const BEACON_INTERVAL: Duration = Duration::from_millis(1600);
 const UNICAST_REPEER_EVERY: u32 = 3;
@@ -254,6 +260,7 @@ pub struct AutoWifi {
     service_discovery: Option<ServiceDiscovery>,
     rendezvous_listener: Option<TcpListener>,
     network_discovery_owner: NetworkDiscoveryOwner,
+    host_lan: HostLanInventory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,7 +513,14 @@ impl AutoWifi {
             service_discovery: None,
             rendezvous_listener: None,
             network_discovery_owner: NetworkDiscoveryOwner::Host,
+            host_lan: HostLanInventory::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_host_lan_inventory(mut self, host_lan: HostLanInventory) -> Self {
+        self.host_lan = host_lan;
+        self
     }
 
     #[must_use]
@@ -566,6 +580,7 @@ struct CompletedTraffic {
 struct AutoWifiAccounting {
     completed: CompletedTraffic,
     members: std::vec::Vec<TokioInterfaceStatus>,
+    local_addresses: std::vec::Vec<(IpAddr, u32)>,
 }
 
 impl CompletedTraffic {
@@ -589,6 +604,7 @@ impl AutoWifiStatus {
                 accounting: Mutex::new(AutoWifiAccounting {
                     completed: CompletedTraffic::default(),
                     members: std::vec::Vec::new(),
+                    local_addresses: std::vec::Vec::new(),
                 }),
             }),
         }
@@ -685,6 +701,21 @@ impl AutoWifiStatus {
         match self.shared.accounting.lock() {
             Ok(accounting) => accounting.members.clone(),
             Err(_) => std::vec::Vec::new(),
+        }
+    }
+
+    /// Addresses this supervisor is currently using on allowed NICs.
+    #[must_use]
+    pub fn local_addresses(&self) -> std::vec::Vec<(IpAddr, u32)> {
+        match self.shared.accounting.lock() {
+            Ok(accounting) => accounting.local_addresses.clone(),
+            Err(_) => std::vec::Vec::new(),
+        }
+    }
+
+    fn set_local_addresses(&self, addresses: std::vec::Vec<(IpAddr, u32)>) {
+        if let Ok(mut accounting) = self.shared.accounting.lock() {
+            accounting.local_addresses = addresses;
         }
     }
 }
@@ -788,10 +819,11 @@ impl InterfaceSupervisor for AutoWifi {
             mut service_discovery,
             rendezvous_listener: supplied_rendezvous_listener,
             network_discovery_owner,
+            host_lan,
         } = self;
         let mut nics = std::vec::Vec::new();
         let mut sockets = None;
-        let prefixes = local_prefixes(&settings.devices);
+        let prefixes = local_prefixes(&settings.devices, &host_lan);
         let mut supervisor = Supervisor {
             brains: HashMap::new(),
             members: HashMap::new(),
@@ -806,6 +838,7 @@ impl InterfaceSupervisor for AutoWifi {
             settings: settings.clone(),
             status,
             completed: CompletedTraffic::default(),
+            host_lan,
         };
         supervisor.publish_status();
         let mut group_rx = supervisor.status.subscribe_group();
@@ -1247,6 +1280,7 @@ struct Supervisor {
     settings: AutoWifiSettings,
     status: AutoWifiStatus,
     completed: CompletedTraffic,
+    host_lan: HostLanInventory,
 }
 
 struct GatewayDial {
@@ -1277,9 +1311,11 @@ impl Supervisor {
         if let Some(_active_sockets) = sockets {
             return NetworkActivation::AlreadyActive;
         }
-        let fresh_nics = link_local_nics(&self.settings.devices);
+        let fresh_nics = link_local_nics(&self.settings.devices, &self.host_lan);
         if fresh_nics.is_empty() {
             nics.clear();
+            self.prefixes.clear();
+            self.publish_local_addresses(nics);
             return NetworkActivation::NoEligibleInterfaces;
         }
         let opened_sockets =
@@ -1580,13 +1616,20 @@ impl Supervisor {
             HashMap::new()
         };
         self.data = sockets.map(|sockets| sockets.data.clone());
-        self.prefixes = local_prefixes(&self.settings.devices);
+        self.prefixes = local_prefixes(&self.settings.devices, &self.host_lan);
+        self.publish_local_addresses(nics);
     }
 
     fn deactivate_network(&mut self) {
         self.brains.clear();
         self.data = None;
         self.prefixes.clear();
+        self.publish_local_addresses(&[]);
+    }
+
+    fn publish_local_addresses(&self, nics: &[Nic]) {
+        self.status
+            .set_local_addresses(supervisor_local_addresses(&self.prefixes, nics));
     }
 
     fn teardown_auto_interface_network(&mut self) {
@@ -1974,9 +2017,10 @@ impl Supervisor {
             NetworkDiscoveryOwner::Host => platform_gateway_inventory(),
             NetworkDiscoveryOwner::Platform => Err(GatewayInventoryUnavailable),
         };
-        let fresh = link_local_nics(&self.settings.devices);
-        self.prefixes = local_prefixes(&self.settings.devices);
+        let fresh = link_local_nics(&self.settings.devices, &self.host_lan);
+        self.prefixes = local_prefixes(&self.settings.devices, &self.host_lan);
         self.apply_reconcile(discovery, nics, fresh, gateways);
+        self.publish_local_addresses(nics);
     }
 
     fn apply_reconcile(
@@ -2060,9 +2104,12 @@ struct Sockets {
 }
 
 /// The per-scope probe obtains the kernel's send-source link-local address so the beacon token matches what peers recompute from the datagram source.
-fn link_local_nics(devices: &AutoWifiDevicePolicy) -> std::vec::Vec<Nic> {
+fn link_local_nics(
+    devices: &AutoWifiDevicePolicy,
+    host_lan: &HostLanInventory,
+) -> std::vec::Vec<Nic> {
     let Ok(ifaces) = if_addrs::get_if_addrs() else {
-        return std::vec::Vec::new();
+        return host_link_local_nics(devices, host_lan, HashSet::new());
     };
     let mut nics = std::vec::Vec::new();
     let mut seen: HashSet<u32> = HashSet::new();
@@ -2072,12 +2119,38 @@ fn link_local_nics(devices: &AutoWifiDevicePolicy) -> std::vec::Vec<Nic> {
             continue;
         }
         let Some(index) = iface.index else { continue };
-        if !seen.insert(index) {
+        if seen.contains(&index) {
             continue;
         }
-        if let Some(link_local) = link_local_for_scope(index) {
-            nics.push(Nic { link_local, index });
+        let Some(link_local) = link_local_for_scope(index) else {
+            continue;
+        };
+        seen.insert(index);
+        nics.push(Nic { link_local, index });
+    }
+    host_link_local_nics(devices, host_lan, seen)
+        .into_iter()
+        .for_each(|nic| nics.push(nic));
+    nics
+}
+
+fn host_link_local_nics(
+    devices: &AutoWifiDevicePolicy,
+    host_lan: &HostLanInventory,
+    mut seen: HashSet<u32>,
+) -> std::vec::Vec<Nic> {
+    let mut nics = std::vec::Vec::new();
+    for interface in host_lan.allowed_interfaces(devices) {
+        let Some(link_local) = interface.link_local() else {
+            continue;
+        };
+        if !seen.insert(interface.index()) {
+            continue;
         }
+        nics.push(Nic {
+            link_local,
+            index: interface.index(),
+        });
     }
     nics
 }
@@ -2089,28 +2162,83 @@ struct LocalPrefix {
     index: u32,
 }
 
-fn local_prefixes(auto_wifi_device_policy: &AutoWifiDevicePolicy) -> std::vec::Vec<LocalPrefix> {
-    let Ok(network_interfaces) = if_addrs::get_if_addrs() else {
-        return std::vec::Vec::new();
-    };
-    network_interfaces
+fn supervisor_local_addresses(
+    prefixes: &[LocalPrefix],
+    nics: &[Nic],
+) -> std::vec::Vec<(IpAddr, u32)> {
+    let mut addresses: std::vec::Vec<(IpAddr, u32)> = prefixes
         .iter()
-        .filter(|network_interface| {
-            auto_wifi_device_policy.allows(&network_interface.name, network_interface.is_loopback())
-        })
-        .map(|network_interface| match &network_interface.addr {
-            if_addrs::IfAddr::V4(ipv4_address) => LocalPrefix {
-                addr: IpAddr::V4(ipv4_address.ip),
-                netmask: IpAddr::V4(ipv4_address.netmask),
-                index: network_interface.index.unwrap_or(0),
-            },
-            if_addrs::IfAddr::V6(ipv6_address) => LocalPrefix {
-                addr: IpAddr::V6(ipv6_address.ip),
-                netmask: IpAddr::V6(ipv6_address.netmask),
-                index: network_interface.index.unwrap_or(0),
-            },
-        })
-        .collect()
+        .filter(|prefix| !prefix.addr.is_loopback() && !prefix.addr.is_unspecified())
+        .map(|prefix| (prefix.addr, prefix.index))
+        .collect();
+    for nic in nics {
+        if !nic.link_local.is_unicast_link_local() {
+            continue;
+        }
+        let addr = IpAddr::V6(nic.link_local);
+        if !addresses
+            .iter()
+            .any(|(existing, index)| *existing == addr && *index == nic.index)
+        {
+            addresses.push((addr, nic.index));
+        }
+    }
+    addresses.sort_by(compare_local_address);
+    addresses
+}
+
+fn compare_local_address(left: &(IpAddr, u32), right: &(IpAddr, u32)) -> Ordering {
+    match (left.0, right.0) {
+        (IpAddr::V4(_), IpAddr::V6(_)) => Ordering::Less,
+        (IpAddr::V6(_), IpAddr::V4(_)) => Ordering::Greater,
+        (IpAddr::V4(a), IpAddr::V4(b)) => a.cmp(&b).then(left.1.cmp(&right.1)),
+        (IpAddr::V6(a), IpAddr::V6(b)) => a.cmp(&b).then(left.1.cmp(&right.1)),
+    }
+}
+
+fn local_prefixes(
+    auto_wifi_device_policy: &AutoWifiDevicePolicy,
+    host_lan: &HostLanInventory,
+) -> std::vec::Vec<LocalPrefix> {
+    let mut prefixes = match if_addrs::get_if_addrs() {
+        Ok(network_interfaces) => network_interfaces
+            .iter()
+            .filter(|network_interface| {
+                auto_wifi_device_policy
+                    .allows(&network_interface.name, network_interface.is_loopback())
+            })
+            .map(|network_interface| match &network_interface.addr {
+                if_addrs::IfAddr::V4(ipv4_address) => LocalPrefix {
+                    addr: IpAddr::V4(ipv4_address.ip),
+                    netmask: IpAddr::V4(ipv4_address.netmask),
+                    index: network_interface.index.unwrap_or(0),
+                },
+                if_addrs::IfAddr::V6(ipv6_address) => LocalPrefix {
+                    addr: IpAddr::V6(ipv6_address.ip),
+                    netmask: IpAddr::V6(ipv6_address.netmask),
+                    index: network_interface.index.unwrap_or(0),
+                },
+            })
+            .collect(),
+        Err(_) => std::vec::Vec::new(),
+    };
+    let present: HashSet<(IpAddr, u32)> = prefixes
+        .iter()
+        .map(|prefix| (prefix.addr, prefix.index))
+        .collect();
+    for interface in host_lan.allowed_interfaces(auto_wifi_device_policy) {
+        for address in interface.addresses() {
+            if present.contains(&(address.addr(), interface.index())) {
+                continue;
+            }
+            prefixes.push(LocalPrefix {
+                addr: address.addr(),
+                netmask: address.netmask(),
+                index: interface.index(),
+            });
+        }
+    }
+    prefixes
 }
 
 fn is_local_peer(peer_address: IpAddr, local_prefixes: &[LocalPrefix]) -> bool {
@@ -2416,6 +2544,9 @@ impl prns_core::interfaces::ReportsStatus for AutoWifiPeer {
 }
 
 #[cfg(test)]
+mod without_ipv6_ll_multicast;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::num::NonZeroU8;
@@ -2713,6 +2844,39 @@ mod tests {
         assert!(!is_local_peer(v4([172, 16, 0, 1]), &prefixes));
     }
 
+    #[test]
+    fn supervisor_local_addresses_list_each_ipv4_and_ipv6_and_skip_loopback() {
+        let prefixes = [
+            prefix([192, 168, 1, 18], [255, 255, 255, 0]),
+            LocalPrefix {
+                addr: IpAddr::V6(Ipv6Addr::LOCALHOST),
+                netmask: IpAddr::V6(Ipv6Addr::from([0xff; 16])),
+                index: 1,
+            },
+            LocalPrefix {
+                addr: v4([127, 0, 0, 1]),
+                netmask: v4([255, 0, 0, 0]),
+                index: 1,
+            },
+        ];
+        let nics = [nic(47, 0x3321)];
+        assert_eq!(
+            supervisor_local_addresses(&prefixes, &nics),
+            vec![
+                (v4([192, 168, 1, 18]), 1),
+                (IpAddr::V6(nics[0].link_local), 47),
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_wifi_status_stores_local_addresses() {
+        let id = InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, contract::GROUP_ID);
+        let status = AutoWifiStatus::new(id, contract::GROUP_ID.to_vec());
+        status.set_local_addresses(std::vec![(v4([192, 168, 1, 18]), 47)]);
+        assert_eq!(status.local_addresses(), vec![(v4([192, 168, 1, 18]), 47)]);
+    }
+
     fn test_supervisor() -> (Supervisor, prns_runtime::runtime::DetachedFleet) {
         let id = InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, contract::GROUP_ID);
         let settings = AutoWifiSettings::default();
@@ -2733,6 +2897,7 @@ mod tests {
             settings: settings.clone(),
             status: AutoWifiStatus::new(id, settings.group_id.clone()),
             completed: CompletedTraffic::default(),
+            host_lan: HostLanInventory::default(),
         };
         (supervisor, guard)
     }

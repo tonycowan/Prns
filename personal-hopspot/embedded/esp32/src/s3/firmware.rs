@@ -25,6 +25,21 @@ static PENDING_REMOTE_LORA_PROFILE: BlockingMutex<
     Cell<Option<RadioProfile>>,
 > = BlockingMutex::new(Cell::new(None));
 
+static PUBLISHED_INTERFACE_MODES: BlockingMutex<
+    CriticalSectionRawMutex,
+    Cell<personal_hopspot_core::InterfaceModeTable>,
+> = BlockingMutex::new(Cell::new(
+    personal_hopspot_core::InterfaceModeTable::DEFAULT,
+));
+
+fn published_interface_modes() -> personal_hopspot_core::InterfaceModeTable {
+    PUBLISHED_INTERFACE_MODES.lock(|cell| cell.get())
+}
+
+fn publish_interface_modes(table: personal_hopspot_core::InterfaceModeTable) {
+    PUBLISHED_INTERFACE_MODES.lock(|cell| cell.set(table));
+}
+
 pub(super) struct HopspotRemoteControlState {
     usb: &'static EmbassyInterfaceStatus,
     #[cfg(feature = "lora")]
@@ -32,6 +47,7 @@ pub(super) struct HopspotRemoteControlState {
     wifi: Option<AutoWifiStatus<MEMBERS>>,
     espnow: Option<&'static EmbassyInterfaceStatus>,
     tcp: Option<&'static EmbassyInterfaceStatus>,
+    ble_identity: Option<personal_rns::interfaces::bluetooth_auto::BleIdentity>,
 }
 
 impl HopspotRemoteControlState {
@@ -51,6 +67,7 @@ impl HopspotRemoteControlState {
                 }
             },
             self.espnow,
+            published_interface_modes(),
         )
     }
 
@@ -133,6 +150,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
                         }
                     },
                     wifi_ssid.as_deref(),
+                    self.ble_identity,
                 );
             },
         )
@@ -447,6 +465,7 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         }
     };
     let working_interface_modes = loaded_interface_modes.table;
+    publish_interface_modes(working_interface_modes);
     let interface_mode_startup_notice = loaded_interface_modes.notice.map(|notice| match notice {
         screen::InterfaceModeLoadNotice::Recovered => screen::UiNotice::ProfileRecovered,
         screen::InterfaceModeLoadNotice::Reset => screen::UiNotice::ProfileReset,
@@ -564,6 +583,7 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         wifi: wifi.as_ref().map(|interface| interface.status()),
         espnow: espnow.as_ref().map(|_| espnow_status),
         tcp: tcp_status,
+        ble_identity,
     };
 
     let recipe = PrnsNodeRecipe {
@@ -1433,6 +1453,7 @@ pub(super) async fn run_core<B: Esp32S3Board>(
                                     // working table (and snapshots) immediately and persist.
                                     // Live descriptors keep their claim-time mode until reboot.
                                     working_interface_modes.set(slot, selection);
+                                    publish_interface_modes(working_interface_modes);
                                     let result = screen::apply_and_persist_interface_modes(
                                         async { true },
                                         || async {
@@ -1473,7 +1494,7 @@ pub(super) async fn run_core<B: Esp32S3Board>(
                 let result = screen::apply_and_persist_radio_profile(
                     async { LORA_CONTROL.apply(profile).await == LoRaApplyOutcome::Applied },
                     || async {
-                        match lora_profile_store.save(profile).await {
+                        match lora_profile_store.save(profile, None).await {
                             Ok(()) => true,
                             Err(error) => {
                                 log::error!("LoRa profile save failed: {error:?}");

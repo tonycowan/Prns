@@ -578,7 +578,8 @@ fn validate_uf2_board_identities(boards: &[BoardCatalogEntry]) -> Result<(), Cat
             BoardBuild::Uf2(build) if build.board_identity.discovery.is_auto() => {
                 Some((board.slug.as_str(), &build.board_identity))
             }
-            BoardBuild::NrfSerialDfu(build) if build.recovery.board_identity.discovery.is_auto() =>
+            BoardBuild::NrfSerialDfu(build)
+                if build.recovery.board_identity.discovery.is_auto() =>
             {
                 Some((board.slug.as_str(), &build.recovery.board_identity))
             }

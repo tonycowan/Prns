@@ -3,19 +3,22 @@ use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 
 use crate::backend::{
-    format_activity_age, format_target_route, interface_mode_label, radio_facts, target_label,
-    BackendError, ControllerIdentity, InterfaceEntry, InterfacePower, PairingState,
-    RemoteControlAnnounceWait, RemoteControlBackend, TargetAccess, TargetStatus,
+    auto_wifi_peer_list_note, bluetooth_auto_peer_list_note, format_activity_age,
+    format_target_route, interface_mode_label, radio_facts, target_label, BackendError,
+    ControllerIdentity, InterfaceEntry, InterfacePower, PairingState, RemoteControlAnnounceWait,
+    RemoteControlBackend, TargetAccess, TargetStatus,
 };
 use crate::edits::{
     apply_draft_to_entry, apply_lora_preset, apply_lora_region, can_edit_group, can_edit_lora,
-    can_edit_wifi_station, clamp_lora_frequency, clamp_lora_preamble, clamp_lora_tx_power,
-    dirty_keys_matching, draft_or_saved, format_lora_frequency_input, parse_lora_frequency_mhz,
-    put_draft, revert_drafts, saved_group, InterfaceDraft, InterfaceField, LoRaTuneControl,
-    LORA_TX_POWER_MIN_DBM,
+    can_edit_tcp_target, can_edit_wifi_station, clamp_lora_frequency, clamp_lora_preamble,
+    clamp_lora_tx_power, dirty_keys_matching, draft_or_saved, format_lora_frequency_input,
+    parse_lora_frequency_mhz, put_draft, revert_drafts, saved_group, saved_tcp_target,
+    InterfaceDraft, InterfaceField, LoRaTuneControl, LORA_TX_POWER_MIN_DBM,
 };
 #[cfg(not(target_os = "android"))]
-use crate::flash::{FlashDraft, FlashProgress, FlashRunOutcome, FlashStage, FlashStageState};
+use crate::flash::{
+    EnrolledFlashTarget, FlashDraft, FlashProgress, FlashRunOutcome, FlashStage, FlashStageState,
+};
 use crate::identity_clone::{IdentityCloneView, SiblingControllerView};
 
 #[cfg(target_os = "android")]
@@ -23,7 +26,7 @@ use crate::identity_clone::{IdentityCloneView, SiblingControllerView};
 struct FlashProgress;
 
 #[cfg(target_os = "android")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct FlashDraft;
 use personal_rns::interfaces::lora::{
     CodingRate, LoraBandwidth, ModemPreset, Modulation, RadioProfile, Region, SpreadingFactor,
@@ -82,6 +85,7 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
 .flash-stage.current .label, .flash-stage.done .label { color: #183d2b; }
 .flash-stage.failed .label { color: #8a2f2f; }
 .flash-stage-detail { margin: 10px 0 0; }
+.flash-manage { margin-top: 12px; }
 .card h2, .card h3 { margin-top: 0; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .heading-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -94,12 +98,23 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
 .twisty-bar .twisty-row { flex: 1; min-width: 0; }
 .target-head { display: flex; align-items: flex-start; gap: 8px; padding: 14px 16px; }
 .target-head .twisty-toggle { border: 0; background: transparent; padding: 2px 0 0; width: 24px; height: 28px; flex: 0 0 auto; display: grid; place-items: center; }
-.target-main { flex: 1; min-width: 0; display: grid; gap: 6px; }
+.target-main { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: start; }
+.target-copy { min-width: 0; display: grid; gap: 6px; }
+.target-main > .facts { grid-column: 1 / -1; min-width: 0; }
 .target-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .target-title .name { font-weight: 700; flex: 0 0 auto; }
 .target-title .build { font-size: 12px; font-weight: 500; color: #64736a; flex: 0 0 auto; }
 .target-title .peer-alias { flex: 1; min-width: 72px; max-width: 240px; }
-.target-title .status { margin-left: auto; }
+.target-aside { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 7.75rem; }
+.target-aside-status { display: flex; align-items: center; justify-content: flex-end; gap: 2px; }
+.target-controller-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
+.target-controller-actions .button { flex: 1 1 6.5rem; padding: 7px 10px; font-size: 13px; }
+.target-controller-actions .note { flex: 1 1 100%; margin: 0; font-size: 12px; }
+.target-aside .target-controller-actions { flex-direction: column; }
+.target-aside .target-controller-actions .button { width: 100%; flex: 0 0 auto; }
+.target-aside .target-controller-actions .note { max-width: 11rem; }
+.target-copy .target-controller-actions { flex-wrap: nowrap; gap: 9px; }
+.target-copy .target-controller-actions .button { flex: 0 0 auto; padding: 9px 14px; font-size: inherit; white-space: nowrap; }
 .target-head .refresh { align-self: center; }
 .refresh { flex: 0 0 auto; align-self: center; border: 0; background: transparent; color: #183d2b; padding: 8px 10px; line-height: 1; font-size: 18px; }
 .refresh:hover { background: #eef5f0; border-radius: 6px; }
@@ -198,18 +213,21 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .interface-item.open { border-color: #b7c8bc; }
 .interface-item .twisty-row { padding: 11px 12px; }
 .interface-item .accordion-body { padding: 0 12px 12px 38px; }
-.facts { display: grid; gap: 4px; margin: 0; }
-.facts div { display: grid; grid-template-columns: 110px 1fr; gap: 10px; align-items: center; font-size: 13px; }
-.facts dt { color: #52705c; font-weight: 600; }
-.facts dd { margin: 0; color: #17221b; word-break: break-all; }
+.facts { display: grid; gap: 4px; margin: 0; min-width: 0; }
+.facts div { display: grid; grid-template-columns: minmax(0, 6.75rem) minmax(0, 1fr); gap: 8px 10px; align-items: start; font-size: 13px; min-width: 0; }
+.facts dt { color: #52705c; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.facts dd { margin: 0; color: #17221b; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.facts dd.wrap { word-break: normal; overflow-wrap: anywhere; }
 .facts dd.with-unit { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .facts dd.with-unit input { flex: 1 1 auto; width: auto; min-width: 0; }
 .facts .unit { flex: 0 0 3.25em; color: #52705c; white-space: nowrap; }
 .facts input,
 .facts select { width: 100%; height: 30px; margin: 0; border: 1px solid #bfcac2; border-radius: 7px; padding: 0 8px; background: #fbfdfb; }
 .facts .failure dd { color: #9b3129; }
-.peer-list { display: grid; gap: 10px; margin: 8px 0 0; padding: 0; list-style: none; }
-.peer-card { border: 1px solid #e3ebe5; border-radius: 6px; padding: 10px; background: #fff; }
+.facts .health-warn dd { color: #8a5a12; }
+.facts .health-ok dd { color: #1f6b3a; }
+.peer-list { display: grid; gap: 10px; margin: 8px 0 0; padding: 0; list-style: none; min-width: 0; }
+.peer-card { border: 1px solid #e3ebe5; border-radius: 6px; padding: 10px; background: #fff; min-width: 0; }
 .peer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 13px; }
 .peer-title { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
 .peer-head .name { font-weight: 700; flex: 0 0 auto; }
@@ -217,7 +235,8 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 @media (max-width: 720px) {
   .app-bar { padding: 10px 12px; }
   .content { padding: 20px 18px 24px; }
-  .accordion-body { padding-left: 16px; }
+  .accordion-body,
+  .interface-item .accordion-body { padding-left: 16px; }
 }
 "#;
 
@@ -320,6 +339,8 @@ pub fn App() -> Element {
     let nodes_info = use_signal(|| false);
     let flash_info = use_signal(|| false);
     let selected_flash_board = use_signal(|| None::<String>);
+    let flash_configuring = use_signal(|| false);
+    let flash_forms = use_signal(HashMap::<String, FlashDraft>::new);
     let flash_status = use_signal(String::new);
     let flashing = use_signal(|| false);
     let flash_progress = use_signal(|| None::<FlashProgress>);
@@ -526,7 +547,11 @@ pub fn App() -> Element {
                             interfaces_by_target,
                             unsaved,
                             targets,
+                            selected_target,
+                            expanded_targets,
                             selected_flash_board,
+                            flash_configuring,
+                            flash_forms,
                             flash_status,
                             flashing,
                             flash_progress,
@@ -567,7 +592,7 @@ pub fn App() -> Element {
                                 }
                             }
                             if interfaces_info() {
-                                p { class: "note info-note", "These are this app's local transports (Auto Wi-Fi, TCP client, BLE, and USB). They are a separate stack from a prnsd running on this machine unless you Start the TCP client at that daemon (127.0.0.1:4242 by default). Start/Stop brings each transport up and down; Configure matches a target card, including BLE group. Only BLE Auto starts on unless HOPSPOT_RC_BLE=0. USB, Auto Wi-Fi, and TCP start off unless HOPSPOT_RC_USB=1, HOPSPOT_RC_AUTO_WIFI=1, or HOPSPOT_RC_TCP=host:port. Do not run this app's BLE and a local prnsd Bluetooth Auto at the same time." }
+                                p { class: "note info-note", "These are this app's local transports (Auto Wi-Fi, TCP client, BLE, and USB). They are a separate stack from a prnsd running on this machine unless you Start the TCP client at that daemon. Start/Stop brings each transport up and down. Configure on the TCP client card sets this app's outbound host:port (IPv4 or DNS; default port 4242) and keeps it in the app data directory; that is not the Flash form's board TCP client. Configure also matches a target card, including BLE group. Only BLE Auto starts on unless HOPSPOT_RC_BLE=0. USB, Auto Wi-Fi, and TCP start off unless HOPSPOT_RC_USB=1, HOPSPOT_RC_AUTO_WIFI=1, or HOPSPOT_RC_TCP=host:port. HOPSPOT_RC_TCP overrides the saved target at boot and starts that client on. Do not run this app's BLE and a local prnsd Bluetooth Auto at the same time." }
                             }
                             InterfaceAccordion {
                                 host: InterfaceHost::Controller,
@@ -721,41 +746,30 @@ pub fn App() -> Element {
                                                 span { class: if expanded { "twisty open" } else { "twisty" } }
                                             }
                                             div { class: "target-main",
-                                                div { class: "target-title",
-                                                    span { class: "name", "{target_display_name(&target)}" }
-                                                    if !awaiting {
-                                                        input {
-                                                            class: "peer-alias",
-                                                            r#type: "text",
-                                                            placeholder: "Alias",
-                                                            value: "{target_aliases().get(&target.id).cloned().unwrap_or_default()}",
-                                                            aria_label: format!("Alias for {}", target_display_name(&target)),
-                                                            oninput: {
-                                                                let target_id = target.id.clone();
-                                                                move |event| {
-                                                                    let value = event.value();
-                                                                    if value.is_empty() {
-                                                                        target_aliases.write().remove(&target_id);
-                                                                    } else {
-                                                                        target_aliases.write().insert(target_id.clone(), value);
+                                                div { class: "target-copy",
+                                                    div { class: "target-title",
+                                                        span { class: "name", "{target_display_name(&target)}" }
+                                                        if !awaiting {
+                                                            input {
+                                                                class: "peer-alias",
+                                                                r#type: "text",
+                                                                placeholder: "Alias",
+                                                                value: "{target_aliases().get(&target.id).cloned().unwrap_or_default()}",
+                                                                aria_label: format!("Alias for {}", target_display_name(&target)),
+                                                                oninput: {
+                                                                    let target_id = target.id.clone();
+                                                                    move |event| {
+                                                                        let value = event.value();
+                                                                        if value.is_empty() {
+                                                                            target_aliases.write().remove(&target_id);
+                                                                        } else {
+                                                                            target_aliases.write().insert(target_id.clone(), value);
+                                                                        }
                                                                     }
-                                                                }
-                                                            },
-                                                            onblur: {
-                                                                let target_id = target.id.clone();
-                                                                move |_| {
-                                                                    persist_target_alias(
-                                                                        target_id.clone(),
-                                                                        backend(),
-                                                                        target_aliases,
-                                                                        activity_log,
-                                                                    );
-                                                                }
-                                                            },
-                                                            onkeydown: {
-                                                                let target_id = target.id.clone();
-                                                                move |event| {
-                                                                    if event.key() == Key::Enter {
+                                                                },
+                                                                onblur: {
+                                                                    let target_id = target.id.clone();
+                                                                    move |_| {
                                                                         persist_target_alias(
                                                                             target_id.clone(),
                                                                             backend(),
@@ -763,67 +777,96 @@ pub fn App() -> Element {
                                                                             activity_log,
                                                                         );
                                                                     }
+                                                                },
+                                                                onkeydown: {
+                                                                    let target_id = target.id.clone();
+                                                                    move |event| {
+                                                                        if event.key() == Key::Enter {
+                                                                            persist_target_alias(
+                                                                                target_id.clone(),
+                                                                                backend(),
+                                                                                target_aliases,
+                                                                                activity_log,
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                },
+                                                            }
+                                                        }
+                                                    }
+                                                    if !awaiting && cfg!(feature = "mobile") {
+                                                        ControllerTargetActions {
+                                                            target_id: target.id.clone(),
+                                                            backend,
+                                                            activity_log,
+                                                            target_aliases,
+                                                            targets,
+                                                            selected_target,
+                                                            expanded_targets,
+                                                            interfaces_by_target,
+                                                            pairing,
+                                                        }
+                                                    }
+                                                    if cfg!(not(feature = "mobile")) {
+                                                        ManagedTargetFacts { target: target.clone() }
+                                                    }
+                                                }
+                                                div { class: "target-aside",
+                                                    div { class: "target-aside-status",
+                                                        span {
+                                                            class: status_class(&target.status),
+                                                            {status_label(&target.status)}
+                                                        }
+                                                        RefreshButton {
+                                                            label: if awaiting {
+                                                                format!("Refresh {}", target_display_name(&target))
+                                                            } else {
+                                                                format!(
+                                                                    "Refresh interfaces on {}",
+                                                                    target_aliases()
+                                                                        .get(&target.id)
+                                                                        .cloned()
+                                                                        .filter(|name| !name.trim().is_empty())
+                                                                        .unwrap_or_else(|| target_display_name(&target))
+                                                                )
+                                                            },
+                                                            on_refresh: {
+                                                                let target_id = target.id.clone();
+                                                                let awaiting = awaiting;
+                                                                move |_| {
+                                                                    if awaiting {
+                                                                        refresh_target_list(
+                                                                            backend(),
+                                                                            targets,
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                    refresh_host_interfaces(
+                                                                        InterfaceHost::Target(target_id.clone()),
+                                                                        backend(),
+                                                                        interfaces_by_target,
+                                                                        pairing(),
+                                                                    );
                                                                 }
                                                             },
                                                         }
                                                     }
-                                                    span {
-                                                        class: status_class(&target.status),
-                                                        {status_label(&target.status)}
-                                                    }
-                                                    RefreshButton {
-                                                label: if awaiting {
-                                                    format!("Refresh {}", target_display_name(&target))
-                                                } else {
-                                                    format!(
-                                                        "Refresh interfaces on {}",
-                                                        target_aliases()
-                                                            .get(&target.id)
-                                                            .cloned()
-                                                            .filter(|name| !name.trim().is_empty())
-                                                            .unwrap_or_else(|| target_display_name(&target))
-                                                    )
-                                                },
-                                                on_refresh: {
-                                                    let target_id = target.id.clone();
-                                                    let awaiting = awaiting;
-                                                    move |_| {
-                                                        if awaiting {
-                                                            refresh_target_list(
-                                                                backend(),
-                                                                targets,
-                                                            );
-                                                            return;
-                                                        }
-                                                        refresh_host_interfaces(
-                                                            InterfaceHost::Target(target_id.clone()),
-                                                            backend(),
+                                                    if !awaiting && cfg!(not(feature = "mobile")) {
+                                                        ControllerTargetActions {
+                                                            target_id: target.id.clone(),
+                                                            backend,
+                                                            activity_log,
+                                                            target_aliases,
+                                                            targets,
+                                                            selected_target,
+                                                            expanded_targets,
                                                             interfaces_by_target,
-                                                            pairing(),
-                                                        );
-                                                    }
-                                                },
-                                            }
-                                                }
-                                                dl { class: "facts",
-                                                    if let Some(version) = target.build_version.as_deref().filter(|text| !text.is_empty()) {
-                                                        div { dt { "PRNS" } dd { "{version}" } }
-                                                    }
-                                                    div { dt { "Address" } dd { "{target.id}" } }
-                                                    div {
-                                                        dt { "Announce" }
-                                                        dd {
-                                                            if let Some(path) = target.path.as_ref() {
-                                                                "{path.announced_at}"
-                                                            } else {
-                                                                "Not heard yet"
-                                                            }
+                                                            pairing,
                                                         }
                                                     }
-                                                    div {
-                                                        dt { "Route" }
-                                                        dd { {format_target_route(target.path.as_ref())} }
-                                                    }
+                                                }
+                                                if cfg!(feature = "mobile") {
+                                                    ManagedTargetFacts { target: target.clone() }
                                                 }
                                             }
                                             }
@@ -854,12 +897,7 @@ pub fn App() -> Element {
                                                             status: target.status,
                                                             backend,
                                                             activity_log,
-                                                            target_aliases,
                                                             targets,
-                                                            selected_target,
-                                                            expanded_targets,
-                                                            interfaces_by_target,
-                                                            pairing,
                                                         }
                                                         InterfaceAccordion {
                                                             host: InterfaceHost::Target(target.id.clone()),
@@ -922,9 +960,34 @@ pub fn App() -> Element {
 }
 
 #[component]
-fn TargetControls(
+fn ManagedTargetFacts(target: TargetAccess) -> Element {
+    rsx! {
+        dl { class: "facts",
+            if let Some(version) = target.build_version.as_deref().filter(|text| !text.is_empty()) {
+                div { dt { "PRNS" } dd { "{version}" } }
+            }
+            div { dt { "Address" } dd { "{target.id}" } }
+            div {
+                dt { "Announce" }
+                dd {
+                    if let Some(path) = target.path.as_ref() {
+                        "{path.announced_at}"
+                    } else {
+                        "Not heard yet"
+                    }
+                }
+            }
+            div {
+                dt { "Route" }
+                dd { {format_target_route(target.path.as_ref())} }
+            }
+        }
+    }
+}
+
+#[component]
+fn ControllerTargetActions(
     target_id: String,
-    status: TargetStatus,
     backend: Signal<RemoteControlBackend>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
     mut target_aliases: Signal<HashMap<String, String>>,
@@ -936,157 +999,167 @@ fn TargetControls(
 ) -> Element {
     let mut forget_prompt = use_signal(|| ForgetPrompt::Idle);
     rsx! {
-        div { class: "stack",
-            div { class: "actions",
-                button {
-                    class: "button",
-                    onclick: {
-                        let target = target_id.clone();
-                        move |_| {
-                            let target = target.clone();
-                            let backend = backend();
-                            spawn(async move {
-                                match backend.probe_target(&target).await {
-                                    Ok(_) => {
-                                        if !pairing_in_progress(&pairing()) {
-                                            load_interfaces_for_target(
-                                                backend,
-                                                target,
-                                                interfaces_by_target,
-                                                true,
-                                                RemoteControlAnnounceWait::UntilHeard,
-                                            );
-                                        }
-                                    }
-                                    Err(_) => {}
+        div { class: "target-controller-actions",
+        button {
+            class: "button",
+            onclick: {
+                let target = target_id.clone();
+                move |_| {
+                    let target = target.clone();
+                    let backend = backend();
+                    spawn(async move {
+                        match backend.probe_target(&target).await {
+                            Ok(_) => {
+                                if !pairing_in_progress(&pairing()) {
+                                    load_interfaces_for_target(
+                                        backend,
+                                        target,
+                                        interfaces_by_target,
+                                        true,
+                                        RemoteControlAnnounceWait::UntilHeard,
+                                    );
                                 }
-                            });
+                            }
+                            Err(_) => {}
                         }
-                    },
-                    "Find path"
+                    });
                 }
-                button {
-                    class: "button",
-                    onclick: {
-                        let target = target_id.clone();
-                        move |_| {
-                            let target = target.clone();
-                            let backend = backend();
-                            spawn(async move {
-                                let _ = backend.announce(&target).await;
-                            });
-                        }
-                    },
-                    "Announce"
-                }
-                button {
-                    class: if status == TargetStatus::Sleeping { "button primary" } else { "button" },
-                    onclick: {
-                        let target = target_id.clone();
-                        let sleeping = status == TargetStatus::Sleeping;
-                        move |_| {
-                            let target = target.clone();
-                            let backend = backend();
-                            spawn(async move {
-                                let result = if sleeping {
-                                    backend.wake(&target).await
-                                } else {
-                                    backend.sleep(&target).await
-                                };
-                                match result {
-                                    Ok(()) => {
-                                        let next = if sleeping {
-                                            TargetStatus::Online
-                                        } else {
-                                            TargetStatus::Sleeping
-                                        };
-                                        targets.write().iter_mut().filter(|item| item.id == target).for_each(
-                                            |item| item.status = next,
-                                        );
-                                        push_activity(
-                                            activity_log,
-                                            if sleeping {
-                                                format!("Wake requested for {target}.")
-                                            } else {
-                                                format!("Sleep requested for {target}.")
-                                            },
+            },
+            "Find path"
+        }
+        if forget_prompt() == ForgetPrompt::Confirming {
+            button {
+                class: "button danger",
+                onclick: {
+                    let target = target_id.clone();
+                    move |_| {
+                        let target = target.clone();
+                        let backend = backend();
+                        forget_prompt.set(ForgetPrompt::Idle);
+                        spawn(async move {
+                            match backend.forget_target(&target).await {
+                                Ok(()) => {
+                                    interfaces_by_target.write().remove(&target);
+                                    expanded_targets.write().remove(&target);
+                                    target_aliases.write().remove(&target);
+                                    targets.write().retain(|item| item.id != target);
+                                    if selected_target() == target {
+                                        selected_target.set(
+                                            targets()
+                                                .iter()
+                                                .find(|item| {
+                                                    item.status != TargetStatus::AwaitingPairing
+                                                })
+                                                .map(|item| item.id.clone())
+                                                .unwrap_or_default(),
                                         );
                                     }
-                                    Err(error) => push_activity(
+                                    push_activity(
+                                        activity_log,
+                                        format!("Forgot stored access for {target}."),
+                                    );
+                                }
+                                Err(error) => push_activity(
+                                    activity_log,
+                                    format!("Forget failed: {error}"),
+                                ),
+                            }
+                        });
+                    }
+                },
+                "Confirm forget"
+            }
+            button {
+                class: "button",
+                onclick: move |_| forget_prompt.set(ForgetPrompt::Idle),
+                "Cancel"
+            }
+            p { class: "note", "Removes stored pairing and the local alias. Pair again to return this node to the list." }
+        } else {
+            button {
+                class: "button danger",
+                onclick: move |_| forget_prompt.set(ForgetPrompt::Confirming),
+                "Forget"
+            }
+        }
+        }
+    }
+}
+
+#[component]
+fn TargetControls(
+    target_id: String,
+    status: TargetStatus,
+    backend: Signal<RemoteControlBackend>,
+    activity_log: Signal<Vec<ActivityLogEntry>>,
+    mut targets: Signal<Vec<TargetAccess>>,
+) -> Element {
+    rsx! {
+        div { class: "actions",
+            button {
+                class: "button",
+                onclick: {
+                    let target = target_id.clone();
+                    move |_| {
+                        let target = target.clone();
+                        let backend = backend();
+                        spawn(async move {
+                            let _ = backend.announce(&target).await;
+                        });
+                    }
+                },
+                "Announce"
+            }
+            button {
+                class: if status == TargetStatus::Sleeping { "button primary" } else { "button" },
+                onclick: {
+                    let target = target_id.clone();
+                    let sleeping = status == TargetStatus::Sleeping;
+                    move |_| {
+                        let target = target.clone();
+                        let backend = backend();
+                        spawn(async move {
+                            let result = if sleeping {
+                                backend.wake(&target).await
+                            } else {
+                                backend.sleep(&target).await
+                            };
+                            match result {
+                                Ok(()) => {
+                                    let next = if sleeping {
+                                        TargetStatus::Online
+                                    } else {
+                                        TargetStatus::Sleeping
+                                    };
+                                    targets.write().iter_mut().filter(|item| item.id == target).for_each(
+                                        |item| item.status = next,
+                                    );
+                                    push_activity(
                                         activity_log,
                                         if sleeping {
-                                            format!("Wake failed: {error}")
+                                            format!("Wake requested for {target}.")
                                         } else {
-                                            format!("Sleep failed: {error}")
+                                            format!("Sleep requested for {target}.")
                                         },
-                                    ),
+                                    );
                                 }
-                            });
-                        }
-                    },
-                    if status == TargetStatus::Sleeping {
-                        "Wake"
-                    } else {
-                        "Sleep"
-                    }
-                }
-                if forget_prompt() == ForgetPrompt::Confirming {
-                    button {
-                        class: "button danger",
-                        onclick: {
-                            let target = target_id.clone();
-                            move |_| {
-                                let target = target.clone();
-                                let backend = backend();
-                                forget_prompt.set(ForgetPrompt::Idle);
-                                spawn(async move {
-                                    match backend.forget_target(&target).await {
-                                        Ok(()) => {
-                                            interfaces_by_target.write().remove(&target);
-                                            expanded_targets.write().remove(&target);
-                                            target_aliases.write().remove(&target);
-                                            targets.write().retain(|item| item.id != target);
-                                            if selected_target() == target {
-                                                selected_target.set(
-                                                    targets()
-                                                        .iter()
-                                                        .find(|item| {
-                                                            item.status != TargetStatus::AwaitingPairing
-                                                        })
-                                                        .map(|item| item.id.clone())
-                                                        .unwrap_or_default(),
-                                                );
-                                            }
-                                            push_activity(
-                                                activity_log,
-                                                format!("Forgot stored access for {target}."),
-                                            );
-                                        }
-                                        Err(error) => push_activity(
-                                            activity_log,
-                                            format!("Forget failed: {error}"),
-                                        ),
-                                    }
-                                });
+                                Err(error) => push_activity(
+                                    activity_log,
+                                    if sleeping {
+                                        format!("Wake failed: {error}")
+                                    } else {
+                                        format!("Sleep failed: {error}")
+                                    },
+                                ),
                             }
-                        },
-                        "Confirm forget"
+                        });
                     }
-                    button {
-                        class: "button",
-                        onclick: move |_| forget_prompt.set(ForgetPrompt::Idle),
-                        "Cancel"
-                    }
+                },
+                if status == TargetStatus::Sleeping {
+                    "Wake"
                 } else {
-                    button {
-                        class: "button danger",
-                        onclick: move |_| forget_prompt.set(ForgetPrompt::Confirming),
-                        "Forget"
-                    }
+                    "Sleep"
                 }
-            }
-            if forget_prompt() == ForgetPrompt::Confirming {
-                p { class: "note", "This removes the stored pairing and local alias. The target must pair again to return to the list." }
             }
         }
     }
@@ -1635,6 +1708,26 @@ fn InterfaceAccordion(
                         let saving_this = saving().contains(&key);
                         let configuring = editing().contains(&key);
                         let expanded = expanded_interfaces().contains(&key);
+                        let address = if can_edit_tcp_target(&entry) {
+                            let target = saved_tcp_target(&entry);
+                            if target.is_empty() {
+                                format!(
+                                    "{} · {} · {}",
+                                    entry.kind,
+                                    interface_mode_label(entry.mode),
+                                    entry.connection
+                                )
+                            } else {
+                                format!("{} · {target} · {}", entry.kind, entry.connection)
+                            }
+                        } else {
+                            format!(
+                                "{} · {} · {}",
+                                entry.kind,
+                                interface_mode_label(entry.mode),
+                                entry.connection
+                            )
+                        };
                         rsx! {
                             section {
                                 key: "{key}",
@@ -1660,7 +1753,7 @@ fn InterfaceAccordion(
                                     span { class: if expanded { "twisty open" } else { "twisty" }, aria_hidden: "true" }
                                     div { class: "twisty-copy",
                                         span { class: "twisty-title", "{entry.name}" }
-                                        span { class: "twisty-address", "{entry.kind} · {interface_mode_label(entry.mode)} · {entry.connection}" }
+                                        span { class: "twisty-address", "{address}" }
                                     }
                                     span { class: "status", {power_label(&entry.power)} }
                                 }
@@ -1820,6 +1913,12 @@ fn InterfaceAccordion(
                                                     }
                                                     if entry.shows_peers || !entry.peers.is_empty() {
                                                         p { class: "note", "Peers {entry.peers.len()}" }
+                                                        if let Some(note) = auto_wifi_peer_list_note(&entry.kind) {
+                                                            p { class: "note", "{note}" }
+                                                        }
+                                                        if let Some(note) = bluetooth_auto_peer_list_note(&entry.kind) {
+                                                            p { class: "note", "{note}" }
+                                                        }
                                                         if entry.peers.is_empty() {
                                                             p { class: "note", "No peers on this interface." }
                                                         } else {
@@ -1876,7 +1975,6 @@ fn InterfaceAccordion(
                                                                                     },
                                                                                 }
                                                                             }
-                                                                            span { class: "status", "{peer.connection}" }
                                                                             RefreshButton {
                                                                                 label: format!("Refresh {}", peer.name),
                                                                                 on_refresh: {
@@ -1893,7 +1991,23 @@ fn InterfaceAccordion(
                                                                             }
                                                                         }
                                                                         dl { class: "facts",
-                                                                            div { dt { "Address" } dd { "{peer.id}" } }
+                                                                            div { dt { "Status" } dd { "{peer.connection}" } }
+                                                                            if let Some(health) = peer.health {
+                                                                                div {
+                                                                                    class: if health.is_radio_only() { "health-warn" } else { "health-ok" },
+                                                                                    dt { "Health" }
+                                                                                    dd { "{health.label()}" }
+                                                                                }
+                                                                            }
+                                                                            div { dt { "Path" } dd { "{peer.role}" } }
+                                                                            if let (Some(label), Some(endpoint)) = (peer.endpoint_label.as_ref(), peer.endpoint.as_ref()) {
+                                                                                div { dt { "{label}" } dd { class: "wrap", "{endpoint}" } }
+                                                                            }
+                                                                            if let (Some(label), Some(endpoint)) = (peer.local_endpoint_label.as_ref(), peer.local_endpoint.as_ref()) {
+                                                                                div { dt { "{label}" } dd { class: "wrap", "{endpoint}" } }
+                                                                            }
+                                                                            div { dt { "What" } dd { class: "wrap", "{peer.detail}" } }
+                                                                            div { dt { "ID" } dd { "{peer.id}" } }
                                                                             div { dt { "TX" } dd { "{format_byte_count(peer.tx_bytes)}" } }
                                                                             div { dt { "RX" } dd { "{format_byte_count(peer.rx_bytes)}" } }
                                                                             div { dt { "Links" } dd { "{peer.links}" } }
@@ -1957,6 +2071,39 @@ fn InterfaceAccordion(
                                                                                 selected: draft.mode == mode,
                                                                                 "{interface_mode_label(mode)}"
                                                                             }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            if can_edit_tcp_target(&entry) && scope == CONTROLLER_SCOPE {
+                                                                div {
+                                                                    class: if draft.field_changed(&entry, InterfaceField::TcpTarget) { "changed" } else { "" },
+                                                                    dt { "Target" }
+                                                                    dd {
+                                                                        input {
+                                                                            r#type: "text",
+                                                                            value: "{draft.tcp_target}",
+                                                                            placeholder: "host:port",
+                                                                            disabled: saving_this,
+                                                                            oninput: {
+                                                                                let key = key.clone();
+                                                                                let saved = entry.clone();
+                                                                                move |event| {
+                                                                                    let mut draft = draft_or_saved(
+                                                                                        &drafts(),
+                                                                                        &key,
+                                                                                        &saved,
+                                                                                    );
+                                                                                    draft.tcp_target = event.value();
+                                                                                    save_notices.write().remove(&key);
+                                                                                    put_draft(
+                                                                                        &mut drafts.write(),
+                                                                                        key.clone(),
+                                                                                        &saved,
+                                                                                        draft,
+                                                                                    );
+                                                                                }
+                                                                            },
                                                                         }
                                                                     }
                                                                 }
@@ -2759,10 +2906,14 @@ fn FlashSection(
     interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
     unsaved: Signal<Option<UnsavedPrompt>>,
     mut targets: Signal<Vec<TargetAccess>>,
+    selected_target: Signal<String>,
+    expanded_targets: Signal<HashSet<String>>,
     mut selected_flash_board: Signal<Option<String>>,
+    mut flash_configuring: Signal<bool>,
+    mut flash_forms: Signal<HashMap<String, FlashDraft>>,
     mut flash_status: Signal<String>,
     mut flashing: Signal<bool>,
-    flash_progress: Signal<Option<FlashProgress>>,
+    mut flash_progress: Signal<Option<FlashProgress>>,
     flash_info: Signal<bool>,
 ) -> Element {
     #[cfg(target_os = "android")]
@@ -2774,7 +2925,11 @@ fn FlashSection(
             interfaces_by_target,
             unsaved,
             targets,
+            selected_target,
+            expanded_targets,
             selected_flash_board,
+            flash_configuring,
+            flash_forms,
             flash_status,
             flashing,
             flash_progress,
@@ -2799,13 +2954,16 @@ fn FlashSection(
             let cancelled = poll.clone();
             spawn(async move {
                 while !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                    let found = tokio::task::spawn_blocking(crate::flash::detect_probable_slugs)
-                        .await
-                        .unwrap_or_default();
-                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
+                    if !flashing() && !crate::flash::uf2_volume_probes_held() {
+                        let found =
+                            tokio::task::spawn_blocking(crate::flash::detect_probable_slugs)
+                                .await
+                                .unwrap_or_default();
+                        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        probable_slugs.set(found);
                     }
-                    probable_slugs.set(found);
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             });
@@ -2813,8 +2971,6 @@ fn FlashSection(
         let probable = probable_slugs();
         let mut boards = crate::flash::catalog_boards().unwrap_or_default();
         boards.sort_by_key(|board| !probable.iter().any(|slug| slug == &board.slug));
-        let flash_forms = use_signal(HashMap::<String, FlashDraft>::new);
-        let mut flash_configuring = use_signal(|| false);
         rsx! {
             div { class: "heading-row",
                 h1 { "Flash" }
@@ -2896,7 +3052,10 @@ fn FlashSection(
                                                         class: "button",
                                                         r#type: "button",
                                                         disabled: flashing(),
-                                                        onclick: move |_| flash_configuring.set(false),
+                                                        onclick: move |_| {
+                                                            flash_configuring.set(false);
+                                                            clear_flash_progress(flash_progress, flash_status);
+                                                        },
                                                         "Back"
                                                     }
                                                     button {
@@ -2953,7 +3112,7 @@ fn FlashSection(
                                                     }
                                                     p { class: "note",
                                                         if board.enrollable {
-                                                            "Flash writes firmware plus this Operator’s grant. The node appears under Managed Nodes when the flash succeeds."
+                                                            "Flash writes firmware plus this Operator’s grant. When that succeeds, this page offers to open the node under Managed Nodes."
                                                         } else {
                                                             "This transport cannot write the enrollment vault. Flash firmware here, then pair the node from Managed Nodes."
                                                         }
@@ -3015,6 +3174,40 @@ fn FlashSection(
                                             rsx! {
                                                 if !status.is_empty() && !repeats_progress {
                                                     p { class: "note", "{status}" }
+                                                }
+                                            }
+                                        }
+                                        {
+                                            let offer = flash_progress()
+                                                .as_ref()
+                                                .and_then(FlashProgress::manage_offer)
+                                                .cloned();
+                                            rsx! {
+                                                if let Some(enrolled) = offer {
+                                                    div { class: "actions flash-manage",
+                                                        button {
+                                                            class: "button primary",
+                                                            r#type: "button",
+                                                            onclick: move |_| {
+                                                                flash_configuring.set(false);
+                                                                clear_flash_progress(
+                                                                    flash_progress,
+                                                                    flash_status,
+                                                                );
+                                                                open_enrolled_flash_target(
+                                                                    enrolled.clone(),
+                                                                    backend(),
+                                                                    screen,
+                                                                    drafts,
+                                                                    interfaces_by_target,
+                                                                    unsaved,
+                                                                    selected_target,
+                                                                    expanded_targets,
+                                                                );
+                                                            },
+                                                            "Manage {enrolled.display_name}"
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -3316,7 +3509,7 @@ fn start_flash(
                         .enroll_flashed_target(enrollment.access, &display_name)
                         .await
                     {
-                        Ok(_) => {
+                        Ok(target_id) => {
                             let mut detail = format!(
                                 "{display_name} is flashed and listed under Managed Nodes."
                             );
@@ -3341,6 +3534,10 @@ fn start_flash(
                                 detail,
                                 write_percent: None,
                                 outcome: FlashRunOutcome::Succeeded,
+                                enrolled: Some(EnrolledFlashTarget {
+                                    id: target_id,
+                                    display_name: display_name.clone(),
+                                }),
                             }));
                             if let Ok(items) = backend.targets().await {
                                 targets.set(items);
@@ -3356,6 +3553,7 @@ fn start_flash(
                                 detail: error.to_string(),
                                 write_percent: None,
                                 outcome: FlashRunOutcome::Failed,
+                                enrolled: None,
                             }));
                         }
                     }
@@ -3371,6 +3569,7 @@ fn start_flash(
                         detail,
                         write_percent: None,
                         outcome: FlashRunOutcome::Succeeded,
+                        enrolled: None,
                     }));
                 }
                 Ok(Err(error)) => {
@@ -3413,6 +3612,38 @@ async fn apply_flashed_lora(
     backend
         .set_interface_lora_profile(target_id, &lora.id, profile)
         .await
+}
+
+#[cfg(not(target_os = "android"))]
+fn clear_flash_progress(
+    mut flash_progress: Signal<Option<FlashProgress>>,
+    mut flash_status: Signal<String>,
+) {
+    flash_progress.set(None);
+    flash_status.set(String::new());
+}
+
+#[cfg(not(target_os = "android"))]
+fn open_enrolled_flash_target(
+    enrolled: EnrolledFlashTarget,
+    backend: RemoteControlBackend,
+    screen: Signal<Screen>,
+    drafts: Signal<HashMap<String, InterfaceDraft>>,
+    interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    unsaved: Signal<Option<UnsavedPrompt>>,
+    mut selected_target: Signal<String>,
+    mut expanded_targets: Signal<HashSet<String>>,
+) {
+    selected_target.set(enrolled.id.clone());
+    expanded_targets.write().insert(enrolled.id.clone());
+    load_interfaces_for_target(
+        backend,
+        enrolled.id,
+        interfaces_by_target,
+        true,
+        RemoteControlAnnounceWait::UntilHeard,
+    );
+    request_screen(Screen::Nodes, screen, drafts, interfaces_by_target, unsaved);
 }
 
 fn request_screen(
@@ -3605,6 +3836,16 @@ fn save_interface_drafts(
                                     &draft.wifi_password,
                                 )
                                 .await
+                        }
+                    }
+                    InterfaceField::TcpTarget => {
+                        if scope == CONTROLLER_SCOPE {
+                            backend.set_local_tcp_target(&draft.tcp_target)
+                        } else {
+                            Err(BackendError::Operation {
+                                operation: "set controller TCP target",
+                                detail: "TCP host:port on this card is only for this app's outbound client".to_string(),
+                            })
                         }
                     }
                 };

@@ -14,7 +14,9 @@ use nrf_softdevice::Softdevice;
 use personal_hopspot_core as hopspot;
 use personal_rns::bluetooth_auto::{BluetoothAuto, BluetoothAutoStatus};
 use personal_rns::engine::{AnnounceAppData, AnnounceNow, AnnounceTarget, PrnsCommand};
-use personal_rns::interfaces::bluetooth_auto::{Endpoint, LinkCapabilities, Nrf52Host, BLE_HW_MTU};
+use personal_rns::interfaces::bluetooth_auto::{
+    BleIdentity, Endpoint, LinkCapabilities, Nrf52Host, BLE_HW_MTU,
+};
 use personal_rns::interfaces::lora::{AirtimePolicy, RadioProfile, DEFAULT_915_PROFILE};
 use personal_rns::interfaces::usb_auto::{WEBUSB_PRODUCT_ID, WEBUSB_VENDOR_ID};
 use personal_rns::interfaces::{ConnectionState, InterfaceId, InterfaceStatus};
@@ -72,6 +74,7 @@ static PENDING_REMOTE_LORA_PROFILE: BlockingMutex<
 pub(super) struct HopspotRemoteControlState {
     lora: &'static EmbassyInterfaceStatus,
     usb: &'static EmbassyInterfaceStatus,
+    ble_identity: Option<BleIdentity>,
 }
 
 impl HopspotRemoteControlState {
@@ -115,6 +118,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
                     ble_group,
                     LORA_CONTROL.current(),
                     None,
+                    self.ble_identity,
                 );
             },
         )
@@ -505,6 +509,7 @@ pub async fn run(spawner: Spawner) -> ! {
         app_state: HopspotRemoteControlState {
             lora: lora_status,
             usb: usb_status,
+            ble_identity,
         },
         storage: Storage,
         request_endpoints: hopspot::node_pages::NodePageRoutes,

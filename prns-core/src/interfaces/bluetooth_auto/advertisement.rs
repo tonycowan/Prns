@@ -51,6 +51,31 @@ pub enum ColumbaConnectionRole {
     Unavailable,
 }
 
+/// Whether this advertisement report carried our manufacturer-specific field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManufacturerPresence {
+    Present,
+    Absent,
+}
+
+/// Whether a discovery should become an outbound dial sighting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DialSightingAction {
+    /// Forward a sighting so policy may dial.
+    Dial,
+    /// Keep the peer for inbound / a later complete ADV; do not dial.
+    Accept,
+}
+
+/// How DualRole manufacturer ADV without a v5 dial-key is treated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacyDualRolePolicy {
+    /// Host stacks (Mac): initiate toward SoftDevice / ESP.
+    FailOpenDial,
+    /// Embedded: keep radio-address election between firmware peers.
+    AddressSort { local: BleAddress, peer: BleAddress },
+}
+
 /// Encode a SoftDevice-sized ADV including the Prns service UUID, role flags, and discovery group tag.
 ///
 /// Layout fills all 31 classic ADV bytes when successful.
@@ -237,6 +262,98 @@ pub fn dial_key_from_manufacturer(company_id: u16, data: &[u8]) -> Option<BleAdd
         .try_into()
         .ok()?;
     Some(BleAddress::new(key))
+}
+
+/// Pre-dial election (option C′).
+///
+/// Dial-key (v5) peers elect with [`columba_connection_role`]. DualRole reports
+/// without manufacturer Accept so UUID-only primary ADV does not race a phone
+/// inbound dial. Legacy DualRole with manufacturer and no dial key follows
+/// [`LegacyDualRolePolicy`].
+pub fn dial_sighting_action(
+    local_dial_key: BleAddress,
+    peer_dial_key: Option<BleAddress>,
+    peer_capabilities: BleRoleCapabilities,
+    manufacturer: ManufacturerPresence,
+    legacy: LegacyDualRolePolicy,
+) -> DialSightingAction {
+    match peer_capabilities {
+        BleRoleCapabilities::PeripheralOnly => DialSightingAction::Dial,
+        BleRoleCapabilities::DualRole => match peer_dial_key {
+            Some(peer) => match columba_connection_role(
+                local_dial_key,
+                BleRoleCapabilities::DualRole,
+                peer,
+                BleRoleCapabilities::DualRole,
+            ) {
+                ColumbaConnectionRole::Dial => DialSightingAction::Dial,
+                ColumbaConnectionRole::Accept | ColumbaConnectionRole::Unavailable => {
+                    DialSightingAction::Accept
+                }
+            },
+            None => match manufacturer {
+                ManufacturerPresence::Absent => DialSightingAction::Accept,
+                ManufacturerPresence::Present => match legacy {
+                    LegacyDualRolePolicy::FailOpenDial => DialSightingAction::Dial,
+                    LegacyDualRolePolicy::AddressSort { local, peer } => {
+                        match columba_connection_role(
+                            local,
+                            BleRoleCapabilities::DualRole,
+                            peer,
+                            BleRoleCapabilities::DualRole,
+                        ) {
+                            ColumbaConnectionRole::Dial => DialSightingAction::Dial,
+                            ColumbaConnectionRole::Accept | ColumbaConnectionRole::Unavailable => {
+                                DialSightingAction::Accept
+                            }
+                        }
+                    }
+                },
+            },
+        },
+    }
+}
+
+/// Manufacturer presence for our experimental company ID on this ADV report.
+pub fn advertisement_manufacturer_presence(adv: &[u8]) -> ManufacturerPresence {
+    if AdReader::new(adv).any(|(ad_type, body)| {
+        ad_type == AD_MANUFACTURER_SPECIFIC
+            && body.get(..2) == Some(EXPERIMENTAL_ROLE_COMPANY_ID.as_slice())
+    }) {
+        ManufacturerPresence::Present
+    } else {
+        ManufacturerPresence::Absent
+    }
+}
+
+/// Dial-election key from a full advertisement report, when the peer advertised v5+.
+pub fn dial_key_from_advertisement(adv: &[u8]) -> Option<BleAddress> {
+    AdReader::new(adv).find_map(|(ad_type, body)| {
+        if ad_type != AD_MANUFACTURER_SPECIFIC {
+            return None;
+        }
+        let company_id: [u8; 2] = body.get(..2)?.try_into().ok()?;
+        dial_key_from_manufacturer(u16::from_le_bytes(company_id), body.get(2..)?)
+    })
+}
+
+/// Embedded scan-path election over one ADV or scan-response report.
+pub fn embedded_dial_sighting_action(
+    local_dial_key: BleAddress,
+    local_radio: BleAddress,
+    peer_radio: BleAddress,
+    adv: &[u8],
+) -> DialSightingAction {
+    dial_sighting_action(
+        local_dial_key,
+        dial_key_from_advertisement(adv),
+        columba_role_capabilities(adv).unwrap_or(BleRoleCapabilities::DualRole),
+        advertisement_manufacturer_presence(adv),
+        LegacyDualRolePolicy::AddressSort {
+            local: local_radio,
+            peer: peer_radio,
+        },
+    )
 }
 
 pub fn columba_connection_role(

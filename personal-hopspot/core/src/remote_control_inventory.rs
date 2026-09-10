@@ -1,3 +1,6 @@
+use core::fmt::Write as _;
+
+use personal_rns::interfaces::bluetooth_auto::BleIdentity;
 use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::interfaces::{InterfaceId, InterfaceKind, InterfaceSnapshot, Membership};
 use personal_rns::remote_control::{
@@ -119,11 +122,20 @@ pub fn decorate_hopspot_remote_control_card(
     ble_group: Option<&str>,
     lora_profile: Option<RadioProfile>,
     wifi_ssid: Option<&str>,
+    ble_identity: Option<BleIdentity>,
 ) {
     let Some(kind) = operator_kind(snapshot) else {
         return;
     };
-    card.set_name(kind.name());
+    if kind == InterfaceKind::BluetoothAuto {
+        if let Some(identity) = ble_identity {
+            card.set_name(bluetooth_auto_interface_name(identity).as_str());
+        } else {
+            card.set_name(kind.name());
+        }
+    } else {
+        card.set_name(kind.name());
+    }
     if matches!(kind, InterfaceKind::LoRa | InterfaceKind::Rnode) {
         if let Some(profile) = lora_profile {
             card.set_config(profile.inventory_config().as_str());
@@ -139,6 +151,23 @@ pub fn decorate_hopspot_remote_control_card(
             card.set_group(group);
         }
     }
+}
+
+/// Same `bluetooth-auto XXXX` title the Controller uses on Settings.
+#[must_use]
+pub fn bluetooth_auto_interface_name(identity: BleIdentity) -> heapless::String<32> {
+    let id = InterfaceId::from_channel_tag(InterfaceKind::BluetoothPeer, identity.as_bytes());
+    let bytes = id.as_bytes();
+    let mut name = heapless::String::new();
+    match (bytes.get(1), bytes.get(2)) {
+        (Some(first), Some(second)) => {
+            let _ = write!(&mut name, "bluetooth-auto {first:02x}{second:02x}");
+        }
+        (Some(_) | None, Some(_) | None) => {
+            let _ = name.push_str("bluetooth-auto");
+        }
+    }
+    name
 }
 
 fn operator_interface(snapshot: &InterfaceSnapshot) -> bool {
@@ -255,12 +284,23 @@ mod tests {
                 &snapshots,
                 supervisor_id,
                 |snapshot, card| {
-                    decorate_hopspot_remote_control_card(snapshot, card, Some("lab"), None, None)
+                    decorate_hopspot_remote_control_card(
+                        snapshot,
+                        card,
+                        Some("lab"),
+                        None,
+                        None,
+                        Some(BleIdentity::new(*b"stable-identity!")),
+                    )
                 },
             )
         else {
             panic!("BLE supervisor should return a config card");
         };
+        assert_eq!(
+            card.name.as_str(),
+            bluetooth_auto_interface_name(BleIdentity::new(*b"stable-identity!")).as_str()
+        );
         assert_eq!(card.group.as_str(), "lab");
         assert!(card.config.is_empty());
         assert_eq!(card.destinations, 3);
@@ -298,6 +338,7 @@ mod tests {
                         None,
                         None,
                         Some("field-lab"),
+                        None,
                     )
                 },
             )
@@ -422,6 +463,7 @@ mod tests {
                         card,
                         Some("lab"),
                         Some(personal_rns::interfaces::lora::DEFAULT_915_PROFILE),
+                        None,
                         None,
                     );
                 },

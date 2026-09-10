@@ -198,7 +198,7 @@ class BleLink(private val context: Context) {
                 return
             }
             val octets = parseMac(device.address) ?: return
-            if (!shouldDial(octets, result)) {
+            if (!shouldDial(result)) {
                 return
             }
             val direct = ByteBuffer.allocateDirect(6)
@@ -1538,7 +1538,14 @@ class BleLink(private val context: Context) {
             .addServiceUuid(ParcelUuid(PRNS_SERVICE))
             .addManufacturerData(
                 PRNS_ROLE_COMPANY_ID,
-                byteArrayOf(PRNS_ROLE_VERSION, PRNS_ROLE_DUAL_MODE),
+                byteArrayOf(
+                    PRNS_ROLE_VERSION,
+                    PRNS_ROLE_DUAL_MODE,
+                    PRNS_DEFAULT_GROUP_TAG[0],
+                    PRNS_DEFAULT_GROUP_TAG[1],
+                    PRNS_DEFAULT_GROUP_TAG[2],
+                    PRNS_DEFAULT_GROUP_TAG[3],
+                ),
             )
             .build()
         try {
@@ -1624,17 +1631,17 @@ class BleLink(private val context: Context) {
         }
     }
 
-    @SuppressLint("HardwareIds")
-    private fun shouldDial(peerAddress: ByteArray, result: ScanResult): Boolean {
+    private fun shouldDial(result: ScanResult): Boolean {
         val capabilities = result.scanRecord
             ?.getManufacturerSpecificData(PRNS_ROLE_COMPANY_ID)
         if (capabilities != null &&
             capabilities.size >= 2 &&
-            capabilities[0] >= PRNS_ROLE_VERSION &&
+            capabilities[0] >= PRNS_ROLE_VERSION_MIN &&
             capabilities[1].toInt() and PRNS_ROLE_PERIPHERAL_ONLY.toInt() != 0
         ) {
             return true
         }
+        val peerAddress = parseMac(result.device.address) ?: return true
         val localAddress = runCatching { adapter?.address }.getOrNull()?.let(::parseMac) ?: return true
         if (localAddress.contentEquals(HIDDEN_LOCAL_ADDRESS)) {
             return true
@@ -1723,9 +1730,12 @@ class BleLink(private val context: Context) {
         private const val L2CAP_OPEN_RETRIES = 5
         private const val L2CAP_OPEN_RETRY_MS = 200L
         private const val PRNS_ROLE_COMPANY_ID = 0xFFFF
-        private const val PRNS_ROLE_VERSION: Byte = 0x03
+        private const val PRNS_ROLE_VERSION_MIN: Byte = 0x03
+        private const val PRNS_ROLE_VERSION: Byte = 0x04
         private const val PRNS_ROLE_DUAL_MODE: Byte = 0x00
         private const val PRNS_ROLE_PERIPHERAL_ONLY: Byte = 0x01
+        private val PRNS_DEFAULT_GROUP_TAG =
+            byteArrayOf(0xEA.toByte(), 0xC4.toByte(), 0xD7.toByte(), 0x0B)
         private val HIDDEN_LOCAL_ADDRESS = byteArrayOf(2, 0, 0, 0, 0, 0)
         val PRNS_SERVICE: UUID = UUID.fromString("37145b00-442d-4a94-917f-8f42c5da28e3")
         val COLUMBA_TX: UUID = UUID.fromString("37145b00-442d-4a94-917f-8f42c5da28e4")

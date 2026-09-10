@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use personal_rns::identity::in_memory::InMemoryNodeIdentity;
 use personal_rns::identity::{
@@ -21,6 +22,26 @@ use serialport::SerialPortType;
 
 const INFO_UF2_READ_LIMIT: u64 = 4096;
 const ESPRESSIF_NATIVE_USB_VENDOR_ID: u16 = 0x303A;
+static UF2_VOLUME_PROBE_HELD: AtomicBool = AtomicBool::new(false);
+
+struct Uf2VolumeProbeHold;
+
+impl Uf2VolumeProbeHold {
+    fn acquire() -> Self {
+        UF2_VOLUME_PROBE_HELD.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Uf2VolumeProbeHold {
+    fn drop(&mut self) {
+        UF2_VOLUME_PROBE_HELD.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn uf2_volume_probes_held() -> bool {
+    UF2_VOLUME_PROBE_HELD.load(Ordering::SeqCst)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlashStage {
@@ -66,12 +87,19 @@ pub enum FlashRunOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnrolledFlashTarget {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlashProgress {
     pub enrollable: bool,
     pub stage: FlashStage,
     pub detail: String,
     pub write_percent: Option<u8>,
     pub outcome: FlashRunOutcome,
+    pub enrolled: Option<EnrolledFlashTarget>,
 }
 
 impl FlashProgress {
@@ -82,6 +110,14 @@ impl FlashProgress {
             detail: detail.into(),
             write_percent: None,
             outcome: FlashRunOutcome::Running,
+            enrolled: None,
+        }
+    }
+
+    pub fn manage_offer(&self) -> Option<&EnrolledFlashTarget> {
+        match self.outcome {
+            FlashRunOutcome::Succeeded => self.enrolled.as_ref(),
+            FlashRunOutcome::Running | FlashRunOutcome::Failed => None,
         }
     }
 
@@ -365,7 +401,12 @@ pub fn catalog_boards() -> Result<Vec<CatalogBoard>, FlashError> {
 }
 
 pub fn detect_probable_slugs() -> Vec<String> {
-    slugs_matching_devices(&connected_uf2_identities(), &connected_usb_identities())
+    let uf2 = if uf2_volume_probes_held() {
+        Vec::new()
+    } else {
+        connected_uf2_identities()
+    };
+    slugs_matching_devices(&uf2, &connected_usb_identities())
 }
 
 fn slugs_matching_devices(uf2: &[Uf2BootloaderIdentity], usb: &[UsbIdentity]) -> Vec<String> {
@@ -610,23 +651,8 @@ pub fn flash_enrolled_board(
             Ok::<_, FlashError>((path, offset))
         })
         .transpose()?;
-    let mut command = Command::new("cargo");
-    command
-        .arg("run")
-        .arg("--locked")
-        .arg("--quiet")
-        .arg("-p")
-        .arg("hopspot-flash")
-        .arg("--")
-        .arg("flash")
-        .arg(slug)
-        .arg("--local-build")
-        .arg("--yes")
-        .arg("--json")
-        .current_dir(&repo)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let _hold = Uf2VolumeProbeHold::acquire();
+    let mut command = hopspot_flash_command(&repo, slug);
     if let Some((path, offset)) = &vault_path {
         command
             .arg("--rc-vault")
@@ -655,20 +681,41 @@ pub fn flash_enrolled_board(
             on_progress(progress_from_hopspot_event(enrollable, &event));
         }
     }
-    let output = child
-        .wait_with_output()
+    let status = child
+        .wait()
         .map_err(|error| FlashError::Message(format!("hopspot-flash did not finish: {error}")))?;
     if let Some((path, _)) = vault_path {
         let _ = std::fs::remove_file(path);
     }
-    if output.status.success() {
+    if status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
     Err(FlashError::Message(hopspot_failure_detail(
-        &stderr,
+        "",
         last_json_error,
     )))
+}
+
+fn hopspot_flash_command(repo: &Path, slug: &str) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .arg("run")
+        .arg("--locked")
+        .arg("-p")
+        .arg("hopspot-flash")
+        .arg("--")
+        .arg("flash")
+        .arg(slug)
+        .arg("--local-build")
+        .arg("--yes")
+        .arg("--json")
+        .current_dir(repo)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("CARGO_TARGET_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    command
 }
 
 fn parse_allow_list_key(
@@ -926,6 +973,43 @@ mod tests {
     }
 
     #[test]
+    fn controller_flash_invokes_hopspot_flash_like_the_cli() {
+        let command = hopspot_flash_command(Path::new("/repo"), "mesh-tower-v2");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "--locked",
+                "-p",
+                "hopspot-flash",
+                "--",
+                "flash",
+                "mesh-tower-v2",
+                "--local-build",
+                "--yes",
+                "--json",
+            ]
+        );
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| { key == "CARGO_TARGET_DIR" && value.is_none() }));
+    }
+
+    #[test]
+    fn a_controller_flash_holds_uf2_volume_probes() {
+        assert!(!uf2_volume_probes_held());
+        {
+            let _hold = Uf2VolumeProbeHold::acquire();
+            assert!(uf2_volume_probes_held());
+        }
+        assert!(!uf2_volume_probes_held());
+    }
+
+    #[test]
     fn hopspot_phases_advance_the_progress_diagram() {
         let building = parse_hopspot_event(
             r#"{"schema":1,"event":"phase","phase":"building","message":"Building Heltec V4"}"#,
@@ -948,5 +1032,55 @@ mod tests {
         let progress = progress_from_hopspot_event(true, &writing);
         assert_eq!(progress.stage, FlashStage::Write);
         assert_eq!(progress.write_percent, Some(25));
+        assert!(progress.manage_offer().is_none());
+    }
+
+    #[test]
+    fn successful_enrollment_offers_the_new_node() {
+        let progress = FlashProgress {
+            enrollable: true,
+            stage: FlashStage::Complete,
+            detail: "Heltec MeshTower V2 is flashed and listed under Managed Nodes.".to_string(),
+            write_percent: None,
+            outcome: FlashRunOutcome::Succeeded,
+            enrolled: Some(EnrolledFlashTarget {
+                id: "aabbccddeeff0011".to_string(),
+                display_name: "Heltec MeshTower V2".to_string(),
+            }),
+        };
+        let offer = progress
+            .manage_offer()
+            .expect("enrolled flash offers the node");
+        assert_eq!(offer.id, "aabbccddeeff0011");
+        assert_eq!(offer.display_name, "Heltec MeshTower V2");
+    }
+
+    #[test]
+    fn flash_without_enrollment_does_not_offer_a_node() {
+        let progress = FlashProgress {
+            enrollable: false,
+            stage: FlashStage::Complete,
+            detail: "firmware flashed".to_string(),
+            write_percent: None,
+            outcome: FlashRunOutcome::Succeeded,
+            enrolled: None,
+        };
+        assert!(progress.manage_offer().is_none());
+    }
+
+    #[test]
+    fn failed_complete_does_not_offer_a_node() {
+        let progress = FlashProgress {
+            enrollable: true,
+            stage: FlashStage::Complete,
+            detail: "listing failed".to_string(),
+            write_percent: None,
+            outcome: FlashRunOutcome::Failed,
+            enrolled: Some(EnrolledFlashTarget {
+                id: "aabbccddeeff0011".to_string(),
+                display_name: "Heltec MeshTower V2".to_string(),
+            }),
+        };
+        assert!(progress.manage_offer().is_none());
     }
 }

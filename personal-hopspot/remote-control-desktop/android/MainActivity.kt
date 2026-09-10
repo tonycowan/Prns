@@ -7,12 +7,14 @@ import android.os.Bundle
 import android.util.Log
 import org.personal.prns.controller.BleLink
 import org.personal.prns.controller.UsbLink
+import org.personal.prns.controller.WifiLanLink
 
 typealias BuildConfig = org.personal.prns.controller.BuildConfig
 
 class MainActivity : WryActivity() {
     private var bleLink: BleLink? = null
     private var usbLink: UsbLink? = null
+    private var wifiLanLink: WifiLanLink? = null
     private var lastPermissionState: List<Boolean>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -33,8 +35,10 @@ class MainActivity : WryActivity() {
     override fun onDestroy() {
         runCatching { bleLink?.stop() }
         runCatching { usbLink?.stop() }
+        runCatching { wifiLanLink?.stop() }
         bleLink = null
         usbLink = null
+        wifiLanLink = null
         super.onDestroy()
     }
 
@@ -42,6 +46,11 @@ class MainActivity : WryActivity() {
         if (usbLink == null) {
             usbLink = runCatching { UsbLink(applicationContext).also { it.start() } }
                 .onFailure { Log.e(TAG, "USB Auto link failed to start", it) }
+                .getOrNull()
+        }
+        if (wifiLanLink == null) {
+            wifiLanLink = runCatching { WifiLanLink(applicationContext).also { it.start() } }
+                .onFailure { Log.e(TAG, "Wi-Fi LAN link failed to start", it) }
                 .getOrNull()
         }
         if (bleLink == null && hasBlePermissions()) {

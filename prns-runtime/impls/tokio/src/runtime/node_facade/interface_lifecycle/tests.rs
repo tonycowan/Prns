@@ -240,6 +240,21 @@ async fn a_fleet_member_inherits_its_supervisors_ifac() {
     );
 }
 
+#[test]
+fn fleet_can_name_a_member_after_add() {
+    let supervisor = InterfaceId::new([0x71; 8]);
+    let (fleet, _tail) = Fleet::detached(supervisor);
+    let interface = StatusInterface::new(b"named-member");
+    let id = interface.id();
+    let _attached = fleet.add(interface);
+    assert!(fleet.set_member_name(id, "192.168.1.1:42699"));
+    let map = fleet.interfaces.lock().unwrap();
+    assert_eq!(
+        map.get(&id).unwrap().name.as_deref(),
+        Some("192.168.1.1:42699")
+    );
+}
+
 fn registered_status(view: StatusView, membership: Membership) -> RegisteredInterface {
     RegisteredInterface {
         view,

@@ -16,6 +16,7 @@ pub enum InterfaceField {
     Group,
     LoRaTune,
     WifiStation,
+    TcpTarget,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +38,7 @@ pub struct InterfaceDraft {
     pub lora: Option<RadioProfile>,
     pub wifi_ssid: String,
     pub wifi_password: String,
+    pub tcp_target: String,
 }
 
 impl InterfaceDraft {
@@ -48,6 +50,7 @@ impl InterfaceDraft {
             lora: saved_lora(entry),
             wifi_ssid: saved_wifi_ssid(entry),
             wifi_password: String::new(),
+            tcp_target: saved_tcp_target(entry),
         }
     }
 
@@ -67,6 +70,9 @@ impl InterfaceDraft {
             && (self.wifi_ssid != saved_wifi_ssid(saved) || !self.wifi_password.is_empty())
         {
             fields.push(InterfaceField::WifiStation);
+        }
+        if can_edit_tcp_target(saved) && self.tcp_target != saved_tcp_target(saved) {
+            fields.push(InterfaceField::TcpTarget);
         }
         fields
     }
@@ -133,6 +139,9 @@ pub fn apply_draft_to_entry(entry: &mut InterfaceEntry, draft: &InterfaceDraft) 
     {
         crate::backend::apply_wifi_station_to_entry(entry, &draft.wifi_ssid);
     }
+    if can_edit_tcp_target(entry) {
+        crate::backend::apply_tcp_target_to_entry(entry, &draft.tcp_target);
+    }
 }
 
 pub fn put_draft(
@@ -181,6 +190,37 @@ pub fn can_edit_lora(entry: &InterfaceEntry) -> bool {
 #[must_use]
 pub fn can_edit_wifi_station(entry: &InterfaceEntry) -> bool {
     entry.kind == "auto-wifi"
+}
+
+#[must_use]
+pub fn can_edit_tcp_target(entry: &InterfaceEntry) -> bool {
+    entry.kind == "tcp-client"
+}
+
+#[must_use]
+pub fn saved_tcp_target(entry: &InterfaceEntry) -> String {
+    let host = entry
+        .extras
+        .iter()
+        .find(|fact| fact.label == "Host")
+        .map(|fact| fact.value.as_str());
+    let port = entry
+        .extras
+        .iter()
+        .find(|fact| fact.label == "Port")
+        .map(|fact| fact.value.as_str());
+    if let (Some(host), Some(port)) = (host, port) {
+        return format!("{host}:{port}");
+    }
+    entry
+        .detail
+        .as_deref()
+        .into_iter()
+        .flat_map(|detail| detail.split(" · "))
+        .map(str::trim)
+        .find(|part| part.contains(':') && !part.starts_with("IFAC "))
+        .unwrap_or("")
+        .to_string()
 }
 
 #[must_use]
@@ -308,8 +348,8 @@ mod tests {
 
     use super::{
         apply_draft_to_entry, apply_lora_preset, apply_lora_region, dirty_keys_matching,
-        draft_or_saved, put_draft, revert_drafts, saved_group, saved_wifi_ssid, InterfaceDraft,
-        InterfaceField, LoRaTuneControl,
+        draft_or_saved, put_draft, revert_drafts, saved_group, saved_tcp_target, saved_wifi_ssid,
+        InterfaceDraft, InterfaceField, LoRaTuneControl,
     };
 
     fn entry(mode: InterfaceMode) -> InterfaceEntry {
@@ -369,6 +409,7 @@ mod tests {
                 lora: None,
                 wifi_ssid: saved_wifi_ssid(&saved),
                 wifi_password: String::new(),
+                tcp_target: saved_tcp_target(&saved),
             },
         );
         assert_eq!(
@@ -385,6 +426,7 @@ mod tests {
                 lora: None,
                 wifi_ssid: saved_wifi_ssid(&saved),
                 wifi_password: String::new(),
+                tcp_target: saved_tcp_target(&saved),
             },
         );
         assert!(drafts.is_empty());
@@ -411,6 +453,7 @@ mod tests {
                 lora: None,
                 wifi_ssid: saved_wifi_ssid(&saved),
                 wifi_password: String::new(),
+                tcp_target: saved_tcp_target(&saved),
             },
         );
         put_draft(
@@ -423,6 +466,7 @@ mod tests {
                 lora: None,
                 wifi_ssid: saved_wifi_ssid(&saved),
                 wifi_password: String::new(),
+                tcp_target: saved_tcp_target(&saved),
             },
         );
         assert_eq!(
@@ -445,6 +489,7 @@ mod tests {
         let mut saved = entry(InterfaceMode::Full);
         saved.kind = "auto-wifi".to_string();
         saved.group = Some("reticulum".to_string());
+        let tcp_target = saved_tcp_target(&saved);
         apply_draft_to_entry(
             &mut saved,
             &InterfaceDraft {
@@ -453,12 +498,14 @@ mod tests {
                 lora: None,
                 wifi_ssid: "field-lab".to_string(),
                 wifi_password: String::new(),
+                tcp_target,
             },
         );
         assert_eq!(saved.mode, InterfaceMode::Gateway);
         assert_eq!(saved.group.as_deref(), Some("field-mesh"));
         assert_eq!(saved.detail.as_deref(), Some("W,field-lab"));
         let mut tcp = entry(InterfaceMode::Full);
+        let tcp_target = saved_tcp_target(&tcp);
         apply_draft_to_entry(
             &mut tcp,
             &InterfaceDraft {
@@ -467,6 +514,7 @@ mod tests {
                 lora: None,
                 wifi_ssid: "ignored".to_string(),
                 wifi_password: String::new(),
+                tcp_target,
             },
         );
         assert_eq!(tcp.mode, InterfaceMode::Roaming);
@@ -478,6 +526,7 @@ mod tests {
         let mut saved = entry(InterfaceMode::Full);
         saved.kind = "bluetooth-auto".to_string();
         saved.group = Some("reticulum".to_string());
+        let tcp_target = saved_tcp_target(&saved);
         apply_draft_to_entry(
             &mut saved,
             &InterfaceDraft {
@@ -486,6 +535,7 @@ mod tests {
                 lora: None,
                 wifi_ssid: String::new(),
                 wifi_password: String::new(),
+                tcp_target,
             },
         );
         assert_eq!(saved.mode, InterfaceMode::Roaming);
@@ -538,6 +588,47 @@ mod tests {
         assert!(draft.lora_control_changed(&saved, LoRaTuneControl::Preset));
         draft.lora = Some(DEFAULT_915_PROFILE);
         assert!(!draft.is_dirty(&saved));
+    }
+
+    #[test]
+    fn tcp_target_edits_are_dirty_until_they_match_the_saved_value() {
+        let mut saved = entry(InterfaceMode::Full);
+        crate::backend::apply_tcp_target_to_entry(&mut saved, "127.0.0.1:4242");
+        let mut draft = InterfaceDraft::captured_from(&saved);
+        assert_eq!(draft.tcp_target, "127.0.0.1:4242");
+        assert!(!draft.is_dirty(&saved));
+        draft.tcp_target = "gateway.example:4242".to_string();
+        assert!(draft.field_changed(&saved, InterfaceField::TcpTarget));
+        draft.tcp_target = saved_tcp_target(&saved);
+        assert!(!draft.is_dirty(&saved));
+    }
+
+    #[test]
+    fn applying_a_draft_writes_the_tcp_target() {
+        let mut saved = entry(InterfaceMode::Full);
+        crate::backend::apply_tcp_target_to_entry(&mut saved, "127.0.0.1:4242");
+        let group = saved_group(&saved);
+        let wifi_ssid = saved_wifi_ssid(&saved);
+        apply_draft_to_entry(
+            &mut saved,
+            &InterfaceDraft {
+                mode: InterfaceMode::Full,
+                group,
+                lora: None,
+                wifi_ssid,
+                wifi_password: String::new(),
+                tcp_target: "gateway.example:4242".to_string(),
+            },
+        );
+        assert_eq!(saved.detail.as_deref(), Some("gateway.example:4242"));
+        assert!(saved
+            .extras
+            .iter()
+            .any(|fact| fact.label == "Host" && fact.value == "gateway.example"));
+        assert!(saved
+            .extras
+            .iter()
+            .any(|fact| fact.label == "Port" && fact.value == "4242"));
     }
 
     #[test]

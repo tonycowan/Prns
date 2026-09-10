@@ -6,14 +6,16 @@ mod identity;
 mod policy;
 
 pub use advertisement::{
-    advertisement_group_tag, columba_connection_role, columba_role_capabilities,
-    columba_role_capabilities_from_manufacturer, contains_service, dial_key_from_identity,
-    dial_key_from_manufacturer, discovery_groups_match, encode_advertisement,
-    group_tag_from_manufacturer, manufacturer_discovery_group_tag,
+    advertisement_group_tag, advertisement_manufacturer_presence, columba_connection_role,
+    columba_role_capabilities, columba_role_capabilities_from_manufacturer, contains_service,
+    dial_key_from_advertisement, dial_key_from_identity, dial_key_from_manufacturer,
+    dial_sighting_action, discovery_groups_match, embedded_dial_sighting_action,
+    encode_advertisement, group_tag_from_manufacturer, manufacturer_discovery_group_tag,
     manufacturer_discovery_groups_match, manufacturer_role_payload,
     manufacturer_role_payload_with_dial_key, BleRoleCapabilities, BleUuid, ColumbaConnectionRole,
-    BLE_SERVICE_UUID, BLE_SERVICE_UUID_BYTES, COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID,
-    COLUMBA_TX_UUID, DIAL_KEY_LEN, MAX_ADVERTISEMENT_LEN, NATIVE_CONTROL_UUID, NATIVE_DATA_UUID,
+    DialSightingAction, LegacyDualRolePolicy, ManufacturerPresence, BLE_SERVICE_UUID,
+    BLE_SERVICE_UUID_BYTES, COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID, COLUMBA_TX_UUID, DIAL_KEY_LEN,
+    MAX_ADVERTISEMENT_LEN, NATIVE_CONTROL_UUID, NATIVE_DATA_UUID,
 };
 pub use backend::{
     AdvertisingMode, BleBackend, BleEvent, BleLink, BleSink, BleSource, DialOutcome, Origin,

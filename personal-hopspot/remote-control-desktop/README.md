@@ -71,9 +71,13 @@ HOPSPOT_RC_TCP=127.0.0.1:4242 cargo run --features desktop
 Only BLE Auto starts on. Set `HOPSPOT_RC_BLE=0` to boot it off; Settings
 Start/Stop turns each local transport up or down without restarting. USB,
 Auto Wi-Fi, and TCP start off. Set `HOPSPOT_RC_USB=1` or
-`HOPSPOT_RC_AUTO_WIFI=1` to start those on. A TCP client is always listed,
-default off, aiming at `127.0.0.1:4242`. `HOPSPOT_RC_TCP=host:port` chooses
-another target and starts that client on. Do not run this app's BLE and a local `prnsd` Bluetooth Auto at
+`HOPSPOT_RC_AUTO_WIFI=1` to start those on. Settings lists a **TCP client**
+card, default off, aiming at `127.0.0.1:4242`. Configure on that card sets
+this app's outbound `host:port` (IPv4 or DNS; default port 4242) and keeps
+it in `tcp-target` under the data directory, then retargets the live client
+so Android does not need an env var or restart. `HOPSPOT_RC_TCP=host:port`
+overrides that file at boot and starts the client on. The Flash form's TCP
+field provisions a board, not this app. Do not run this app's BLE and a local `prnsd` Bluetooth Auto at
 the same time. Pairing ads stay hop-0; `prnsd` will not forward them.
 Stable Operator and Instance identities, the host BLE identity, and paired-target
 access are stored under `~/.local/share/hopspot-remote-control`. Override
@@ -81,7 +85,8 @@ that location with `HOPSPOT_RC_DATA_DIR`. Settings shows the Operator hash
    that pairing writes onto the target (`identities/controller`) and this
    install's Instance hash (`identities/instance`). Sibling Controllers
    share Operator only. The BLE identity is `identities/ble` in that
-   directory. Peer aliases live in `peer-aliases` there, keyed by the
+   directory. The controller TCP client target lives in `tcp-target` there.
+   Peer aliases live in `peer-aliases` there, keyed by the
    full interface id (the `P XXXX` label is a durable short prefix of that id).
    Target pairing names live in `target-names` (the announcement label from
    pairing). Optional target aliases live in `target-aliases` beside that
@@ -154,8 +159,9 @@ the controller first so it is already listening. Heard announcements show up on
    Below the target
    address are
    two lines: last announce time in local time, then hop count and inbound path.
-   Stored targets come back Offline after a restart; the app probes each
-   one with a path request, and **Find path** retries that. **Forget**
+   Stored targets come back Offline after a restart; the app announces this
+   controller's operator destination and probes each target with a path
+   request, and **Find path** retries that. **Forget**
    drops the stored pairing from this controller.
 
 If you opened pairing before starting the app, open it again (or close and

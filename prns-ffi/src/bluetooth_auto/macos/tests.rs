@@ -15,8 +15,9 @@ use super::backend::{
 use super::central::CentralPeerSession;
 use super::discovery::{
     candidate_strength, dial_sighting_action, discover_disposition, CandidateStrength,
-    DialSightingAction, DiscoverDisposition, DiscoveryGuard, ManufacturerPresence,
-    PeripheralLinkState, SessionPresence, StaleCancellation, StaleLinkRecovery,
+    DialSightingAction, DiscoverDisposition, DiscoveryGuard, LegacyDualRolePolicy,
+    ManufacturerPresence, PeripheralLinkState, SessionPresence, StaleCancellation,
+    StaleLinkRecovery,
 };
 use super::gatt_link::{
     gatt_inbound_channel, gatt_inbound_channel_with_budget, GattInboundSendError,
@@ -276,7 +277,8 @@ fn ba_sim_02_field_race_legacy_dual_role_fail_opens_dial() {
             local,
             None,
             BleRoleCapabilities::DualRole,
-            ManufacturerPresence::Present
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
         ),
         DialSightingAction::Dial,
         "legacy DualRole with manufacturer must fail-open Dial (option C′)"
@@ -293,7 +295,8 @@ fn incomplete_adv_without_manufacturer_must_not_dial() {
             local,
             None,
             BleRoleCapabilities::DualRole,
-            ManufacturerPresence::Absent
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::FailOpenDial,
         ),
         DialSightingAction::Accept,
         "UUID-only / no-manufacturer DualRole must Accept, not Dial"
@@ -309,7 +312,8 @@ fn dial_sighting_elects_on_shared_dial_key() {
             mac,
             Some(phone),
             BleRoleCapabilities::DualRole,
-            ManufacturerPresence::Present
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
         ),
         DialSightingAction::Accept,
         "Mac must Accept when phone dial-key wins sort"
@@ -319,7 +323,8 @@ fn dial_sighting_elects_on_shared_dial_key() {
             phone,
             Some(mac),
             BleRoleCapabilities::DualRole,
-            ManufacturerPresence::Present
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
         ),
         DialSightingAction::Dial,
         "phone must Dial when it wins dial-key sort"
@@ -329,7 +334,8 @@ fn dial_sighting_elects_on_shared_dial_key() {
             mac,
             None,
             BleRoleCapabilities::PeripheralOnly,
-            ManufacturerPresence::Absent
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::FailOpenDial,
         ),
         DialSightingAction::Dial
     );

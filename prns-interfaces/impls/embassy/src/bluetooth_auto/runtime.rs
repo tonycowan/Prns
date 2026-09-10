@@ -154,6 +154,7 @@ impl InterfaceStatus for BluetoothMemberStatus {
 
 const DISCOVERY_GROUP_CAP: usize = 32;
 
+#[derive(Clone, Copy)]
 struct DiscoveryGroup {
     bytes: [u8; DISCOVERY_GROUP_CAP],
     len: u8,

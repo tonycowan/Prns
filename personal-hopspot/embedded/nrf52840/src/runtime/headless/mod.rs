@@ -453,6 +453,7 @@ pub async fn run(spawner: Spawner) -> ! {
         app_state: remote_control::HopspotRemoteControlState {
             lora: lora_status,
             usb: usb_status,
+            ble_identity,
         },
         #[cfg(not(feature = "board-mesh-tower-v2"))]
         app_state: (),

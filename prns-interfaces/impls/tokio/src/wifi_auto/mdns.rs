@@ -18,6 +18,7 @@ use prns_core::interfaces::wifi_auto::{
     ServiceAdvertisement,
 };
 
+use super::HostLanInventory;
 use crate::network_device::AutoWifiDevicePolicy;
 
 use super::publication_absence::{
@@ -36,24 +37,38 @@ pub(crate) const DISCOVERY_CAPACITY: NonZeroU8 = contract::DEFAULT_DISCOVERY_SER
 /// The provider remains dormant until the associated AutoWifi runtime owns the
 /// shared TCP listener and reports [`DiscoveryParticipation::Central`].
 pub fn native_service_discovery(auto_wifi_device_policy: AutoWifiDevicePolicy) -> ServiceDiscovery {
+    native_service_discovery_with_host_lan(auto_wifi_device_policy, HostLanInventory::default())
+}
+
+pub fn native_service_discovery_with_host_lan(
+    auto_wifi_device_policy: AutoWifiDevicePolicy,
+    host_lan: HostLanInventory,
+) -> ServiceDiscovery {
     let (service_discovery, service_discovery_publisher) =
         ServiceDiscovery::channel(DISCOVERY_CAPACITY);
-    spawn_service_discovery(auto_wifi_device_policy, service_discovery_publisher);
+    spawn_service_discovery(
+        auto_wifi_device_policy,
+        host_lan,
+        service_discovery_publisher,
+    );
     service_discovery
 }
 
 fn spawn_service_discovery(
     auto_wifi_device_policy: AutoWifiDevicePolicy,
+    host_lan: HostLanInventory,
     service_discovery_publisher: ServiceDiscoveryPublisher,
 ) {
     tokio::spawn(run_service_discovery(
         auto_wifi_device_policy,
+        host_lan,
         service_discovery_publisher,
     ));
 }
 
 async fn run_service_discovery(
     auto_wifi_device_policy: AutoWifiDevicePolicy,
+    host_lan: HostLanInventory,
     mut service_discovery_publisher: ServiceDiscoveryPublisher,
 ) -> NativeDiscoveryExit {
     loop {
@@ -70,18 +85,21 @@ async fn run_service_discovery(
             }
         }
 
-        let central_session_follow_up =
-            match run_central_session(&auto_wifi_device_policy, &mut service_discovery_publisher)
-                .await
-            {
-                Ok(central_session_end) => CentralSessionFollowUp::from(central_session_end),
-                Err(mdns_error) => {
-                    crate::diagnostic_log::debug!(
-                        "wifi-auto: mDNS discovery unavailable: {mdns_error}"
-                    );
-                    CentralSessionFollowUp::RetryBackend
-                }
-            };
+        let central_session_follow_up = match run_central_session(
+            &auto_wifi_device_policy,
+            &host_lan,
+            &mut service_discovery_publisher,
+        )
+        .await
+        {
+            Ok(central_session_end) => CentralSessionFollowUp::from(central_session_end),
+            Err(mdns_error) => {
+                crate::diagnostic_log::debug!(
+                    "wifi-auto: mDNS discovery unavailable: {mdns_error}"
+                );
+                CentralSessionFollowUp::RetryBackend
+            }
+        };
 
         service_discovery_publisher.clear_snapshot();
         match central_session_follow_up {
@@ -120,6 +138,7 @@ async fn run_service_discovery(
 
 async fn run_central_session(
     auto_wifi_device_policy: &AutoWifiDevicePolicy,
+    host_lan: &HostLanInventory,
     service_discovery_publisher: &mut ServiceDiscoveryPublisher,
 ) -> Result<CentralDiscoverySessionEnd, MdnsDiscoveryError> {
     let central_publications = CentralPublications::fresh()?;
@@ -149,7 +168,7 @@ async fn run_central_session(
             }
             _ = reconciliation_interval.tick() => {
                 let current_eligible_ip_addresses =
-                    collect_eligible_ip_addresses(auto_wifi_device_policy)?;
+                    collect_eligible_ip_addresses(auto_wifi_device_policy, host_lan)?;
                 match InterfaceReconciliation::between(
                     &eligible_ip_addresses,
                     &current_eligible_ip_addresses,
@@ -177,7 +196,8 @@ async fn run_central_session(
                     Ok(service_event) => service_event,
                     Err(_backend_stopped) => break CentralDiscoverySessionEnd::BackendStopped,
                 };
-                let local_link_local_scopes = local_link_local_scope_ids(auto_wifi_device_policy);
+                let local_link_local_scopes =
+                    local_link_local_scope_ids(auto_wifi_device_policy, host_lan);
                 match apply_service_event(
                     &mut discovery_snapshot,
                     &service_event,
@@ -323,6 +343,7 @@ fn apply_resolved_service(
 
 fn collect_eligible_ip_addresses(
     auto_wifi_device_policy: &AutoWifiDevicePolicy,
+    host_lan: &HostLanInventory,
 ) -> Result<BTreeSet<IpAddr>, MdnsDiscoveryError> {
     let network_interfaces = if_addrs::get_if_addrs().map_err(MdnsDiscoveryError::Interfaces)?;
     let mut eligible_ip_addresses = BTreeSet::new();
@@ -338,17 +359,23 @@ fn collect_eligible_ip_addresses(
         eligible_ip_addresses.insert(ip_address);
     }
     eligible_ip_addresses.extend(
-        super::link_local_nics(auto_wifi_device_policy)
+        super::link_local_nics(auto_wifi_device_policy, host_lan)
             .into_iter()
             .map(|network_interface| IpAddr::V6(network_interface.link_local)),
     );
+    for interface in host_lan.allowed_interfaces(auto_wifi_device_policy) {
+        for address in interface.addresses() {
+            eligible_ip_addresses.insert(address.addr());
+        }
+    }
     Ok(eligible_ip_addresses)
 }
 
 fn local_link_local_scope_ids(
     auto_wifi_device_policy: &AutoWifiDevicePolicy,
+    host_lan: &HostLanInventory,
 ) -> std::vec::Vec<u32> {
-    super::link_local_nics(auto_wifi_device_policy)
+    super::link_local_nics(auto_wifi_device_policy, host_lan)
         .into_iter()
         .map(|network_interface| network_interface.index)
         .filter(|scope_id| *scope_id != 0)
@@ -1435,5 +1462,11 @@ mod tests {
             ServiceEventOutcome::SnapshotChanged
         );
         assert!(discovery_snapshot.is_empty());
+    }
+
+    /// Host mDNS must accept IPv4-only Auto records when IPv6 LL multicast is absent.
+    mod without_ipv6_ll_multicast {
+        use super::*;
+        include!("mdns_without_ipv6_ll_multicast.rs");
     }
 }

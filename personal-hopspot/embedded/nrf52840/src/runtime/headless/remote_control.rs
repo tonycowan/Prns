@@ -6,6 +6,7 @@ use embassy_sync::channel::Channel;
 use personal_hopspot_core as hopspot;
 use personal_rns::bluetooth_auto::BluetoothAutoStatus;
 use personal_rns::identity::IDENTITY_PUBLIC_KEY_LEN;
+use personal_rns::interfaces::bluetooth_auto::BleIdentity;
 use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::interfaces::{
     InterfaceGravity, InterfaceId, InterfaceMode, InterfaceSnapshot, InterfaceStatus, Membership,
@@ -76,6 +77,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 pub(super) struct HopspotRemoteControlState {
     pub(super) lora: &'static personal_rns::manifold::embassy::EmbassyInterfaceStatus,
     pub(super) usb: &'static personal_rns::manifold::embassy::EmbassyInterfaceStatus,
+    pub(super) ble_identity: Option<BleIdentity>,
 }
 
 static PENDING_REMOTE_LORA_PROFILE: BlockingMutex<
@@ -130,6 +132,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
                     ble_group,
                     LORA_CONTROL.current(),
                     None,
+                    self.ble_identity,
                 );
             },
         )
