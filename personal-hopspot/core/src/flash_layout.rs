@@ -103,12 +103,11 @@ const NRF52840_S140_APPLICATION_RAM_ORIGIN: u32 = 0x2000C000;
 const T1000E_APPLICATION_RAM_ORIGIN: u32 = 0x20010000;
 const NRF52840_RAM_END: u32 = 0x20040000;
 const NRF52840_MINIMUM_RUNTIME_STACK_BYTES: u32 = 68 * 1024;
-/// Heltec display boards (T096 / T114) run closer to the BSS ceiling once interface-mode
-/// persistence and the Options/detail face paths are linked; keep a 4 KiB smaller floor.
-const HELTEC_DISPLAY_MINIMUM_RUNTIME_STACK_BYTES: u32 = 64 * 1024;
-/// T-Echo SoftDevice builds carry Bluetooth Auto slot state that pushes BSS higher than
-/// Heltec display boards; keep an 8 KiB smaller floor than the generic nRF52840 budget.
-const T_ECHO_MINIMUM_RUNTIME_STACK_BYTES: u32 = 60 * 1024;
+/// Heltec display boards (T096 / T114) run closer to the BSS ceiling once SoftDevice
+/// Bluetooth Auto + interface-mode persistence are linked; keep a 12 KiB smaller floor.
+const HELTEC_DISPLAY_MINIMUM_RUNTIME_STACK_BYTES: u32 = 56 * 1024;
+/// T-Echo SoftDevice builds share that same BSS pressure; keep the matching floor.
+const T_ECHO_MINIMUM_RUNTIME_STACK_BYTES: u32 = HELTEC_DISPLAY_MINIMUM_RUNTIME_STACK_BYTES;
 /// T-Echo keeps the same one-page journal arenas as Mesh Tower V2 so application
 /// flash can absorb SoftDevice Bluetooth Auto + Remote Control growth.
 pub const T_ECHO_MIN_ARENA_BYTES: usize = NRF52840_MIN_ARENA_BYTES;
@@ -462,7 +461,7 @@ mod tests {
             Nrf52840FirmwareMemory {
                 application_flash: FirmwareAddressRange::new(0x26000, 0xE2000),
                 application_ram: FirmwareAddressRange::new(0x2000C000, 0x20040000),
-                minimum_runtime_stack_bytes: 60 * 1024,
+                minimum_runtime_stack_bytes: 56 * 1024,
             }
         );
         assert_eq!(
@@ -470,7 +469,7 @@ mod tests {
             Nrf52840FirmwareMemory {
                 application_flash: FirmwareAddressRange::new(0x27000, 0xE2000),
                 application_ram: FirmwareAddressRange::new(0x2000C000, 0x20040000),
-                minimum_runtime_stack_bytes: 60 * 1024,
+                minimum_runtime_stack_bytes: 56 * 1024,
             }
         );
         assert_eq!(
@@ -478,7 +477,7 @@ mod tests {
             Nrf52840FirmwareMemory {
                 application_flash: FirmwareAddressRange::new(0x26000, 0xE1000),
                 application_ram: FirmwareAddressRange::new(0x2000C000, 0x20040000),
-                minimum_runtime_stack_bytes: 64 * 1024,
+                minimum_runtime_stack_bytes: 56 * 1024,
             }
         );
         assert_eq!(
