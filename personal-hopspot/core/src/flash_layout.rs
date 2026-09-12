@@ -64,7 +64,7 @@ pub const T1000E_RECOVERY_BOOTLOADER_FLASH_OFFSET: u32 = 0xF4000;
 pub const T096_APPLICATION_DATA_END: u32 = 0xEC000;
 pub const T096_FACTORY_RESERVED_FLASH_OFFSET: u32 = 0xED000;
 pub const T096_RECOVERY_BOOTLOADER_FLASH_OFFSET: u32 = 0xF4000;
-pub const T_ECHO_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET: u32 = 0xC0000;
+pub const T_ECHO_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET: u32 = 0xE2000;
 pub const HELTEC_DISPLAY_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET: u32 = 0xE1000;
 pub const MESH_TOWER_V2_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET: u32 = 0xE2000;
 pub const T1000E_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET: u32 = 0xE9000;
@@ -106,12 +106,17 @@ const NRF52840_MINIMUM_RUNTIME_STACK_BYTES: u32 = 68 * 1024;
 /// Heltec display boards (T096 / T114) run closer to the BSS ceiling once interface-mode
 /// persistence and the Options/detail face paths are linked; keep a 4 KiB smaller floor.
 const HELTEC_DISPLAY_MINIMUM_RUNTIME_STACK_BYTES: u32 = 64 * 1024;
-pub const T_ECHO_MIN_ARENA_BYTES: usize = 17 * HOPSPOT_FLASH_PAGE_BYTES;
+/// T-Echo SoftDevice builds carry Bluetooth Auto slot state that pushes BSS higher than
+/// Heltec display boards; keep an 8 KiB smaller floor than the generic nRF52840 budget.
+const T_ECHO_MINIMUM_RUNTIME_STACK_BYTES: u32 = 60 * 1024;
+/// T-Echo keeps the same one-page journal arenas as Mesh Tower V2 so application
+/// flash can absorb SoftDevice Bluetooth Auto + Remote Control growth.
+pub const T_ECHO_MIN_ARENA_BYTES: usize = NRF52840_MIN_ARENA_BYTES;
 pub const T_ECHO_JOURNAL_LAYOUT: FlashJournalLayout = FlashJournalLayout::new(
-    [0xC1000, 0xC2000],
+    [0xE3000, 0xE4000],
     [
-        FlashArenaRange::new(0xC3000, 0xD6000),
-        FlashArenaRange::new(0xD6000, 0xE7000),
+        FlashArenaRange::new(0xE5000, 0xE6000),
+        FlashArenaRange::new(0xE6000, 0xE7000),
     ],
 );
 pub const T_ECHO_S140_V6_FIRMWARE_MEMORY: Nrf52840FirmwareMemory = Nrf52840FirmwareMemory {
@@ -123,7 +128,7 @@ pub const T_ECHO_S140_V6_FIRMWARE_MEMORY: Nrf52840FirmwareMemory = Nrf52840Firmw
         NRF52840_S140_APPLICATION_RAM_ORIGIN,
         NRF52840_RAM_END,
     ),
-    minimum_runtime_stack_bytes: NRF52840_MINIMUM_RUNTIME_STACK_BYTES,
+    minimum_runtime_stack_bytes: T_ECHO_MINIMUM_RUNTIME_STACK_BYTES,
 };
 pub const T_ECHO_S140_V7_FIRMWARE_MEMORY: Nrf52840FirmwareMemory = Nrf52840FirmwareMemory {
     application_flash: FirmwareAddressRange::new(
@@ -134,7 +139,7 @@ pub const T_ECHO_S140_V7_FIRMWARE_MEMORY: Nrf52840FirmwareMemory = Nrf52840Firmw
         NRF52840_S140_APPLICATION_RAM_ORIGIN,
         NRF52840_RAM_END,
     ),
-    minimum_runtime_stack_bytes: NRF52840_MINIMUM_RUNTIME_STACK_BYTES,
+    minimum_runtime_stack_bytes: T_ECHO_MINIMUM_RUNTIME_STACK_BYTES,
 };
 
 pub const NRF52840_MIN_ARENA_BYTES: usize = HOPSPOT_FLASH_PAGE_BYTES;
@@ -455,17 +460,17 @@ mod tests {
         assert_eq!(
             T_ECHO_S140_V6_FIRMWARE_MEMORY,
             Nrf52840FirmwareMemory {
-                application_flash: FirmwareAddressRange::new(0x26000, 0xC0000),
+                application_flash: FirmwareAddressRange::new(0x26000, 0xE2000),
                 application_ram: FirmwareAddressRange::new(0x2000C000, 0x20040000),
-                minimum_runtime_stack_bytes: 68 * 1024,
+                minimum_runtime_stack_bytes: 60 * 1024,
             }
         );
         assert_eq!(
             T_ECHO_S140_V7_FIRMWARE_MEMORY,
             Nrf52840FirmwareMemory {
-                application_flash: FirmwareAddressRange::new(0x27000, 0xC0000),
+                application_flash: FirmwareAddressRange::new(0x27000, 0xE2000),
                 application_ram: FirmwareAddressRange::new(0x2000C000, 0x20040000),
-                minimum_runtime_stack_bytes: 68 * 1024,
+                minimum_runtime_stack_bytes: 60 * 1024,
             }
         );
         assert_eq!(
@@ -499,9 +504,9 @@ mod tests {
         for (layout, expected_start, expected_end, expected_arena_lengths) in [
             (
                 T_ECHO_JOURNAL_LAYOUT,
-                0xC1000,
+                0xE3000,
                 0xE7000,
-                [19 * HOPSPOT_FLASH_PAGE_BYTES, T_ECHO_MIN_ARENA_BYTES],
+                [T_ECHO_MIN_ARENA_BYTES; 2],
             ),
             (
                 HELTEC_DISPLAY_NRF52840_JOURNAL_LAYOUT,

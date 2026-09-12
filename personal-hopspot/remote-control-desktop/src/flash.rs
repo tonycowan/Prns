@@ -553,7 +553,7 @@ pub fn identity_offset(slug: &str) -> Option<u32> {
         "heltec-v4" | "heltec-v4-r8" | "heltec-e290" => Some(0x00E7_D000),
         "t-beam-supreme" => Some(0x0067_D000),
         "xiao-esp32-c6" => Some(0x003D_F000),
-        "t-echo" => Some(0x000B_F000),
+        "t-echo" => Some(0x000E_2000),
         "t114" | "t096" => Some(0x000E_1000),
         "mesh-tower-v2" => Some(0x000E_2000),
         "t1000-e" => Some(0x000E_9000),
