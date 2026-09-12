@@ -153,28 +153,28 @@ impl<const N: usize> RunnerRequest<N> {
                 target: "personal_hopspot_esp32",
                 "rc: drop queue_full bytes={inbound_len}"
             );
-            return;
-        }
-        #[cfg(feature = "log")]
-        if let Journaled::RequestReceived {
-            destination,
-            link_id,
-            requester,
-            path_hash,
-            data,
-            ..
-        } = journaled
-        {
-            log::info!(
-                target: "personal_hopspot_esp32",
-                "rc: enqueue dest={} link={} path={} ctrl={} kind={:?} bytes={}",
-                hex4(destination.as_bytes()),
-                hex4(link_id.as_bytes()),
-                hex4(path_hash.as_bytes()),
-                hash4(*requester),
-                data.get(1).copied(),
-                data.len()
-            );
+        } else {
+            #[cfg(feature = "log")]
+            if let Journaled::RequestReceived {
+                destination,
+                link_id,
+                requester,
+                path_hash,
+                data,
+                ..
+            } = journaled
+            {
+                log::info!(
+                    target: "personal_hopspot_esp32",
+                    "rc: enqueue dest={} link={} path={} ctrl={} kind={:?} bytes={}",
+                    hex4(destination.as_bytes()),
+                    hex4(link_id.as_bytes()),
+                    hex4(path_hash.as_bytes()),
+                    hash4(*requester),
+                    data.get(1).copied(),
+                    data.len()
+                );
+            }
         }
     }
 }
