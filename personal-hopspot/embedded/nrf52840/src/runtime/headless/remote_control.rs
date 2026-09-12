@@ -9,7 +9,7 @@ use personal_rns::identity::IDENTITY_PUBLIC_KEY_LEN;
 use personal_rns::interfaces::bluetooth_auto::BleIdentity;
 use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::interfaces::{
-    InterfaceGravity, InterfaceId, InterfaceMode, InterfaceSnapshot, InterfaceStatus, Membership,
+    InterfaceGravity, InterfaceId, InterfaceSnapshot, InterfaceStatus, Membership,
 };
 use personal_rns::remote_control::{
     parse_controller_public_keys, RemoteControlBuildVersion, RemoteControlControllerGrant,
@@ -77,6 +77,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 pub(super) struct HopspotRemoteControlState {
     pub(super) lora: &'static personal_rns::manifold::embassy::EmbassyInterfaceStatus,
     pub(super) usb: &'static personal_rns::manifold::embassy::EmbassyInterfaceStatus,
+    pub(super) modes: hopspot::InterfaceModeTable,
     pub(super) ble_identity: Option<BleIdentity>,
 }
 
@@ -111,7 +112,11 @@ impl HopspotRemoteControlState {
 
 impl RemoteControlHostControls for HopspotRemoteControlState {
     fn inventory_interfaces(&self) -> RemoteControlInterfaceInventory {
-        hopspot::remote_control_inventory_from_snapshots(&build_snapshots(self.lora, self.usb))
+        hopspot::remote_control_inventory_from_snapshots(&build_snapshots(
+            self.lora,
+            self.usb,
+            self.modes,
+        ))
     }
 
     fn build_version(&self) -> RemoteControlBuildVersion {
@@ -123,7 +128,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
         let mut group = [0u8; 32];
         let ble_group = ble.copy_group(&mut group);
         hopspot::remote_control_interface_config_from_snapshots(
-            &build_snapshots(self.lora, self.usb),
+            &build_snapshots(self.lora, self.usb, self.modes),
             id,
             |snapshot, card| {
                 hopspot::decorate_hopspot_remote_control_card(
@@ -144,7 +149,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
         offset: u8,
     ) -> RemoteControlInterfacePeersOutcome {
         hopspot::remote_control_interface_peers_from_snapshots(
-            &build_snapshots(self.lora, self.usb),
+            &build_snapshots(self.lora, self.usb, self.modes),
             id,
             offset,
         )
@@ -253,6 +258,7 @@ pub(super) fn take_pending_lora_profile() -> Option<RadioProfile> {
 fn build_snapshots(
     lora: &dyn InterfaceStatus,
     usb: &dyn InterfaceStatus,
+    modes: hopspot::InterfaceModeTable,
 ) -> heapless::Vec<InterfaceSnapshot, { MEMBERS + 4 }> {
     let ble = BluetoothAutoStatus::new(&BLE_SHARED);
     let mut entries: heapless::Vec<(&dyn InterfaceStatus, Membership), { MEMBERS + 4 }> =
@@ -269,7 +275,7 @@ fn build_snapshots(
         let counts = INTERFACE_STORE.counts(status.id());
         let _ = snapshots.push(InterfaceSnapshot {
             id: status.id(),
-            mode: InterfaceMode::Full,
+            mode: hopspot::mode_from_table(modes, status.id().kind()),
             gravity: InterfaceGravity::ZERO,
             connection: status.connection(),
             failure_reason: status.failure_reason(),

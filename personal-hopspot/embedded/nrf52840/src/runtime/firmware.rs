@@ -74,6 +74,7 @@ static PENDING_REMOTE_LORA_PROFILE: BlockingMutex<
 pub(super) struct HopspotRemoteControlState {
     lora: &'static EmbassyInterfaceStatus,
     usb: &'static EmbassyInterfaceStatus,
+    modes: hopspot::InterfaceModeTable,
     ble_identity: Option<BleIdentity>,
 }
 
@@ -97,7 +98,11 @@ impl HopspotRemoteControlState {
 
 impl RemoteControlHostControls for HopspotRemoteControlState {
     fn inventory_interfaces(&self) -> RemoteControlInterfaceInventory {
-        hopspot::remote_control_inventory_from_snapshots(&build_snapshots(self.lora, self.usb))
+        hopspot::remote_control_inventory_from_snapshots(&build_snapshots(
+            self.lora,
+            self.usb,
+            self.modes,
+        ))
     }
 
     fn build_version(&self) -> RemoteControlBuildVersion {
@@ -109,7 +114,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
         let mut group = [0u8; 32];
         let ble_group = ble.copy_group(&mut group);
         hopspot::remote_control_interface_config_from_snapshots(
-            &build_snapshots(self.lora, self.usb),
+            &build_snapshots(self.lora, self.usb, self.modes),
             id,
             |snapshot, card| {
                 hopspot::decorate_hopspot_remote_control_card(
@@ -130,7 +135,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
         offset: u8,
     ) -> RemoteControlInterfacePeersOutcome {
         hopspot::remote_control_interface_peers_from_snapshots(
-            &build_snapshots(self.lora, self.usb),
+            &build_snapshots(self.lora, self.usb, self.modes),
             id,
             offset,
         )
@@ -509,6 +514,7 @@ pub async fn run(spawner: Spawner) -> ! {
         app_state: HopspotRemoteControlState {
             lora: lora_status,
             usb: usb_status,
+            modes: working_interface_modes,
             ble_identity,
         },
         storage: Storage,
@@ -1005,7 +1011,7 @@ pub async fn run(spawner: Spawner) -> ! {
             if let Some(profile) = PENDING_REMOTE_LORA_PROFILE.lock(|cell| cell.replace(None)) {
                 let result = hopspot::apply_and_persist_radio_profile(
                     async { LORA_CONTROL.apply(profile).await == LoRaApplyOutcome::Applied },
-                    || async { lora_profile_store.save(profile).await.is_ok() },
+                    || async { lora_profile_store.save(profile, None).await.is_ok() },
                 )
                 .await;
                 if result.applied() {
