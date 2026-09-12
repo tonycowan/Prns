@@ -313,11 +313,7 @@ async fn dispatch<St, R: RequestEndpointSet<St>>(
     let dispatched = match route {
         PreparedRequestRoute::RemoteControl(admission) => {
             dispatch_admitted_remote_control_request(
-                state,
-                commands,
-                inbound,
-                &mut body,
-                *admission,
+                state, commands, inbound, &mut body, *admission,
             )
             .await
         }
