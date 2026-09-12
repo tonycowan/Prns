@@ -113,9 +113,7 @@ impl HopspotRemoteControlState {
 impl RemoteControlHostControls for HopspotRemoteControlState {
     fn inventory_interfaces(&self) -> RemoteControlInterfaceInventory {
         hopspot::remote_control_inventory_from_snapshots(&build_snapshots(
-            self.lora,
-            self.usb,
-            self.modes,
+            self.lora, self.usb, self.modes,
         ))
     }
 
