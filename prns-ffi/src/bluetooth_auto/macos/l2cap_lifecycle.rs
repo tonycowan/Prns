@@ -163,9 +163,7 @@ fn spawn_l2cap_lane(
             }
             while let Some(len) = deframer.next_frame(&mut frame) {
                 if first_frame {
-                    let line = format!(
-                        "bluetooth: {peer:02x?} L2CAP first inbound frame {len}B"
-                    );
+                    let line = format!("bluetooth: {peer:02x?} L2CAP first inbound frame {len}B");
                     crate::diagnostic_log::info!("{line}");
                     eprintln!("{line}");
                     first_frame = false;

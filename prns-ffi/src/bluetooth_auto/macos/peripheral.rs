@@ -296,7 +296,8 @@ define_class!(
                 eprintln!("{line}");
             }
             let Some(channel) = channel else {
-                let line = "bluetooth: L2CAP open callback with no channel — data plane not established";
+                let line =
+                    "bluetooth: L2CAP open callback with no channel — data plane not established";
                 crate::diagnostic_log::warn!("{line}");
                 eprintln!("{line}");
                 return;

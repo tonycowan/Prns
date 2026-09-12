@@ -846,10 +846,8 @@ async fn apply_settle<B, const MAX_PEERS: usize>(
             } => {
                 if let Some(mut held) = link.take() {
                     let channel_tag = *identity.as_bytes();
-                    let id = InterfaceId::from_channel_tag(
-                        InterfaceKind::BluetoothPeer,
-                        &channel_tag,
-                    );
+                    let id =
+                        InterfaceId::from_channel_tag(InterfaceKind::BluetoothPeer, &channel_tag);
                     let status =
                         TokioInterfaceStatus::new_unaccounted(id, ConnectionState::Connected);
                     let details = match lane {
