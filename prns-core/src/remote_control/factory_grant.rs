@@ -111,9 +111,8 @@ fn encode_identity_slot(
     let mut buffer = [STATE_EMPTY; SLOT_LEN];
     write_label(&mut buffer, label);
     let _ = write_bytes(&mut buffer, SECRET_OFFSET, secret);
-    if let Some(inverse) =
-        buffer.get_mut(SECRET_INVERSE_OFFSET..SECRET_INVERSE_OFFSET + IDENTITY_SECRET_KEY_LEN)
-    {
+    let inverse_end = SECRET_INVERSE_OFFSET.saturating_add(IDENTITY_SECRET_KEY_LEN);
+    if let Some(inverse) = buffer.get_mut(SECRET_INVERSE_OFFSET..inverse_end) {
         for (dst, byte) in inverse.iter_mut().zip(secret.iter()) {
             *dst = !*byte;
         }

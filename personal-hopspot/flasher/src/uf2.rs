@@ -928,8 +928,8 @@ mod tests {
         #[cfg(not(windows))]
         assert_eq!(command.get_program(), std::ffi::OsStr::new("cp"));
         let args: Vec<_> = command.get_args().collect();
-        assert!(args.iter().any(|arg| *arg == from.as_os_str()));
-        assert!(args.iter().any(|arg| *arg == to.as_os_str()));
+        assert!(args.contains(&from.as_os_str()));
+        assert!(args.contains(&to.as_os_str()));
     }
 
     #[test]
