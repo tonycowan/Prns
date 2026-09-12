@@ -568,10 +568,7 @@ mod tests {
         peer.rx_bytes = 22;
         peer.links = 3;
         peer.destinations = 5;
-        let raw = [
-            inventory_entry(bluetooth.clone()),
-            inventory_entry(peer.clone()),
-        ];
+        let raw = [inventory_entry(bluetooth), inventory_entry(peer)];
         let RemoteControlInterfacePeersOutcome::Page(page) =
             interface_peers_from_host(&raw, bluetooth.id, 0)
         else {

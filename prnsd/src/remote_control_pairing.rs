@@ -329,10 +329,7 @@ fn encode_snapshot(snapshot: &PairingWindowSnapshot) -> String {
         snapshot.invitation_code,
         snapshot.endpoint_hash,
         snapshot.expires_at_millis,
-        match snapshot.confirmation_digits.as_deref() {
-            Some(digits) => digits,
-            None => "none",
-        }
+        snapshot.confirmation_digits.as_deref().unwrap_or("none"),
     )
 }
 
