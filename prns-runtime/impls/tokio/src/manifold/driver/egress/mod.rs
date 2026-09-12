@@ -17,7 +17,9 @@ use crate::runtime::{
     AnnounceBackpressureEvent, AnnounceEgressOutcome, EgressLaneMetricsSnapshot,
     EgressMetricsSnapshot,
 };
-use crate::wire::{PacketType, WireContext, WirePacketHeader};
+#[cfg(feature = "tracing")]
+use crate::wire::PacketType;
+use crate::wire::{WireContext, WirePacketHeader};
 
 use super::TokioGrantProducer;
 

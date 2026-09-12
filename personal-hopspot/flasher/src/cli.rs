@@ -233,6 +233,7 @@ mod tests {
         .is_ok());
     }
 
+    #[test]
     fn json_and_monitor_remain_valid_individually() {
         assert!(
             Cli::try_parse_from(["hopspot-flash", "flash", "heltec-v4", "--yes", "--json",])

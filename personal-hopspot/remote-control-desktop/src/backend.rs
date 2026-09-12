@@ -6106,20 +6106,24 @@ fn should_wait_for_control_announce(
     }
 }
 
+#[cfg(test)]
 fn local_interface_is_live(connection: &str) -> bool {
     matches!(connection, "Connected" | "Degraded")
 }
 
+#[cfg(test)]
 fn interface_is_usb_auto(kind: &str) -> bool {
     matches!(kind, "usb-auto-host" | "usb-auto-device")
 }
 
+#[cfg(test)]
 fn hop_interface_is_live(interface: &str, locals: &[InterfaceEntry]) -> bool {
     locals.iter().any(|entry| {
         local_interface_is_live(&entry.connection) && hop_kind_matches_local(interface, &entry.kind)
     })
 }
 
+#[cfg(test)]
 fn hop_kind_matches_local(hop: &str, local: &str) -> bool {
     hop == local
         || (interface_is_usb_auto(hop) && interface_is_usb_auto(local))
@@ -6131,6 +6135,7 @@ fn hop_kind_matches_local(hop: &str, local: &str) -> bool {
 
 /// Drop a stored hop only when that hop's interface is down. Routing
 /// picks USB vs BLE; this app does not pin a transport.
+#[cfg(test)]
 fn should_forget_control_route(path: Option<&TargetPath>, locals: &[InterfaceEntry]) -> bool {
     match path {
         Some(path) => !hop_interface_is_live(&path.interface, locals),
