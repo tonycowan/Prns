@@ -948,6 +948,8 @@ pub(super) async fn drive_interfaces(
     }
 }
 
+type GroupApplyCallback = std::sync::Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
+
 /// A status view the runtime tracks centrally, tagged with where its interface sits in the fleet. `interfaces()` joins each with the engine's count store to mint an `InterfaceSnapshot`.
 pub(super) struct RegisteredInterface {
     view: StatusView,
@@ -958,7 +960,7 @@ pub(super) struct RegisteredInterface {
     ifac: Option<InterfaceIfacSnapshot>,
     name: Option<String>,
     group: Option<String>,
-    group_apply: Option<std::sync::Arc<dyn Fn(&[u8]) -> bool + Send + Sync>>,
+    group_apply: Option<GroupApplyCallback>,
     rssi: Option<i8>,
     group_id: Option<String>,
     byte_accounting: ByteAccounting,

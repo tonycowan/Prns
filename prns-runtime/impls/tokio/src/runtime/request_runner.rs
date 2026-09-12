@@ -71,7 +71,7 @@ impl RunnerRequest {
 
 enum PreparedRequestRoute {
     Application,
-    RemoteControl(AdmittedRemoteControlRequest),
+    RemoteControl(Box<AdmittedRemoteControlRequest>),
     Declined(Decline),
 }
 
@@ -93,7 +93,7 @@ fn prepare_request(
             self_announcement,
             &request.inbound(),
         ) {
-            Ok(admission) => PreparedRequestRoute::RemoteControl(admission),
+            Ok(admission) => PreparedRequestRoute::RemoteControl(Box::new(admission)),
             Err(error) => {
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
@@ -312,8 +312,14 @@ async fn dispatch<St, R: RequestEndpointSet<St>>(
     let mut body = RunnerResponse::Buffered(std::vec::Vec::new());
     let dispatched = match route {
         PreparedRequestRoute::RemoteControl(admission) => {
-            dispatch_admitted_remote_control_request(state, commands, inbound, &mut body, admission)
-                .await
+            dispatch_admitted_remote_control_request(
+                state,
+                commands,
+                inbound,
+                &mut body,
+                *admission,
+            )
+            .await
         }
         PreparedRequestRoute::Application => {
             dispatch_request::<St, R>(state, commands, request.path_hash, inbound, &mut body).await
