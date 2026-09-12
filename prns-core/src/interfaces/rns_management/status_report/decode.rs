@@ -636,7 +636,7 @@ fn read_fleet_peer(
     for _ in 0..length {
         let key = read_key(reader, RnsStatsFieldScope::Interface(parent_index))?;
         let path =
-            RnsStatsFieldPath::interface(parent_index, &format!("fleet_peers[{peer_index}].{key}"));
+            RnsStatsFieldPath::interface(parent_index, format!("fleet_peers[{peer_index}].{key}"));
         ensure_unique(&mut fields, path.clone())?;
         match key.as_str() {
             interface::NAME => name = Some(read_string(reader, path)?),
