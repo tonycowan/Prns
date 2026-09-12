@@ -52,10 +52,16 @@ that app after adopt. Keep a copy of dest's `identities/controller` file first.
 Both secrets are minted from the OS CSPRNG on first launch into
 `~/.local/share/hopspot-remote-control/identities/controller` and
 `identities/instance` (or `$HOPSPOT_RC_DATA_DIR/identities/…`) and reused
-after that. After a sibling is adopted, pair, forget, and local labels (pairing names,
-target aliases, manager aliases, sibling aliases, and non-USB peer aliases) update the
-other app once both have heard each other's Instance roster announce on a
-shared transport. Pairing a target again after Forget records a newer upsert clock so a sibling's leftover tombstone does not delete the new grant. Approve waits for that grant to appear in inventory, writes its pairing name, and only then drops the awaiting row and pushes the roster snapshot. Entering the invitation code on one sibling dismisses that pairing advertisement on the others. An install's name for itself stays local ("This controller")
+after that. Adoption copies the Operator secret, managed-node grants, sibling pins, and
+roster labels (pairing names, target aliases, manager aliases, sibling aliases,
+and non-USB peer aliases). After that, pair, forget, and later label edits
+update the other app once both have heard each other's Instance roster announce
+on a shared transport. Managed nodes start unmonitored. **Connect** on one
+sibling claims that node for ten minutes: the other installs mark it Offline,
+show Connect 00:00, and stop asking it for status. Another sibling can take
+the node back by pressing Connect itself. The timer resets when Connect is
+pressed and expires back to 00:00. A dest that already has sibling pins also pulls those
+labels on launch without waiting to hear the other install. Pairing a target again after Forget records a newer upsert clock so a sibling's leftover tombstone does not delete the new grant. Approve waits for that grant to appear in inventory, writes its pairing name, and only then drops the awaiting row and pushes the roster snapshot. Entering the invitation code on one sibling dismisses that pairing advertisement on the others. An install's name for itself stays local ("This controller")
 and is not copied; incoming sibling-alias rows for this Instance are ignored. Roster does not run during a USB sibling adopt.
 Settings → Activity log records configuration changes made through this
 app (Start/Stop, Save, pairing, Forget, Sleep/Wake, peer and target aliases).
@@ -169,7 +175,7 @@ list of interfaces; expand an interface to manage that feature.
 6. On **Managed Nodes**, expand the paired entry (it keeps the pairing
    announcement name; add an alias if you want a second label) and then any interface you want to manage. The list matches the
    daemon's configured interfaces (`prnsd status -a`), not individual peers.
-   Use Find path / Announce / **Sleep** or **Wake** on the target — one
+   Use Connect / Announce / **Sleep** or **Wake** on the target — one
    button, **Wake** when the target is sleeping and **Sleep** otherwise —
    or **Start** / **Stop** under an interface title. **Configure** slides the status
    card aside and slides **Start** / **Stop** and **Configure** off so **Back**
@@ -222,18 +228,27 @@ list of interfaces; expand an interface to manage that feature.
    target address are the last
    announce time in local time and a second line with hop count and inbound path. A stored
    target starts Offline after this app restarts because reachability is not
-   persisted. Opening the app (or Find path) announces this controller's
-   operator destination and sends a path request to the target's stable
-   remote-control destination. The operator announce gives the target a
+   persisted; the node list itself is loaded from this install's persist and
+   roster replica, then sibling roster deltas correct it. Nodes start
+   unmonitored (Connect 00:00). A sibling that pressed Connect also leaves
+   this install Offline for that node until this install Connects. Opening
+   the app announces this controller's
+   operator destination. Connect sends a path request to the target's stable
+   remote-control destination, starts a ten-minute monitor, and drops the stored hop, then the
+   interface list waits for a dest announce (or a path reply) before it
+   opens a link. It also tells sibling Controllers to stop asking that node
+   for status. Routing chooses USB or BLE. Expanding a target shows the
+   last interface inventory from Connect; it does not fetch. The operator announce gives the target a
    path back to the controller that is in use, which a target probe cannot
    choose when several cloned controllers could answer. The target answers
    the path request if a shared transport is up. Announce is the opposite
    direction: it needs a live control link and asks the target to announce.
    The interface list waits for that control destination (not the one-shot
-   pairing advertisement) before it opens a link. Any heard route to that
-   address is enough — the boot announce, the extra announce after
-   target Approve, or a later one. Find path is only a recovery probe
-   after this app restarts Offline.    Approving here first can send
+   pairing advertisement) only when no route is heard yet. A live hop is
+   enough — the boot announce, the extra announce after
+   target Approve, or a later one. Connect is the only way this install
+   starts asking a node for status after a restart or after the ten-minute
+   monitor expires.    Approving here first can send
    inventory in the same moment Completed arrives. Hopspot activates
    the controller grant in RAM before it writes flash, so that request
    should succeed without waiting for persist. The app still retries

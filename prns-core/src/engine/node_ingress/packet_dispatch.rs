@@ -8,8 +8,8 @@ use crate::engine::remote_control_pairing::{
 use crate::engine::settlement::settle;
 use crate::engine::LinkClosedReason;
 use crate::engine::{
-    CryptoOwed, Directive, EngineReaction, EngineState, IngestPacketOutcome, InstantMillis,
-    Journaled, LinkEstablished, OwedWork, ProtocolViolationKind,
+    CryptoOwed, Directive, EngineReaction, EngineState, IgnoreReason, IngestPacketOutcome,
+    InstantMillis, Journaled, LinkEstablished, OwedWork, ProtocolViolationKind,
     RemoteControlControllerPairingRequestFailureCause,
     RemoteControlControllerPairingResponseArrival, RemoteControlControllerPairingResponseReceived,
     SendRequestFailure, SendRequestIntent, Settlement, WakeSchedule, WakeSchedules,
@@ -53,6 +53,7 @@ where
 pub struct IngestPacketReport {
     pub wake_schedules: WakeSchedules,
     pub protocol_violation: Option<ProtocolViolationKind>,
+    pub ignore_reason: Option<IgnoreReason>,
 }
 
 impl<S: StorageLayout> EngineState<S> {
@@ -160,6 +161,7 @@ impl<S: StorageLayout> EngineState<S> {
 
         //Consider cfg-gating this on metrics/observability?
         let protocol_violation = ProtocolViolationKind::of_outcome(&outcome);
+        let mut ignore_reason = None;
 
         wake_schedule_changes.held_announce_release = effects.held_announce_release;
         let accepted_observation = effects.accepted_announce.take();
@@ -818,15 +820,17 @@ impl<S: StorageLayout> EngineState<S> {
                     },
                 ));
             }
-            IngestPacketOutcome::Ignored(_reason) => {
+            IngestPacketOutcome::Ignored(reason) => {
                 #[cfg(feature = "runtime-metrics")]
-                self.ignored_packet_counts.record(_reason);
+                self.ignored_packet_counts.record(reason);
+                ignore_reason = Some(reason);
             }
         }
         wake_schedule_changes.link_deadlines = self.link_deadlines_wake();
         IngestPacketReport {
             wake_schedules: wake_schedule_changes,
             protocol_violation,
+            ignore_reason,
         }
     }
 }

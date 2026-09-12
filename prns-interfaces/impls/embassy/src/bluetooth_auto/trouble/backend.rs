@@ -173,7 +173,7 @@ impl SlotChannels {
         self.peer_addr.lock(|cell| cell.set(bytes));
     }
 
-    fn addr(&self) -> [u8; 6] {
+    pub(super) fn addr(&self) -> [u8; 6] {
         self.peer_addr.lock(|cell| cell.get())
     }
 
@@ -265,6 +265,10 @@ impl BleHub {
             discovery_group_tag: BlockingMutex::new(Cell::new(DEFAULT_GROUP_TAG)),
             status,
         }
+    }
+
+    pub(super) fn set_peer_details(&self, address: [u8; 6], details: PeerDetails) {
+        self.status.set_details_for_address(address, details);
     }
 
     pub fn set_local_address(&self, local_address: [u8; 6]) {
@@ -630,15 +634,31 @@ impl EventHandler for ScanFunnel {
         for report in reports {
             let Ok(report) = report else { continue };
             let peer_address = BleAddress::from_hci_bytes(report.addr.into_inner());
-            let capabilities =
-                columba_role_capabilities(report.data).unwrap_or(BleRoleCapabilities::DualRole);
-            let should_dial = columba_connection_role(
+            let view = advertised_role_view(report.data);
+            let action = embedded_scan_dial_action(
+                Endpoint::Esp32(Esp32Host::Esp32),
                 self.local_address,
-                BleRoleCapabilities::DualRole,
                 peer_address,
-                capabilities,
-            ) == ColumbaConnectionRole::Dial;
-            if contains_service(report.data)
+                report.data,
+            );
+            if view.has_service || view.manufacturer == ManufacturerPresence::Present {
+                crate::diagnostic_log::info!(
+                    "ble: scan {:02x?} rssi={} svc={} mfg={:?} ver={:?} type={:?} node={:?} group={:02x?} tie={:?} elect={:?}",
+                    report.addr.into_inner(),
+                    report.rssi,
+                    view.has_service,
+                    view.manufacturer,
+                    view.version,
+                    view.type_byte,
+                    advertised_or_implied_node_type(report.data),
+                    view.group,
+                    view.dial_key,
+                    action
+                );
+            }
+            let should_dial = action == DialSightingAction::Dial;
+            let ours = view.has_service || view.manufacturer == ManufacturerPresence::Present;
+            if ours
                 && discovery_groups_match(self.hub.discovery_group_tag(), report.data)
                 && should_dial
             {

@@ -51,6 +51,7 @@ pub enum RosterLabelKind {
     SiblingAlias,
     SiblingRemoved,
     PairingAdvertDismissed,
+    TargetLooking,
 }
 
 impl RosterLabelKind {
@@ -63,6 +64,7 @@ impl RosterLabelKind {
             Self::SiblingAlias => 5,
             Self::SiblingRemoved => 6,
             Self::PairingAdvertDismissed => 7,
+            Self::TargetLooking => 8,
         }
     }
 
@@ -75,6 +77,7 @@ impl RosterLabelKind {
             5 => Some(Self::SiblingAlias),
             6 => Some(Self::SiblingRemoved),
             7 => Some(Self::PairingAdvertDismissed),
+            8 => Some(Self::TargetLooking),
             _ => None,
         }
     }
@@ -88,6 +91,7 @@ impl RosterLabelKind {
             Self::SiblingAlias => "sibling-alias",
             Self::SiblingRemoved => "sibling-removed",
             Self::PairingAdvertDismissed => "pairing-advert",
+            Self::TargetLooking => "target-looking",
         }
     }
 
@@ -100,8 +104,43 @@ impl RosterLabelKind {
             "sibling-alias" => Some(Self::SiblingAlias),
             "sibling-removed" => Some(Self::SiblingRemoved),
             "pairing-advert" => Some(Self::PairingAdvertDismissed),
+            "target-looking" => Some(Self::TargetLooking),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetAttention {
+    Free,
+    HeldByThis,
+    HeldBySibling,
+}
+
+#[must_use]
+pub fn looking_instance<'a>(replica: &'a RosterReplica, target_id: &str) -> Option<&'a str> {
+    let target_id = target_id.trim();
+    replica.labels.iter().find_map(|label| {
+        (label.kind == RosterLabelKind::TargetLooking && label.key.eq_ignore_ascii_case(target_id))
+            .then(|| label.value.as_deref())
+            .flatten()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+#[must_use]
+pub fn attention_for_target(
+    replica: &RosterReplica,
+    target_id: &str,
+    instance_hex: &str,
+) -> TargetAttention {
+    match looking_instance(replica, target_id) {
+        None => TargetAttention::Free,
+        Some(holder) if holder.eq_ignore_ascii_case(instance_hex.trim()) => {
+            TargetAttention::HeldByThis
+        }
+        Some(_) => TargetAttention::HeldBySibling,
     }
 }
 
@@ -264,11 +303,36 @@ pub fn forget_target_locally(replica: &mut RosterReplica, target: IdentityHash) 
         replica,
         RosterLabel {
             kind: RosterLabelKind::TargetAlias,
+            key: key.clone(),
+            value: None,
+            clock: replica.clock,
+        },
+    );
+    upsert_label(
+        replica,
+        RosterLabel {
+            kind: RosterLabelKind::TargetLooking,
             key,
             value: None,
             clock: replica.clock,
         },
     );
+}
+
+#[must_use]
+pub fn replica_forgets_target(replica: &RosterReplica, hash: IdentityHash) -> bool {
+    let tombstone = tombstone_clock(replica, hash);
+    tombstone > 0 && tombstone >= upsert_clock(replica, hash)
+}
+
+#[must_use]
+pub fn replica_known_targets(replica: &RosterReplica) -> Vec<IdentityHash> {
+    replica
+        .upserts
+        .iter()
+        .filter(|(hash, _)| !replica_forgets_target(replica, *hash))
+        .map(|(hash, _)| *hash)
+        .collect()
 }
 
 pub fn note_local_upsert(replica: &mut RosterReplica, target: IdentityHash) {
@@ -290,16 +354,25 @@ pub fn note_local_label(
     if kind == RosterLabelKind::PeerAlias && !peer_alias_is_syncable(key) {
         return;
     }
+    let next_value = value
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned);
+    if replica
+        .labels
+        .iter()
+        .any(|label| label.kind == kind && label.key == key && label.value == next_value)
+    {
+        // Same fact already published — do not bump the clock or re-push siblings.
+        return;
+    }
     replica.clock = replica.clock.saturating_add(1);
     upsert_label(
         replica,
         RosterLabel {
             kind,
             key: key.to_owned(),
-            value: value
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(ToOwned::to_owned),
+            value: next_value,
             clock: replica.clock,
         },
     );
@@ -806,7 +879,7 @@ fn encode_replica_body(
     Some(body)
 }
 
-fn encode_labels(body: &mut Vec<u8>, labels: &[RosterLabel]) -> Option<()> {
+pub(crate) fn encode_labels(body: &mut Vec<u8>, labels: &[RosterLabel]) -> Option<()> {
     let count = u16::try_from(labels.len()).ok()?;
     body.extend_from_slice(&count.to_le_bytes());
     for label in labels {
@@ -979,7 +1052,7 @@ fn decode_replica_body(
     })
 }
 
-fn decode_labels(body: &[u8]) -> Option<Vec<RosterLabel>> {
+pub(crate) fn decode_labels(body: &[u8]) -> Option<Vec<RosterLabel>> {
     if body.is_empty() {
         return Some(Vec::new());
     }
@@ -1307,6 +1380,32 @@ mod tests {
     }
 
     #[test]
+    fn note_local_label_skips_unchanged_values() {
+        let mut local = RosterReplica::default();
+        note_local_label(
+            &mut local,
+            RosterLabelKind::TargetAlias,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some("hv4C"),
+        );
+        assert_eq!(local.clock, 1);
+        note_local_label(
+            &mut local,
+            RosterLabelKind::TargetAlias,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some("hv4C"),
+        );
+        assert_eq!(local.clock, 1);
+        note_local_label(
+            &mut local,
+            RosterLabelKind::TargetAlias,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some("renamed"),
+        );
+        assert_eq!(local.clock, 2);
+    }
+
+    #[test]
     fn older_label_does_not_overwrite() {
         let mut local = RosterReplica::default();
         note_local_label(
@@ -1529,5 +1628,112 @@ mod tests {
         adopt_sibling(&mut replica, sibling);
         assert_eq!(replica.siblings, vec![sibling]);
         assert!(!sibling_is_removed(&replica, sibling.identity_hash()));
+    }
+
+    #[test]
+    fn replica_known_targets_omit_tombstoned_hashes() {
+        let hash = access(0x21).target().identity_hash();
+        let mut replica = RosterReplica::default();
+        note_local_upsert(&mut replica, hash);
+        assert_eq!(replica_known_targets(&replica), vec![hash]);
+        forget_target_locally(&mut replica, hash);
+        assert!(replica_forgets_target(&replica, hash));
+        assert!(replica_known_targets(&replica).is_empty());
+    }
+
+    #[test]
+    fn target_looking_wire_and_file_round_trip() {
+        let replica = RosterReplica {
+            clock: 5,
+            upserts: Vec::new(),
+            tombstones: Vec::new(),
+            siblings: Vec::new(),
+            labels: vec![RosterLabel {
+                kind: RosterLabelKind::TargetLooking,
+                key: "cccccccccccccccccccccccccccccccc".to_string(),
+                value: Some("dddddddddddddddddddddddddddddddd".to_string()),
+                clock: 5,
+            }],
+        };
+        let parsed = parse_replica(&format_replica(&replica));
+        assert_eq!(parsed.labels, replica.labels);
+        assert_eq!(
+            RosterLabelKind::from_wire(RosterLabelKind::TargetLooking.wire()),
+            Some(RosterLabelKind::TargetLooking)
+        );
+        assert_eq!(
+            RosterLabelKind::from_token(RosterLabelKind::TargetLooking.token()),
+            Some(RosterLabelKind::TargetLooking)
+        );
+    }
+
+    #[test]
+    fn find_path_looking_label_is_exclusive_and_cleared_on_forget() {
+        let target = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let this_instance = "11111111111111111111111111111111";
+        let other_instance = "22222222222222222222222222222222";
+        let mut replica = RosterReplica::default();
+        assert_eq!(
+            attention_for_target(&replica, target, this_instance),
+            TargetAttention::Free
+        );
+        note_local_label(
+            &mut replica,
+            RosterLabelKind::TargetLooking,
+            target,
+            Some(other_instance),
+        );
+        assert_eq!(
+            attention_for_target(&replica, target, this_instance),
+            TargetAttention::HeldBySibling
+        );
+        note_local_label(
+            &mut replica,
+            RosterLabelKind::TargetLooking,
+            target,
+            Some(this_instance),
+        );
+        assert_eq!(
+            attention_for_target(&replica, target, this_instance),
+            TargetAttention::HeldByThis
+        );
+        let hash = IdentityHash::new(parse_hex::<HASH_LEN>(target).expect("target hash"));
+        forget_target_locally(&mut replica, hash);
+        assert_eq!(looking_instance(&replica, target), None);
+        assert_eq!(
+            attention_for_target(&replica, target, this_instance),
+            TargetAttention::Free
+        );
+    }
+
+    #[test]
+    fn newer_looking_label_wins() {
+        let target = "ffffffffffffffffffffffffffffffff";
+        let mut local = RosterReplica::default();
+        note_local_label(
+            &mut local,
+            RosterLabelKind::TargetLooking,
+            target,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        let delta = RosterDelta {
+            clock: 9,
+            signer: secret(0x11).public(),
+            upserts: Vec::new(),
+            tombstones: Vec::new(),
+            siblings: Vec::new(),
+            labels: vec![RosterLabel {
+                kind: RosterLabelKind::TargetLooking,
+                key: target.to_string(),
+                value: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+                clock: 9,
+            }],
+        };
+        let (merged, plan) = merge_roster(&local, &delta);
+        assert_eq!(
+            looking_instance(&merged, target),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert_eq!(plan.labels.len(), 1);
     }
 }

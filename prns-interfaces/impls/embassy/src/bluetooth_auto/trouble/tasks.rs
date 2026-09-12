@@ -5,7 +5,8 @@ use super::discovery::{
 use super::sessions::{serve_central, serve_peripheral, CentralGattSetup};
 use super::*;
 use prns_core::interfaces::bluetooth_auto::{
-    encode_advertisement, BleRoleCapabilities, MAX_ADVERTISEMENT_LEN,
+    advertised_role_view, encode_advertisement_with_node_type, Endpoint, Esp32Host,
+    MAX_ADVERTISEMENT_LEN,
 };
 
 pub async fn serve_slot<T: TroubleTransport>(
@@ -113,12 +114,21 @@ pub async fn acceptor<T: TroubleTransport>(
         };
         let radio = hub.acquire_radio().await;
         let mut adv_data = [0u8; MAX_ADVERTISEMENT_LEN];
-        let adv_len = encode_advertisement(
+        let adv_len = encode_advertisement_with_node_type(
             &mut adv_data,
-            BleRoleCapabilities::DualRole,
+            Endpoint::Esp32(Esp32Host::Esp32),
             hub.discovery_group_tag(),
         )
         .unwrap_or(0);
+        let view = advertised_role_view(&adv_data[..adv_len]);
+        crate::diagnostic_log::info!(
+            "ble: advertise ver={:?} type={:?} node={:?} group={:02x?} tie={:?}",
+            view.version,
+            view.type_byte,
+            view.node_type,
+            view.group,
+            view.dial_key
+        );
         let advertiser = match peripheral
             .advertise(
                 &advertisement_parameters(window),
@@ -260,7 +270,7 @@ pub async fn dialer<T: TroubleTransport>(
             let whitelist = [(target.kind, &bd)];
             let mut config = ConnectConfig {
                 scan_config: ScanConfig {
-                    active: false,
+                    active: true,
                     filter_accept_list: &whitelist,
                     ..Default::default()
                 },

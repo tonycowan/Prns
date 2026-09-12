@@ -258,6 +258,7 @@ impl PrnsNodeHandle {
                             transported_links: counts.transported_links,
                             membership: placement.membership,
                             radio: vitals.radio,
+                            details: vitals.details,
                         },
                         ifac: ifac.clone(),
                         group: group.clone(),

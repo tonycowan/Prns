@@ -36,6 +36,7 @@ personal-rns = { path = "../../personal-rns", default-features = false, features
 
 [target.'cfg(target_os = "android")'.dependencies]
 personal-rns = { path = "../../personal-rns", default-features = false, features = ["tokio-host", "tcp", "wifi-auto-mdns", "bluetooth-auto", "usb", "log", "tracing", "parallel-persistence", "parallel-resource-hash"] }
+prns-core = { path = "../../prns-core", default-features = false }
 prns-ffi = { path = "../../prns-ffi", default-features = false, features = ["log"] }
 android_logger = "0.14"
 jni = "0.21"

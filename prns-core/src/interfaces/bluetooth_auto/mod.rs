@@ -6,16 +6,21 @@ mod identity;
 mod policy;
 
 pub use advertisement::{
-    advertisement_group_tag, advertisement_manufacturer_presence, columba_connection_role,
-    columba_role_capabilities, columba_role_capabilities_from_manufacturer, contains_service,
-    dial_key_from_advertisement, dial_key_from_identity, dial_key_from_manufacturer,
-    dial_sighting_action, discovery_groups_match, embedded_dial_sighting_action,
-    encode_advertisement, group_tag_from_manufacturer, manufacturer_discovery_group_tag,
+    advertised_or_implied_node_type, advertised_role_view, advertisement_group_tag,
+    advertisement_manufacturer_presence, columba_connection_role, columba_role_capabilities,
+    columba_role_capabilities_from_manufacturer, contains_service, dial_key_from_advertisement,
+    dial_key_from_identity, dial_key_from_manufacturer, dial_sighting_action,
+    discovery_groups_match, embedded_dial_sighting_action, embedded_scan_dial_action,
+    encode_advertisement, encode_advertisement_with_node_type, group_tag_from_manufacturer,
+    implied_macos_without_manufacturer, manufacturer_discovery_group_tag,
     manufacturer_discovery_groups_match, manufacturer_role_payload,
-    manufacturer_role_payload_with_dial_key, BleRoleCapabilities, BleUuid, ColumbaConnectionRole,
-    DialSightingAction, LegacyDualRolePolicy, ManufacturerPresence, BLE_SERVICE_UUID,
-    BLE_SERVICE_UUID_BYTES, COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID, COLUMBA_TX_UUID, DIAL_KEY_LEN,
-    MAX_ADVERTISEMENT_LEN, NATIVE_CONTROL_UUID, NATIVE_DATA_UUID,
+    manufacturer_role_payload_with_dial_key, manufacturer_role_payload_with_node_type,
+    node_type_from_advertisement, node_type_from_manufacturer, node_type_from_role_payload,
+    typed_dial_override, typed_dial_override_code, AdvertisedRoleView, BleRoleCapabilities,
+    BleUuid, ColumbaConnectionRole, DialSightingAction, LegacyDualRolePolicy, ManufacturerPresence,
+    BLE_SERVICE_UUID, BLE_SERVICE_UUID_BYTES, COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID,
+    COLUMBA_TX_UUID, DIAL_KEY_LEN, EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE, MAX_ADVERTISEMENT_LEN,
+    NATIVE_CONTROL_UUID, NATIVE_DATA_UUID,
 };
 pub use backend::{
     AdvertisingMode, BleBackend, BleEvent, BleLink, BleSink, BleSource, DialOutcome, Origin,

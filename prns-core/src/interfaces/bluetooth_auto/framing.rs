@@ -150,8 +150,16 @@ pub struct StreamDeframer<const N: usize> {
 }
 
 impl<const N: usize> StreamDeframer<N> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { buf: HVec::new() }
+    }
+
+    pub fn remaining_capacity(&self) -> usize {
+        N.saturating_sub(self.buf.len())
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
     }
 
     pub fn absorb(&mut self, bytes: &[u8]) -> bool {

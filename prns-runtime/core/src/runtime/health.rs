@@ -87,6 +87,7 @@ mod tests {
             radio: crate::interfaces::RadioIndication::for_kind(Some(
                 crate::interfaces::InterfaceKind::LocalClient,
             )),
+            details: crate::interfaces::PeerDetails::NotApplicable,
         };
         let wifi_peer = InterfaceSnapshot {
             id: InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, b"peer"),
@@ -104,6 +105,7 @@ mod tests {
                 supervisor_id: InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, b"wifi"),
             },
             radio: crate::interfaces::RadioIndication::for_kind(Some(InterfaceKind::WifiPeer)),
+            details: crate::interfaces::PeerDetails::NotApplicable,
         };
 
         let health =

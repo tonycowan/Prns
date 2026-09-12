@@ -24,7 +24,7 @@ use super::super::remote_control_pairing_persistence::{
     RemoteControlPairingPersistenceEvents, RemoteControlPairingPersistenceRequired,
 };
 use super::super::request_endpoints::RequestEndpointSet;
-use super::super::request_runner::{run_router, RunnerRequest};
+use super::super::request_runner::{run_router, trace_journaled, RunnerRequest};
 use super::super::{
     EmbassyInterfaceStore, EmbeddedFlashPersistence, EmbeddedPersistenceDiagnostic,
     EmbeddedPersistenceRestoreReport, InterfaceInspectionStore, ManifoldPersistence,
@@ -578,9 +578,8 @@ where
                     {
                         pairing_persistence_events.signal(required);
                     }
-                    if let Some(request) = RunnerRequest::copy_from(&journaled) {
-                        let _ = request_sender.try_send(request);
-                    }
+                    trace_journaled(&journaled);
+                    RunnerRequest::try_enqueue(&journaled, &request_sender);
                     on_event(PrnsEvent::from(journaled), &state);
                 });
             },
@@ -860,9 +859,8 @@ where
                     {
                         pairing_persistence_events.signal(required);
                     }
-                    if let Some(request) = RunnerRequest::copy_from(&journaled) {
-                        let _ = request_sender.try_send(request);
-                    }
+                    trace_journaled(&journaled);
+                    RunnerRequest::try_enqueue(&journaled, &request_sender);
                     on_event(PrnsEvent::from(journaled), state);
                 });
             },

@@ -417,6 +417,7 @@ pub enum IdentityCloneInbound<'a> {
         accesses: &'a [u8],
         clock: u64,
         siblings: &'a [u8],
+        labels: &'a [u8],
     },
     WaitingForSource,
     Error(IdentityCloneErrorCode),
@@ -496,21 +497,27 @@ fn parse_payload(rest: &[u8]) -> Option<IdentityCloneInbound<'_>> {
     let clock_at = start + access_len;
     let clock_bytes = rest.get(clock_at..clock_at + 8)?;
     let clock = u64::from_le_bytes(clock_bytes.try_into().ok()?);
-    let siblings = rest.get(clock_at + 8..)?;
+    let sibling_at = clock_at + 8;
+    let count = *rest.get(sibling_at)?;
+    let sibling_bytes = 1 + usize::from(count).saturating_mul(IDENTITY_PUBLIC_KEY_LEN);
+    let siblings = rest.get(sibling_at..sibling_at + sibling_bytes)?;
+    let labels = rest.get(sibling_at + sibling_bytes..).unwrap_or(&[]);
     Some(IdentityCloneInbound::Payload {
         secret,
         accesses,
         clock,
         siblings,
+        labels,
     })
 }
 
 pub fn parse_clone_siblings(bytes: &[u8]) -> Option<Vec<PublicIdentityMaterial>> {
     let (count, rest) = bytes.split_first()?;
     let expected = usize::from(*count).saturating_mul(IDENTITY_PUBLIC_KEY_LEN);
-    if rest.len() != expected {
+    if rest.len() < expected {
         return None;
     }
+    let rest = &rest[..expected];
     let mut siblings = Vec::with_capacity(usize::from(*count));
     for chunk in rest.chunks_exact(IDENTITY_PUBLIC_KEY_LEN) {
         siblings.push(PublicIdentityMaterial::from_slice(chunk).ok()?);
@@ -578,6 +585,7 @@ pub struct IdentityClonePayload {
     pub accesses: Vec<u8>,
     pub clock: u64,
     pub siblings: Vec<PublicIdentityMaterial>,
+    pub labels: Vec<u8>,
 }
 
 pub struct DestCloneSession {
@@ -685,12 +693,14 @@ impl RequestEndpoint<ControllerAppState> for IdentityClone {
                         + 8
                         + 1
                         + sibling_bytes
+                        + payload.labels.len()
                 ];
                 let written = write_clone_payload(
                     &payload.operator_secret,
                     &payload.accesses,
                     payload.clock,
                     &payload.siblings,
+                    &payload.labels,
                     &mut body,
                 );
                 if written.is_some() {
@@ -739,12 +749,14 @@ pub fn write_clone_payload(
     accesses: &[u8],
     clock: u64,
     siblings: &[PublicIdentityMaterial],
+    labels: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
     let access_len = u32::try_from(accesses.len()).ok()?;
     let sibling_count = u8::try_from(siblings.len()).ok()?;
     let sibling_bytes = siblings.len().saturating_mul(IDENTITY_PUBLIC_KEY_LEN);
-    let required = 1 + IDENTITY_SECRET_KEY_LEN + 4 + accesses.len() + 8 + 1 + sibling_bytes;
+    let required =
+        1 + IDENTITY_SECRET_KEY_LEN + 4 + accesses.len() + 8 + 1 + sibling_bytes + labels.len();
     if out.len() < required {
         return None;
     }
@@ -763,6 +775,7 @@ pub fn write_clone_payload(
         out[at..at + IDENTITY_PUBLIC_KEY_LEN].copy_from_slice(sibling.as_bytes());
         at += IDENTITY_PUBLIC_KEY_LEN;
     }
+    out[at..at + labels.len()].copy_from_slice(labels);
     Some(required)
 }
 
@@ -770,7 +783,7 @@ pub fn write_clone_payload(
 mod tests {
     use super::*;
     use crate::backend::InterfacePeer;
-    use personal_rns::interfaces::{InterfaceMode, RadioIndication};
+    use personal_rns::interfaces::{InterfaceMode, PeerDetails, RadioIndication};
 
     fn interface(kind: &str, power: InterfacePower, peers: usize) -> InterfaceEntry {
         InterfaceEntry {
@@ -796,6 +809,8 @@ mod tests {
             failure: None,
             extras: Vec::new(),
             shows_peers: peers > 0,
+            peers_error: None,
+            arrived_at: None,
             peers: (0..peers)
                 .map(|index| InterfacePeer {
                     id: format!("{index:016x}"),
@@ -816,6 +831,7 @@ mod tests {
                     rate_bytes_per_sec: 0,
                     last_activity_secs: None,
                     radio: RadioIndication::NotRadio,
+                    details: PeerDetails::NotApplicable,
                 })
                 .collect(),
         }
@@ -930,18 +946,54 @@ mod tests {
         let sibling = secret(0x66).public();
         let mut payload = [0u8; 256];
         let payload_len =
-            write_clone_payload(&secret_bytes, b"snap", 7, &[sibling], &mut payload).unwrap();
+            write_clone_payload(&secret_bytes, b"snap", 7, &[sibling], &[], &mut payload).unwrap();
         match parse_identity_clone_message(&payload[..payload_len]).unwrap() {
             IdentityCloneInbound::Payload {
                 secret: parsed_secret,
                 accesses,
                 clock,
                 siblings,
+                labels,
             } => {
                 assert_eq!(parsed_secret, &secret_bytes);
                 assert_eq!(accesses, b"snap");
                 assert_eq!(clock, 7);
                 assert_eq!(parse_clone_siblings(siblings).unwrap(), vec![sibling]);
+                assert!(labels.is_empty());
+            }
+            _ => panic!("payload"),
+        }
+    }
+
+    #[test]
+    fn clone_payload_keeps_trailing_roster_labels() {
+        let secret_bytes = [0x55; IDENTITY_SECRET_KEY_LEN];
+        let sibling = secret(0x66).public();
+        let mut labels = Vec::new();
+        crate::roster_sync::encode_labels(
+            &mut labels,
+            &[crate::roster_sync::RosterLabel {
+                kind: crate::roster_sync::RosterLabelKind::TargetName,
+                key: "aabbccddeeff00112233445566778899".to_string(),
+                value: Some("Heltec".to_string()),
+                clock: 4,
+            }],
+        )
+        .unwrap();
+        let mut payload = vec![0u8; 512];
+        let payload_len =
+            write_clone_payload(&secret_bytes, b"snap", 7, &[sibling], &labels, &mut payload)
+                .unwrap();
+        match parse_identity_clone_message(&payload[..payload_len]).unwrap() {
+            IdentityCloneInbound::Payload {
+                siblings,
+                labels: parsed_labels,
+                ..
+            } => {
+                assert_eq!(parse_clone_siblings(siblings).unwrap(), vec![sibling]);
+                let decoded = crate::roster_sync::decode_labels(parsed_labels).unwrap();
+                assert_eq!(decoded.len(), 1);
+                assert_eq!(decoded[0].value.as_deref(), Some("Heltec"));
             }
             _ => panic!("payload"),
         }

@@ -631,6 +631,35 @@ impl RemoteControlWakeRadios {
     }
 }
 
+fn require_available(
+    available_requests: RemoteControlRequestSet,
+    kind: RemoteControlRequestKind,
+) -> Result<(), RemoteControlAdmitError> {
+    if available_requests.supports(kind) {
+        Ok(())
+    } else {
+        Err(RemoteControlAdmitError::KindNotPermitted)
+    }
+}
+
+/// Why an inbound Remote Control request produced no reply.
+///
+/// Every variant maps to [`Decline::Ignore`]. The Controller then times out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteControlAdmitError {
+    UnidentifiedRequester,
+    RequestTooLarge,
+    NoGrant,
+    KindNotPermitted,
+    AnnounceUnavailable,
+}
+
+impl From<RemoteControlAdmitError> for Decline {
+    fn from(_error: RemoteControlAdmitError) -> Self {
+        Self::Ignore
+    }
+}
+
 struct RemoteControlRequestEndpoint;
 
 impl RemoteControlRequestEndpoint {
@@ -638,110 +667,112 @@ impl RemoteControlRequestEndpoint {
         request: Result<RemoteControlRequest, RemoteControlRequestParseError>,
         available_requests: RemoteControlRequestSet,
         self_announcement: RemoteControlSelfAnnouncement,
-    ) -> Result<AdmittedRemoteControlOperation, Decline> {
+    ) -> Result<AdmittedRemoteControlOperation, RemoteControlAdmitError> {
         match request {
             Ok(RemoteControlRequest::Describe) => {
-                if !available_requests.supports(RemoteControlRequestKind::Describe) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(available_requests, RemoteControlRequestKind::Describe)?;
                 let description = RemoteControlDescription::try_from(available_requests).map_err(
-                    |RemoteControlDescriptionError::DescribeUnavailable| Decline::Ignore,
+                    |RemoteControlDescriptionError::DescribeUnavailable| {
+                        RemoteControlAdmitError::KindNotPermitted
+                    },
                 )?;
                 Ok(AdmittedRemoteControlOperation::Describe(description))
             }
             Ok(RemoteControlRequest::AnnounceSelf) => {
-                if !available_requests.supports(RemoteControlRequestKind::AnnounceSelf) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(available_requests, RemoteControlRequestKind::AnnounceSelf)?;
                 let RemoteControlSelfAnnouncement::Destination(destination) = self_announcement
                 else {
-                    return Err(Decline::Ignore);
+                    return Err(RemoteControlAdmitError::AnnounceUnavailable);
                 };
                 Ok(AdmittedRemoteControlOperation::AnnounceSelf { destination })
             }
             Ok(RemoteControlRequest::InventoryInterfaces) => {
-                if !available_requests.supports(RemoteControlRequestKind::InventoryInterfaces) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::InventoryInterfaces,
+                )?;
                 Ok(AdmittedRemoteControlOperation::InventoryInterfaces)
             }
             Ok(RemoteControlRequest::SetInterfacePower { id, power }) => {
-                if !available_requests.supports(RemoteControlRequestKind::SetInterfacePower) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::SetInterfacePower,
+                )?;
                 Ok(AdmittedRemoteControlOperation::SetInterfacePower { id, power })
             }
             Ok(RemoteControlRequest::SetInterfaceMode { id, mode }) => {
-                if !available_requests.supports(RemoteControlRequestKind::SetInterfaceMode) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::SetInterfaceMode,
+                )?;
                 Ok(AdmittedRemoteControlOperation::SetInterfaceMode { id, mode })
             }
             Ok(RemoteControlRequest::SetInterfaceGroup { id, group }) => {
-                if !available_requests.supports(RemoteControlRequestKind::SetInterfaceGroup) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::SetInterfaceGroup,
+                )?;
                 Ok(AdmittedRemoteControlOperation::SetInterfaceGroup { id, group })
             }
             Ok(RemoteControlRequest::InventoryInterfacePeers { id, offset }) => {
-                if !available_requests.supports(RemoteControlRequestKind::InventoryInterfacePeers) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::InventoryInterfacePeers,
+                )?;
                 Ok(AdmittedRemoteControlOperation::InventoryInterfacePeers { id, offset })
             }
             Ok(RemoteControlRequest::InventoryInterfaceConfig { id }) => {
-                if !available_requests.supports(RemoteControlRequestKind::InventoryInterfaceConfig)
-                {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::InventoryInterfaceConfig,
+                )?;
                 Ok(AdmittedRemoteControlOperation::InventoryInterfaceConfig { id })
             }
             Ok(RemoteControlRequest::SetInterfaceLoRaProfile { id, profile }) => {
-                if !available_requests.supports(RemoteControlRequestKind::SetInterfaceLoRaProfile) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::SetInterfaceLoRaProfile,
+                )?;
                 Ok(AdmittedRemoteControlOperation::SetInterfaceLoRaProfile { id, profile })
             }
             Ok(RemoteControlRequest::SetInterfaceWifiStation { id, station }) => {
-                if !available_requests.supports(RemoteControlRequestKind::SetInterfaceWifiStation) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::SetInterfaceWifiStation,
+                )?;
                 Ok(AdmittedRemoteControlOperation::SetInterfaceWifiStation { id, station })
             }
             Ok(RemoteControlRequest::InventoryControllers) => {
-                if !available_requests.supports(RemoteControlRequestKind::InventoryControllers) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::InventoryControllers,
+                )?;
                 Ok(AdmittedRemoteControlOperation::InventoryControllers)
             }
             Ok(RemoteControlRequest::AuthorizeController { controller }) => {
-                if !available_requests.supports(RemoteControlRequestKind::AuthorizeController) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::AuthorizeController,
+                )?;
                 Ok(AdmittedRemoteControlOperation::AuthorizeController { controller })
             }
             Ok(RemoteControlRequest::RevokeController { hash }) => {
-                if !available_requests.supports(RemoteControlRequestKind::RevokeController) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::RevokeController,
+                )?;
                 Ok(AdmittedRemoteControlOperation::RevokeController { hash })
             }
             Ok(RemoteControlRequest::DescribeBuild) => {
-                if !available_requests.supports(RemoteControlRequestKind::DescribeBuild) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(available_requests, RemoteControlRequestKind::DescribeBuild)?;
                 Ok(AdmittedRemoteControlOperation::DescribeBuild)
             }
             Ok(RemoteControlRequest::SleepRadios) => {
-                if !available_requests.supports(RemoteControlRequestKind::SleepRadios) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(available_requests, RemoteControlRequestKind::SleepRadios)?;
                 Ok(AdmittedRemoteControlOperation::SleepRadios)
             }
             Ok(RemoteControlRequest::WakeRadios) => {
-                if !available_requests.supports(RemoteControlRequestKind::WakeRadios) {
-                    return Err(Decline::Ignore);
-                }
+                require_available(available_requests, RemoteControlRequestKind::WakeRadios)?;
                 Ok(AdmittedRemoteControlOperation::WakeRadios)
             }
             Err(error) => Ok(AdmittedRemoteControlOperation::ProtocolError(
@@ -945,13 +976,13 @@ struct RemoteControlRequestBinding {
 }
 
 impl RemoteControlRequestBinding {
-    fn new(request: &InboundRequest<'_>) -> Result<Self, Decline> {
+    fn new(request: &InboundRequest<'_>) -> Result<Self, RemoteControlAdmitError> {
         let Some(controller) = request.requester else {
-            return Err(Decline::Ignore);
+            return Err(RemoteControlAdmitError::UnidentifiedRequester);
         };
         let mut data = [0; RemoteControlRequest::MAX_ENCODED_LEN];
         let Some(bound) = data.get_mut(..request.data.len()) else {
-            return Err(Decline::Ignore);
+            return Err(RemoteControlAdmitError::RequestTooLarge);
         };
         bound.copy_from_slice(request.data);
         Ok(Self {
@@ -986,13 +1017,13 @@ pub fn admit_remote_control_request<ControllerGrants>(
     supported_requests: RemoteControlRequestSet,
     self_announcement: RemoteControlSelfAnnouncement,
     request: &InboundRequest<'_>,
-) -> Result<AdmittedRemoteControlRequest, Decline>
+) -> Result<AdmittedRemoteControlRequest, RemoteControlAdmitError>
 where
     ControllerGrants: RemoteControlControllerGrantTable,
 {
     let binding = RemoteControlRequestBinding::new(request)?;
     let Some(grant) = controller_grants.grant_for(&binding.controller).copied() else {
-        return Err(Decline::Ignore);
+        return Err(RemoteControlAdmitError::NoGrant);
     };
     let available_requests =
         supported_requests.intersection(&grant.permitted_requests().with_current_operator_edits());
@@ -1608,7 +1639,7 @@ mod tests {
 
         assert!(matches!(
             RemoteControlRequestBinding::new(&request.inbound()),
-            Err(Decline::Ignore),
+            Err(RemoteControlAdmitError::RequestTooLarge),
         ));
     }
 
@@ -1726,6 +1757,75 @@ mod tests {
                 assert!(node.received.borrow().is_none());
             }
         });
+    }
+
+    #[test]
+    fn admit_names_the_silent_ignore_reasons() {
+        let allowed = identity(0x43);
+        let mut grants = controller_grants_permitting(
+            allowed,
+            RemoteControlRequestSet::only(RemoteControlRequestKind::Describe),
+        );
+        let announce = announce_self_request();
+        let describe = describe_request();
+        let inbound = |requester, data| InboundRequestFixture {
+            destination: DestinationHash::new([0x21; 16]),
+            link_id: LinkId::new([0x43; 16]),
+            request_id: RequestId([0x65; 16]),
+            requester,
+            requested_at: InstantMillis(1_000),
+            rtt: RttMillis::new(20),
+            data,
+        };
+
+        assert_eq!(
+            admit_remote_control_request(
+                &mut grants,
+                RemoteControlRequestSet::all(),
+                RemoteControlSelfAnnouncement::Unavailable,
+                &inbound(None, &announce).inbound(),
+            )
+            .err(),
+            Some(RemoteControlAdmitError::UnidentifiedRequester),
+        );
+        assert_eq!(
+            admit_remote_control_request(
+                &mut grants,
+                RemoteControlRequestSet::all(),
+                RemoteControlSelfAnnouncement::Unavailable,
+                &inbound(Some(identity(0x65).identity_hash()), &announce).inbound(),
+            )
+            .err(),
+            Some(RemoteControlAdmitError::NoGrant),
+        );
+        assert_eq!(
+            admit_remote_control_request(
+                &mut grants,
+                RemoteControlRequestSet::only(RemoteControlRequestKind::Describe),
+                RemoteControlSelfAnnouncement::Unavailable,
+                &inbound(Some(allowed.identity_hash()), &announce).inbound(),
+            )
+            .err(),
+            Some(RemoteControlAdmitError::KindNotPermitted),
+        );
+        let mut all_grants = controller_grants(allowed);
+        assert_eq!(
+            admit_remote_control_request(
+                &mut all_grants,
+                RemoteControlRequestSet::all(),
+                RemoteControlSelfAnnouncement::Unavailable,
+                &inbound(Some(allowed.identity_hash()), &announce).inbound(),
+            )
+            .err(),
+            Some(RemoteControlAdmitError::AnnounceUnavailable),
+        );
+        assert!(admit_remote_control_request(
+            &mut grants,
+            RemoteControlRequestSet::only(RemoteControlRequestKind::Describe),
+            RemoteControlSelfAnnouncement::Unavailable,
+            &inbound(Some(allowed.identity_hash()), &describe).inbound(),
+        )
+        .is_ok());
     }
 
     #[test]

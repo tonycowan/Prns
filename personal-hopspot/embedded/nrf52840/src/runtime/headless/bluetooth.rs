@@ -5,7 +5,7 @@ use nrf_softdevice::ble::l2cap;
 use nrf_softdevice::Softdevice;
 use personal_rns::bluetooth_auto::BluetoothAuto;
 use personal_rns::interfaces::bluetooth_auto::{
-    BleIdentity, Endpoint, LinkCapabilities, Nrf52Host,
+    BleIdentity, Endpoint, LinkCapabilities, Nrf52Host, Psm,
 };
 use personal_rns::runtime::{Fleet, SupervisorLane};
 use static_cell::StaticCell;
@@ -56,7 +56,8 @@ pub(super) fn prepare(
             identity,
             Endpoint::Nrf52(Nrf52Host::Nrf52),
             LinkCapabilities {
-                l2cap: None,
+                // CoC retest: advertise SoftDevice PSM so Opens(Nrf52) can Open to Mac.
+                l2cap: Psm::new(super::super::bluetooth_auto::L2CAP_PSM),
                 link_mtu: BLE_HW_MTU as u16,
             },
             crate::runtime::bluetooth_auto::local_discovery_group_tag(),

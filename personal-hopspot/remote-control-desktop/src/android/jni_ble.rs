@@ -2,6 +2,7 @@ use super::ble_bridge;
 use jni::objects::{JByteBuffer, JClass};
 use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
+use prns_core::interfaces::bluetooth_auto::{typed_dial_override_code, AndroidHost, Endpoint};
 use prns_ffi::bluetooth_auto::android::AndroidBleIngressAdmission;
 
 #[no_mangle]
@@ -112,6 +113,28 @@ fn ble_identity_octets(env: &JNIEnv, buffer: &JByteBuffer) -> Option<[u8; 16]> {
     let mut octets = [0u8; 16];
     octets.copy_from_slice(bytes);
     Some(octets)
+}
+
+fn ble_payload<'a>(env: &JNIEnv, buffer: &JByteBuffer) -> Option<&'a [u8]> {
+    let address = env.get_direct_buffer_address(buffer).ok()?;
+    let capacity = env.get_direct_buffer_capacity(buffer).ok()?;
+    if address.is_null() || capacity == 0 {
+        return None;
+    }
+    // SAFETY: `address` points at the JVM-owned direct buffer, pinned for this call.
+    Some(unsafe { core::slice::from_raw_parts(address, capacity) })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_personal_prns_controller_NativeBridge_nativeBleTypedDialAction(
+    env: JNIEnv,
+    _class: JClass,
+    payload: JByteBuffer,
+) -> jint {
+    i32::from(typed_dial_override_code(
+        Endpoint::Android(AndroidHost::Android),
+        ble_payload(&env, &payload).unwrap_or(&[]),
+    ))
 }
 
 #[no_mangle]

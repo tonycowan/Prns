@@ -52,6 +52,9 @@ object NativeBridge {
 
     external fun nativeBleSighting(address: ByteBuffer, rssi: Int)
 
+    /** `1` dial, `0` accept, `-1` keep the v4 C′ path. */
+    external fun nativeBleTypedDialAction(rolePayload: ByteBuffer): Int
+
     external fun nativeBleDialFailed(address: ByteBuffer): Boolean
 
     external fun nativeBleLinkUp(connId: Int, address: ByteBuffer, rssi: Int, dialed: Boolean): Boolean

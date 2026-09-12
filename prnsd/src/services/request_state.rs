@@ -365,6 +365,7 @@ fn remote_control_peer(snapshot: &InterfaceSnapshot) -> RemoteControlInterfacePe
         destinations: snapshot.destinations,
         rate_bytes_per_sec: rate_bytes_per_sec(snapshot),
         radio: snapshot.radio,
+        details: snapshot.details,
     }
 }
 
@@ -466,6 +467,7 @@ mod tests {
             transported_links: 0,
             membership,
             radio: personal_rns::interfaces::RadioIndication::for_kind(Some(kind)),
+            details: personal_rns::interfaces::PeerDetails::NotApplicable,
         }
     }
 

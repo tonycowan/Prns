@@ -198,7 +198,9 @@ class BleLink(private val context: Context) {
                 return
             }
             val octets = parseMac(device.address) ?: return
-            if (!shouldDial(result)) {
+            val elect = shouldDial(result)
+            dumpScan(result, elect)
+            if (!elect) {
                 return
             }
             val direct = ByteBuffer.allocateDirect(6)
@@ -1539,8 +1541,8 @@ class BleLink(private val context: Context) {
             .addManufacturerData(
                 PRNS_ROLE_COMPANY_ID,
                 byteArrayOf(
-                    PRNS_ROLE_VERSION,
-                    PRNS_ROLE_DUAL_MODE,
+                    PRNS_ROLE_VERSION_WITH_NODE_TYPE,
+                    PRNS_NODE_TYPE_ANDROID,
                     PRNS_DEFAULT_GROUP_TAG[0],
                     PRNS_DEFAULT_GROUP_TAG[1],
                     PRNS_DEFAULT_GROUP_TAG[2],
@@ -1609,6 +1611,7 @@ class BleLink(private val context: Context) {
         columbaIdentityChar = null
         l2capServer = null
         devices.clear()
+        lastScanDump.clear()
         inboundByAddr.clear()
         columbaSubscribedCentrals.clear()
         dialingAddrs.clear()
@@ -1631,9 +1634,47 @@ class BleLink(private val context: Context) {
         }
     }
 
+    private fun dumpScan(result: ScanResult, elect: Boolean) {
+        val record = result.scanRecord
+        val capabilities = record?.getManufacturerSpecificData(PRNS_ROLE_COMPANY_ID)
+        val svc = record?.serviceUuids?.any { it.uuid == PRNS_SERVICE } == true
+        val mfg = if (capabilities == null) "Absent" else "Present"
+        val ver = capabilities?.getOrNull(0)?.toInt()?.and(0xff)
+        val type = capabilities?.getOrNull(1)?.toInt()?.and(0xff)
+        val group = if (capabilities != null && capabilities.size >= 6) {
+            (2..5).joinToString("") { "%02x".format(capabilities[it]) }
+        } else {
+            "none"
+        }
+        val hex = capabilities?.joinToString("") { "%02x".format(it) } ?: "-"
+        val signature = "$mfg|$hex|$elect"
+        if (lastScanDump.put(result.device.address, signature) == signature) {
+            return
+        }
+        Log.i(
+            TAG,
+            "ble: scan ${result.device.address} rssi=${result.rssi} svc=$svc mfg=$mfg " +
+                "ver=$ver type=$type group=$group elect=$elect hex=$hex",
+        )
+    }
+
+    private fun typedDialOverride(capabilities: ByteArray?): Boolean? {
+        val payload = capabilities ?: ByteArray(0)
+        val direct = ByteBuffer.allocateDirect(payload.size)
+        if (payload.isNotEmpty()) {
+            direct.put(payload)
+        }
+        return when (NativeBridge.nativeBleTypedDialAction(direct)) {
+            1 -> true
+            0 -> false
+            else -> null
+        }
+    }
+
     private fun shouldDial(result: ScanResult): Boolean {
         val capabilities = result.scanRecord
             ?.getManufacturerSpecificData(PRNS_ROLE_COMPANY_ID)
+        typedDialOverride(capabilities)?.let { return it }
         if (capabilities != null &&
             capabilities.size >= 2 &&
             capabilities[0] >= PRNS_ROLE_VERSION_MIN &&
@@ -1731,7 +1772,8 @@ class BleLink(private val context: Context) {
         private const val L2CAP_OPEN_RETRY_MS = 200L
         private const val PRNS_ROLE_COMPANY_ID = 0xFFFF
         private const val PRNS_ROLE_VERSION_MIN: Byte = 0x03
-        private const val PRNS_ROLE_VERSION: Byte = 0x04
+        private const val PRNS_ROLE_VERSION_WITH_NODE_TYPE: Byte = 0x06
+        private const val PRNS_NODE_TYPE_ANDROID: Byte = 0x03
         private const val PRNS_ROLE_DUAL_MODE: Byte = 0x00
         private const val PRNS_ROLE_PERIPHERAL_ONLY: Byte = 0x01
         private val PRNS_DEFAULT_GROUP_TAG =
@@ -1747,6 +1789,7 @@ class BleLink(private val context: Context) {
         private const val COLUMBA_IDENTITY_LEN = 16
     }
 
+    private val lastScanDump = ConcurrentHashMap<String, String>()
     private val dialingAddrs = ConcurrentHashMap.newKeySet<String>()
     private val connectedAddrs = ConcurrentHashMap.newKeySet<String>()
     private val linkedConnIds = ConcurrentHashMap.newKeySet<Int>()

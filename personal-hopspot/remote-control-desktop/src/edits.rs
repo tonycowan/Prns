@@ -377,6 +377,8 @@ mod tests {
             extras: Vec::new(),
             shows_peers: false,
             peers: Vec::new(),
+            peers_error: None,
+            arrived_at: None,
         }
     }
 

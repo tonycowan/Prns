@@ -1,6 +1,6 @@
 //! nRF52 Bluetooth Auto transport shared by supported board targets.
 
-use core::cell::{Cell, UnsafeCell};
+use core::cell::{Cell, RefCell, UnsafeCell};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_futures::select::{select, select3, select4, Either, Either3};
@@ -27,17 +27,17 @@ use personal_rns::bluetooth_auto::{
     BluetoothAutoShared, BluetoothAutoStatus, FrameLease, FramePoolError, SharedFramePool,
 };
 use personal_rns::interfaces::bluetooth_auto::{
-    columba_connection_role, columba_role_capabilities, contains_service, default_group_tag,
-    discovery_groups_match, encode_advertisement, encode_stream_frame, fragments_of, group_tag,
-    BleAddress, BleIdentity, BleRoleCapabilities, ColumbaConnectionRole, Control, Fragment,
-    L2capPlan, PeerProtocol, Reassembler, BLE_HW_MTU, CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN,
-    GROUP_NAME, GROUP_TAG_LEN, STREAM_FRAME_PREFIX_LEN,
+    advertised_role_view, default_group_tag, discovery_groups_match, embedded_scan_dial_action,
+    encode_advertisement_with_node_type, encode_stream_frame, fragments_of, group_tag, BleAddress,
+    BleIdentity, Control, DialSightingAction, Endpoint, Fragment, L2capPlan, ManufacturerPresence,
+    Nrf52Host, PeerProtocol, Reassembler, StreamDeframer, BLE_HW_MTU, CONTROL_MAX_LEN,
+    FRAGMENT_HEADER_LEN, GROUP_NAME, GROUP_TAG_LEN, STREAM_FRAME_PREFIX_LEN,
 };
 use personal_rns::interfaces::bluetooth_auto::{
     AdvertisingMode, BleBackend, BleEvent, BleLink, BleSink, BleSource, DialOutcome, Origin,
     RadioMode, ScanningMode,
 };
-use personal_rns::interfaces::{InterfaceId, InterfaceKind};
+use personal_rns::interfaces::{InterfaceId, InterfaceKind, PeerDetails};
 
 pub(super) use super::bluetooth_gatt_server::Server;
 use super::bluetooth_gatt_server::{ServerWrite, WriteDelivery, WriteTarget};
@@ -213,8 +213,12 @@ const CONNECT_WINDOW_TICKS: u16 = 300;
 const CONNECT_SCAN_INTERVAL: u32 = 160;
 const CONNECT_SCAN_WINDOW: u32 = 128;
 
-const L2CAP_PSM: u16 = 0x0080;
+pub(super) const L2CAP_PSM: u16 = 0x0080;
 const L2CAP_MTU: usize = STREAM_FRAME_PREFIX_LEN + BLE_HW_MTU;
+/// SoftDevice delivers complete SDUs up to [`L2CAP_MTU`]. One max-size frame fits in that
+/// budget; absorb incrementally and drain between chunks so we do not keep a second SDU
+/// buffered inside each `serve_slot` future (MeshTower RAM is tight).
+const L2CAP_DEFRAMER_CAP: usize = L2CAP_MTU;
 const L2CAP_MPS: u16 = 247;
 const L2CAP_RX_QUEUE: u8 = 2;
 const L2CAP_TX_QUEUE: u8 = 2;
@@ -222,6 +226,10 @@ const L2CAP_CREDITS: u16 = 4;
 const L2CAP_POOL: usize = MEMBERS + 4;
 const L2CAP_HANDSHAKE_WINDOW: Duration = Duration::from_secs(5);
 const L2CAP_SETUP_RETRY: Duration = Duration::from_millis(150);
+
+fn publish_peer_details(address: [u8; 6], details: PeerDetails) {
+    BluetoothAutoStatus::new(&BLE_SHARED).set_details_for_address(address, details);
+}
 
 struct L2capPool {
     buffers: [UnsafeCell<[u8; L2CAP_MTU]>; L2CAP_POOL],
@@ -447,6 +455,9 @@ struct LinkChannels {
     /// hides an already-settled peer from sighting suppression (the redundant self-dial).
     address: BlockingMutex<Mtx, Cell<[u8; 6]>>,
     peer_protocol: BlockingMutex<Mtx, Cell<Option<PeerProtocol>>>,
+    /// Lives here (not in the `serve_slot` future) so embassy's pool_size=7 tasks do not each carry
+    /// a deframer-sized async state on MeshTower's tight RAM budget.
+    l2cap_deframer: BlockingMutex<Mtx, RefCell<StreamDeframer<L2CAP_DEFRAMER_CAP>>>,
 }
 
 impl LinkChannels {
@@ -463,6 +474,7 @@ impl LinkChannels {
             profile_ready: Signal::new(),
             address: BlockingMutex::new(Cell::new([0u8; 6])),
             peer_protocol: BlockingMutex::new(Cell::new(None)),
+            l2cap_deframer: BlockingMutex::new(RefCell::new(StreamDeframer::new())),
         }
     }
 
@@ -488,6 +500,7 @@ impl LinkChannels {
         self.data_plane.reset();
         self.profile_ready.reset();
         self.peer_protocol.lock(|current| current.set(None));
+        self.l2cap_deframer.lock(|deframer| deframer.borrow_mut().clear());
         self.control_in.clear();
         self.control_out.clear();
         self.data_in.clear();
@@ -1108,6 +1121,7 @@ async fn process_acknowledged_writes(slot: &'static LinkChannels) {
 
 async fn l2cap_pump(
     channel: &l2cap::Channel<L2capPacket>,
+    slot: &'static LinkChannels,
     data_out_rx: Receiver<'static, Mtx, SharedFrameLease, DATA_TOKEN_DEPTH>,
     data_in_tx: Sender<'static, Mtx, SharedFrameLease, DATA_TOKEN_DEPTH>,
 ) {
@@ -1123,25 +1137,49 @@ async fn l2cap_pump(
         }
     };
     let inbound = async {
+        // Length-prefixed frames can span SDUs and pack more than one frame into a
+        // single SDU. Absorb in remaining-capacity chunks; drain with a stack body
+        // that never lives across an await (deframer state is on the slot).
         loop {
             let packet = match channel.rx().await {
                 Ok(packet) => packet,
                 Err(_) => break,
             };
             let bytes = packet.bytes();
-            if bytes.len() < STREAM_FRAME_PREFIX_LEN {
-                continue;
-            }
-            let len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
-            let frame = &bytes[STREAM_FRAME_PREFIX_LEN..];
-            if frame.len() < len {
-                continue;
-            }
-            if admit_inbound_frame_with_backpressure(&data_in_tx, &frame[..len])
-                .await
-                .is_err()
-            {
-                break;
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let room = slot
+                    .l2cap_deframer
+                    .lock(|deframer| deframer.borrow().remaining_capacity());
+                if room == 0 {
+                    let mut body = [0u8; BLE_HW_MTU];
+                    let Some(len) = slot.l2cap_deframer.lock(|deframer| {
+                        deframer.borrow_mut().next_frame(&mut body)
+                    }) else {
+                        return;
+                    };
+                    let _ = admit_inbound_frame(&data_in_tx, &body[..len]);
+                    continue;
+                }
+                let take = room.min(bytes.len() - offset);
+                let absorbed = slot.l2cap_deframer.lock(|deframer| {
+                    deframer
+                        .borrow_mut()
+                        .absorb(&bytes[offset..offset + take])
+                });
+                if !absorbed {
+                    return;
+                }
+                offset += take;
+                loop {
+                    let mut body = [0u8; BLE_HW_MTU];
+                    let Some(len) = slot.l2cap_deframer.lock(|deframer| {
+                        deframer.borrow_mut().next_frame(&mut body)
+                    }) else {
+                        break;
+                    };
+                    let _ = admit_inbound_frame(&data_in_tx, &body[..len]);
+                }
             }
         }
     };
@@ -1208,18 +1246,31 @@ async fn serve_peripheral(
         let plan = slot.data_plane.wait().await;
         let protocol = slot.peer_protocol().unwrap_or(PeerProtocol::Native);
         let channel = match (protocol, plan) {
-            (PeerProtocol::Native, L2capPlan::Accept) => with_timeout(
-                L2CAP_HANDSHAKE_WINDOW,
-                l2cap.listen_with(conn, &l2cap_config(), |psm| psm == L2CAP_PSM),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .map(|(_psm, channel)| channel),
+            (PeerProtocol::Native, L2capPlan::Accept) => {
+                let accepted = with_timeout(
+                    L2CAP_HANDSHAKE_WINDOW,
+                    l2cap.listen_with(conn, &l2cap_config(), |psm| psm == L2CAP_PSM),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map(|(_psm, channel)| channel);
+                if accepted.is_some() {
+                    publish_peer_details(slot.address(), PeerDetails::BleCoc);
+                } else {
+                    publish_peer_details(slot.address(), PeerDetails::BleGatt);
+                    BluetoothAutoStatus::new(&BLE_SHARED).note_setup_failure();
+                }
+                accepted
+            }
+            (PeerProtocol::Native, L2capPlan::None) => {
+                publish_peer_details(slot.address(), PeerDetails::BleGatt);
+                None
+            }
             _ => None,
         };
         match channel {
-            Some(channel) => l2cap_pump(&channel, data_out_rx, data_in_tx).await,
+            Some(channel) => l2cap_pump(&channel, slot, data_out_rx, data_in_tx).await,
             None => loop {
                 let frame = data_out_rx.receive().await;
                 let frame = frame.lock().await;
@@ -1380,20 +1431,33 @@ async fn serve_native_central(
 
     let data = async {
         let channel = match slot.data_plane.wait().await {
-            L2capPlan::Open { psm } => with_timeout(L2CAP_HANDSHAKE_WINDOW, async {
-                loop {
-                    if let Ok(channel) = l2cap.setup(&conn, &l2cap_config(), psm.get()).await {
-                        break channel;
+            L2capPlan::Open { psm } => {
+                let opened = with_timeout(L2CAP_HANDSHAKE_WINDOW, async {
+                    loop {
+                        if let Ok(channel) = l2cap.setup(&conn, &l2cap_config(), psm.get()).await {
+                            break channel;
+                        }
+                        Timer::after(L2CAP_SETUP_RETRY).await;
                     }
-                    Timer::after(L2CAP_SETUP_RETRY).await;
+                })
+                .await
+                .ok();
+                if opened.is_some() {
+                    publish_peer_details(slot.address(), PeerDetails::BleCoc);
+                } else {
+                    publish_peer_details(slot.address(), PeerDetails::BleGatt);
+                    BluetoothAutoStatus::new(&BLE_SHARED).note_setup_failure();
                 }
-            })
-            .await
-            .ok(),
-            _ => None,
+                opened
+            }
+            L2capPlan::None => {
+                publish_peer_details(slot.address(), PeerDetails::BleGatt);
+                None
+            }
+            L2capPlan::Accept => None,
         };
         match channel {
-            Some(channel) => l2cap_pump(&channel, data_out_rx, data_in_tx).await,
+            Some(channel) => l2cap_pump(&channel, slot, data_out_rx, data_in_tx).await,
             None => loop {
                 let frame = data_out_rx.receive().await;
                 let frame = frame.lock().await;
@@ -1545,9 +1609,9 @@ pub(super) async fn acceptor(sd: &'static Softdevice, hub: &'static BleHub) -> !
         let index = slot.index();
 
         let mut adv_buf = [0u8; 31];
-        let adv_len = encode_advertisement(
+        let adv_len = encode_advertisement_with_node_type(
             &mut adv_buf,
-            BleRoleCapabilities::DualRole,
+            Endpoint::Nrf52(Nrf52Host::Nrf52),
             local_discovery_group_tag(),
         )
         .unwrap_or(0);
@@ -1602,15 +1666,17 @@ pub(super) async fn scanner(sd: &'static Softdevice, hub: &'static BleHub) -> ! 
                 core::slice::from_raw_parts(report.data.p_data, report.data.len as usize)
             };
             let address = Address::from_raw(report.peer_addr);
-            let capabilities =
-                columba_role_capabilities(data).unwrap_or(BleRoleCapabilities::DualRole);
-            let should_dial = columba_connection_role(
+            let peer_address = BleAddress::from_hci_bytes(address.bytes());
+            let view = advertised_role_view(data);
+            let action = embedded_scan_dial_action(
+                Endpoint::Nrf52(Nrf52Host::Nrf52),
                 local_address,
-                BleRoleCapabilities::DualRole,
-                BleAddress::from_hci_bytes(address.bytes()),
-                capabilities,
-            ) == ColumbaConnectionRole::Dial;
-            if contains_service(data)
+                peer_address,
+                data,
+            );
+            let should_dial = action == DialSightingAction::Dial;
+            let ours = view.has_service || view.manufacturer == ManufacturerPresence::Present;
+            if ours
                 && discovery_groups_match(local_discovery_group_tag(), data)
                 && should_dial
             {

@@ -1,3 +1,4 @@
+use super::handshake::{l2cap_arrangement, AppleHost, Endpoint, L2capArrangement};
 use super::identity::{default_group_tag, BleAddress, BleIdentity, GROUP_TAG_LEN};
 
 pub const MAX_ADVERTISEMENT_LEN: usize = 31;
@@ -27,8 +28,10 @@ const EXPERIMENTAL_ROLE_COMPANY_ID: [u8; 2] = [0xff, 0xff];
 pub(super) const EXPERIMENTAL_ROLE_VERSION_MIN: u8 = 0x03;
 /// Manufacturer payload version that carries a discovery group tag.
 pub(super) const EXPERIMENTAL_ROLE_VERSION: u8 = 0x04;
-/// Host manufacturer payload that also carries a dial-election key (first 6 identity bytes).
+/// Retired host payload that also carried a 6-byte dial-election key. No field installations.
 pub(super) const EXPERIMENTAL_ROLE_VERSION_WITH_DIAL_KEY: u8 = 0x05;
+/// Host payload: node type plus discovery group. Mixed fleet is v4 + v6 only.
+pub const EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE: u8 = 0x06;
 pub(super) const EXPERIMENTAL_ROLE_PERIPHERAL_ONLY: u8 = 0x01;
 pub const DIAL_KEY_LEN: usize = 6;
 
@@ -109,6 +112,35 @@ pub fn encode_advertisement(
     Some(writer.len())
 }
 
+/// Classic ADV with a v6 type byte. Same 31-byte layout as [`encode_advertisement`];
+/// group stays at the v4 offset so mixed-fleet scanners keep filtering.
+pub fn encode_advertisement_with_node_type(
+    out: &mut [u8],
+    endpoint: Endpoint,
+    group_tag: [u8; GROUP_TAG_LEN],
+) -> Option<usize> {
+    let mut writer = AdWriter::new(out);
+    writer.put(AD_FLAGS, &[FLAGS_LE_GENERAL_DISCOVERABLE])?;
+    let mut little_endian = BLE_SERVICE_UUID_BYTES;
+    little_endian.reverse();
+    writer.put(AD_SERVICE_UUID128, &little_endian)?;
+    let payload = manufacturer_role_payload_with_node_type(endpoint, group_tag);
+    writer.put(
+        AD_MANUFACTURER_SPECIFIC,
+        &[
+            EXPERIMENTAL_ROLE_COMPANY_ID[0],
+            EXPERIMENTAL_ROLE_COMPANY_ID[1],
+            payload[0],
+            payload[1],
+            payload[2],
+            payload[3],
+            payload[4],
+            payload[5],
+        ],
+    )?;
+    Some(writer.len())
+}
+
 pub fn contains_service(adv: &[u8]) -> bool {
     let mut little_endian = BLE_SERVICE_UUID_BYTES;
     little_endian.reverse();
@@ -136,6 +168,9 @@ pub fn columba_role_capabilities_from_manufacturer(
         || *data.first()? < EXPERIMENTAL_ROLE_VERSION_MIN
     {
         return None;
+    }
+    if *data.first()? >= EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE {
+        return Some(BleRoleCapabilities::DualRole);
     }
     if data.get(1)? & EXPERIMENTAL_ROLE_PERIPHERAL_ONLY == 0 {
         Some(BleRoleCapabilities::DualRole)
@@ -193,8 +228,8 @@ pub fn manufacturer_discovery_groups_match(
 /// Manufacturer-specific body for a DualRole advertisement in the local discovery group.
 ///
 /// SoftDevice primary ADV is capped at [`MAX_ADVERTISEMENT_LEN`]; this v4 shape fits beside the
-/// 128-bit service UUID. Host stacks that can carry a larger manufacturer field should prefer
-/// [`manufacturer_role_payload_with_dial_key`].
+/// 128-bit service UUID. Prefer [`manufacturer_role_payload_with_node_type`] on every dual-role
+/// advertiser (including SoftDevice) so typed dial can see Esp32 / Nrf52.
 pub fn manufacturer_role_payload(
     role_capabilities: BleRoleCapabilities,
     group_tag: [u8; GROUP_TAG_LEN],
@@ -213,10 +248,146 @@ pub fn manufacturer_role_payload(
     ]
 }
 
+/// Host manufacturer payload: advertised node type plus discovery group.
+///
+/// Same size as v4, so it still sits in classic ADV_IND next to the 128-bit UUID.
+/// Group stays at the v4 offset so un-upgraded scanners keep filtering. Byte 1 is
+/// [`Endpoint::advertisement_type_byte`] instead of DualRole flags.
+pub fn manufacturer_role_payload_with_node_type(
+    endpoint: Endpoint,
+    group_tag: [u8; GROUP_TAG_LEN],
+) -> [u8; 2 + GROUP_TAG_LEN] {
+    [
+        EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE,
+        endpoint.advertisement_type_byte(),
+        group_tag[0],
+        group_tag[1],
+        group_tag[2],
+        group_tag[3],
+    ]
+}
+
+/// Node type from a manufacturer role body, when the peer advertised v6+.
+pub fn node_type_from_role_payload(data: &[u8]) -> Option<Endpoint> {
+    if *data.first()? < EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE {
+        return None;
+    }
+    Endpoint::from_advertisement_type_byte(*data.get(1)?)
+}
+
+/// Node type from a parsed manufacturer payload, when the peer advertised v6+.
+pub fn node_type_from_manufacturer(company_id: u16, data: &[u8]) -> Option<Endpoint> {
+    if company_id != u16::from_le_bytes(EXPERIMENTAL_ROLE_COMPANY_ID) {
+        return None;
+    }
+    node_type_from_role_payload(data)
+}
+
+/// Node type from a full advertisement report, when the peer advertised v6+.
+pub fn node_type_from_advertisement(adv: &[u8]) -> Option<Endpoint> {
+    AdReader::new(adv).find_map(|(ad_type, body)| {
+        if ad_type != AD_MANUFACTURER_SPECIFIC {
+            return None;
+        }
+        let company_id: [u8; 2] = body.get(..2)?.try_into().ok()?;
+        node_type_from_manufacturer(u16::from_le_bytes(company_id), body.get(2..)?)
+    })
+}
+
+/// Parsed manufacturer role fields from one ADV or SCAN_RSP report.
+///
+/// v6 is `[ver, type, group4]`. There is no v5 dial-key tie on the wire; [`Self::dial_key`]
+/// is only set for historical v5 payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdvertisedRoleView {
+    pub version: Option<u8>,
+    pub type_byte: Option<u8>,
+    pub node_type: Option<Endpoint>,
+    pub group: [u8; GROUP_TAG_LEN],
+    pub dial_key: Option<BleAddress>,
+    pub has_service: bool,
+    pub manufacturer: ManufacturerPresence,
+}
+
+/// Walk one report and surface the v6 type / group (and a v5 dial-key if present).
+pub fn advertised_role_view(adv: &[u8]) -> AdvertisedRoleView {
+    let (version, type_byte) = AdReader::new(adv)
+        .find_map(|(ad_type, body)| {
+            if ad_type != AD_MANUFACTURER_SPECIFIC {
+                return None;
+            }
+            if body.get(..2) != Some(EXPERIMENTAL_ROLE_COMPANY_ID.as_slice()) {
+                return None;
+            }
+            Some((*body.get(2)?, body.get(3).copied()))
+        })
+        .map(|(version, type_byte)| (Some(version), type_byte))
+        .unwrap_or((None, None));
+    AdvertisedRoleView {
+        version,
+        type_byte,
+        node_type: node_type_from_advertisement(adv),
+        group: advertisement_group_tag(adv),
+        dial_key: dial_key_from_advertisement(adv),
+        has_service: contains_service(adv),
+        manufacturer: advertisement_manufacturer_presence(adv),
+    }
+}
+
+/// CoreBluetooth `startAdvertising` never puts manufacturer data on the air.
+/// A Prns UUID with no manufacturer is treated as MacOs for the arrangement table.
+pub fn implied_macos_without_manufacturer() -> Endpoint {
+    Endpoint::CoreBluetooth(AppleHost::MacOs)
+}
+
+/// Peer type from this report, or MacOs when our service is present and manufacturer is absent.
+pub fn advertised_or_implied_node_type(adv: &[u8]) -> Option<Endpoint> {
+    if let Some(peer) = node_type_from_advertisement(adv) {
+        return Some(peer);
+    }
+    if contains_service(adv)
+        && advertisement_manufacturer_presence(adv) == ManufacturerPresence::Absent
+    {
+        return Some(implied_macos_without_manufacturer());
+    }
+    None
+}
+
+/// Use the CoC arrangement table as the pre-connect dial decision when ADV carries a type.
+///
+/// `Opens(E)` means E dials and opens CoC. `GattOnly` / `EitherOpens` return `None` so the
+/// caller keeps the v4 C′ path (Mac/Android first; same-type ties are later).
+pub fn typed_dial_override(
+    local: Endpoint,
+    advertised_peer: Option<Endpoint>,
+) -> Option<DialSightingAction> {
+    let peer = advertised_peer?;
+    match l2cap_arrangement(local, peer) {
+        L2capArrangement::Opens(opener) if opener == local => Some(DialSightingAction::Dial),
+        L2capArrangement::Opens(_) => Some(DialSightingAction::Accept),
+        L2capArrangement::GattOnly | L2capArrangement::EitherOpens => None,
+    }
+}
+
+/// JNI / host adapter code: `1` dial, `0` accept, `-1` keep the v4 C′ path.
+///
+/// An empty payload means no manufacturer: look up implied MacOs.
+pub fn typed_dial_override_code(local: Endpoint, role_payload: &[u8]) -> i8 {
+    let peer = if role_payload.is_empty() {
+        Some(implied_macos_without_manufacturer())
+    } else {
+        node_type_from_role_payload(role_payload)
+    };
+    match typed_dial_override(local, peer) {
+        Some(DialSightingAction::Dial) => 1,
+        Some(DialSightingAction::Accept) => 0,
+        None => -1,
+    }
+}
+
 /// Host manufacturer payload including a dial-election key shared across address spaces.
 ///
-/// CoreBluetooth does not expose peer public MACs, so Mac/Android elect on
-/// [`dial_key_from_identity`] carried here instead of radio addresses.
+/// Retired wire format (v5). Kept so tests can still parse historical payloads.
 pub fn manufacturer_role_payload_with_dial_key(
     role_capabilities: BleRoleCapabilities,
     group_tag: [u8; GROUP_TAG_LEN],
@@ -334,6 +505,32 @@ pub fn dial_key_from_advertisement(adv: &[u8]) -> Option<BleAddress> {
         }
         let company_id: [u8; 2] = body.get(..2)?.try_into().ok()?;
         dial_key_from_manufacturer(u16::from_le_bytes(company_id), body.get(2..)?)
+    })
+}
+
+/// Embedded scan-path election: typed table when ADV has a type or implies Mac, else address sort.
+///
+/// Trouble / SoftDevice funnels only forward Dial sightings. Without the typed
+/// override, `Opens(Esp32)` vs Mac never fires because C′ address-sort can drop
+/// the Mac ADV before policy sees it.
+pub fn embedded_scan_dial_action(
+    local: Endpoint,
+    local_radio: BleAddress,
+    peer_radio: BleAddress,
+    adv: &[u8],
+) -> DialSightingAction {
+    typed_dial_override(local, advertised_or_implied_node_type(adv)).unwrap_or_else(|| {
+        match columba_connection_role(
+            local_radio,
+            BleRoleCapabilities::DualRole,
+            peer_radio,
+            columba_role_capabilities(adv).unwrap_or(BleRoleCapabilities::DualRole),
+        ) {
+            ColumbaConnectionRole::Dial => DialSightingAction::Dial,
+            ColumbaConnectionRole::Accept | ColumbaConnectionRole::Unavailable => {
+                DialSightingAction::Accept
+            }
+        }
     })
 }
 

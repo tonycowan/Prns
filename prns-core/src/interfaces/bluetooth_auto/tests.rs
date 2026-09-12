@@ -189,6 +189,268 @@ fn dial_key_from_identity_is_stable_prefix_and_round_trips_manufacturer_v5() {
 }
 
 #[test]
+fn v6_payload_publishes_type_and_keeps_group_at_the_v4_offset() {
+    let payload = manufacturer_role_payload_with_node_type(mac(), default_group_tag());
+    assert_eq!(payload[0], EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE);
+    assert_eq!(payload[1], mac().advertisement_type_byte());
+    assert_eq!(
+        node_type_from_role_payload(&payload),
+        Some(mac()),
+        "v6 type byte reconstructs MacOs"
+    );
+    assert_eq!(node_type_from_manufacturer(0xffff, &payload), Some(mac()));
+    assert_eq!(
+        group_tag_from_manufacturer(0xffff, &payload),
+        Some(default_group_tag()),
+        "v4 scanners still read the group"
+    );
+    assert_eq!(
+        columba_role_capabilities_from_manufacturer(0xffff, &payload),
+        Some(BleRoleCapabilities::DualRole),
+        "v6 type must not be read as PeripheralOnly flags"
+    );
+    assert_eq!(
+        node_type_from_role_payload(&manufacturer_role_payload(
+            BleRoleCapabilities::DualRole,
+            default_group_tag()
+        )),
+        None,
+        "v4 has no node type"
+    );
+}
+
+#[test]
+fn v6_classic_adv_publishes_esp32_type_and_fills_the_31_byte_budget() {
+    let mut buf = [0u8; MAX_ADVERTISEMENT_LEN];
+    let len = encode_advertisement_with_node_type(&mut buf, esp32(), default_group_tag()).unwrap();
+    assert_eq!(len, MAX_ADVERTISEMENT_LEN);
+    assert!(contains_service(&buf[..len]));
+    assert_eq!(
+        columba_role_capabilities(&buf[..len]),
+        Some(BleRoleCapabilities::DualRole)
+    );
+    assert_eq!(advertisement_group_tag(&buf[..len]), default_group_tag());
+    assert_eq!(
+        node_type_from_advertisement(&buf[..len]),
+        Some(esp32()),
+        "HV4 v6 ADV reconstructs Esp32"
+    );
+    let view = advertised_role_view(&buf[..len]);
+    assert_eq!(view.version, Some(EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE));
+    assert_eq!(view.type_byte, Some(esp32().advertisement_type_byte()));
+    assert_eq!(view.node_type, Some(esp32()));
+    assert_eq!(view.group, default_group_tag());
+    assert_eq!(view.dial_key, None);
+    assert!(view.has_service);
+}
+
+#[test]
+fn mac_accepts_and_android_dials_when_both_advertise_v6_type() {
+    assert_eq!(
+        typed_dial_override(
+            mac(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                android(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Accept)
+    );
+    assert_eq!(
+        typed_dial_override(
+            android(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                mac(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Dial)
+    );
+    assert_eq!(
+        typed_dial_override(mac(), None),
+        None,
+        "v4 peers keep the C′ path"
+    );
+    assert_eq!(
+        typed_dial_override(android(), Some(android())),
+        None,
+        "same-type Android falls back until ties exist"
+    );
+}
+
+#[test]
+fn mac_accepts_and_esp32_dials_when_both_advertise_v6_type() {
+    assert_eq!(
+        typed_dial_override(
+            mac(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                esp32(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Accept)
+    );
+    assert_eq!(
+        typed_dial_override(
+            esp32(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                mac(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Dial)
+    );
+}
+
+#[test]
+fn mac_accepts_and_nrf_dials_when_both_advertise_v6_type() {
+    assert_eq!(
+        typed_dial_override(
+            mac(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                nrf(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Accept)
+    );
+    assert_eq!(
+        typed_dial_override(
+            nrf(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                mac(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Dial)
+    );
+}
+
+#[test]
+fn embedded_scan_dials_mac_on_v6_type_even_when_address_sort_would_accept() {
+    let mut adv = [0u8; MAX_ADVERTISEMENT_LEN];
+    let len = encode_advertisement_with_node_type(&mut adv, mac(), default_group_tag()).unwrap();
+    let winning_radio = BleAddress::new([0x00; 6]);
+    let losing_radio = BleAddress::new([0xFF; 6]);
+    assert_eq!(
+        embedded_scan_dial_action(esp32(), losing_radio, winning_radio, &adv[..len]),
+        DialSightingAction::Dial,
+        "Opens(Esp32) must Dial Mac even when the board loses radio-address sort"
+    );
+    assert_eq!(
+        embedded_scan_dial_action(nrf(), losing_radio, winning_radio, &adv[..len]),
+        DialSightingAction::Dial,
+        "Opens(Nrf52) must Dial Mac even when the board loses radio-address sort"
+    );
+}
+
+#[test]
+fn v6_classic_adv_publishes_nrf52_type_and_fills_the_31_byte_budget() {
+    let mut buf = [0u8; MAX_ADVERTISEMENT_LEN];
+    let len = encode_advertisement_with_node_type(&mut buf, nrf(), default_group_tag()).unwrap();
+    assert_eq!(len, MAX_ADVERTISEMENT_LEN);
+    assert!(contains_service(&buf[..len]));
+    assert_eq!(
+        columba_role_capabilities(&buf[..len]),
+        Some(BleRoleCapabilities::DualRole),
+        "v6 Nrf52 type must not be read as PeripheralOnly flags"
+    );
+    assert_eq!(advertisement_group_tag(&buf[..len]), default_group_tag());
+    assert_eq!(
+        node_type_from_advertisement(&buf[..len]),
+        Some(nrf()),
+        "MeshTower v6 ADV reconstructs Nrf52"
+    );
+    let view = advertised_role_view(&buf[..len]);
+    assert_eq!(view.version, Some(EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE));
+    assert_eq!(view.type_byte, Some(nrf().advertisement_type_byte()));
+    assert_eq!(view.node_type, Some(nrf()));
+}
+
+#[test]
+fn embedded_scan_dials_uuid_only_corebluetooth_shape() {
+    let mut uuid_only = [0u8; 31];
+    let uuid_len = {
+        let mut little_endian = BLE_SERVICE_UUID_BYTES;
+        little_endian.reverse();
+        uuid_only[0] = 2;
+        uuid_only[1] = 0x01;
+        uuid_only[2] = 0x06;
+        uuid_only[3] = 17;
+        uuid_only[4] = 0x07;
+        uuid_only[5..21].copy_from_slice(&little_endian);
+        21
+    };
+    let losing_radio = BleAddress::new([0xFF; 6]);
+    let winning_radio = BleAddress::new([0x00; 6]);
+    assert_eq!(
+        embedded_scan_dial_action(esp32(), losing_radio, winning_radio, &uuid_only[..uuid_len]),
+        DialSightingAction::Dial,
+        "UUID-only implies MacOs; Opens(Esp32) Dials"
+    );
+    assert_eq!(
+        embedded_scan_dial_action(nrf(), losing_radio, winning_radio, &uuid_only[..uuid_len]),
+        DialSightingAction::Dial,
+        "UUID-only implies MacOs; Opens(Nrf52) Dials"
+    );
+}
+
+#[test]
+fn uuid_only_implies_macos_for_the_arrangement_table() {
+    let mut uuid_only = [0u8; 31];
+    let uuid_len = {
+        let mut little_endian = BLE_SERVICE_UUID_BYTES;
+        little_endian.reverse();
+        uuid_only[0] = 2;
+        uuid_only[1] = 0x01;
+        uuid_only[2] = 0x06;
+        uuid_only[3] = 17;
+        uuid_only[4] = 0x07;
+        uuid_only[5..21].copy_from_slice(&little_endian);
+        21
+    };
+    assert_eq!(
+        advertised_or_implied_node_type(&uuid_only[..uuid_len]),
+        Some(mac())
+    );
+    assert_eq!(typed_dial_override_code(esp32(), &[]), 1);
+    assert_eq!(typed_dial_override_code(nrf(), &[]), 1);
+    assert_eq!(typed_dial_override_code(android(), &[]), 1);
+    assert_eq!(
+        typed_dial_override_code(mac(), &[]),
+        -1,
+        "Mac vs implied Mac is GattOnly; C′ Accepts"
+    );
+}
+
+#[test]
+fn manufacturer_only_scan_rsp_still_dials_mac() {
+    let payload = manufacturer_role_payload_with_node_type(mac(), default_group_tag());
+    let rsp = [
+        9,
+        AD_MANUFACTURER_SPECIFIC,
+        0xff,
+        0xff,
+        payload[0],
+        payload[1],
+        payload[2],
+        payload[3],
+        payload[4],
+        payload[5],
+    ];
+    let view = advertised_role_view(&rsp);
+    assert!(!view.has_service, "CoreBluetooth puts type in SCAN_RSP");
+    assert_eq!(view.version, Some(EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE));
+    assert_eq!(view.node_type, Some(mac()));
+    let losing_radio = BleAddress::new([0xFF; 6]);
+    let winning_radio = BleAddress::new([0x00; 6]);
+    assert_eq!(
+        embedded_scan_dial_action(esp32(), losing_radio, winning_radio, &rsp),
+        DialSightingAction::Dial
+    );
+}
+
+#[test]
 fn host_legacy_dual_role_fail_opens_dial() {
     let local = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
     assert_eq!(
@@ -375,6 +637,30 @@ fn mac_and_linux_open_when_linux_opens() {
     assert_eq!(
         l2cap_arrangement(linux(), mac()),
         L2capArrangement::Opens(linux())
+    );
+}
+
+#[test]
+fn mac_and_esp32_only_open_when_esp32_opens() {
+    assert_eq!(
+        l2cap_arrangement(mac(), esp32()),
+        L2capArrangement::Opens(esp32())
+    );
+    assert_eq!(
+        l2cap_arrangement(esp32(), mac()),
+        L2capArrangement::Opens(esp32())
+    );
+}
+
+#[test]
+fn mac_and_nrf_only_open_when_nrf_opens() {
+    assert_eq!(
+        l2cap_arrangement(mac(), nrf()),
+        L2capArrangement::Opens(nrf())
+    );
+    assert_eq!(
+        l2cap_arrangement(nrf(), mac()),
+        L2capArrangement::Opens(nrf())
     );
 }
 
@@ -571,13 +857,17 @@ fn the_esp32_either_opens_the_fast_lane_with_its_peers() {
 }
 
 #[test]
-fn the_esp32_stays_on_the_gatt_floor_with_windows_and_apple() {
+fn the_esp32_stays_on_the_gatt_floor_with_windows_and_apple_mobile() {
     assert_eq!(
         l2cap_arrangement(esp32(), Endpoint::WinRt(WinRtHost::Windows)),
         L2capArrangement::GattOnly
     );
     assert_eq!(
-        l2cap_arrangement(esp32(), mac()),
+        l2cap_arrangement(esp32(), ios()),
+        L2capArrangement::GattOnly
+    );
+    assert_eq!(
+        l2cap_arrangement(esp32(), ipad()),
         L2capArrangement::GattOnly
     );
 }
@@ -603,6 +893,7 @@ fn the_arrangement_table_is_order_independent() {
         android(),
         Endpoint::CoreBluetooth(AppleHost::Ios),
         Endpoint::Esp32(Esp32Host::Esp32),
+        nrf(),
         Endpoint::WinRt(WinRtHost::Windows),
     ];
     for &a in &endpoints {
@@ -620,6 +911,7 @@ fn opens_always_names_one_of_the_pair() {
         android(),
         Endpoint::CoreBluetooth(AppleHost::Ios),
         Endpoint::Esp32(Esp32Host::Esp32),
+        nrf(),
         Endpoint::WinRt(WinRtHost::Windows),
     ];
     for &a in &endpoints {
@@ -683,6 +975,18 @@ fn opens_arrangement_rejects_either_wrong_gatt_role() {
     assert!(!needs_redial(opens_android, HandshakeRole::Listener, mac()));
     assert!(needs_redial(opens_android, HandshakeRole::Dialer, mac()));
 
+    let opens_esp32 = l2cap_arrangement(mac(), esp32());
+    assert!(needs_redial(opens_esp32, HandshakeRole::Listener, esp32()));
+    assert!(!needs_redial(opens_esp32, HandshakeRole::Dialer, esp32()));
+    assert!(!needs_redial(opens_esp32, HandshakeRole::Listener, mac()));
+    assert!(needs_redial(opens_esp32, HandshakeRole::Dialer, mac()));
+
+    let opens_nrf = l2cap_arrangement(mac(), nrf());
+    assert!(needs_redial(opens_nrf, HandshakeRole::Listener, nrf()));
+    assert!(!needs_redial(opens_nrf, HandshakeRole::Dialer, nrf()));
+    assert!(!needs_redial(opens_nrf, HandshakeRole::Listener, mac()));
+    assert!(needs_redial(opens_nrf, HandshakeRole::Dialer, mac()));
+
     let either = l2cap_arrangement(linux(), android());
     assert!(!needs_redial(either, HandshakeRole::Listener, linux()));
     assert!(!needs_redial(either, HandshakeRole::Dialer, linux()));
@@ -745,6 +1049,50 @@ fn opens_lets_only_the_named_side_open_and_only_as_central() {
     );
     assert_eq!(
         l2cap_plan(arr, HandshakeRole::Dialer, mac(), &mac_caps, &android_caps),
+        L2capPlan::Accept
+    );
+}
+
+#[test]
+fn opens_lets_esp32_open_mac_only_as_central() {
+    let arr = l2cap_arrangement(mac(), esp32());
+    let esp_caps = caps(Some(0x0080));
+    let mac_caps = caps(Some(0x00c0));
+
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Dialer, esp32(), &esp_caps, &mac_caps),
+        L2capPlan::Open {
+            psm: Psm::new(0x00c0).unwrap()
+        }
+    );
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Listener, esp32(), &esp_caps, &mac_caps),
+        L2capPlan::None
+    );
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Listener, mac(), &mac_caps, &esp_caps),
+        L2capPlan::Accept
+    );
+}
+
+#[test]
+fn opens_lets_nrf_open_mac_only_as_central() {
+    let arr = l2cap_arrangement(mac(), nrf());
+    let nrf_caps = caps(Some(0x0080));
+    let mac_caps = caps(Some(0x00c0));
+
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Dialer, nrf(), &nrf_caps, &mac_caps),
+        L2capPlan::Open {
+            psm: Psm::new(0x00c0).unwrap()
+        }
+    );
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Listener, nrf(), &nrf_caps, &mac_caps),
+        L2capPlan::None
+    );
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Listener, mac(), &mac_caps, &nrf_caps),
         L2capPlan::Accept
     );
 }

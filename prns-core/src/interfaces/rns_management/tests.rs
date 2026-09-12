@@ -56,6 +56,7 @@ fn interface_stats_preserve_live_counters_and_access_code_fields() {
             transported_links: 0,
             membership: Membership::Independent,
             radio: crate::interfaces::RadioIndication::for_kind(Some(InterfaceKind::TcpClient)),
+            details: crate::interfaces::PeerDetails::NotApplicable,
         },
         Some(RnsInterfaceAccessCode::new(
             [0x33; 64],

@@ -17,7 +17,7 @@ use crate::runtime::{
     AnnounceBackpressureEvent, AnnounceEgressOutcome, EgressLaneMetricsSnapshot,
     EgressMetricsSnapshot,
 };
-use crate::wire::{WireContext, WirePacketHeader};
+use crate::wire::{PacketType, WireContext, WirePacketHeader};
 
 use super::TokioGrantProducer;
 
@@ -67,6 +67,30 @@ fn egress_queue(frame: &[u8]) -> EgressQueue {
         Ok(_) | Err(_) => EgressQueue::Expedited,
     }
 }
+
+#[cfg(feature = "tracing")]
+fn trace_interesting_egress(target: InterfaceId, frame: &[u8], outcome: &'static str) {
+    let Ok((header, payload)) = WirePacketHeader::parse(frame) else {
+        return;
+    };
+    if header.packet_type == PacketType::Announce {
+        return;
+    }
+    tracing::info!(
+        target: "prns.runtime",
+        event = "wire_egress",
+        outcome,
+        interface = ?target.kind(),
+        packet = ?header.packet_type,
+        context = ?header.context,
+        dest = ?header.address.as_bytes(),
+        hops = header.hops,
+        payload = payload.len(),
+    );
+}
+
+#[cfg(not(feature = "tracing"))]
+fn trace_interesting_egress(_target: InterfaceId, _frame: &[u8], _outcome: &'static str) {}
 
 impl Egress {
     #[must_use]
@@ -120,13 +144,17 @@ impl Egress {
             }
 
             match lane.producer.try_grant() {
-                None => return EgressEnqueueOutcome::LaneFull,
+                None => {
+                    trace_interesting_egress(target, bytes, "lane_full");
+                    return EgressEnqueueOutcome::LaneFull;
+                }
                 Some(slot) => {
                     slot.fill(bytes);
                     match queue {
                         EgressQueue::Expedited => lane.producer.commit_expedited(),
                         EgressQueue::Bulk => lane.producer.commit(),
                     }
+                    trace_interesting_egress(target, bytes, "enqueued");
 
                     #[cfg(feature = "runtime-metrics")]
                     {
@@ -138,6 +166,7 @@ impl Egress {
                 }
             }
         }
+        trace_interesting_egress(target, bytes, "lane_missing");
         EgressEnqueueOutcome::LaneMissing
     }
 
@@ -253,6 +282,7 @@ impl Egress {
                     }
                     if let Some(len) = fill(&mut slot.bytes[..hint]) {
                         slot.len = len.min(hint);
+                        trace_interesting_egress(target, slot.frame(), "enqueued");
                         match egress_queue(slot.frame()) {
                             EgressQueue::Expedited => lane.producer.commit_expedited(),
                             EgressQueue::Bulk => lane.producer.commit(),
@@ -266,6 +296,9 @@ impl Egress {
                 }
                 None => {
                     let _fill_result = fill(discard);
+                    if let Some(len) = _fill_result {
+                        trace_interesting_egress(target, &discard[..len], "lane_full");
+                    }
                     #[cfg(feature = "runtime-metrics")]
                     if _fill_result.is_some() {
                         self.metrics.full_lane_drops =
@@ -276,6 +309,9 @@ impl Egress {
             return;
         }
         let _fill_result = fill(discard);
+        if let Some(len) = _fill_result {
+            trace_interesting_egress(target, &discard[..len], "lane_missing");
+        }
         #[cfg(feature = "runtime-metrics")]
         if _fill_result.is_some() {
             self.metrics.missing_lane_drops = self.metrics.missing_lane_drops.saturating_add(1);

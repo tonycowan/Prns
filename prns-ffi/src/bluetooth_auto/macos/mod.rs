@@ -24,9 +24,9 @@ use objc2_core_bluetooth::{
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSNumber, NSString};
 
 use prns_core::interfaces::bluetooth_auto::{
-    manufacturer_role_payload, BleAddress, BleRoleCapabilities, BleUuid, BLE_SERVICE_UUID,
-    COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID, COLUMBA_TX_UUID, GROUP_TAG_LEN, NATIVE_CONTROL_UUID,
-    NATIVE_DATA_UUID,
+    manufacturer_role_payload_with_node_type, AppleHost, BleAddress, BleUuid, Endpoint,
+    BLE_SERVICE_UUID, COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID, COLUMBA_TX_UUID, GROUP_TAG_LEN,
+    NATIVE_CONTROL_UUID, NATIVE_DATA_UUID,
 };
 
 use central::CentralDelegate;
@@ -108,11 +108,15 @@ fn advertisement_data(
     // SAFETY: CoreBluetooth exports this NSString constant with process lifetime.
     let uuids_key: &NSString = unsafe { CBAdvertisementDataServiceUUIDsKey };
     let uuids_value: &AnyObject = services;
-    // Prefer manufacturer group tag over local name so SoftDevice passive scanners see the group
-    // in primary ADV (classic ADV is only 31 bytes with a 128-bit service UUID).
+    // CoreBluetooth startAdvertising honors only ServiceUUIDs and LocalName.
+    // ManufacturerData is kept so Mac's own scan-path tests can round-trip a v6
+    // payload; the controller does not put it on the air.
     // SAFETY: CoreBluetooth exports this NSString constant with process lifetime.
     let mfg_key: &NSString = unsafe { CBAdvertisementDataManufacturerDataKey };
-    let payload = manufacturer_role_payload(BleRoleCapabilities::DualRole, group_tag);
+    let payload = manufacturer_role_payload_with_node_type(
+        Endpoint::CoreBluetooth(AppleHost::MacOs),
+        group_tag,
+    );
     let mut mfg_bytes = [0u8; 8];
     mfg_bytes[0] = 0xff;
     mfg_bytes[1] = 0xff;

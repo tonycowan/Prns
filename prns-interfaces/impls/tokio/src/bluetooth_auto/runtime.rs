@@ -26,7 +26,7 @@ const DIAL_TRACK: usize = 16;
 const RECENT_MEMBER_GRACE: Duration = Duration::from_secs(3);
 use prns_core::interfaces::{
     ConfiguredInterfacePolicy, ConnectionState, EffectiveInterfacePolicy, InterfaceDescriptor,
-    InterfaceId, InterfaceKind, InterfaceStatus, TransferRates,
+    InterfaceId, InterfaceKind, InterfaceStatus, PeerDetails, PeerDetailsNotify, TransferRates,
 };
 use prns_runtime::manifold::driver::TokioInterfaceStatus;
 use prns_runtime::manifold::interface_seam::{Interface, InterfaceSeam, MAX_WIRE_FRAME_LEN};
@@ -68,6 +68,24 @@ impl<Src: BleSource, Snk: BleSink> BluetoothPeer<Src, Snk> {
     ) -> Self {
         let channel_tag = *identity.as_bytes();
         let id = InterfaceId::from_channel_tag(InterfaceKind::BluetoothPeer, &channel_tag);
+        Self::with_policy_status(
+            identity,
+            source,
+            sink,
+            policy,
+            TokioInterfaceStatus::new_unaccounted(id, ConnectionState::Connected),
+        )
+    }
+
+    fn with_policy_status(
+        identity: BleIdentity,
+        source: Src,
+        sink: Snk,
+        policy: EffectiveInterfacePolicy,
+        status: TokioInterfaceStatus,
+    ) -> Self {
+        let channel_tag = *identity.as_bytes();
+        let id = status.id();
         Self {
             id,
             identity,
@@ -75,7 +93,7 @@ impl<Src: BleSource, Snk: BleSink> BluetoothPeer<Src, Snk> {
             sink,
             channel_tag,
             policy,
-            status: TokioInterfaceStatus::new_unaccounted(id, ConnectionState::Connected),
+            status,
             closed: None,
         }
     }
@@ -827,11 +845,32 @@ async fn apply_settle<B, const MAX_PEERS: usize>(
                 ..
             } => {
                 if let Some(mut held) = link.take() {
+                    let channel_tag = *identity.as_bytes();
+                    let id = InterfaceId::from_channel_tag(
+                        InterfaceKind::BluetoothPeer,
+                        &channel_tag,
+                    );
+                    let status =
+                        TokioInterfaceStatus::new_unaccounted(id, ConnectionState::Connected);
+                    let details = match lane {
+                        L2capPlan::None => PeerDetails::BleGatt,
+                        L2capPlan::Accept | L2capPlan::Open { .. } => PeerDetails::Unknown,
+                    };
+                    status.set_details(details);
+                    held.bind_details_notify(PeerDetailsNotify::new({
+                        let status = status.clone();
+                        move |details| status.set_details(details)
+                    }));
                     arm_fast_lane(&mut held, &lane).await;
                     let (source, sink) = held.into_data();
-                    let member = BluetoothPeer::with_policy(identity, source, sink, policy)
-                        .report_close_to(address, closed.clone());
-                    let status = member.status();
+                    let member = BluetoothPeer::with_policy_status(
+                        identity,
+                        source,
+                        sink,
+                        policy,
+                        status.clone(),
+                    )
+                    .report_close_to(address, closed.clone());
                     let name = format_ble_peer_name(identity, address);
                     let attached = fleet.add_named(member, name, peer_rssi);
                     members.insert(

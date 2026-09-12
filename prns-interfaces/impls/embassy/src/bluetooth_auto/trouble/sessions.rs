@@ -178,8 +178,9 @@ async fn queue_inbound_frame(
 fn note_inbound_admission(hub: &BleHub, result: Result<InboundFrameAdmission, FramePoolError>) {
     match result {
         Ok(InboundFrameAdmission::Queued) => {}
-        Ok(InboundFrameAdmission::PoolFull | InboundFrameAdmission::QueueFull) => {
+        Ok(admission @ (InboundFrameAdmission::PoolFull | InboundFrameAdmission::QueueFull)) => {
             hub.note_ingress_pressure();
+            crate::diagnostic_log::info!("ble: inbound admit {admission:?}");
         }
         Err(error) => {
             hub.note_ingress_pressure();
@@ -216,6 +217,8 @@ async fn l2cap_pump<T: TroubleTransport>(
     };
     let inbound = async {
         let mut rx = alloc::boxed::Box::new([0u8; L2CAP_SDU_LEN]);
+        let mut deframer = alloc::boxed::Box::new(StreamDeframer::<L2CAP_DEFRAMER_CAP>::new());
+        let mut body = alloc::boxed::Box::new([0u8; BLE_HW_MTU]);
         loop {
             let read = match reader.receive(stack, rx.as_mut()).await {
                 Ok(read) => read,
@@ -225,28 +228,49 @@ async fn l2cap_pump<T: TroubleTransport>(
                 }
             };
             hub.note_link_activity();
-            if read < STREAM_FRAME_PREFIX_LEN {
-                continue;
-            }
-            let len = u16::from_be_bytes([rx[0], rx[1]]) as usize;
-            let body = &rx[STREAM_FRAME_PREFIX_LEN..read];
-            if body.len() < len {
-                continue;
-            }
-            let frame = match inbound_frames.lease().await {
-                Ok(frame) => frame,
-                Err(error) => {
-                    crate::diagnostic_log::warn!("ble L2CAP frame lease failed: {error:?}");
-                    return L2capPumpExit::FramePool;
+            match admit_l2cap_sdu(deframer.as_mut(), &rx[..read]) {
+                L2capStreamAdmit::Overflow => {
+                    crate::diagnostic_log::info!("ble: L2CAP rx drop overflow read={read}");
+                    return L2capPumpExit::Inbound;
                 }
-            };
-            if frame.fill(&body[..len]).await.is_ok() {
-                data_in_tx.send(frame).await;
+                L2capStreamAdmit::Ready => {}
+            }
+            while let Some(len) = deframer.next_frame(body.as_mut()) {
+                crate::diagnostic_log::info!("ble: L2CAP rx prefix={len} read={read}");
+                let frame = match inbound_frames.lease().await {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        crate::diagnostic_log::warn!("ble L2CAP frame lease failed: {error:?}");
+                        return L2capPumpExit::FramePool;
+                    }
+                };
+                if frame.fill(&body[..len]).await.is_ok() {
+                    data_in_tx.send(frame).await;
+                } else {
+                    crate::diagnostic_log::info!("ble: L2CAP rx drop fill prefix={len}");
+                }
             }
         }
     };
     match select(outbound, inbound).await {
         Either::First(exit) | Either::Second(exit) => exit,
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum L2capStreamAdmit {
+    Ready,
+    Overflow,
+}
+
+fn admit_l2cap_sdu<const N: usize>(
+    deframer: &mut StreamDeframer<N>,
+    sdu: &[u8],
+) -> L2capStreamAdmit {
+    if deframer.absorb(sdu) {
+        L2capStreamAdmit::Ready
+    } else {
+        L2capStreamAdmit::Overflow
     }
 }
 
@@ -527,6 +551,7 @@ pub(super) async fn serve_peripheral<T: TroubleTransport>(
         match channel {
             Some(channel) => {
                 crate::diagnostic_log::debug!("ble: L2CAP up (accepted)");
+                hub.set_peer_details(slot.addr(), PeerDetails::BleCoc);
                 let exit = l2cap_pump(
                     hub,
                     stack,
@@ -539,6 +564,7 @@ pub(super) async fn serve_peripheral<T: TroubleTransport>(
                 crate::diagnostic_log::warn!("ble: accepted L2CAP pump ended: {exit:?}");
             }
             None => {
+                hub.set_peer_details(slot.addr(), PeerDetails::BleGatt);
                 let mut profiled_first_frame = false;
                 loop {
                     let frame = data_out_rx.receive().await;
@@ -926,6 +952,7 @@ pub(super) async fn serve_central<T: TroubleTransport>(
         match channel {
             Some(channel) => {
                 crate::diagnostic_log::debug!("ble: L2CAP up (opened)");
+                hub.set_peer_details(slot.addr(), PeerDetails::BleCoc);
                 let exit = l2cap_pump(
                     hub,
                     stack,
@@ -938,6 +965,7 @@ pub(super) async fn serve_central<T: TroubleTransport>(
                 crate::diagnostic_log::warn!("ble: dialed L2CAP pump ended: {exit:?}");
             }
             None => {
+                hub.set_peer_details(slot.addr(), PeerDetails::BleGatt);
                 let mut profiled_first_frame = false;
                 loop {
                     let frame = data_out_rx.receive().await;
@@ -1040,6 +1068,81 @@ mod tests {
 
     use super::*;
     use crate::bluetooth_auto::BluetoothAutoShared;
+
+    fn encoded_frames(frames: &[&[u8]]) -> heapless::Vec<u8, 512> {
+        let mut wire = heapless::Vec::new();
+        let mut scratch = [0u8; L2CAP_SDU_LEN];
+        for frame in frames {
+            let n = encode_stream_frame(frame, &mut scratch).unwrap();
+            wire.extend_from_slice(&scratch[..n]).unwrap();
+        }
+        wire
+    }
+
+    fn drain_frames<const N: usize>(
+        deframer: &mut StreamDeframer<N>,
+    ) -> heapless::Vec<heapless::Vec<u8, 256>, 4> {
+        let mut out = [0u8; BLE_HW_MTU];
+        let mut frames = heapless::Vec::new();
+        while let Some(len) = deframer.next_frame(&mut out) {
+            let mut frame = heapless::Vec::new();
+            frame.extend_from_slice(&out[..len]).unwrap();
+            frames.push(frame).unwrap();
+        }
+        frames
+    }
+
+    #[test]
+    fn one_sdu_with_identify_and_request_yields_both_frames() {
+        let identify = [0x11u8; 211];
+        let request = [0x22u8; 99];
+        let sdu = encoded_frames(&[&identify, &request]);
+        assert_eq!(sdu.len(), 314);
+
+        let mut deframer = StreamDeframer::<L2CAP_DEFRAMER_CAP>::new();
+        assert_eq!(
+            admit_l2cap_sdu(&mut deframer, &sdu),
+            L2capStreamAdmit::Ready
+        );
+        let frames = drain_frames(&mut deframer);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].as_slice(), identify);
+        assert_eq!(frames[1].as_slice(), request);
+    }
+
+    #[test]
+    fn a_frame_split_across_sdus_reassembles() {
+        let frame = [0x7u8; 40];
+        let wire = encoded_frames(&[&frame]);
+        let mut deframer = StreamDeframer::<L2CAP_DEFRAMER_CAP>::new();
+
+        assert_eq!(
+            admit_l2cap_sdu(&mut deframer, &wire[..10]),
+            L2capStreamAdmit::Ready
+        );
+        assert!(drain_frames(&mut deframer).is_empty());
+
+        assert_eq!(
+            admit_l2cap_sdu(&mut deframer, &wire[10..]),
+            L2capStreamAdmit::Ready
+        );
+        let frames = drain_frames(&mut deframer);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].as_slice(), frame);
+    }
+
+    #[test]
+    fn a_full_deframer_rejects_another_sdu() {
+        let mut deframer = StreamDeframer::<4>::new();
+        assert_eq!(
+            admit_l2cap_sdu(&mut deframer, &[1, 2, 3, 4]),
+            L2capStreamAdmit::Ready
+        );
+        assert_eq!(
+            admit_l2cap_sdu(&mut deframer, &[5]),
+            L2capStreamAdmit::Overflow
+        );
+    }
 
     #[test]
     fn initial_credits_cover_exactly_one_largest_l2cap_sdu() {

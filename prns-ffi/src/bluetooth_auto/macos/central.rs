@@ -19,8 +19,9 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use prns_core::interfaces::bluetooth_auto::{BleAddress, BleIdentity, Control, PeerProtocol};
 
 use super::discovery::{
-    advertisement_candidate_strength, discover_disposition, DiscoverDisposition, DiscoveryGuard,
-    PeripheralLinkState, SessionPresence, StaleCancellation, StaleLinkRecovery,
+    advertisement_candidate_strength, advertisement_manufacturer_bytes, discover_disposition,
+    discover_sighting_action, DiscoverDisposition, DiscoveryGuard, PeripheralLinkState,
+    SessionPresence, StaleCancellation, StaleLinkRecovery,
 };
 use super::gatt_link::GattInboundSender;
 use super::gatt_write::{
@@ -32,6 +33,7 @@ use super::{
     core_bluetooth_peer_id, data_uuid, service_uuid, CoreBluetoothPeerId, Event, MacosBleError,
     PeripheralTable, RestoredPeripherals, SendCharacteristicRef, SendPeripheral,
 };
+use prns_core::interfaces::bluetooth_auto::DialSightingAction;
 
 pub(super) fn connected_peripheral(
     central: &CBCentralManager,
@@ -412,6 +414,10 @@ define_class!(
                     return;
                 }
                 DiscoverDisposition::Adopt => {}
+            }
+            let manufacturer = advertisement_manufacturer_bytes(advertisement_data);
+            if discover_sighting_action(manufacturer.as_deref()) == DialSightingAction::Accept {
+                return;
             }
             let dbm = rssi.integerValue();
             let rssi = if dbm == 127 {

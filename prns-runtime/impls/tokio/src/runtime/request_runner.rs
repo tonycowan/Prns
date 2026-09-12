@@ -94,18 +94,19 @@ fn prepare_request(
             &request.inbound(),
         ) {
             Ok(admission) => PreparedRequestRoute::RemoteControl(admission),
-            Err(decline) => {
+            Err(error) => {
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
                     target: "prns.runtime",
                     event = "remote_control_admit_declined",
+                    reason = ?error,
                     has_grant = request
                         .requester
                         .is_some_and(|controller| controller_grants.grant_for(&controller).is_some()),
                     controller = ?request.requester.map(|identity| *identity.as_bytes()),
                     destination = ?request.destination.as_bytes(),
                 );
-                PreparedRequestRoute::Declined(decline)
+                PreparedRequestRoute::Declined(error.into())
             }
         }
     } else {

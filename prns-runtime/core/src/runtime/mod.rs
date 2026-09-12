@@ -108,7 +108,7 @@ pub mod placement {
     pub use super::node::assemble_node_in_place;
     pub use super::remote_control::{
         admit_remote_control_request, dispatch_admitted_remote_control_request,
-        dispatch_remote_control_request, AdmittedRemoteControlRequest,
+        dispatch_remote_control_request, AdmittedRemoteControlRequest, RemoteControlAdmitError,
     };
 }
 

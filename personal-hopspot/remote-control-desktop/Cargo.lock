@@ -4046,6 +4046,7 @@ dependencies = [
  "log",
  "ndk-context",
  "personal-rns",
+ "prns-core",
  "prns-ffi",
  "prns-flash-manifest",
  "serde_json",

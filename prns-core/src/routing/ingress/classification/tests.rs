@@ -2,7 +2,8 @@ use super::*;
 use crate::engine::test_support::*;
 use crate::routing::ingress::testkit::{header_bytes, iface};
 use crate::wire::{
-    ContextFlag, DestinationType, PropagationType, TransportId, HEADER_MIN_LEN, MAX_HOP_COUNT,
+    ContextFlag, DestinationType, PropagationType, TransportId, WireContext, HEADER_MIN_LEN,
+    MAX_HOP_COUNT,
 };
 
 #[test]
@@ -98,6 +99,29 @@ fn recognized_non_announce_packets_classify_from_the_header() {
             PacketType::Announce => unreachable!(),
         }
     }
+}
+
+#[test]
+fn classified_packets_expose_the_inbound_wire_trace() {
+    let source = iface(0x02);
+    let mut bytes = header_bytes(PacketType::Data);
+    let classified = ClassifiedInboundPacket::classify(InboundPacket {
+        arrived_at: InstantMillis(9),
+        source_interface: source,
+        bytes: &mut bytes,
+    });
+    assert_eq!(classified.source_interface(), source);
+    assert_eq!(classified.wire_context(), Some(WireContext::None));
+    assert_eq!(classified.payload_len(), 0);
+
+    let mut malformed_bytes = [0x01];
+    let malformed = ClassifiedInboundPacket::classify(InboundPacket {
+        arrived_at: InstantMillis(7),
+        source_interface: iface(0x01),
+        bytes: &mut malformed_bytes,
+    });
+    assert_eq!(malformed.wire_context(), None);
+    assert_eq!(malformed.payload_len(), 0);
 }
 
 #[test]

@@ -9,10 +9,11 @@ use objc2_foundation::{NSData, NSDictionary, NSString};
 
 use prns_core::interfaces::bluetooth_auto::{
     columba_role_capabilities_from_manufacturer, default_group_tag,
-    manufacturer_discovery_groups_match, GROUP_TAG_LEN,
+    implied_macos_without_manufacturer, manufacturer_discovery_groups_match,
+    node_type_from_manufacturer, typed_dial_override, AppleHost, BleAddress, BleRoleCapabilities,
+    Endpoint, GROUP_TAG_LEN,
 };
 
-#[cfg(test)]
 pub(super) use prns_core::interfaces::bluetooth_auto::{
     dial_sighting_action, DialSightingAction, LegacyDualRolePolicy, ManufacturerPresence,
 };
@@ -169,6 +170,49 @@ pub(super) fn advertisement_candidate_strength(
         manufacturer_data.as_deref(),
         local_group_tag,
     )
+}
+
+pub(super) fn advertisement_manufacturer_bytes(
+    advertisement_data: &NSDictionary<NSString, AnyObject>,
+) -> Option<Vec<u8>> {
+    // SAFETY: CoreBluetooth exports this dictionary key with process lifetime.
+    let manufacturer_data_key = unsafe { CBAdvertisementDataManufacturerDataKey };
+    advertisement_data
+        .objectForKey(manufacturer_data_key)
+        .and_then(|data| data.downcast_ref::<NSData>().map(NSData::to_vec))
+}
+
+/// Pre-connect dial decision for a CoreBluetooth sighting.
+///
+/// v6 Android or Esp32 type → Accept (`Opens(...)`). v4 DualRole → C′ FailOpenDial.
+pub(super) fn discover_sighting_action(manufacturer_data: Option<&[u8]>) -> DialSightingAction {
+    let local = Endpoint::CoreBluetooth(AppleHost::MacOs);
+    let (peer, capabilities, presence) = match manufacturer_data {
+        Some(data) if data.len() >= 2 => {
+            let company_id = u16::from_le_bytes([data[0], data[1]]);
+            let body = &data[2..];
+            (
+                node_type_from_manufacturer(company_id, body),
+                columba_role_capabilities_from_manufacturer(company_id, body)
+                    .unwrap_or(BleRoleCapabilities::DualRole),
+                ManufacturerPresence::Present,
+            )
+        }
+        _ => (
+            Some(implied_macos_without_manufacturer()),
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Absent,
+        ),
+    };
+    typed_dial_override(local, peer).unwrap_or_else(|| {
+        dial_sighting_action(
+            BleAddress::new([0; 6]),
+            None,
+            capabilities,
+            presence,
+            LegacyDualRolePolicy::FailOpenDial,
+        )
+    })
 }
 
 #[derive(Default)]

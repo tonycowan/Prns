@@ -53,9 +53,11 @@ pub use policy::{
 };
 pub use status::{
     AirtimeUtilization, BluetoothIndication, ConnectionState, FrameAccounting, InterfaceSnapshot,
-    InterfaceStatus, InterfaceVitals, LoRaIndication, Membership, RadioFamily, RadioIndication,
-    TransferRates, WifiIndication,
+    InterfaceStatus, InterfaceVitals, LoRaIndication, Membership, PeerDetails, RadioFamily,
+    RadioIndication, TransferRates, WifiIndication,
 };
+#[cfg(feature = "tokio-host")]
+pub use status::PeerDetailsNotify;
 #[cfg(feature = "tokio-host")]
 pub use status::{
     ConnectionView, FrameAccountingEvent, FrameAccountingRecorder, RecordsFrameAccounting,

@@ -4,9 +4,10 @@ use dioxus::prelude::*;
 
 use crate::backend::{
     auto_wifi_peer_list_note, bluetooth_auto_peer_list_note, format_activity_age,
-    format_target_route, interface_mode_label, radio_facts, target_label, BackendError,
-    ControllerIdentity, InterfaceEntry, InterfacePower, PairingState, RemoteControlAnnounceWait,
-    RemoteControlBackend, TargetAccess, TargetStatus,
+    format_connect_label, format_target_route, format_wall_clock_now, interface_mode_label,
+    radio_facts, target_label, BackendError, ControllerIdentity, InterfaceEntry, InterfacePower,
+    PairingState, PathProbeReason, RemoteControlAnnounceWait, RemoteControlBackend, TargetAccess,
+    TargetStatus,
 };
 use crate::edits::{
     apply_draft_to_entry, apply_lora_preset, apply_lora_region, can_edit_group, can_edit_lora,
@@ -177,6 +178,7 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .twisty.open::before { transform: translate(-50%, -65%) rotate(45deg); }
 .twisty-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
 .twisty-title { font-weight: 700; }
+.twisty-as-of { color: #66766c; font-size: 12px; font-variant-numeric: tabular-nums; }
 .twisty-path { color: #52705c; font-size: 12px; }
 .twisty-address { color: #64736a; font-size: 13px; word-break: break-all; }
 .allow-list-key { color: #64736a; font-size: 12px; word-break: break-all; }
@@ -208,6 +210,10 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .hash-popup .twisty-address { word-break: break-all; }
 .whitelist-rule { border: 0; border-top: 1px solid #d7e0d9; margin: 4px 0; }
 .accordion-body { padding: 0 16px 16px 40px; display: grid; gap: 12px; }
+.interface-list-head { display: flex; align-items: center; gap: 12px; }
+.interface-list-head .actions { margin: 0; }
+.interface-list-head .interface-as-of { margin-left: auto; }
+.interface-as-of { margin: 0; text-align: right; color: #66766c; font-size: 12px; font-variant-numeric: tabular-nums; }
 .interface-list { display: grid; gap: 8px; }
 .interface-item { border: 1px solid #e3ebe5; border-radius: 7px; background: #fbfdfb; }
 .interface-item.open { border-color: #b7c8bc; }
@@ -276,9 +282,36 @@ struct ActivityLogEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LoadedInterfaces {
+    Idle,
     Loading,
-    Ready(Vec<InterfaceEntry>),
+    Ready {
+        entries: Vec<InterfaceEntry>,
+        arrived_at: String,
+    },
     Failed(String),
+}
+
+impl LoadedInterfaces {
+    fn ready(entries: Vec<InterfaceEntry>) -> Self {
+        Self::Ready {
+            entries,
+            arrived_at: format_wall_clock_now(),
+        }
+    }
+
+    fn entries(&self) -> Option<&[InterfaceEntry]> {
+        match self {
+            Self::Ready { entries, .. } => Some(entries),
+            Self::Idle | Self::Loading | Self::Failed(_) => None,
+        }
+    }
+
+    fn entries_mut(&mut self) -> Option<&mut Vec<InterfaceEntry>> {
+        match self {
+            Self::Ready { entries, .. } => Some(entries),
+            Self::Idle | Self::Loading | Self::Failed(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -311,8 +344,12 @@ enum UnsavedAfter {
 #[allow(non_snake_case)]
 pub fn App() -> Element {
     let screen = use_signal(|| Screen::Nodes);
+    let backend = use_signal(RemoteControlBackend::new);
     let mut selected_target = use_signal(String::new);
-    let mut targets = use_signal(Vec::<TargetAccess>::new);
+    let mut targets = use_signal({
+        let items = backend().stored_targets();
+        move || items
+    });
     let mut interfaces_by_target = use_signal(HashMap::<String, LoadedInterfaces>::new);
     let mut expanded_targets = use_signal(HashSet::<String>::new);
     let expanded_interfaces = use_signal(HashSet::<String>::new);
@@ -327,7 +364,6 @@ pub fn App() -> Element {
     let mut pairing_error = use_signal(String::new);
     let mut pairing_target = use_signal(String::new);
     let activity_log = use_signal(Vec::<ActivityLogEntry>::new);
-    let backend = use_signal(RemoteControlBackend::new);
     let mut peer_aliases = use_signal(|| backend().peer_aliases());
     let mut manager_aliases = use_signal(|| backend().manager_aliases());
     let mut target_aliases = use_signal(|| backend().target_aliases());
@@ -353,10 +389,10 @@ pub fn App() -> Element {
                 push_activity(activity_log, "Controller node failed to start.");
                 return;
             }
-            let mut auto_probed = HashSet::<String>::new();
             let version_inflight =
                 std::sync::Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
             loop {
+                backend.advance_target_monitors();
                 let _ = backend.advance_clone().await;
                 if let Ok(view) = backend.identity_clone() {
                     if clone_view() != Some(view.clone()) {
@@ -388,7 +424,7 @@ pub fn App() -> Element {
                     Ok(items) => {
                         interfaces_by_target
                             .write()
-                            .insert(CONTROLLER_SCOPE.to_string(), LoadedInterfaces::Ready(items));
+                            .insert(CONTROLLER_SCOPE.to_string(), LoadedInterfaces::ready(items));
                     }
                     Err(error) => {
                         interfaces_by_target.write().insert(
@@ -417,27 +453,13 @@ pub fn App() -> Element {
                             .write()
                             .retain(|id, _| id == CONTROLLER_SCOPE || live_ids.contains(id));
                         expanded_targets.write().retain(|id| live_ids.contains(id));
-                        auto_probed.retain(|id| live_ids.contains(id));
                         if let Ok(mut inflight) = version_inflight.lock() {
                             inflight.retain(|id| live_ids.contains(id));
                         }
                         for item in &items {
                             if item.status == TargetStatus::AwaitingPairing
-                                || item.path.is_some()
-                                || !auto_probed.insert(item.id.clone())
-                            {
-                                continue;
-                            }
-                            let backend = backend.clone();
-                            let id = item.id.clone();
-                            spawn(async move {
-                                let _ = backend.probe_target(&id).await;
-                            });
-                        }
-                        for item in &items {
-                            if item.status == TargetStatus::AwaitingPairing
                                 || item.build_version.is_some()
-                                || (item.path.is_none() && item.status != TargetStatus::Online)
+                                || !backend.is_monitoring_target(&item.id)
                             {
                                 continue;
                             }
@@ -664,7 +686,9 @@ pub fn App() -> Element {
                         div { class: "section-intro",
                             p { class: "lead", "Expand a node to configure it, or expand an awaiting pairing announcement to complete the pairing." }
                             if nodes_info() {
-                                p { class: "note info-note", "to come" }
+                                p { class: "note info-note",
+                                    "Manual pairing: start this Controller first so it is already listening on a shared transport (BLE is on by default; enable USB, Auto Wi-Fi, or TCP in Settings if needed). Then open pairing on the target — each open mints a new invitation, so older codes will not work. On an OLED Hopspot use Global menu → Pair remote and note the eight hex digits. On MeshTower long-press the button; the LED blinks the invitation (0 is a long flash; 1–F are that many short flashes). For prnsd run pairing open. Expand the newest Awaiting pairing row here, enter that code, and Continue. Compare the six confirmation digits (not the invitation), then Approve on both sides in either order within about two minutes — OLED Approve on screen; MeshTower short-press approves and long-press rejects while the LED double-pulses; prnsd uses pairing approve. After pairing, expand the target and press Connect when you want inventory. If this app was not running when the target opened pairing, reopen pairing on the target. Use the newest awaiting row after a failed Continue; a wrong invitation fails silently. Enrolled Flash from this Controller already writes the grant, so those boards skip the invitation."
+                                }
                             }
                         }
                         if targets().is_empty() {
@@ -732,15 +756,6 @@ pub fn App() -> Element {
                                                             }
                                                             return;
                                                         }
-                                                        if opening && !pairing_in_progress(&pairing()) {
-                                                            load_interfaces_for_target(
-                                                                backend(),
-                                                                target_id.clone(),
-                                                                interfaces_by_target,
-                                                                false,
-                                                                RemoteControlAnnounceWait::UntilHeard,
-                                                            );
-                                                        }
                                                     }
                                                 },
                                                 span { class: if expanded { "twisty open" } else { "twisty" } }
@@ -774,6 +789,7 @@ pub fn App() -> Element {
                                                                             target_id.clone(),
                                                                             backend(),
                                                                             target_aliases,
+                                                                            peer_aliases,
                                                                             activity_log,
                                                                         );
                                                                     }
@@ -786,6 +802,7 @@ pub fn App() -> Element {
                                                                                 target_id.clone(),
                                                                                 backend(),
                                                                                 target_aliases,
+                                                                                peer_aliases,
                                                                                 activity_log,
                                                                             );
                                                                         }
@@ -797,6 +814,7 @@ pub fn App() -> Element {
                                                     if !awaiting && cfg!(feature = "mobile") {
                                                         ControllerTargetActions {
                                                             target_id: target.id.clone(),
+                                                            monitor_remaining_secs: target.monitor_remaining_secs,
                                                             backend,
                                                             activity_log,
                                                             target_aliases,
@@ -854,6 +872,7 @@ pub fn App() -> Element {
                                                     if !awaiting && cfg!(not(feature = "mobile")) {
                                                         ControllerTargetActions {
                                                             target_id: target.id.clone(),
+                                                            monitor_remaining_secs: target.monitor_remaining_secs,
                                                             backend,
                                                             activity_log,
                                                             target_aliases,
@@ -892,33 +911,54 @@ pub fn App() -> Element {
                                                             p { class: "note", "A pairing attempt is already in progress on another target." }
                                                         }
                                                     } else {
-                                                        TargetControls {
-                                                            target_id: target.id.clone(),
-                                                            status: target.status,
-                                                            backend,
-                                                            activity_log,
-                                                            targets,
-                                                        }
-                                                        InterfaceAccordion {
-                                                            host: InterfaceHost::Target(target.id.clone()),
-                                                            loaded: interfaces_by_target()
+                                                        {
+                                                            let loaded = interfaces_by_target()
                                                                 .get(&target.id)
                                                                 .cloned()
-                                                                .unwrap_or(LoadedInterfaces::Loading),
-                                                            expanded_interfaces,
-                                                            drafts,
-                                                            editing,
-                                                            saving,
-                                                            save_notices,
-                                                            focused_interface,
-                                                            unsaved,
-                                                            expanded_targets,
-                                                            screen,
-                                                            interfaces_by_target,
-                                                            backend,
-                                                            activity_log,
-                                                            peer_aliases,
-                                                            pairing,
+                                                                .unwrap_or(LoadedInterfaces::Idle);
+                                                            let arrived_at = match &loaded {
+                                                                LoadedInterfaces::Ready {
+                                                                    arrived_at,
+                                                                    ..
+                                                                } => Some(arrived_at.clone()),
+                                                                LoadedInterfaces::Idle
+                                                                | LoadedInterfaces::Loading
+                                                                | LoadedInterfaces::Failed(_) => {
+                                                                    None
+                                                                }
+                                                            };
+                                                            rsx! {
+                                                                div { class: "interface-list-head",
+                                                                    TargetControls {
+                                                                        target_id: target.id.clone(),
+                                                                        status: target.status,
+                                                                        backend,
+                                                                        activity_log,
+                                                                        targets,
+                                                                    }
+                                                                    if let Some(arrived_at) = arrived_at {
+                                                                        p { class: "interface-as-of", "as of {arrived_at}" }
+                                                                    }
+                                                                }
+                                                                InterfaceAccordion {
+                                                                    host: InterfaceHost::Target(target.id.clone()),
+                                                                    loaded,
+                                                                    expanded_interfaces,
+                                                                    drafts,
+                                                                    editing,
+                                                                    saving,
+                                                                    save_notices,
+                                                                    focused_interface,
+                                                                    unsaved,
+                                                                    expanded_targets,
+                                                                    screen,
+                                                                    interfaces_by_target,
+                                                                    backend,
+                                                                    activity_log,
+                                                                    peer_aliases,
+                                                                    pairing,
+                                                                }
+                                                            }
                                                         }
                                                         hr { class: "whitelist-rule" }
                                                         NodeManagementWhitelist {
@@ -988,6 +1028,7 @@ fn ManagedTargetFacts(target: TargetAccess) -> Element {
 #[component]
 fn ControllerTargetActions(
     target_id: String,
+    monitor_remaining_secs: u32,
     backend: Signal<RemoteControlBackend>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
     mut target_aliases: Signal<HashMap<String, String>>,
@@ -1008,24 +1049,28 @@ fn ControllerTargetActions(
                     let target = target.clone();
                     let backend = backend();
                     spawn(async move {
-                        match backend.probe_target(&target).await {
-                            Ok(_) => {
-                                if !pairing_in_progress(&pairing()) {
-                                    load_interfaces_for_target(
-                                        backend,
-                                        target,
-                                        interfaces_by_target,
-                                        true,
-                                        RemoteControlAnnounceWait::UntilHeard,
-                                    );
-                                }
+                        match backend.probe_target(&target, PathProbeReason::OperatorConnect).await {
+                            Ok(_) => {}
+                            Err(error) => {
+                                push_activity(
+                                    activity_log,
+                                    format!("Connect dropped the hop; waiting for a dest announce. {error}"),
+                                );
                             }
-                            Err(_) => {}
+                        }
+                        if !pairing_in_progress(&pairing()) {
+                            load_interfaces_for_target(
+                                backend,
+                                target,
+                                interfaces_by_target,
+                                true,
+                                RemoteControlAnnounceWait::UntilRefreshed,
+                            );
                         }
                     });
                 }
             },
-            "Find path"
+            "{format_connect_label(monitor_remaining_secs)}"
         }
         if forget_prompt() == ForgetPrompt::Confirming {
             button {
@@ -1645,6 +1690,9 @@ fn InterfaceAccordion(
 ) -> Element {
     let scope = host.scope_id().to_string();
     match loaded {
+        LoadedInterfaces::Idle => rsx! {
+            p { class: "note", "No interface inventory yet. Press Connect to refresh." }
+        },
         LoadedInterfaces::Loading => rsx! {
             p { class: "note", "Loading interfaces…" }
         },
@@ -1673,7 +1721,7 @@ fn InterfaceAccordion(
                 "Retry"
             }
         },
-        LoadedInterfaces::Ready(entries) if entries.is_empty() => rsx! {
+        LoadedInterfaces::Ready { entries, .. } if entries.is_empty() => rsx! {
             div { class: "heading-row",
                 p { class: "note",
                     if matches!(host, InterfaceHost::Controller) {
@@ -1698,7 +1746,7 @@ fn InterfaceAccordion(
                 }
             }
         },
-        LoadedInterfaces::Ready(entries) => rsx! {
+        LoadedInterfaces::Ready { entries, .. } => rsx! {
             div { class: "interface-list",
                 for entry in entries {
                     {
@@ -1753,6 +1801,9 @@ fn InterfaceAccordion(
                                     span { class: if expanded { "twisty open" } else { "twisty" }, aria_hidden: "true" }
                                     div { class: "twisty-copy",
                                         span { class: "twisty-title", "{entry.name}" }
+                                        if let Some(arrived_at) = entry.arrived_at.as_ref() {
+                                            span { class: "twisty-as-of", "as of {arrived_at}" }
+                                        }
                                         span { class: "twisty-address", "{address}" }
                                     }
                                     span { class: "status", {power_label(&entry.power)} }
@@ -1761,9 +1812,11 @@ fn InterfaceAccordion(
                                     label: format!("Refresh {}", entry.name),
                                     on_refresh: {
                                         let host = host.clone();
+                                        let interface_id = entry.id.clone();
                                         move |_| {
-                                            refresh_host_interfaces(
+                                            refresh_one_interface(
                                                 host.clone(),
+                                                interface_id.clone(),
                                                 backend(),
                                                 interfaces_by_target,
                                                 pairing(),
@@ -1919,7 +1972,9 @@ fn InterfaceAccordion(
                                                         if let Some(note) = bluetooth_auto_peer_list_note(&entry.kind) {
                                                             p { class: "note", "{note}" }
                                                         }
-                                                        if entry.peers.is_empty() {
+                                                        if let Some(error) = entry.peers_error.as_ref() {
+                                                            p { class: "note", "Could not load peers: {error}" }
+                                                        } else if entry.peers.is_empty() {
                                                             p { class: "note", "No peers on this interface." }
                                                         } else {
                                                             ul { class: "peer-list",
@@ -1975,20 +2030,6 @@ fn InterfaceAccordion(
                                                                                     },
                                                                                 }
                                                                             }
-                                                                            RefreshButton {
-                                                                                label: format!("Refresh {}", peer.name),
-                                                                                on_refresh: {
-                                                                                    let host = host.clone();
-                                                                                    move |_| {
-                                                                                        refresh_host_interfaces(
-                                                                                            host.clone(),
-                                                                                            backend(),
-                                                                                            interfaces_by_target,
-                                                                                            pairing(),
-                                                                                        );
-                                                                                    }
-                                                                                },
-                                                                            }
                                                                         }
                                                                         dl { class: "facts",
                                                                             div { dt { "Status" } dd { "{peer.connection}" } }
@@ -1997,6 +2038,12 @@ fn InterfaceAccordion(
                                                                                     class: if health.is_radio_only() { "health-warn" } else { "health-ok" },
                                                                                     dt { "Health" }
                                                                                     dd { "{health.label()}" }
+                                                                                }
+                                                                            }
+                                                                            if peer.details.is_applicable() {
+                                                                                div {
+                                                                                    dt { "Details" }
+                                                                                    dd { "{peer.details}" }
                                                                                 }
                                                                             }
                                                                             div { dt { "Path" } dd { "{peer.role}" } }
@@ -2810,6 +2857,65 @@ fn refresh_target_list(backend: RemoteControlBackend, mut targets: Signal<Vec<Ta
     });
 }
 
+fn refresh_one_interface(
+    host: InterfaceHost,
+    interface_id: String,
+    backend: RemoteControlBackend,
+    mut interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    pairing: PairingState,
+) {
+    match host {
+        InterfaceHost::Controller => {
+            if let Ok(entry) = backend.refresh_local_interface(&interface_id) {
+                replace_interface_entry(
+                    &mut interfaces_by_target,
+                    CONTROLLER_SCOPE,
+                    interface_id,
+                    entry,
+                );
+            }
+        }
+        InterfaceHost::Target(target_id) => {
+            if pairing_in_progress(&pairing) {
+                return;
+            }
+            if !backend.is_monitoring_target(&target_id) {
+                return;
+            }
+            spawn(async move {
+                if let Ok(entry) = backend
+                    .refresh_target_interface(&target_id, &interface_id)
+                    .await
+                {
+                    replace_interface_entry(
+                        &mut interfaces_by_target,
+                        &target_id,
+                        interface_id,
+                        entry,
+                    );
+                }
+            });
+        }
+    }
+}
+
+fn replace_interface_entry(
+    interfaces_by_target: &mut Signal<HashMap<String, LoadedInterfaces>>,
+    scope: &str,
+    interface_id: String,
+    entry: InterfaceEntry,
+) {
+    if let Some(items) = interfaces_by_target
+        .write()
+        .get_mut(scope)
+        .and_then(LoadedInterfaces::entries_mut)
+    {
+        if let Some(slot) = items.iter_mut().find(|item| item.id == interface_id) {
+            *slot = entry;
+        }
+    }
+}
+
 fn refresh_host_interfaces(
     host: InterfaceHost,
     backend: RemoteControlBackend,
@@ -2843,7 +2949,7 @@ fn load_controller_interfaces(
         Ok(items) => {
             interfaces_by_target
                 .write()
-                .insert(CONTROLLER_SCOPE.to_string(), LoadedInterfaces::Ready(items));
+                .insert(CONTROLLER_SCOPE.to_string(), LoadedInterfaces::ready(items));
         }
         Err(error) => {
             interfaces_by_target.write().insert(
@@ -2862,10 +2968,13 @@ fn load_interfaces_for_target(
     wait: RemoteControlAnnounceWait,
 ) {
     let current = interfaces_by_target().get(&target_id).cloned();
-    if matches!(current, Some(LoadedInterfaces::Loading)) {
+    if !force && matches!(current, Some(LoadedInterfaces::Loading)) {
         return;
     }
-    if !force && matches!(current, Some(LoadedInterfaces::Ready(_))) {
+    if !force && matches!(current, Some(LoadedInterfaces::Ready { .. })) {
+        return;
+    }
+    if !backend.is_monitoring_target(&target_id) {
         return;
     }
     if !backend.is_connected() {
@@ -2875,7 +2984,7 @@ fn load_interfaces_for_target(
         );
         return;
     }
-    if !matches!(current, Some(LoadedInterfaces::Ready(_))) {
+    if !matches!(current, Some(LoadedInterfaces::Ready { .. })) {
         interfaces_by_target
             .write()
             .insert(target_id.clone(), LoadedInterfaces::Loading);
@@ -2885,7 +2994,7 @@ fn load_interfaces_for_target(
             Ok(items) => {
                 interfaces_by_target
                     .write()
-                    .insert(target_id, LoadedInterfaces::Ready(items));
+                    .insert(target_id, LoadedInterfaces::ready(items));
             }
             Err(error) => {
                 interfaces_by_target.write().insert(
@@ -3914,7 +4023,11 @@ fn write_interface_entry(
     interface_id: &str,
     update: impl FnOnce(&mut InterfaceEntry),
 ) {
-    if let Some(LoadedInterfaces::Ready(items)) = interfaces_by_target.write().get_mut(scope) {
+    if let Some(items) = interfaces_by_target
+        .write()
+        .get_mut(scope)
+        .and_then(LoadedInterfaces::entries_mut)
+    {
         if let Some(item) = items.iter_mut().find(|item| item.id == interface_id) {
             update(item);
         }
@@ -3967,7 +4080,7 @@ fn saved_interfaces_by_key(
 ) -> HashMap<String, InterfaceEntry> {
     let mut saved = HashMap::new();
     for (scope, loaded) in loaded {
-        if let LoadedInterfaces::Ready(items) = loaded {
+        if let Some(items) = loaded.entries() {
             for item in items {
                 saved.insert(interface_key(scope, &item.id), item.clone());
             }
@@ -4052,6 +4165,7 @@ fn persist_target_alias(
     target_id: String,
     backend: RemoteControlBackend,
     mut target_aliases: Signal<HashMap<String, String>>,
+    mut peer_aliases: Signal<HashMap<String, String>>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
 ) {
     let label = backend
@@ -4082,6 +4196,7 @@ fn persist_target_alias(
     if backend.set_target_alias(&target_id, &stored).is_err() {
         return;
     }
+    peer_aliases.set(backend.peer_aliases());
     match next {
         Some(alias) => {
             target_aliases.write().insert(target_id, alias.clone());
@@ -4197,13 +4312,25 @@ fn persist_peer_alias(
     if backend.set_peer_alias(&peer_id, &stored).is_err() {
         return;
     }
-    match next {
+    // Clearing may restore a managed-node auto alias; refresh from backend.
+    peer_aliases.set(backend.peer_aliases());
+    match backend
+        .peer_aliases()
+        .get(&peer_id)
+        .cloned()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(alias) if next.is_none() => {
+            push_activity(
+                activity_log,
+                format!("Restored auto alias for {label} to {alias}."),
+            );
+        }
         Some(alias) => {
-            peer_aliases.write().insert(peer_id, alias.clone());
             push_activity(activity_log, format!("Set alias for {label} to {alias}."));
         }
         None => {
-            peer_aliases.write().remove(&peer_id);
             push_activity(activity_log, format!("Cleared alias for {label}."));
         }
     }
@@ -4345,7 +4472,7 @@ fn SiblingControllersPanel(
                             activity_log,
                         )}
                         h4 { "Adopt a sibling" }
-                        p { class: "note", "Adoption copies the Operator secret and the managed node information from this adopting Controller onto the other adoptee Controller. Does not copy Instance. Currently it works only over USB: stop BLE, Auto Wi-Fi, and TCP. Adoptee Controller initiates the process by pressing \"I am up for adoption\". The adopting Controller then presses \"Adopt\". Visually verify the six digit adoption code, then \"Approve\". Adoptee Controller must quit and reopen after adoption for the new Operator id to take effect." }
+                        p { class: "note", "Adoption copies the Operator secret, managed nodes, pairing names, aliases, and sibling pins from this adopting Controller onto the other adoptee Controller. Does not copy Instance. Currently it works only over USB: stop BLE, Auto Wi-Fi, and TCP. Adoptee Controller initiates the process by pressing \"I am up for adoption\". The adopting Controller then presses \"Adopt\". Visually verify the six digit adoption code, then \"Approve\". Adoptee Controller must quit and reopen after adoption for the new Operator id to take effect." }
                         {clone_identity_controls(clone, backend, adopt_alias, activity_log)}
                     }
                 }
@@ -4759,27 +4886,29 @@ fn toggle_interface_power(
     mut interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
 ) {
-    let next_power = match interfaces_by_target().get(&scope) {
-        Some(LoadedInterfaces::Ready(items)) => items
-            .iter()
-            .find(|item| item.id == interface_id)
-            .map(|item| match item.power {
-                InterfacePower::On => InterfacePower::Off,
-                InterfacePower::Off => InterfacePower::On,
-            }),
-        Some(_) | None => None,
-    };
+    let next_power = interfaces_by_target()
+        .get(&scope)
+        .and_then(LoadedInterfaces::entries)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.id == interface_id)
+                .map(|item| match item.power {
+                    InterfacePower::On => InterfacePower::Off,
+                    InterfacePower::Off => InterfacePower::On,
+                })
+        });
     let Some(next_power) = next_power else {
         return;
     };
     let name = interfaces_by_target()
         .get(&scope)
-        .and_then(|loaded| match loaded {
-            LoadedInterfaces::Ready(items) => items
+        .and_then(LoadedInterfaces::entries)
+        .and_then(|items| {
+            items
                 .iter()
                 .find(|item| item.id == interface_id)
-                .map(|item| item.name.clone()),
-            LoadedInterfaces::Loading | LoadedInterfaces::Failed(_) => None,
+                .map(|item| item.name.clone())
         })
         .unwrap_or_else(|| interface_id.clone());
     let host_label = match &host {
@@ -4799,8 +4928,10 @@ fn toggle_interface_power(
         };
         match result {
             Ok(()) => {
-                if let Some(LoadedInterfaces::Ready(items)) =
-                    interfaces_by_target.write().get_mut(&scope)
+                if let Some(items) = interfaces_by_target
+                    .write()
+                    .get_mut(&scope)
+                    .and_then(LoadedInterfaces::entries_mut)
                 {
                     items
                         .iter_mut()

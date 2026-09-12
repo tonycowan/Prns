@@ -15,7 +15,7 @@ use personal_hopspot_core as hopspot;
 use personal_rns::bluetooth_auto::{BluetoothAuto, BluetoothAutoStatus};
 use personal_rns::engine::{AnnounceAppData, AnnounceNow, AnnounceTarget, PrnsCommand};
 use personal_rns::interfaces::bluetooth_auto::{
-    BleIdentity, Endpoint, LinkCapabilities, Nrf52Host, BLE_HW_MTU,
+    BleIdentity, Endpoint, LinkCapabilities, Nrf52Host, Psm, BLE_HW_MTU,
 };
 use personal_rns::interfaces::lora::{AirtimePolicy, RadioProfile, DEFAULT_915_PROFILE};
 use personal_rns::interfaces::usb_auto::{WEBUSB_PRODUCT_ID, WEBUSB_VENDOR_ID};
@@ -536,7 +536,8 @@ pub async fn run(spawner: Spawner) -> ! {
                 identity,
                 Endpoint::Nrf52(Nrf52Host::Nrf52),
                 LinkCapabilities {
-                    l2cap: None,
+                    // CoC retest: advertise SoftDevice PSM so Opens(Nrf52) can Open to Mac.
+                    l2cap: Psm::new(crate::runtime::bluetooth_auto::L2CAP_PSM),
                     link_mtu: BLE_HW_MTU as u16,
                 },
                 crate::runtime::bluetooth_auto::local_discovery_group_tag(),

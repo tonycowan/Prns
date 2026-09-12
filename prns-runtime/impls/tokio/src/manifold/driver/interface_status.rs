@@ -4,7 +4,7 @@ use tokio::sync::watch;
 
 use crate::interfaces::{
     AirtimeUtilization, ConnectionState, FrameAccounting, FrameAccountingEvent, InterfaceId,
-    InterfaceStatus, RadioIndication, RecordsFrameAccounting, TransferRates,
+    InterfaceStatus, PeerDetails, RadioIndication, RecordsFrameAccounting, TransferRates,
 };
 
 #[derive(Clone)]
@@ -27,6 +27,8 @@ struct StatusCell {
     frames_undecodable: AtomicU64,
     frames_delivered: AtomicU64,
     radio: AtomicU64,
+    details_tag: AtomicU8,
+    details_payload: AtomicU8,
 }
 
 const AIRTIME_UNPUBLISHED: u32 = u32::MAX;
@@ -76,6 +78,8 @@ impl TokioInterfaceStatus {
                 frames_undecodable: AtomicU64::new(0),
                 frames_delivered: AtomicU64::new(0),
                 radio: AtomicU64::new(RADIO_UNPUBLISHED),
+                details_tag: AtomicU8::new(PeerDetails::NotApplicable.wire_tag()),
+                details_payload: AtomicU8::new(0),
             }),
         }
     }
@@ -161,6 +165,15 @@ impl TokioInterfaceStatus {
         self.inner
             .radio
             .store(u64::from_be_bytes(bytes), Ordering::Relaxed);
+    }
+
+    pub fn set_details(&self, details: PeerDetails) {
+        self.inner
+            .details_tag
+            .store(details.wire_tag(), Ordering::Relaxed);
+        self.inner
+            .details_payload
+            .store(details.wire_payload(), Ordering::Relaxed);
     }
 
     pub fn set_transfer_rates(&self, rates: TransferRates) {
@@ -252,6 +265,14 @@ impl InterfaceStatus for TokioInterfaceStatus {
             Some((indication, _)) => indication,
             None => RadioIndication::for_kind(self.inner.id.kind()),
         }
+    }
+
+    fn details(&self) -> PeerDetails {
+        PeerDetails::from_wire(
+            self.inner.details_tag.load(Ordering::Relaxed),
+            self.inner.details_payload.load(Ordering::Relaxed),
+        )
+        .unwrap_or(PeerDetails::NotApplicable)
     }
 }
 

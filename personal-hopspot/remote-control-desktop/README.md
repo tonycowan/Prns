@@ -96,11 +96,14 @@ that location with `HOPSPOT_RC_DATA_DIR`. Settings shows the Operator hash
    and so on. Settings → Sibling Controllers lists adopted installs by that
    alias. Configure slides in USB adopt: dest arms **Allow a sibling to
    replace me**, source presses **Share Operator**, both confirm the six
-   digits. Dest's Operator is replaced; Instance stays. Quit and reopen the
-   dest app after adopt. Sibling roster sync uses Instance after that and
-   copies pairing names, target aliases, manager aliases, sibling aliases
-   for other Instances, and non-USB peer aliases when both apps have heard
-   each other. This install's own sibling-alias row is local-only.
+   digits.    Dest's Operator is replaced; Instance stays. Quit and reopen the
+   dest app after adopt. The adopt snapshot includes pairing names, target
+   aliases, manager aliases, sibling aliases for other Instances, and
+   non-USB peer aliases. Later roster sync uses Instance and also pulls
+   those labels from pinned siblings on launch without waiting to hear
+   them. **Connect** claims that node for this install for ten minutes;
+   siblings mark it Offline, show Connect 00:00, and stop asking it for
+   status. This install's own sibling-alias row is local-only.
 
 ## Pair a target
 
@@ -159,9 +162,17 @@ the controller first so it is already listening. Heard announcements show up on
    Below the target
    address are
    two lines: last announce time in local time, then hop count and inbound path.
-   Stored targets come back Offline after a restart; the app announces this
+   Stored targets come back Offline after a restart from this install's
+   persist and roster replica; sibling roster deltas then correct the list.
+   The app announces this
    controller's operator destination and probes each target with a path
-   request, and **Find path** retries that. **Forget**
+   request. Nodes start unmonitored (**Connect 00:00**). **Connect**
+   drops the stored hop so routing can hear a fresh dest announce, starts
+   a ten-minute monitor, and tells sibling Controllers to show
+   Connect 00:00 and stop asking that node for status. Pressing Connect
+   again resets the timer. The interface list then waits for that announce.
+   Expanding a target shows the last interface inventory from Connect;
+   it does not fetch. **Forget**
    drops the stored pairing from this controller.
 
 If you opened pairing before starting the app, open it again (or close and

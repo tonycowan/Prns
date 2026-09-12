@@ -281,6 +281,7 @@ fn build_snapshots(
             transported_links: counts.transported_links,
             membership: *membership,
             radio: status.radio(),
+            details: status.details(),
         });
     }
     snapshots

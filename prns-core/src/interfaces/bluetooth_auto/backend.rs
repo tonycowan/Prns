@@ -129,6 +129,11 @@ pub trait BleLink {
 
     async fn upgrade(&mut self, plan: &L2capPlan) -> Result<(), Self::Error>;
 
+    /// Bind a host callback that learns GATT vs CoC after `upgrade` / `into_data` settle.
+    /// Default is a no-op; CoreBluetooth uses this because CoC attaches asynchronously.
+    #[cfg(feature = "tokio-host")]
+    fn bind_details_notify(&mut self, _notify: crate::interfaces::PeerDetailsNotify) {}
+
     fn into_data(self) -> (Self::Source, Self::Sink);
 }
 

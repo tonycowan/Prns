@@ -156,6 +156,20 @@ fn decode_endpoint(bytes: &[u8]) -> Option<Endpoint> {
     })
 }
 
+impl Endpoint {
+    /// Stack byte published in a v6 manufacturer payload (`host` assumed 0).
+    pub fn advertisement_type_byte(self) -> u8 {
+        endpoint_bytes(self)[0]
+    }
+
+    /// Reconstruct an endpoint from a v6 advertisement type byte.
+    ///
+    /// Host is 0 (`MacOs`, `Linux`, `Android`, …). iOS/iPadOS are not encoded yet.
+    pub fn from_advertisement_type_byte(byte: u8) -> Option<Self> {
+        decode_endpoint(&[byte, 0])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkCapabilities {
     pub l2cap: Option<Psm>,
@@ -232,6 +246,9 @@ fn known_arrangement(a: Endpoint, b: Endpoint) -> Option<L2capArrangement> {
     match (a, b) {
         (CoreBluetooth(MacOs), BlueZ(host)) => Some(L2capArrangement::Opens(BlueZ(host))),
         (CoreBluetooth(MacOs), Android(host)) => Some(L2capArrangement::Opens(Android(host))),
+        // Mac is acceptor-only for CoC. Embedded dual-role peers must dial and open.
+        (CoreBluetooth(MacOs), Esp32(host)) => Some(L2capArrangement::Opens(Esp32(host))),
+        (CoreBluetooth(MacOs), Nrf52(host)) => Some(L2capArrangement::Opens(Nrf52(host))),
         (CoreBluetooth(Ios | IpadOs), Android(_)) => Some(L2capArrangement::Opens(a)),
         (BlueZ(_), Android(_)) => Some(L2capArrangement::EitherOpens),
         (BlueZ(_), Nrf52(_)) => Some(L2capArrangement::EitherOpens),

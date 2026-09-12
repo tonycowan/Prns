@@ -22,7 +22,7 @@ use prns_core::interfaces::bluetooth_auto::{
     RadioMode, ScanningMode,
 };
 use prns_core::interfaces::{
-    BitrateBps, ConnectionState, InterfaceId, InterfaceKind, InterfaceStatus,
+    BitrateBps, ConnectionState, InterfaceId, InterfaceKind, InterfaceStatus, PeerDetails,
 };
 use prns_runtime::manifold::grant::FrameTarget;
 use prns_runtime::runtime::{EmbassyFleet as Fleet, OutboundFrame};
@@ -93,35 +93,44 @@ impl BluetoothRecoveryReason {
 
 pub struct BluetoothMemberStatus {
     id: CriticalSectionMutex<Cell<InterfaceId>>,
+    address: CriticalSectionMutex<Cell<[u8; 6]>>,
     connection: AtomicU8,
     rx: AtomicU64,
     tx: AtomicU64,
     active: AtomicBool,
+    details_tag: AtomicU8,
+    details_payload: AtomicU8,
 }
 
 impl BluetoothMemberStatus {
     const fn new() -> Self {
         Self {
             id: CriticalSectionMutex::new(Cell::new(InterfaceId::new([0u8; 8]))),
+            address: CriticalSectionMutex::new(Cell::new([0u8; 6])),
             connection: AtomicU8::new(ConnectionState::Disconnected.as_u8()),
             rx: AtomicU64::new(0),
             tx: AtomicU64::new(0),
             active: AtomicBool::new(false),
+            details_tag: AtomicU8::new(PeerDetails::NotApplicable.wire_tag()),
+            details_payload: AtomicU8::new(0),
         }
     }
 
-    fn assign(&self, id: InterfaceId) {
+    fn assign(&self, id: InterfaceId, address: BleAddress) {
         self.id.lock(|cell| cell.set(id));
+        self.address.lock(|cell| cell.set(*address.octets()));
         self.connection
             .store(ConnectionState::Connected.as_u8(), Ordering::Relaxed);
         self.rx.store(0, Ordering::Relaxed);
         self.tx.store(0, Ordering::Relaxed);
+        self.set_details(PeerDetails::Unknown);
         self.active.store(true, Ordering::Relaxed);
     }
 
     fn retire(&self) {
         self.connection
             .store(ConnectionState::Disconnected.as_u8(), Ordering::Relaxed);
+        self.set_details(PeerDetails::NotApplicable);
         self.active.store(false, Ordering::Relaxed);
     }
 
@@ -131,6 +140,17 @@ impl BluetoothMemberStatus {
 
     fn add_tx(&self, bytes: u64) {
         self.tx.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn set_details(&self, details: PeerDetails) {
+        self.details_tag
+            .store(details.wire_tag(), Ordering::Relaxed);
+        self.details_payload
+            .store(details.wire_payload(), Ordering::Relaxed);
+    }
+
+    fn peer_address(&self) -> [u8; 6] {
+        self.address.lock(|cell| cell.get())
     }
 }
 
@@ -149,6 +169,14 @@ impl InterfaceStatus for BluetoothMemberStatus {
 
     fn tx_bytes(&self) -> u64 {
         self.tx.load(Ordering::Relaxed)
+    }
+
+    fn details(&self) -> PeerDetails {
+        PeerDetails::from_wire(
+            self.details_tag.load(Ordering::Relaxed),
+            self.details_payload.load(Ordering::Relaxed),
+        )
+        .unwrap_or(PeerDetails::NotApplicable)
     }
 }
 
@@ -440,6 +468,15 @@ impl<const MEMBERS: usize> BluetoothAutoStatus<MEMBERS> {
             .members
             .iter()
             .filter(|member| member.active.load(Ordering::Relaxed))
+    }
+
+    pub fn set_details_for_address(&self, address: [u8; 6], details: PeerDetails) {
+        for member in self.members() {
+            if member.peer_address() == address {
+                member.set_details(details);
+                return;
+            }
+        }
     }
 }
 
@@ -1599,7 +1636,6 @@ async fn apply_settled<
                     if !matches!(lane, L2capPlan::None) {
                         let _ = link.upgrade(&lane).await;
                     }
-                    let (source, sink) = link.into_data();
                     let id = InterfaceId::from_channel_tag(
                         InterfaceKind::BluetoothPeer,
                         identity.as_bytes(),
@@ -1607,7 +1643,14 @@ async fn apply_settled<
                     fleet
                         .register_member(contract::descriptor(id, bitrate))
                         .await;
-                    status.member(slot).assign(id);
+                    status.member(slot).assign(id, address);
+                    match lane {
+                        L2capPlan::None => status.member(slot).set_details(PeerDetails::BleGatt),
+                        L2capPlan::Accept | L2capPlan::Open { .. } => {
+                            status.member(slot).set_details(PeerDetails::Unknown);
+                        }
+                    }
+                    let (source, sink) = link.into_data();
                     status.republish_peer_count();
                     status.note_settled_link();
                     members[slot] = Some(Active {
@@ -1951,7 +1994,10 @@ mod tests {
             )
         );
 
-        status.member(0).assign(InterfaceId::new([11; 8]));
+        status.member(0).assign(
+            InterfaceId::new([11; 8]),
+            BleAddress::new([1, 2, 3, 4, 5, 6]),
+        );
         status.republish_peer_count();
         assert_eq!(status.connection(), ConnectionState::Connected);
         assert_eq!(status.failure_reason(), Some(SETUP_FAILURE_REASON));
@@ -1983,7 +2029,10 @@ mod tests {
         status.republish_peer_count();
         assert_eq!(status.connection(), ConnectionState::Reconnecting);
 
-        status.member(1).assign(InterfaceId::new([12; 8]));
+        status.member(1).assign(
+            InterfaceId::new([12; 8]),
+            BleAddress::new([2, 3, 4, 5, 6, 7]),
+        );
         status.republish_peer_count();
         status.note_settled_link();
         assert_eq!(

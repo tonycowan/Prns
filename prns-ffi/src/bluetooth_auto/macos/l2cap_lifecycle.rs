@@ -6,6 +6,7 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use prns_core::interfaces::bluetooth_auto::{
     encode_stream_frame, Fragment, Reassembler, StreamDeframer, BLE_HW_MTU,
 };
+use prns_core::interfaces::{PeerDetails, PeerDetailsNotify};
 
 use super::data_plane::{flush, DataPlane, Outbound, PumpHandle, PumpPtr, L2CAP_SDU_LEN};
 use super::gatt_link::GattInboundReceiver;
@@ -44,6 +45,8 @@ pub(super) fn start(
     l2cap_pending: Option<oneshot::Receiver<DataPlane>>,
     frames: tokio_mpsc::Sender<Box<[u8]>>,
     failure_policy: FailurePolicy,
+    peer: [u8; 6],
+    details: Option<PeerDetailsNotify>,
 ) -> Option<PendingLane> {
     let gatt_merge = gatt_inbound.map(|inbound| spawn_gatt_merge(inbound, frames.clone()));
     match l2cap_pending {
@@ -52,8 +55,13 @@ pub(super) fn start(
             frames,
             gatt_merge,
             failure_policy,
+            peer,
+            details,
         )),
         None => {
+            if let Some(details) = details {
+                details.publish(PeerDetails::BleGatt);
+            }
             // Dropping a Tokio JoinHandle detaches the GATT floor task; the task remains owned by
             // the merged source channel until that source closes.
             drop(gatt_merge);
@@ -101,6 +109,8 @@ fn spawn_l2cap_lane(
     frames: tokio_mpsc::Sender<Box<[u8]>>,
     gatt_merge: Option<tokio::task::JoinHandle<()>>,
     failure_policy: FailurePolicy,
+    peer: [u8; 6],
+    details: Option<PeerDetailsNotify>,
 ) -> PendingLane {
     let (write_tx, write_ready) = oneshot::channel::<WriteHalf>();
     let (end_action, link_end) = match failure_policy {
@@ -112,11 +122,24 @@ fn spawn_l2cap_lane(
     };
     tokio::spawn(async move {
         let Ok(data) = pending.await else {
+            let line = format!(
+                "bluetooth: {peer:02x?} L2CAP acceptor pending dropped before a channel arrived"
+            );
+            crate::diagnostic_log::info!("{line}");
+            eprintln!("{line}");
+            if let Some(details) = &details {
+                details.publish(PeerDetails::BleGatt);
+            }
             return;
         };
-        crate::diagnostic_log::debug!(
-            "bluetooth: L2CAP fast lane up — data now rides the channel, GATT stays the floor"
+        let line = format!(
+            "bluetooth: {peer:02x?} L2CAP fast lane up — data rides CoC; GATT stays available as floor"
         );
+        crate::diagnostic_log::info!("{line}");
+        eprintln!("{line}");
+        if let Some(details) = &details {
+            details.publish(PeerDetails::BleCoc);
+        }
         let DataPlane {
             mut inbound_rx,
             outbound,
@@ -133,11 +156,20 @@ fn spawn_l2cap_lane(
         let _read_pump = pump;
         let mut deframer = StreamDeframer::<{ 2 * L2CAP_SDU_LEN }>::new();
         let mut frame = std::vec![0u8; 2 * L2CAP_SDU_LEN];
+        let mut first_frame = true;
         'read: while let Some(chunk) = inbound_rx.recv().await {
             if !deframer.absorb(&chunk) {
                 break;
             }
             while let Some(len) = deframer.next_frame(&mut frame) {
+                if first_frame {
+                    let line = format!(
+                        "bluetooth: {peer:02x?} L2CAP first inbound frame {len}B"
+                    );
+                    crate::diagnostic_log::info!("{line}");
+                    eprintln!("{line}");
+                    first_frame = false;
+                }
                 if frames.send(Box::from(&frame[..len])).await.is_err() {
                     break 'read;
                 }
@@ -147,18 +179,25 @@ fn spawn_l2cap_lane(
             EndAction::RetainGattFloor => {
                 // The detached task continues to own the central-role GATT receive floor.
                 drop(gatt_merge);
-                crate::diagnostic_log::debug!(
-                    "bluetooth: L2CAP reader exited — central-role link retains its GATT floor"
+                let line = format!(
+                    "bluetooth: {peer:02x?} L2CAP reader exited — central-role link retains GATT floor"
                 );
+                crate::diagnostic_log::info!("{line}");
+                eprintln!("{line}");
+                if let Some(details) = &details {
+                    details.publish(PeerDetails::BleGatt);
+                }
             }
             EndAction::EndLink(end_tx) => {
                 // Release the authoritative session's GATT receiver before the link owner observes
                 // closure. Its existing close path can then distinguish this session from a newer
                 // session for the same peer address without a second identity mechanism.
                 stop_gatt_merge(gatt_merge).await;
-                crate::diagnostic_log::warn!(
-                    "bluetooth: L2CAP reader exited — inbound link teardown starting"
+                let line = format!(
+                    "bluetooth: {peer:02x?} L2CAP reader exited — inbound link teardown starting"
                 );
+                crate::diagnostic_log::warn!("{line}");
+                eprintln!("{line}");
                 let _ = end_tx.send(DataPlaneEnd::Terminated);
             }
         }

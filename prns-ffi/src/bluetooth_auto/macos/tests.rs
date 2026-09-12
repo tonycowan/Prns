@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use objc2_core_bluetooth::CBCharacteristicProperties;
 use prns_core::interfaces::bluetooth_auto::{
     default_group_tag, dial_key_from_identity, group_tag, manufacturer_role_payload,
-    AdvertisingMode, BleAddress, BleBackend, BleIdentity, BleRoleCapabilities, Control,
-    ScanningMode,
+    manufacturer_role_payload_with_node_type, AdvertisingMode, AndroidHost, BleAddress, BleBackend,
+    BleIdentity, BleRoleCapabilities, Control, Endpoint, Esp32Host, ScanningMode,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -14,10 +14,10 @@ use super::backend::{
 };
 use super::central::CentralPeerSession;
 use super::discovery::{
-    candidate_strength, dial_sighting_action, discover_disposition, CandidateStrength,
-    DialSightingAction, DiscoverDisposition, DiscoveryGuard, LegacyDualRolePolicy,
-    ManufacturerPresence, PeripheralLinkState, SessionPresence, StaleCancellation,
-    StaleLinkRecovery,
+    candidate_strength, dial_sighting_action, discover_disposition, discover_sighting_action,
+    CandidateStrength, DialSightingAction, DiscoverDisposition, DiscoveryGuard,
+    LegacyDualRolePolicy, ManufacturerPresence, PeripheralLinkState, SessionPresence,
+    StaleCancellation, StaleLinkRecovery,
 };
 use super::gatt_link::{
     gatt_inbound_channel, gatt_inbound_channel_with_budget, GattInboundSendError,
@@ -340,6 +340,56 @@ fn dial_sighting_elects_on_shared_dial_key() {
         DialSightingAction::Dial
     );
     let _ = BleAddress::new([0; 6]);
+}
+
+#[test]
+fn v6_esp32_type_keeps_mac_from_dialing() {
+    let payload = manufacturer_role_payload_with_node_type(
+        Endpoint::Esp32(Esp32Host::Esp32),
+        default_group_tag(),
+    );
+    let mut mfg = [0u8; 8];
+    mfg[0] = 0xff;
+    mfg[1] = 0xff;
+    mfg[2..].copy_from_slice(&payload);
+    assert_eq!(
+        discover_sighting_action(Some(&mfg)),
+        DialSightingAction::Accept
+    );
+}
+
+#[test]
+fn v6_android_type_keeps_mac_from_dialing() {
+    let payload = manufacturer_role_payload_with_node_type(
+        Endpoint::Android(AndroidHost::Android),
+        default_group_tag(),
+    );
+    let mut mfg = [0u8; 8];
+    mfg[0] = 0xff;
+    mfg[1] = 0xff;
+    mfg[2..].copy_from_slice(&payload);
+    assert_eq!(
+        discover_sighting_action(Some(&mfg)),
+        DialSightingAction::Accept
+    );
+}
+
+#[test]
+fn v4_board_without_type_still_fail_opens_dial() {
+    let payload = manufacturer_role_payload(BleRoleCapabilities::DualRole, default_group_tag());
+    let mut mfg = [0u8; 8];
+    mfg[0] = 0xff;
+    mfg[1] = 0xff;
+    mfg[2..].copy_from_slice(&payload);
+    assert_eq!(
+        discover_sighting_action(Some(&mfg)),
+        DialSightingAction::Dial
+    );
+    assert_eq!(
+        discover_sighting_action(None),
+        DialSightingAction::Accept,
+        "implied Mac vs Mac is GattOnly, then C′ Accepts"
+    );
 }
 
 #[test]

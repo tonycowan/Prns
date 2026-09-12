@@ -1601,24 +1601,16 @@ class BleLink(private val context: Context) {
             .setConnectable(true)
             .setTimeout(0)
             .build()
-        val identity = localBleIdentity()
-        val manufacturer = ByteArray(if (identity != null && identity.size >= 6) 12 else 6)
-        manufacturer[0] = if (identity != null && identity.size >= 6) {
-            PRNS_ROLE_VERSION_WITH_DIAL_KEY
-        } else {
-            PRNS_ROLE_VERSION
-        }
-        manufacturer[1] = PRNS_ROLE_DUAL_MODE
-        manufacturer[2] = tag[0]
-        manufacturer[3] = tag[1]
-        manufacturer[4] = tag[2]
-        manufacturer[5] = tag[3]
-        if (identity != null && identity.size >= 6) {
-            System.arraycopy(identity, 0, manufacturer, 6, 6)
-        }
-        // Keep the 128-bit service UUID alone in the primary ADV — packing it with a
-        // 12-byte dial-key manufacturer payload overflows classic 31-byte ADV
-        // (ADVERTISE_FAILED_DATA_TOO_LARGE / code 1) and leaves the phone silent.
+        val manufacturer = byteArrayOf(
+            PRNS_ROLE_VERSION_WITH_NODE_TYPE,
+            PRNS_NODE_TYPE_ANDROID,
+            tag[0],
+            tag[1],
+            tag[2],
+            tag[3],
+        )
+        // v6 is the same size as v4, but keep manufacturer in SCAN_RSP so a 128-bit
+        // UUID primary cannot overflow the way the retired 12-byte v5 payload did.
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(ParcelUuid(PRNS_SERVICE))
@@ -1725,6 +1717,7 @@ class BleLink(private val context: Context) {
         if (isEmptyGattSuppressed(peerMac)) {
             return false
         }
+        typedDialOverride(capabilities)?.let { return it }
         if (capabilities != null &&
             capabilities.size >= 2 &&
             capabilities[0] >= PRNS_ROLE_VERSION_MIN &&
@@ -1791,6 +1784,19 @@ class BleLink(private val context: Context) {
     private fun clearEmptyGattBackoff(address: String) {
         emptyGattMisses.remove(address)
         emptyGattSuppressedUntil.remove(address)
+    }
+
+    private fun typedDialOverride(capabilities: ByteArray?): Boolean? {
+        val payload = capabilities ?: ByteArray(0)
+        val direct = ByteBuffer.allocateDirect(payload.size)
+        if (payload.isNotEmpty()) {
+            direct.put(payload)
+        }
+        return when (NativeBridge.nativeBleTypedDialAction(direct)) {
+            1 -> true
+            0 -> false
+            else -> null
+        }
     }
 
     private fun matchesLocalDiscoveryGroup(capabilities: ByteArray?): Boolean {
@@ -1923,8 +1929,12 @@ class BleLink(private val context: Context) {
         private const val PRNS_ROLE_VERSION_MIN: Byte = 0x03
         /** Advertised manufacturer payload version that includes a discovery group tag. */
         private const val PRNS_ROLE_VERSION: Byte = 0x04
-        /** Manufacturer payload that also carries a 6-byte dial-election key. */
+        /** Retired 6-byte dial-key payload. No field installations; parse only. */
         private const val PRNS_ROLE_VERSION_WITH_DIAL_KEY: Byte = 0x05
+        /** Node type plus group. Mixed fleet is v4 + v6. */
+        private const val PRNS_ROLE_VERSION_WITH_NODE_TYPE: Byte = 0x06
+        /** `Endpoint::Android` stack byte. */
+        private const val PRNS_NODE_TYPE_ANDROID: Byte = 0x03
         private const val PRNS_ROLE_DUAL_MODE: Byte = 0x00
         private const val PRNS_ROLE_PERIPHERAL_ONLY: Byte = 0x01
         /** BA-SIM-02 / option C′: suppress dials after this many empty-GATT misses. */

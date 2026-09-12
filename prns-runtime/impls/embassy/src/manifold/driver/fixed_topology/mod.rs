@@ -21,6 +21,7 @@ use super::egress::{
     flush_due_pacers, ifac_for, route_reaction, soonest_pacer_release, EmbassyEgress,
     InterfacePacer, MAX_PACED_INTERFACES,
 };
+use super::ingest_trace::log_ingest_ignore;
 use super::inline_work::{
     fulfill_owed_work_inline, route_and_capture_owed_work, InlineOwedWorkQueue,
 };
@@ -210,6 +211,8 @@ async fn run_inner<S, H, M, P, A, Store, const NOTIFY: usize, const COMMANDS: us
                         });
                         retain_packet_phy(store, &mut packet, packet_phy);
                         let mut owed_work = InlineOwedWorkQueue::new();
+                        let inbound_context = packet.wire_context();
+                        let inbound_len = packet.payload_len();
                         let report = engine.ingest_classified_into_report(
                             packet,
                             IngestIo {
@@ -244,6 +247,9 @@ async fn run_inner<S, H, M, P, A, Store, const NOTIFY: usize, const COMMANDS: us
                             &mut should_prove,
                             &mut on_journaled,
                         );
+                        if let Some(reason) = report.ignore_reason {
+                            log_ingest_ignore(reason, inbound_context, source, inbound_len);
+                        }
                         account_protocol_violation(
                             frame_accounting_statuses,
                             source,

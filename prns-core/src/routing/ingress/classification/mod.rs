@@ -126,6 +126,32 @@ impl<'a> ClassifiedInboundPacket<'a> {
         matches!(self.ingress, Ingress::Malformed)
     }
 
+    #[must_use]
+    pub fn source_interface(&self) -> InterfaceId {
+        self.source_interface
+    }
+
+    #[must_use]
+    pub fn wire_context(&self) -> Option<WireContext> {
+        match &self.ingress {
+            Ingress::Announce { header, .. } => Some(header.context),
+            Ingress::Data { data, .. } => Some(data.header.context),
+            Ingress::LinkRequest { header, .. } => Some(header.context),
+            Ingress::Proof { context, .. } => Some(*context),
+            Ingress::Malformed | Ingress::IfacRefused => None,
+        }
+    }
+
+    #[must_use]
+    pub fn payload_len(&self) -> usize {
+        match &self.ingress {
+            Ingress::Announce { payload, .. } => payload.len(),
+            Ingress::Data { data, .. } => data.payload.len(),
+            Ingress::LinkRequest { payload, .. } | Ingress::Proof { payload, .. } => payload.len(),
+            Ingress::Malformed | Ingress::IfacRefused => 0,
+        }
+    }
+
     pub(crate) fn into_parts(self) -> (InterfaceId, Ingress<'a>) {
         (self.source_interface, self.ingress)
     }

@@ -23,16 +23,17 @@ use trouble_host::att::{AttClient, AttReq};
 use trouble_host::prelude::*;
 
 use prns_core::interfaces::bluetooth_auto::{
-    columba_connection_role, columba_role_capabilities, contains_service, discovery_groups_match,
-    encode_stream_frame, fragments_of, BleAddress, BleIdentity, BleRoleCapabilities,
-    ColumbaConnectionRole, Control, Fragment, L2capPlan, PeerProtocol, Reassembler, BLE_HW_MTU,
-    BLE_SERVICE_UUID_BYTES, CONTROL_MAX_LEN, DEFAULT_GROUP_TAG, FRAGMENT_HEADER_LEN,
-    STREAM_FRAME_PREFIX_LEN,
+    advertised_or_implied_node_type, advertised_role_view, discovery_groups_match,
+    embedded_scan_dial_action, encode_stream_frame, fragments_of, BleAddress, BleIdentity, Control,
+    DialSightingAction, Endpoint, Esp32Host, Fragment, L2capPlan, ManufacturerPresence,
+    PeerProtocol, Reassembler, StreamDeframer, BLE_HW_MTU, BLE_SERVICE_UUID_BYTES, CONTROL_MAX_LEN,
+    DEFAULT_GROUP_TAG, FRAGMENT_HEADER_LEN, STREAM_FRAME_PREFIX_LEN,
 };
 use prns_core::interfaces::bluetooth_auto::{
     AdvertisingMode, BleBackend, BleEvent, BleLink, BleSink, BleSource, DialOutcome, Origin,
     RadioMode, ScanningMode,
 };
+use prns_core::interfaces::PeerDetails;
 
 use super::connection_slots::{
     ConnectionSlotDataOwners, ConnectionSlotLease, ConnectionSlotLinkLease, ConnectionSlotOwners,
@@ -77,9 +78,11 @@ const SIGHTING_DEPTH: usize = PEER_CAPACITY * 2;
 const SIGHTING_COALESCE_MS: u64 = 2_000;
 const RADIO_WAITERS: usize = 2;
 
-/// One L2CAP SDU carries one length-prefixed stream frame; modest credits and MPS keep two RX reservations inside the packet pool alongside GATT and TX.
+/// Credits and MPS reserve one max SDU. The CoC is still a byte stream, so one SDU may carry
+/// several length-prefixed frames or one frame may span SDUs.
 pub const L2CAP_PSM: u16 = 0x0080;
 const L2CAP_SDU_LEN: usize = STREAM_FRAME_PREFIX_LEN + BLE_HW_MTU;
+const L2CAP_DEFRAMER_CAP: usize = 2 * L2CAP_SDU_LEN;
 const L2CAP_SDU_LENGTH_PREFIX_LEN: u16 = size_of::<u16>() as u16;
 const L2CAP_CREDITS: u16 = (L2CAP_SDU_LEN as u16 + L2CAP_SDU_LENGTH_PREFIX_LEN).div_ceil(L2CAP_MPS);
 const _: () = assert!(L2CAP_SDU_LEN <= <DefaultPacketPool as trouble_host::PacketPool>::MTU);

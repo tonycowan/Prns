@@ -9,7 +9,8 @@ use super::{
 use crate::identity::{IdentityHash, PublicIdentityMaterial, IDENTITY_PUBLIC_KEY_LEN};
 use crate::interfaces::lora::RadioProfile;
 use crate::interfaces::{
-    ConnectionState, InterfaceId, InterfaceKind, InterfaceMode, RadioIndication, INTERFACE_ID_LEN,
+    ConnectionState, InterfaceId, InterfaceKind, InterfaceMode, PeerDetails, RadioIndication,
+    INTERFACE_ID_LEN,
 };
 use crate::wire::TRUNCATED_HASH_BYTE_LEN;
 
@@ -39,7 +40,8 @@ pub const REMOTE_CONTROL_INTERFACE_PEER_ENCODED_LEN: usize = INTERFACE_ID_LEN
     .saturating_add(4) // links
     .saturating_add(4) // destinations
     .saturating_add(4) // rate_bytes_per_sec
-    .saturating_add(RadioIndication::MAX_ENCODED_LEN);
+    .saturating_add(RadioIndication::MAX_ENCODED_LEN)
+    .saturating_add(PeerDetails::ENCODED_LEN);
 const INVENTORY_CARD_TRAILER_TAG: u8 = 0x02;
 pub const REMOTE_CONTROL_INTERFACE_CARD_MAX_ENCODED_LEN: usize = 4usize
     .saturating_add(4)
@@ -86,6 +88,7 @@ pub struct RemoteControlInterfacePeer {
     pub destinations: u32,
     pub rate_bytes_per_sec: u32,
     pub radio: RadioIndication,
+    pub details: PeerDetails,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1490,6 +1493,13 @@ fn write_peer<'a>(
     if peer.radio.write_into(radio_slot).is_none() {
         return Err(super::RemoteControlMessageWriteError::BufferTooShort);
     }
+    let Some((details_slot, rest)) = rest.split_at_mut_checked(PeerDetails::ENCODED_LEN) else {
+        return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+    };
+    details_slot.fill(0);
+    if peer.details.write_into(details_slot).is_none() {
+        return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+    }
     Ok(rest)
 }
 
@@ -1525,6 +1535,12 @@ fn parse_peer(
     let Some((radio, _)) = RadioIndication::parse(radio_bytes) else {
         return Err(super::RemoteControlResponseParseError::Malformed);
     };
+    let Some((details_bytes, rest)) = rest.split_at_checked(PeerDetails::ENCODED_LEN) else {
+        return Err(super::RemoteControlResponseParseError::Truncated);
+    };
+    let Some((details, _)) = PeerDetails::parse(details_bytes) else {
+        return Err(super::RemoteControlResponseParseError::Malformed);
+    };
     Ok((
         RemoteControlInterfacePeer {
             id: InterfaceId::new(id),
@@ -1555,6 +1571,7 @@ fn parse_peer(
                     .map_err(|_| super::RemoteControlResponseParseError::Malformed)?,
             ),
             radio,
+            details,
         },
         rest,
     ))

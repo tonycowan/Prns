@@ -1169,6 +1169,7 @@ fn inventory_power_and_sleep_messages_round_trip() {
         destinations: 5,
         rate_bytes_per_sec: 7,
         radio: crate::interfaces::RadioIndication::from_bluetooth_rssi(Some(-62)),
+        details: crate::interfaces::PeerDetails::NotApplicable,
     })
     .unwrap();
     detailed

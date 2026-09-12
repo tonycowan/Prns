@@ -207,6 +207,7 @@ fn remote_control_peer_for_supervisor(
             destinations: snapshot.destinations,
             rate_bytes_per_sec: rate_bytes_per_sec(snapshot),
             radio: snapshot.radio,
+            details: snapshot.details,
         }),
         Membership::Independent | Membership::FleetMember { .. } => None,
     }
@@ -223,7 +224,7 @@ fn rate_bytes_per_sec(snapshot: &InterfaceSnapshot) -> u32 {
 mod tests {
     use super::*;
     use personal_rns::interfaces::{
-        ConnectionState, InterfaceGravity, InterfaceId, InterfaceKind, InterfaceMode,
+        ConnectionState, InterfaceGravity, InterfaceId, InterfaceKind, InterfaceMode, PeerDetails,
         RadioIndication, TransferRates,
     };
     use personal_rns::remote_control::RemoteControlResponse;
@@ -243,6 +244,7 @@ mod tests {
             transported_links: 0,
             membership: Membership::Independent,
             radio: RadioIndication::for_kind(Some(kind)),
+            details: PeerDetails::NotApplicable,
         }
     }
 

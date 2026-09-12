@@ -277,7 +277,8 @@ define_class!(
                 crate::diagnostic_log::error!("bluetooth: L2CAP publish FAILED: {error:?}");
                 let _ = self.ivars().events.send(Event::L2capPublishFailed);
             } else {
-                crate::diagnostic_log::debug!("bluetooth: published L2CAP channel, PSM {psm:#06x}");
+                crate::diagnostic_log::info!("bluetooth: published L2CAP channel, PSM {psm:#06x}");
+                eprintln!("bluetooth: published L2CAP channel, PSM {psm:#06x}");
                 let _ = self.ivars().events.send(Event::L2capPublished { psm });
             }
         }
@@ -290,21 +291,28 @@ define_class!(
             error: Option<&NSError>,
         ) {
             if let Some(error) = error {
-                crate::diagnostic_log::warn!("bluetooth: L2CAP channel open FAILED: {error:?}");
+                let line = format!("bluetooth: L2CAP channel open FAILED: {error:?}");
+                crate::diagnostic_log::warn!("{line}");
+                eprintln!("{line}");
             }
             let Some(channel) = channel else {
-                crate::diagnostic_log::warn!(
-                    "bluetooth: L2CAP open callback with no channel — data plane not established"
-                );
+                let line = "bluetooth: L2CAP open callback with no channel — data plane not established";
+                crate::diagnostic_log::warn!("{line}");
+                eprintln!("{line}");
                 return;
             };
             let Some((peer_id, data)) = wire_l2cap(channel, &self.ivars().queue) else {
-                crate::diagnostic_log::warn!(
-                    "bluetooth: L2CAP channel exposes no streams — dropping"
-                );
+                let line = "bluetooth: L2CAP channel exposes no streams — dropping";
+                crate::diagnostic_log::warn!("{line}");
+                eprintln!("{line}");
                 return;
             };
-            crate::diagnostic_log::debug!("bluetooth: L2CAP channel opened, data plane up");
+            let line = format!(
+                "bluetooth: {:02x?} L2CAP channel opened — delivering data plane to armed acceptor",
+                peer_id.address().octets()
+            );
+            crate::diagnostic_log::info!("{line}");
+            eprintln!("{line}");
             self.ivars()
                 .pending_l2cap
                 .borrow_mut()
@@ -606,6 +614,7 @@ impl PeripheralDelegate {
             address,
             data_inbound_rx: Some(data_rx),
             l2cap_pending: None,
+            details_notify: None,
         };
         let _ = self.ivars().events.send(Event::Inbound(link));
     }

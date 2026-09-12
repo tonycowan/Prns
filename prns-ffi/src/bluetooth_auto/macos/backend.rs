@@ -658,6 +658,7 @@ impl BleBackend<{ MacosBleBackend::MAX_PEERS }> for MacosBleBackend {
                     address,
                     data_inbound_rx: Some(data_inbound_rx),
                     l2cap_pending: None,
+                    details_notify: None,
                 },
                 peer_rssi,
             }
