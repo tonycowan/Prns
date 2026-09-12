@@ -28,14 +28,30 @@ pub enum FactoryControllerGrantError {
     BlobTooLong,
 }
 
+fn write_bytes(dst: &mut [u8], at: usize, src: &[u8]) -> bool {
+    let Some(end) = at.checked_add(src.len()) else {
+        return false;
+    };
+    let Some(slot) = dst.get_mut(at..end) else {
+        return false;
+    };
+    slot.copy_from_slice(src);
+    true
+}
+
 /// Encodes the Controller allow-list key the target should trust after flash.
 #[must_use]
 pub fn encode_factory_controller_grant_blob(
     public_keys: &IdentityPublicKeys,
 ) -> [u8; FACTORY_CONTROLLER_GRANT_BLOB_LEN] {
     let mut blob = [0u8; FACTORY_CONTROLLER_GRANT_BLOB_LEN];
-    blob[..FACTORY_CONTROLLER_GRANT_MAGIC.len()].copy_from_slice(FACTORY_CONTROLLER_GRANT_MAGIC);
-    blob[FACTORY_CONTROLLER_GRANT_MAGIC.len()..].copy_from_slice(&public_keys.public_key_bytes());
+    let magic_ok = write_bytes(&mut blob, 0, FACTORY_CONTROLLER_GRANT_MAGIC);
+    let keys_ok = write_bytes(
+        &mut blob,
+        FACTORY_CONTROLLER_GRANT_MAGIC.len(),
+        &public_keys.public_key_bytes(),
+    );
+    debug_assert!(magic_ok && keys_ok);
     blob
 }
 
@@ -75,8 +91,16 @@ pub fn encode_remote_control_vault_page(
         .map_err(|_| FactoryControllerGrantError::InvalidLabel)?;
     let blob = encode_factory_controller_grant_blob(controller_public);
     let mut page = [STATE_EMPTY; REMOTE_CONTROL_IDENTITY_VAULT_PAGE_LEN];
-    page[..SLOT_LEN].copy_from_slice(&encode_identity_slot(&target_label, target_secret));
-    page[SLOT_LEN..SLOT_LEN * 2].copy_from_slice(&encode_blob_slot(&grant_label, &blob)?);
+    if !write_bytes(
+        &mut page,
+        0,
+        &encode_identity_slot(&target_label, target_secret),
+    ) {
+        return Err(FactoryControllerGrantError::BlobTooLong);
+    }
+    if !write_bytes(&mut page, SLOT_LEN, &encode_blob_slot(&grant_label, &blob)?) {
+        return Err(FactoryControllerGrantError::BlobTooLong);
+    }
     Ok(page)
 }
 
@@ -86,15 +110,17 @@ fn encode_identity_slot(
 ) -> [u8; SLOT_LEN] {
     let mut buffer = [STATE_EMPTY; SLOT_LEN];
     write_label(&mut buffer, label);
-    buffer[SECRET_OFFSET..SECRET_OFFSET + IDENTITY_SECRET_KEY_LEN].copy_from_slice(secret);
-    for (inverse, byte) in buffer
-        [SECRET_INVERSE_OFFSET..SECRET_INVERSE_OFFSET + IDENTITY_SECRET_KEY_LEN]
-        .iter_mut()
-        .zip(secret.iter())
+    let _ = write_bytes(&mut buffer, SECRET_OFFSET, secret);
+    if let Some(inverse) =
+        buffer.get_mut(SECRET_INVERSE_OFFSET..SECRET_INVERSE_OFFSET + IDENTITY_SECRET_KEY_LEN)
     {
-        *inverse = !*byte;
+        for (dst, byte) in inverse.iter_mut().zip(secret.iter()) {
+            *dst = !*byte;
+        }
     }
-    buffer[0] = STATE_OCCUPIED;
+    if let Some(commit) = buffer.first_mut() {
+        *commit = STATE_OCCUPIED;
+    }
     buffer
 }
 
@@ -111,17 +137,25 @@ fn encode_blob_slot(
     let mut buffer = [STATE_EMPTY; SLOT_LEN];
     write_label(&mut buffer, label);
     let len = u16::try_from(blob.len()).map_err(|_| FactoryControllerGrantError::BlobTooLong)?;
-    buffer[SECRET_OFFSET..SECRET_OFFSET + BLOB_LEN_PREFIX_LEN].copy_from_slice(&len.to_le_bytes());
-    let body_at = SECRET_OFFSET + BLOB_LEN_PREFIX_LEN;
-    buffer[body_at..body_at + blob.len()].copy_from_slice(blob);
-    buffer[0] = STATE_BLOB;
+    if !write_bytes(&mut buffer, SECRET_OFFSET, &len.to_le_bytes()) {
+        return Err(FactoryControllerGrantError::BlobTooLong);
+    }
+    let body_at = SECRET_OFFSET.saturating_add(BLOB_LEN_PREFIX_LEN);
+    if !write_bytes(&mut buffer, body_at, blob) {
+        return Err(FactoryControllerGrantError::BlobTooLong);
+    }
+    if let Some(commit) = buffer.first_mut() {
+        *commit = STATE_BLOB;
+    }
     Ok(buffer)
 }
 
 fn write_label(buffer: &mut [u8; SLOT_LEN], label: &IdentityLabel) {
     let bytes = label.as_str().as_bytes();
-    buffer[LABEL_LEN_OFFSET] = bytes.len() as u8;
-    buffer[LABEL_OFFSET..LABEL_OFFSET + bytes.len()].copy_from_slice(bytes);
+    if let Some(len_slot) = buffer.get_mut(LABEL_LEN_OFFSET) {
+        *len_slot = bytes.len() as u8;
+    }
+    let _ = write_bytes(buffer, LABEL_OFFSET, bytes);
 }
 
 #[cfg(test)]
@@ -167,16 +201,19 @@ mod tests {
         let keys = public_keys(0x33);
         let page = encode_remote_control_vault_page(&target_secret, &keys)
             .expect("a factory vault page encodes");
-        assert_eq!(page[0], STATE_OCCUPIED);
-        assert_eq!(page[SLOT_LEN], STATE_BLOB);
-        assert!(page[SLOT_LEN * 2..].iter().all(|byte| *byte == STATE_EMPTY));
-        assert_eq!(
-            &page[SECRET_OFFSET..SECRET_OFFSET + IDENTITY_SECRET_KEY_LEN],
-            &target_secret
-        );
-        let grant_body = SECRET_OFFSET + BLOB_LEN_PREFIX_LEN;
-        let stored =
-            &page[SLOT_LEN + grant_body..SLOT_LEN + grant_body + FACTORY_CONTROLLER_GRANT_BLOB_LEN];
+        assert_eq!(page.first().copied(), Some(STATE_OCCUPIED));
+        assert_eq!(page.get(SLOT_LEN).copied(), Some(STATE_BLOB));
+        assert!(page
+            .get(SLOT_LEN.saturating_mul(2)..)
+            .is_some_and(|tail| tail.iter().all(|byte| *byte == STATE_EMPTY)));
+        let stored_secret = page
+            .get(SECRET_OFFSET..SECRET_OFFSET.saturating_add(IDENTITY_SECRET_KEY_LEN))
+            .expect("target secret span fits");
+        assert_eq!(stored_secret, &target_secret);
+        let grant_body = SECRET_OFFSET.saturating_add(BLOB_LEN_PREFIX_LEN);
+        let start = SLOT_LEN.saturating_add(grant_body);
+        let end = start.saturating_add(FACTORY_CONTROLLER_GRANT_BLOB_LEN);
+        let stored = page.get(start..end).expect("grant blob span fits");
         assert_eq!(
             decode_factory_controller_grant_blob(stored)
                 .expect("the stored blob decodes")
