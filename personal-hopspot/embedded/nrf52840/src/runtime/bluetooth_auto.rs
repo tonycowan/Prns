@@ -500,7 +500,8 @@ impl LinkChannels {
         self.data_plane.reset();
         self.profile_ready.reset();
         self.peer_protocol.lock(|current| current.set(None));
-        self.l2cap_deframer.lock(|deframer| deframer.borrow_mut().clear());
+        self.l2cap_deframer
+            .lock(|deframer| deframer.borrow_mut().clear());
         self.control_in.clear();
         self.control_out.clear();
         self.data_in.clear();
@@ -1153,29 +1154,29 @@ async fn l2cap_pump(
                     .lock(|deframer| deframer.borrow().remaining_capacity());
                 if room == 0 {
                     let mut body = [0u8; BLE_HW_MTU];
-                    let Some(len) = slot.l2cap_deframer.lock(|deframer| {
-                        deframer.borrow_mut().next_frame(&mut body)
-                    }) else {
+                    let Some(len) = slot
+                        .l2cap_deframer
+                        .lock(|deframer| deframer.borrow_mut().next_frame(&mut body))
+                    else {
                         return;
                     };
                     let _ = admit_inbound_frame(&data_in_tx, &body[..len]);
                     continue;
                 }
                 let take = room.min(bytes.len() - offset);
-                let absorbed = slot.l2cap_deframer.lock(|deframer| {
-                    deframer
-                        .borrow_mut()
-                        .absorb(&bytes[offset..offset + take])
-                });
+                let absorbed = slot
+                    .l2cap_deframer
+                    .lock(|deframer| deframer.borrow_mut().absorb(&bytes[offset..offset + take]));
                 if !absorbed {
                     return;
                 }
                 offset += take;
                 loop {
                     let mut body = [0u8; BLE_HW_MTU];
-                    let Some(len) = slot.l2cap_deframer.lock(|deframer| {
-                        deframer.borrow_mut().next_frame(&mut body)
-                    }) else {
+                    let Some(len) = slot
+                        .l2cap_deframer
+                        .lock(|deframer| deframer.borrow_mut().next_frame(&mut body))
+                    else {
                         break;
                     };
                     let _ = admit_inbound_frame(&data_in_tx, &body[..len]);
@@ -1676,10 +1677,7 @@ pub(super) async fn scanner(sd: &'static Softdevice, hub: &'static BleHub) -> ! 
             );
             let should_dial = action == DialSightingAction::Dial;
             let ours = view.has_service || view.manufacturer == ManufacturerPresence::Present;
-            if ours
-                && discovery_groups_match(local_discovery_group_tag(), data)
-                && should_dial
-            {
+            if ours && discovery_groups_match(local_discovery_group_tag(), data) && should_dial {
                 Some(SeenPeer {
                     address,
                     rssi: report.rssi,
