@@ -1079,9 +1079,7 @@ fn ControllerTargetActions(
     });
     // Keep the Connect label ticking from the session deadline even when the parent
     // targets refresh is stalled on path work (common on Android with many BLE peers).
-    let tick_stop = use_hook(|| {
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
-    });
+    let tick_stop = use_hook(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let tick_cancel = tick_stop.clone();
     use_drop(move || {
         tick_cancel.store(true, std::sync::atomic::Ordering::Relaxed);

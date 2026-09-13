@@ -142,9 +142,7 @@ impl<
         Ok((version, rtt))
     }
 
-    pub async fn describe_power(
-        &self,
-    ) -> Result<(PowerSnapshot, RttMillis), RemoteControlError> {
+    pub async fn describe_power(&self) -> Result<(PowerSnapshot, RttMillis), RemoteControlError> {
         let mut encoded = [0u8; RemoteControlDescribePower::REQUEST.encoded_len()];
         RemoteControlDescribePower::write_request(&mut encoded)?;
         let (response, rtt) = self

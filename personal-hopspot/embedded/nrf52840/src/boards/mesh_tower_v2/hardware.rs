@@ -448,10 +448,7 @@ mod tests {
 
     #[test]
     fn husb238_absent_when_unattached() {
-        assert_eq!(
-            husb238_external_power(0, 0),
-            ExternalPowerState::Absent
-        );
+        assert_eq!(husb238_external_power(0, 0), ExternalPowerState::Absent);
         // Attached flag without a negotiated voltage still means no contract.
         assert_eq!(
             husb238_external_power(0, HUSB238_ATTACH),

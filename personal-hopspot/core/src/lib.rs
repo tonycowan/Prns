@@ -78,6 +78,7 @@ pub use mobile::{
     MOBILE_PANEL_WIDTH, MOBILE_PIXEL_COUNT, MOBILE_RGBA_BYTES,
 };
 pub use persistence::PersistenceState;
+pub use power_publish::{latest_power_snapshot, publish_power_snapshot};
 pub use prns_core::capabilities::positioning::gnss::{
     GnssFix, GnssReceiverCommand, GnssSnapshot, NmeaParser,
 };
@@ -88,7 +89,6 @@ pub use prns_core::capabilities::power::{
     BatteryGauge, BatteryPercent, BatterySource, ChargingState, ExternalPowerState, NoBattery,
     PowerSnapshot,
 };
-pub use power_publish::{latest_power_snapshot, publish_power_snapshot};
 pub use radio_profile_store::{
     LoadedRadioProfile, RadioProfileLoadNotice, RadioProfileStore, RadioProfileStoreError,
 };

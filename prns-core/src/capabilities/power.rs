@@ -311,7 +311,10 @@ mod tests {
     fn power_snapshot_round_trips_on_the_wire() {
         for snapshot in [
             PowerSnapshot::UNKNOWN,
-            PowerSnapshot::new(Some(BatteryPercent::saturating(0)), ExternalPowerState::Absent),
+            PowerSnapshot::new(
+                Some(BatteryPercent::saturating(0)),
+                ExternalPowerState::Absent,
+            ),
             PowerSnapshot::new(
                 Some(BatteryPercent::saturating(73)),
                 ExternalPowerState::Present {
@@ -338,8 +341,11 @@ mod tests {
             assert!(rest.is_empty());
         }
         assert!(!PowerSnapshot::UNKNOWN.is_applicable());
-        assert!(PowerSnapshot::new(Some(BatteryPercent::saturating(1)), ExternalPowerState::Unknown)
-            .is_applicable());
+        assert!(PowerSnapshot::new(
+            Some(BatteryPercent::saturating(1)),
+            ExternalPowerState::Unknown
+        )
+        .is_applicable());
         assert!(PowerSnapshot::new(None, ExternalPowerState::Absent).is_applicable());
     }
 }

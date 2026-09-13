@@ -723,10 +723,7 @@ fn operator_edit_grants_pick_up_later_interface_edit_kinds() {
     let build_only = RemoteControlRequestSet::only(RemoteControlRequestKind::DescribeBuild);
     let mut build_and_power = build_only;
     assert!(build_and_power.insert(RemoteControlRequestKind::DescribePower));
-    assert_eq!(
-        build_only.with_current_operator_edits(),
-        build_and_power,
-    );
+    assert_eq!(build_only.with_current_operator_edits(), build_and_power,);
 }
 
 #[test]

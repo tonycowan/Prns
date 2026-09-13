@@ -117,9 +117,7 @@ impl RemoteControlHandle<'_> {
         Ok((version, rtt))
     }
 
-    pub async fn describe_power(
-        &self,
-    ) -> Result<(PowerSnapshot, RttMillis), RemoteControlError> {
+    pub async fn describe_power(&self) -> Result<(PowerSnapshot, RttMillis), RemoteControlError> {
         let mut encoded = std::vec![0u8; RemoteControlDescribePower::REQUEST.encoded_len()];
         let encoded_len = RemoteControlDescribePower::write_request(encoded.as_mut_slice())?;
         encoded.truncate(encoded_len);

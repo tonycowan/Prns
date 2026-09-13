@@ -2100,10 +2100,7 @@ impl RemoteControlBackend {
         }
     }
 
-    pub async fn refresh_battery(
-        &self,
-        target_id: &str,
-    ) -> Result<Option<String>, BackendError> {
+    pub async fn refresh_battery(&self, target_id: &str) -> Result<Option<String>, BackendError> {
         if !self.is_monitoring_target(target_id) {
             return Ok(self.session()?.cached_battery(target_id));
         }
@@ -2118,8 +2115,7 @@ impl RemoteControlBackend {
             Ok((snapshot, _)) => {
                 // Keep a visible row even when the board reports UNKNOWN so we can tell
                 // "RPC works" apart from "RPC never landed".
-                let label =
-                    format_managed_node_battery(snapshot).or(Some("unknown".to_string()));
+                let label = format_managed_node_battery(snapshot).or(Some("unknown".to_string()));
                 eprintln!(
                     "describe_power {target_id}: applicable={} battery={:?} external={:?} label={label:?}",
                     snapshot.is_applicable(),
@@ -6585,20 +6581,20 @@ mod tests {
         bluetooth_auto_peer_list_note, bluetooth_auto_prefix_from_direct_peer,
         bluetooth_auto_title, clone_announce_is_usb_local, control_announce_satisfies,
         controller_identity_secret_path, encode_hex, format_activity_age, format_announce_millis,
-        format_connect_label, format_hop_count, format_interface, format_next_hop,
-        format_managed_node_battery, format_target_announce, format_target_route, format_utc_millis,
+        format_connect_label, format_hop_count, format_interface, format_managed_node_battery,
+        format_next_hop, format_target_announce, format_target_route, format_utc_millis,
         generic_bluetooth_auto_title, instance_identity_secret_path, interface_peer,
         interface_peer_from_wire, interface_power_from_connection, inventory_recovery_continues,
         load_persisted_tcp_target, local_interface_config, local_interface_entry,
         managed_targets_from_disk, monitor_remaining_at, operator_interface_kind,
-        path_is_better_than, path_is_direct_ble,
         operator_local_kind, parse_invitation_code, parse_target_names, parse_tcp_dial_target,
-        peer_label, persist_tcp_target, radio_facts, remote_interface_entry, render_target_names,
-        resolve_controller_tcp_target, resolve_paired_target_hash, route_interface_kind,
-        should_forget_control_route, should_wait_for_control_announce, stored_alias, target_label,
-        BackendError, InterfaceEntry, InterfaceFact, InterfacePower, PeerHealth,
-        RemoteControlAnnounceWait, TargetPath, TargetStatus, CONTROLLER_IDENTITY_FILE,
-        DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE, MANAGER_ALIASES_FILE, TARGET_MONITOR_TTL,
+        path_is_better_than, path_is_direct_ble, peer_label, persist_tcp_target, radio_facts,
+        remote_interface_entry, render_target_names, resolve_controller_tcp_target,
+        resolve_paired_target_hash, route_interface_kind, should_forget_control_route,
+        should_wait_for_control_announce, stored_alias, target_label, BackendError, InterfaceEntry,
+        InterfaceFact, InterfacePower, PeerHealth, RemoteControlAnnounceWait, TargetPath,
+        TargetStatus, CONTROLLER_IDENTITY_FILE, DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE,
+        MANAGER_ALIASES_FILE, TARGET_MONITOR_TTL,
     };
     use personal_rns::identity::IdentityHash;
     use personal_rns::interfaces::bluetooth_auto::BleIdentity;

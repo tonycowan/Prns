@@ -2,10 +2,10 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join4;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-#[cfg(feature = "board-mesh-tower-v2")]
-use embassy_time::{with_timeout, Duration};
 #[cfg(not(feature = "board-mesh-tower-v2"))]
 use embassy_time::Timer;
+#[cfg(feature = "board-mesh-tower-v2")]
+use embassy_time::{with_timeout, Duration};
 use embassy_usb::{Builder, Config as UsbConfig};
 use static_cell::{ConstStaticCell, StaticCell};
 
@@ -523,15 +523,13 @@ pub async fn run(spawner: Spawner) -> ! {
                     // SoftDevice USBREGSTATUS is MCU 5 V only. HUSB238 reports real USB-PD
                     // attach / 20 V pack-charge contracts. Bound the I²C wait so a stuck bus
                     // cannot starve ADC publishes.
-                    let external = match with_timeout(
-                        Duration::from_millis(50),
-                        pd_sink.external_power(),
-                    )
-                    .await
-                    {
-                        Ok(state) => state,
-                        Err(_) => hopspot::ExternalPowerState::Unknown,
-                    };
+                    let external =
+                        match with_timeout(Duration::from_millis(50), pd_sink.external_power())
+                            .await
+                        {
+                            Ok(state) => state,
+                            Err(_) => hopspot::ExternalPowerState::Unknown,
+                        };
                     let snapshot = battery_gauge.update(millivolts, external);
                     hopspot::publish_power_snapshot(snapshot);
                     // board::maintain waits ~1 ms; sample about every five seconds
