@@ -126,6 +126,10 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
         personal_hopspot_core::hopspot_remote_control_build_version()
     }
 
+    fn power_snapshot(&self) -> personal_hopspot_core::PowerSnapshot {
+        personal_hopspot_core::latest_power_snapshot()
+    }
+
     fn inventory_interface_config(&self, id: InterfaceId) -> RemoteControlInterfaceConfigOutcome {
         let ble = BluetoothAutoStatus::new(&BLE_SHARED);
         let mut group = [0u8; 32];
@@ -865,6 +869,7 @@ pub(super) async fn run_core<B: Esp32S3Board>(
                     sampled_battery_state.external_power(),
                 );
             }
+            personal_hopspot_core::publish_power_snapshot(sampled_battery_state);
 
             let snapshots = build_snapshots(
                 usb_status,

@@ -107,6 +107,10 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
         hopspot::hopspot_remote_control_build_version()
     }
 
+    fn power_snapshot(&self) -> hopspot::PowerSnapshot {
+        hopspot::latest_power_snapshot()
+    }
+
     fn inventory_interface_config(&self, id: InterfaceId) -> RemoteControlInterfaceConfigOutcome {
         let ble = BluetoothAutoStatus::new(&BLE_SHARED);
         let mut group = [0u8; 32];
@@ -617,6 +621,7 @@ pub async fn run(spawner: Spawner) -> ! {
                 Some(vbat_mv),
                 hopspot::ExternalPowerState::from_presence(usb_vbus_present()),
             );
+            hopspot::publish_power_snapshot(battery);
 
             let snapshots = build_snapshots(lora_status, usb_status, working_interface_modes);
             let mut cards = build_cards(&snapshots, lora_status.id(), usb_status.id());

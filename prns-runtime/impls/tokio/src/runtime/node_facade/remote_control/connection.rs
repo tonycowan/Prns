@@ -4,13 +4,14 @@ use crate::interfaces::InterfaceId;
 use crate::routing::links::LinkId;
 use crate::runtime::{
     CloseRemoteControlTargetOutcome, ConnectRemoteControlTargetError, RemoteControlAnnounceSelf,
-    RemoteControlDescribe, RemoteControlDescribeBuild, RemoteControlInventoryInterfaces,
-    RemoteControlSleepRadios, RemoteControlTargetConnection, RemoteControlTargetConnectionControl,
-    RemoteControlTargetConnectionTransport, RemoteControlTargetOperationError,
-    RemoteControlWakeRadios, SendError,
+    RemoteControlDescribe, RemoteControlDescribeBuild, RemoteControlDescribePower,
+    RemoteControlInventoryInterfaces, RemoteControlSleepRadios, RemoteControlTargetConnection,
+    RemoteControlTargetConnectionControl, RemoteControlTargetConnectionTransport,
+    RemoteControlTargetOperationError, RemoteControlWakeRadios, SendError,
 };
 use crate::units::RttMillis;
 use crate::wire::DestinationHash;
+use prns_core::capabilities::power::PowerSnapshot;
 use prns_core::interfaces::InterfaceMode;
 use prns_core::remote_control::{
     RemoteControlAuthorizeControllerOutcome, RemoteControlBuildVersion,
@@ -103,6 +104,17 @@ impl RemoteControlTargetHandle<'_> {
             .admit(RemoteControlDescribeBuild::REQUEST.kind())?;
         self.remote_control
             .describe_build()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn describe_power(
+        &self,
+    ) -> Result<(PowerSnapshot, RttMillis), RemoteControlTargetOperationError> {
+        self.connection
+            .admit(RemoteControlDescribePower::REQUEST.kind())?;
+        self.remote_control
+            .describe_power()
             .await
             .map_err(Into::into)
     }

@@ -55,8 +55,8 @@ pub use node::{
 };
 pub use remote_control::{
     RemoteControlAnnounceSelf, RemoteControlAnnounceSelfFailure, RemoteControlAuthorizeController,
-    RemoteControlDescribe, RemoteControlDescribeBuild, RemoteControlError,
-    RemoteControlHostControls, RemoteControlInventoryControllers,
+    RemoteControlDescribe, RemoteControlDescribeBuild, RemoteControlDescribePower,
+    RemoteControlError, RemoteControlHostControls, RemoteControlInventoryControllers,
     RemoteControlInventoryInterfaceConfig, RemoteControlInventoryInterfacePeers,
     RemoteControlInventoryInterfaces, RemoteControlRevokeController,
     RemoteControlSetInterfaceGroup, RemoteControlSetInterfaceLoRaProfile,

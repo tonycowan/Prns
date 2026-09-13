@@ -391,8 +391,25 @@ pub fn App() -> Element {
             }
             let version_inflight =
                 std::sync::Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
+            let battery_inflight =
+                std::sync::Arc::new(std::sync::Mutex::new(HashSet::<String>::new()));
             loop {
                 backend.advance_target_monitors();
+                // Local inventory is synchronous and must not wait on sibling
+                // roster/clone link attempts (those can stall several seconds).
+                match backend.local_interfaces() {
+                    Ok(items) => {
+                        interfaces_by_target
+                            .write()
+                            .insert(CONTROLLER_SCOPE.to_string(), LoadedInterfaces::ready(items));
+                    }
+                    Err(error) => {
+                        interfaces_by_target.write().insert(
+                            CONTROLLER_SCOPE.to_string(),
+                            LoadedInterfaces::Failed(error.to_string()),
+                        );
+                    }
+                }
                 let _ = backend.advance_clone().await;
                 if let Ok(view) = backend.identity_clone() {
                     if clone_view() != Some(view.clone()) {
@@ -420,19 +437,6 @@ pub fn App() -> Element {
                         sibling_aliases.set(next_siblings);
                     }
                 }
-                match backend.local_interfaces() {
-                    Ok(items) => {
-                        interfaces_by_target
-                            .write()
-                            .insert(CONTROLLER_SCOPE.to_string(), LoadedInterfaces::ready(items));
-                    }
-                    Err(error) => {
-                        interfaces_by_target.write().insert(
-                            CONTROLLER_SCOPE.to_string(),
-                            LoadedInterfaces::Failed(error.to_string()),
-                        );
-                    }
-                }
                 match backend.targets().await {
                     Ok(items) => {
                         let pairing_busy = pairing_in_progress(&pairing());
@@ -456,6 +460,9 @@ pub fn App() -> Element {
                         if let Ok(mut inflight) = version_inflight.lock() {
                             inflight.retain(|id| live_ids.contains(id));
                         }
+                        if let Ok(mut inflight) = battery_inflight.lock() {
+                            inflight.retain(|id| live_ids.contains(id));
+                        }
                         for item in &items {
                             if item.status == TargetStatus::AwaitingPairing
                                 || item.build_version.is_some()
@@ -476,6 +483,30 @@ pub fn App() -> Element {
                             let id = item.id.clone();
                             spawn(async move {
                                 let _ = backend.refresh_build_version(&id).await;
+                                if let Ok(mut inflight) = inflight.lock() {
+                                    inflight.remove(&id);
+                                }
+                            });
+                        }
+                        for item in &items {
+                            if item.status == TargetStatus::AwaitingPairing
+                                || !backend.is_monitoring_target(&item.id)
+                            {
+                                continue;
+                            }
+                            {
+                                let Ok(mut inflight) = battery_inflight.lock() else {
+                                    continue;
+                                };
+                                if !inflight.insert(item.id.clone()) {
+                                    continue;
+                                }
+                            }
+                            let backend = backend.clone();
+                            let inflight = battery_inflight.clone();
+                            let id = item.id.clone();
+                            spawn(async move {
+                                let _ = backend.refresh_battery(&id).await;
                                 if let Ok(mut inflight) = inflight.lock() {
                                     inflight.remove(&id);
                                 }
@@ -1006,6 +1037,9 @@ fn ManagedTargetFacts(target: TargetAccess) -> Element {
             if let Some(version) = target.build_version.as_deref().filter(|text| !text.is_empty()) {
                 div { dt { "PRNS" } dd { "{version}" } }
             }
+            if let Some(battery) = target.battery.as_deref().filter(|text| !text.is_empty()) {
+                div { dt { "Battery" } dd { "{battery}" } }
+            }
             div { dt { "Address" } dd { "{target.id}" } }
             div {
                 dt { "Announce" }
@@ -1039,6 +1073,36 @@ fn ControllerTargetActions(
     pairing: Signal<PairingState>,
 ) -> Element {
     let mut forget_prompt = use_signal(|| ForgetPrompt::Idle);
+    let mut connect_remaining = use_signal(|| monitor_remaining_secs);
+    use_effect(move || {
+        connect_remaining.set(monitor_remaining_secs);
+    });
+    // Keep the Connect label ticking from the session deadline even when the parent
+    // targets refresh is stalled on path work (common on Android with many BLE peers).
+    let tick_stop = use_hook(|| {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+    });
+    let tick_cancel = tick_stop.clone();
+    use_drop(move || {
+        tick_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    use_hook({
+        let stop = tick_stop.clone();
+        let target_id = target_id.clone();
+        move || {
+            let stop = stop.clone();
+            let target_id = target_id.clone();
+            spawn(async move {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let remaining = backend().monitor_remaining_secs(&target_id);
+                    if connect_remaining() != remaining {
+                        connect_remaining.set(remaining);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            });
+        }
+    });
     rsx! {
         div { class: "target-controller-actions",
         button {
@@ -1048,16 +1112,29 @@ fn ControllerTargetActions(
                 move |_| {
                     let target = target.clone();
                     let backend = backend();
+                    // Clear announce/route immediately so the header does not keep
+                    // showing the pre-Connect hop while the probe drops and waits.
+                    targets.write().iter_mut().filter(|item| item.id == target).for_each(
+                        |item| item.path = None,
+                    );
                     spawn(async move {
                         match backend.probe_target(&target, PathProbeReason::OperatorConnect).await {
-                            Ok(_) => {}
+                            Ok(path) => {
+                                targets.write().iter_mut().filter(|item| item.id == target).for_each(
+                                    |item| item.path = Some(path.clone()),
+                                );
+                            }
                             Err(error) => {
+                                targets.write().iter_mut().filter(|item| item.id == target).for_each(
+                                    |item| item.path = None,
+                                );
                                 push_activity(
                                     activity_log,
                                     format!("Connect dropped the hop; waiting for a dest announce. {error}"),
                                 );
                             }
                         }
+                        connect_remaining.set(backend.monitor_remaining_secs(&target));
                         if !pairing_in_progress(&pairing()) {
                             load_interfaces_for_target(
                                 backend,
@@ -1070,7 +1147,7 @@ fn ControllerTargetActions(
                     });
                 }
             },
-            "{format_connect_label(monitor_remaining_secs)}"
+            "{format_connect_label(connect_remaining())}"
         }
         if forget_prompt() == ForgetPrompt::Confirming {
             button {

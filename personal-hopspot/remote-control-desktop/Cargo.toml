@@ -27,6 +27,7 @@ dioxus = { version = "=0.7.5" }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 thiserror = "2"
 prns-flash-manifest = { path = "../../prns-flash-manifest" }
+prns-core = { path = "../../prns-core", default-features = false }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 getrandom = "0.2"
@@ -36,7 +37,6 @@ personal-rns = { path = "../../personal-rns", default-features = false, features
 
 [target.'cfg(target_os = "android")'.dependencies]
 personal-rns = { path = "../../personal-rns", default-features = false, features = ["tokio-host", "tcp", "wifi-auto-mdns", "bluetooth-auto", "usb", "log", "tracing", "parallel-persistence", "parallel-resource-hash"] }
-prns-core = { path = "../../prns-core", default-features = false }
 prns-ffi = { path = "../../prns-ffi", default-features = false, features = ["log"] }
 android_logger = "0.14"
 jni = "0.21"

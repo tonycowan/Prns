@@ -39,6 +39,9 @@ const VBAT_DIVIDER_DEN: u32 = 10;
 /// full (flat). Tuned above ADC/load noise (load dips pull the fast average *down*, never up).
 const CHARGE_RISE_MV: u32 = 16;
 
+/// See [`super::heltec_v4`]: USB-only charger float looks like a full cell; suppress SoC in-band.
+const USB_FLOAT_SUPPRESS_MV: u32 = 4_050;
+
 /// The Heltec V4-R8's battery sense: VBAT on a 49:10 divider into ADC1 (GPIO1). Unlike the S3R2 V4,
 /// ADC_Ctrl is not broken out — do not claim GPIO37 (that pad is SPIDQS on the Octal SiP). The shared
 /// [`BatteryGauge`](screen::BatteryGauge) owns the percentage curve; this reads the divided
@@ -54,10 +57,26 @@ pub struct HeltecR8Battery {
     >,
     fast_ema_mv: u32,
     slow_ema_mv: u32,
+    last_sof: u16,
+    usb_host: bool,
+}
+
+impl HeltecR8Battery {
+    fn poll_usb_host(&mut self) -> bool {
+        let frame = esp_hal::peripherals::USB_DEVICE::regs()
+            .fram_num()
+            .read()
+            .sof_frame_index()
+            .bits();
+        let advanced = frame != self.last_sof;
+        self.last_sof = frame;
+        advanced
+    }
 }
 
 impl screen::BatterySource for HeltecR8Battery {
     fn read_millivolts(&mut self) -> Option<u32> {
+        self.usb_host = self.poll_usb_host();
         for _ in 0..1000 {
             if let Ok(raw) = self.adc.read_oneshot(&mut self.pin) {
                 let mv = raw as u32 * VBAT_DIVIDER_NUM / VBAT_DIVIDER_DEN;
@@ -68,17 +87,24 @@ impl screen::BatterySource for HeltecR8Battery {
                     self.fast_ema_mv = (self.fast_ema_mv * 3 + mv) / 4;
                     self.slow_ema_mv = (self.slow_ema_mv * 15 + mv) / 16;
                 }
+                if self.usb_host && mv >= USB_FLOAT_SUPPRESS_MV {
+                    return None;
+                }
                 return Some(mv);
             }
         }
         None
     }
 
-    /// Inferred charging: the fast voltage average leading the slow one by [`CHARGE_RISE_MV`] means
-    /// the terminal voltage is stepping/trending up (plug-in or active charge). Fades when the cell
-    /// is full (flat) or on unplug (step down) — an approximation that answers "did plugging in
-    /// actually start charging?", which is the signal that matters on a board with no charge pin.
     fn external_power(&mut self) -> screen::ExternalPowerState {
+        if self.usb_host {
+            let charging = if self.fast_ema_mv > self.slow_ema_mv.saturating_add(CHARGE_RISE_MV) {
+                screen::ChargingState::Charging
+            } else {
+                screen::ChargingState::Unknown
+            };
+            return screen::ExternalPowerState::Present { charging };
+        }
         if self.fast_ema_mv > self.slow_ema_mv.saturating_add(CHARGE_RISE_MV) {
             screen::ExternalPowerState::Present {
                 charging: screen::ChargingState::Charging,

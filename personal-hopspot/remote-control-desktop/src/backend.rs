@@ -102,6 +102,8 @@ const ACTIVITY_CONTROLLER_SCOPE: &str = "controller";
 const DEFAULT_TCP_TARGET: &str = "127.0.0.1:4242";
 const ROSTER_ANNOUNCE_GAP: Duration = Duration::from_secs(30);
 const TARGET_MONITOR_TTL: Duration = Duration::from_secs(10 * 60);
+/// After Connect drops a route, prefer a direct BLE path when we already have that peer live.
+const DIRECT_PATH_GRACE: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteControlAnnounceWait {
@@ -126,6 +128,7 @@ pub struct TargetAccess {
     pub status: TargetStatus,
     pub path: Option<TargetPath>,
     pub build_version: Option<String>,
+    pub battery: Option<String>,
     pub monitor_remaining_secs: u32,
 }
 
@@ -915,6 +918,7 @@ impl RemoteControlBackend {
         let mut items = managed_targets_from_disk(&persist, &replica, &names);
         for item in &mut items {
             item.build_version = session.cached_build_version(&item.id);
+            item.battery = session.cached_battery(&item.id);
             item.monitor_remaining_secs = self.monitor_remaining_secs(&item.id);
             if session.target_attention(&item.id) == TargetAttention::HeldBySibling {
                 item.status = TargetStatus::Offline;
@@ -954,6 +958,7 @@ impl RemoteControlBackend {
                 },
                 path: None,
                 build_version: session.cached_build_version(&id),
+                battery: session.cached_battery(&id),
                 monitor_remaining_secs: 0,
                 id,
             });
@@ -970,7 +975,11 @@ impl RemoteControlBackend {
         drop(pairing);
         for item in items.iter_mut() {
             item.monitor_remaining_secs = self.monitor_remaining_secs(&item.id);
-            item.path = self.target_path(&item.id).await;
+            item.path = if self.path_probe_pending(&item.id) {
+                None
+            } else {
+                self.target_path(&item.id).await
+            };
         }
         for announcement in announcements {
             items.push(TargetAccess {
@@ -978,6 +987,7 @@ impl RemoteControlBackend {
                 status: TargetStatus::AwaitingPairing,
                 path: announcement.path,
                 build_version: None,
+                battery: None,
                 monitor_remaining_secs: 0,
                 id: announcement.id,
             });
@@ -1002,6 +1012,7 @@ impl RemoteControlBackend {
             .expect("pairing state mutex poisoned")
             .forget_stored(target_id);
         session.forget_build_version(target_id);
+        session.forget_battery(target_id);
         {
             let mut aliases = session
                 .target_aliases
@@ -1050,41 +1061,20 @@ impl RemoteControlBackend {
             return;
         };
         let now = Instant::now();
-        let sibling_held = session
-            .roster
-            .lock()
-            .ok()
-            .map(|roster| {
-                roster
-                    .replica
-                    .labels
-                    .iter()
-                    .filter(|label| {
-                        label.kind == RosterLabelKind::TargetLooking
-                            && attention_for_target(
-                                &roster.replica,
-                                &label.key,
-                                &session.controller_identity.instance_hash,
-                            ) == TargetAttention::HeldBySibling
-                    })
-                    .map(|label| label.key.clone())
-                    .collect::<HashSet<_>>()
-            })
-            .unwrap_or_default();
         let live = {
             let Ok(until) = session.monitor_until.lock() else {
                 return;
             };
             until
                 .iter()
-                .filter(|(id, deadline)| **deadline > now && !sibling_held.contains(*id))
+                .filter(|(_, deadline)| **deadline > now)
                 .map(|(id, _)| id.clone())
                 .collect::<HashSet<_>>()
         };
         let mut released = Vec::new();
         if let Ok(mut until) = session.monitor_until.lock() {
             until.retain(|id, deadline| {
-                let keep = *deadline > now && !sibling_held.contains(id);
+                let keep = *deadline > now;
                 if !keep {
                     released.push(id.clone());
                 }
@@ -2110,6 +2100,44 @@ impl RemoteControlBackend {
         }
     }
 
+    pub async fn refresh_battery(
+        &self,
+        target_id: &str,
+    ) -> Result<Option<String>, BackendError> {
+        if !self.is_monitoring_target(target_id) {
+            return Ok(self.session()?.cached_battery(target_id));
+        }
+        if !self.session()?.battery_needs_refresh(target_id) {
+            return Ok(self.session()?.cached_battery(target_id));
+        }
+        let remote = self.connect_target(target_id).await?;
+        let result = remote.describe_power().await;
+        remote.close();
+        self.session()?.mark_battery_fetched(target_id);
+        match result {
+            Ok((snapshot, _)) => {
+                // Keep a visible row even when the board reports UNKNOWN so we can tell
+                // "RPC works" apart from "RPC never landed".
+                let label =
+                    format_managed_node_battery(snapshot).or(Some("unknown".to_string()));
+                eprintln!(
+                    "describe_power {target_id}: applicable={} battery={:?} external={:?} label={label:?}",
+                    snapshot.is_applicable(),
+                    snapshot.battery().map(|percent| percent.get()),
+                    snapshot.external_power(),
+                );
+                if let Some(text) = label.clone() {
+                    self.session()?.remember_battery(target_id, text);
+                }
+                Ok(label)
+            }
+            Err(error) => {
+                eprintln!("describe_power {target_id} failed: {error:?}");
+                Ok(self.session()?.cached_battery(target_id))
+            }
+        }
+    }
+
     pub async fn probe_target(
         &self,
         target_id: &str,
@@ -2118,6 +2146,9 @@ impl RemoteControlBackend {
         match reason {
             PathProbeReason::OperatorConnect => self.begin_target_monitor(target_id),
         }
+        // Hide announce/route in the UI until this probe learns a fresh path.
+        self.set_path_probe_pending(target_id, true);
+        let prefer_direct = self.has_live_direct_ble_peer(target_id);
         if let Some(path) = self.target_path(target_id).await {
             eprintln!(
                 "connect drops hop to {target_id} on {} and waits for a dest announce",
@@ -2126,23 +2157,52 @@ impl RemoteControlBackend {
         }
         // Snapshot pre-drop announce so Connect inventory can UntilRefreshed.
         self.remember_control_announce_baseline(target_id).await;
-        self.forget_control_route(target_id).await?;
-        self.request_control_path(target_id).await?;
-        match self.target_path(target_id).await {
-            Some(path) => {
-                self.session()?
-                    .mark_reachable(target_id, TargetStatus::Online);
-                Ok(path)
+        let outcome = async {
+            self.forget_control_route(target_id).await?;
+            self.request_control_path(target_id).await?;
+            match self
+                .wait_for_preferred_control_path(target_id, prefer_direct)
+                .await
+            {
+                Some(path) => {
+                    self.session()?
+                        .mark_reachable(target_id, TargetStatus::Online);
+                    Ok(path)
+                }
+                None => {
+                    self.session()?
+                        .mark_reachable(target_id, TargetStatus::Offline);
+                    Err(BackendError::Operation {
+                        operation: "connect to target",
+                        detail: "the target did not answer a path request for its remote-control destination"
+                            .to_string(),
+                    })
+                }
             }
-            None => {
-                self.session()?
-                    .mark_reachable(target_id, TargetStatus::Offline);
-                Err(BackendError::Operation {
-                    operation: "connect to target",
-                    detail: "the target did not answer a path request for its remote-control destination"
-                        .to_string(),
-                })
-            }
+        }
+        .await;
+        self.set_path_probe_pending(target_id, false);
+        outcome
+    }
+
+    fn path_probe_pending(&self, target_id: &str) -> bool {
+        self.session()
+            .ok()
+            .and_then(|session| session.path_probe_pending.lock().ok())
+            .is_some_and(|pending| pending.contains(target_id))
+    }
+
+    fn set_path_probe_pending(&self, target_id: &str, pending: bool) {
+        let Ok(session) = self.session() else {
+            return;
+        };
+        let Ok(mut set) = session.path_probe_pending.lock() else {
+            return;
+        };
+        if pending {
+            set.insert(target_id.to_string());
+        } else {
+            set.remove(target_id);
         }
     }
 
@@ -2196,6 +2256,47 @@ impl RemoteControlBackend {
             .unwrap_or_default();
         self.note_route_peer_for_target(target_id, &route);
         Some(path_from_route(&route, &peer_aliases, &target_aliases))
+    }
+
+    fn has_live_direct_ble_peer(&self, target_id: &str) -> bool {
+        let Ok(session) = self.session() else {
+            return false;
+        };
+        let Ok(locals) = self.local_interfaces_without_reconcile() else {
+            return false;
+        };
+        locals.iter().any(|entry| {
+            entry.kind == "bluetooth-auto"
+                && entry.peers.iter().any(|peer| {
+                    matches!(peer.connection.as_str(), "Connected" | "Degraded")
+                        && match_peer_to_target(session, &peer.id).as_deref() == Some(target_id)
+                })
+        })
+    }
+
+    async fn wait_for_preferred_control_path(
+        &self,
+        target_id: &str,
+        prefer_direct: bool,
+    ) -> Option<TargetPath> {
+        let mut best = self.target_path(target_id).await;
+        if !prefer_direct || path_is_direct_ble(best.as_ref()) {
+            return best;
+        }
+        let deadline = Instant::now() + DIRECT_PATH_GRACE;
+        while Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let Some(next) = self.target_path(target_id).await else {
+                continue;
+            };
+            if path_is_better_than(&next, best.as_ref()) {
+                best = Some(next);
+            }
+            if path_is_direct_ble(best.as_ref()) {
+                break;
+            }
+        }
+        best
     }
 
     fn note_route_peer_for_target(&self, target_id: &str, route: &RouteSnapshot) {
@@ -2409,6 +2510,21 @@ impl RemoteControlBackend {
                 self.session()?
                     .remember_build_version(target_id, text.to_owned());
             }
+        }
+        if let Ok((snapshot, _)) = remote.describe_power().await {
+            self.session()?.mark_battery_fetched(target_id);
+            let label = format_managed_node_battery(snapshot).or(Some("unknown".to_string()));
+            eprintln!(
+                "inventory describe_power {target_id}: applicable={} battery={:?} external={:?} label={label:?}",
+                snapshot.is_applicable(),
+                snapshot.battery().map(|percent| percent.get()),
+                snapshot.external_power(),
+            );
+            if let Some(text) = label {
+                self.session()?.remember_battery(target_id, text);
+            }
+        } else {
+            eprintln!("inventory describe_power {target_id} failed");
         }
         for item in items.iter_mut() {
             if !item.shows_peers {
@@ -2876,6 +2992,7 @@ impl RemoteControlBackend {
                 .expect("pairing state mutex poisoned")
                 .forget_stored(&id);
             session.forget_build_version(&id);
+            session.forget_battery(&id);
             remove_alias_map_key(&session.target_aliases, &session.target_aliases_path, &id);
         }
         apply_roster_labels(session, &plan.labels);
@@ -3024,6 +3141,8 @@ struct ControllerSession {
     sibling_aliases: Mutex<HashMap<String, String>>,
     sibling_aliases_path: PathBuf,
     build_versions: Mutex<HashMap<String, String>>,
+    batteries: Mutex<HashMap<String, String>>,
+    battery_fetched_at: Mutex<HashMap<String, Instant>>,
     clone: Arc<Mutex<IdentityCloneShared>>,
     roster: Arc<Mutex<RosterShared>>,
     ble_identity: BleIdentity,
@@ -3032,6 +3151,9 @@ struct ControllerSession {
     data_dir: PathBuf,
     last_roster_sync: Mutex<Option<Instant>>,
     monitor_until: Mutex<HashMap<String, Instant>>,
+    /// Targets whose Connect probe has dropped the hop and is waiting for a
+    /// fresh path — hide stale announce/route in the Managed Nodes header.
+    path_probe_pending: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3617,6 +3739,8 @@ impl ControllerSession {
             sibling_aliases,
             sibling_aliases_path,
             build_versions: Mutex::new(HashMap::new()),
+            batteries: Mutex::new(HashMap::new()),
+            battery_fetched_at: Mutex::new(HashMap::new()),
             clone,
             roster,
             ble_identity,
@@ -3625,6 +3749,7 @@ impl ControllerSession {
             data_dir,
             last_roster_sync: Mutex::new(None),
             monitor_until: Mutex::new(HashMap::new()),
+            path_probe_pending: Mutex::new(HashSet::new()),
         })
     }
 
@@ -3648,6 +3773,52 @@ impl ControllerSession {
             .lock()
             .expect("build versions mutex poisoned")
             .remove(target_id);
+    }
+
+    fn cached_battery(&self, target_id: &str) -> Option<String> {
+        self.batteries
+            .lock()
+            .expect("batteries mutex poisoned")
+            .get(target_id)
+            .cloned()
+    }
+
+    fn remember_battery(&self, target_id: &str, label: String) {
+        self.batteries
+            .lock()
+            .expect("batteries mutex poisoned")
+            .insert(target_id.to_owned(), label);
+    }
+
+    fn forget_battery(&self, target_id: &str) {
+        self.batteries
+            .lock()
+            .expect("batteries mutex poisoned")
+            .remove(target_id);
+        self.battery_fetched_at
+            .lock()
+            .expect("battery fetched-at mutex poisoned")
+            .remove(target_id);
+    }
+
+    fn battery_needs_refresh(&self, target_id: &str) -> bool {
+        const BATTERY_REFRESH: Duration = Duration::from_secs(10);
+        match self
+            .battery_fetched_at
+            .lock()
+            .expect("battery fetched-at mutex poisoned")
+            .get(target_id)
+        {
+            Some(at) => at.elapsed() >= BATTERY_REFRESH,
+            None => true,
+        }
+    }
+
+    fn mark_battery_fetched(&self, target_id: &str) {
+        self.battery_fetched_at
+            .lock()
+            .expect("battery fetched-at mutex poisoned")
+            .insert(target_id.to_owned(), Instant::now());
     }
 
     fn stamp_activity(&self, scope: &str, items: &mut [InterfaceEntry]) {
@@ -4445,7 +4616,10 @@ fn not_monitoring(target_id: &str) -> BackendError {
 }
 
 fn monitor_remaining_at(until: Option<Instant>, now: Instant, attention: TargetAttention) -> u32 {
-    if attention == TargetAttention::HeldBySibling {
+    // Sibling hold only blocks *starting* a monitor. Once this controller has a local
+    // Connect deadline, keep counting it down even if roster sync still shows another
+    // instance as looking (common with Mac+Android Controllers on the same mesh).
+    if attention == TargetAttention::HeldBySibling && until.is_none() {
         return 0;
     }
     until
@@ -4523,6 +4697,7 @@ fn managed_targets_from_disk(
             status: TargetStatus::Offline,
             path: None,
             build_version: None,
+            battery: None,
             monitor_remaining_secs: 0,
             id,
         })
@@ -6173,6 +6348,22 @@ fn path_from_route(
     }
 }
 
+fn path_is_direct_ble(path: Option<&TargetPath>) -> bool {
+    path.is_some_and(|path| {
+        path.hops <= 1 && path.via == "direct" && path.interface == "bluetooth-peer"
+    })
+}
+
+fn path_is_better_than(candidate: &TargetPath, current: Option<&TargetPath>) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    if path_is_direct_ble(Some(candidate)) && !path_is_direct_ble(Some(current)) {
+        return true;
+    }
+    candidate.hops < current.hops
+}
+
 fn path_from_announce(hops: u8, interface: InterfaceId, observed_at: InstantMillis) -> TargetPath {
     TargetPath {
         hops,
@@ -6265,6 +6456,36 @@ pub fn format_target_route(path: Option<&TargetPath>) -> String {
             path.interface
         ),
         None => "No path heard yet".to_string(),
+    }
+}
+
+/// Managed Nodes battery row: state of charge and external power are independent.
+/// Show both when known (e.g. `73% · USB`, `73% · charging`); omit only when fully unknown.
+#[must_use]
+pub fn format_managed_node_battery(
+    snapshot: prns_core::capabilities::power::PowerSnapshot,
+) -> Option<String> {
+    use prns_core::capabilities::power::{ChargingState, ExternalPowerState};
+
+    match (snapshot.battery(), snapshot.external_power()) {
+        (
+            Some(percent),
+            ExternalPowerState::Present {
+                charging: ChargingState::Charging,
+            },
+        ) => Some(format!("{}% · charging", percent.get())),
+        (Some(percent), ExternalPowerState::Present { .. }) => {
+            Some(format!("{}% · USB", percent.get()))
+        }
+        (Some(percent), _) => Some(format!("{}%", percent.get())),
+        (
+            None,
+            ExternalPowerState::Present {
+                charging: ChargingState::Charging,
+            },
+        ) => Some("USB · charging".to_string()),
+        (None, ExternalPowerState::Present { .. }) => Some("USB".to_string()),
+        _ => None,
     }
 }
 
@@ -6365,11 +6586,12 @@ mod tests {
         bluetooth_auto_title, clone_announce_is_usb_local, control_announce_satisfies,
         controller_identity_secret_path, encode_hex, format_activity_age, format_announce_millis,
         format_connect_label, format_hop_count, format_interface, format_next_hop,
-        format_target_announce, format_target_route, format_utc_millis,
+        format_managed_node_battery, format_target_announce, format_target_route, format_utc_millis,
         generic_bluetooth_auto_title, instance_identity_secret_path, interface_peer,
         interface_peer_from_wire, interface_power_from_connection, inventory_recovery_continues,
         load_persisted_tcp_target, local_interface_config, local_interface_entry,
         managed_targets_from_disk, monitor_remaining_at, operator_interface_kind,
+        path_is_better_than, path_is_direct_ble,
         operator_local_kind, parse_invitation_code, parse_target_names, parse_tcp_dial_target,
         peer_label, persist_tcp_target, radio_facts, remote_interface_entry, render_target_names,
         resolve_controller_tcp_target, resolve_paired_target_hash, route_interface_kind,
@@ -6426,7 +6648,59 @@ mod tests {
     }
 
     #[test]
-    fn monitor_remaining_is_zero_when_idle_expired_or_a_sibling_holds() {
+    fn managed_node_battery_labels_cover_percent_charging_and_usb() {
+        use prns_core::capabilities::power::{
+            BatteryPercent, ChargingState, ExternalPowerState, PowerSnapshot,
+        };
+
+        assert_eq!(format_managed_node_battery(PowerSnapshot::UNKNOWN), None);
+        assert_eq!(
+            format_managed_node_battery(PowerSnapshot::new(
+                Some(BatteryPercent::saturating(73)),
+                ExternalPowerState::Absent,
+            )),
+            Some("73%".to_string())
+        );
+        assert_eq!(
+            format_managed_node_battery(PowerSnapshot::new(
+                Some(BatteryPercent::saturating(73)),
+                ExternalPowerState::Present {
+                    charging: ChargingState::Unknown,
+                },
+            )),
+            Some("73% · USB".to_string())
+        );
+        assert_eq!(
+            format_managed_node_battery(PowerSnapshot::new(
+                Some(BatteryPercent::saturating(73)),
+                ExternalPowerState::Present {
+                    charging: ChargingState::Charging,
+                },
+            )),
+            Some("73% · charging".to_string())
+        );
+        assert_eq!(
+            format_managed_node_battery(PowerSnapshot::new(
+                None,
+                ExternalPowerState::Present {
+                    charging: ChargingState::Unknown,
+                },
+            )),
+            Some("USB".to_string())
+        );
+        assert_eq!(
+            format_managed_node_battery(PowerSnapshot::new(
+                None,
+                ExternalPowerState::Present {
+                    charging: ChargingState::Charging,
+                },
+            )),
+            Some("USB · charging".to_string())
+        );
+    }
+
+    #[test]
+    fn monitor_remaining_is_zero_when_idle_expired_or_a_sibling_holds_without_local_connect() {
         let now = Instant::now();
         assert_eq!(
             monitor_remaining_at(None, now, crate::roster_sync::TargetAttention::Free),
@@ -6434,7 +6708,7 @@ mod tests {
         );
         assert_eq!(
             monitor_remaining_at(
-                Some(now + TARGET_MONITOR_TTL),
+                None,
                 now,
                 crate::roster_sync::TargetAttention::HeldBySibling,
             ),
@@ -6447,6 +6721,14 @@ mod tests {
                 crate::roster_sync::TargetAttention::HeldByThis,
             ),
             0
+        );
+        assert_eq!(
+            monitor_remaining_at(
+                Some(now + TARGET_MONITOR_TTL),
+                now,
+                crate::roster_sync::TargetAttention::HeldBySibling,
+            ),
+            u32::try_from(TARGET_MONITOR_TTL.as_secs()).unwrap()
         );
         let remaining = monitor_remaining_at(
             Some(now + Duration::from_secs(90)),
@@ -7422,6 +7704,26 @@ mod tests {
         );
         assert_eq!(format_target_announce(None), "Last announce not heard yet");
         assert_eq!(format_target_route(None), "No path heard yet");
+    }
+
+    #[test]
+    fn connect_prefers_direct_bluetooth_over_relayed_paths() {
+        let direct = TargetPath {
+            hops: 1,
+            via: "direct".to_string(),
+            interface: "bluetooth-peer".to_string(),
+            announced_at: String::new(),
+        };
+        let relayed = TargetPath {
+            hops: 2,
+            via: "via HV4A-peer".to_string(),
+            interface: "bluetooth-peer".to_string(),
+            announced_at: String::new(),
+        };
+        assert!(path_is_direct_ble(Some(&direct)));
+        assert!(!path_is_direct_ble(Some(&relayed)));
+        assert!(path_is_better_than(&direct, Some(&relayed)));
+        assert!(!path_is_better_than(&relayed, Some(&direct)));
     }
 
     #[test]

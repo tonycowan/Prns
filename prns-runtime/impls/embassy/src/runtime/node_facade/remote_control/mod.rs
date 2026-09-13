@@ -11,14 +11,16 @@ use crate::routing::links::LinkId;
 use crate::runtime::request_endpoints::RequestEndpointId;
 use crate::runtime::{
     RemoteControlAnnounceSelf, RemoteControlAuthorizeController, RemoteControlDescribe,
-    RemoteControlDescribeBuild, RemoteControlError, RemoteControlInventoryControllers,
-    RemoteControlInventoryInterfaceConfig, RemoteControlInventoryInterfacePeers,
-    RemoteControlInventoryInterfaces, RemoteControlRevokeController,
-    RemoteControlSetInterfaceGroup, RemoteControlSetInterfaceLoRaProfile,
-    RemoteControlSetInterfaceMode, RemoteControlSetInterfacePower,
-    RemoteControlSetInterfaceWifiStation, RemoteControlSleepRadios, RemoteControlWakeRadios,
+    RemoteControlDescribeBuild, RemoteControlDescribePower, RemoteControlError,
+    RemoteControlInventoryControllers, RemoteControlInventoryInterfaceConfig,
+    RemoteControlInventoryInterfacePeers, RemoteControlInventoryInterfaces,
+    RemoteControlRevokeController, RemoteControlSetInterfaceGroup,
+    RemoteControlSetInterfaceLoRaProfile, RemoteControlSetInterfaceMode,
+    RemoteControlSetInterfacePower, RemoteControlSetInterfaceWifiStation, RemoteControlSleepRadios,
+    RemoteControlWakeRadios,
 };
 use crate::units::RttMillis;
+use prns_core::capabilities::power::PowerSnapshot;
 use prns_core::interfaces::{InterfaceId, InterfaceMode};
 use prns_core::remote_control::{
     RemoteControlAuthorizeControllerOutcome, RemoteControlBuildVersion,
@@ -138,6 +140,25 @@ impl<
             .map_err(RemoteControlError::Request)?;
         let version = RemoteControlDescribeBuild::parse_response(response.as_slice())?;
         Ok((version, rtt))
+    }
+
+    pub async fn describe_power(
+        &self,
+    ) -> Result<(PowerSnapshot, RttMillis), RemoteControlError> {
+        let mut encoded = [0u8; RemoteControlDescribePower::REQUEST.encoded_len()];
+        RemoteControlDescribePower::write_request(&mut encoded)?;
+        let (response, rtt) = self
+            .node
+            .request_with_maximum_response_bytes::<{ RemoteControlDescribePower::RESPONSE_CAPACITY }>(
+                self.link_id,
+                RequestEndpointId::of(REMOTE_CONTROL_REQUEST_ENDPOINT_ID),
+                &encoded,
+                RequestResponseTimeout::LinkDefault,
+            )
+            .await
+            .map_err(RemoteControlError::Request)?;
+        let snapshot = RemoteControlDescribePower::parse_response(response.as_slice())?;
+        Ok((snapshot, rtt))
     }
 
     pub async fn inventory_interfaces(

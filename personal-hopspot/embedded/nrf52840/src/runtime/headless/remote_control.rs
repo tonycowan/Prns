@@ -121,6 +121,10 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
         hopspot::hopspot_remote_control_build_version()
     }
 
+    fn power_snapshot(&self) -> hopspot::PowerSnapshot {
+        hopspot::latest_power_snapshot()
+    }
+
     fn inventory_interface_config(&self, id: InterfaceId) -> RemoteControlInterfaceConfigOutcome {
         let ble = BluetoothAutoStatus::new(&BLE_SHARED);
         let mut group = [0u8; 32];

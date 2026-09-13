@@ -167,6 +167,7 @@ impl<'a> RemoteControlConfiguration<'a> {
         let _config = available.insert(RemoteControlRequestKind::InventoryInterfaceConfig);
         let _lora = available.insert(RemoteControlRequestKind::SetInterfaceLoRaProfile);
         let _build = available.insert(RemoteControlRequestKind::DescribeBuild);
+        let _power = available.insert(RemoteControlRequestKind::DescribePower);
         let _wifi = available.insert(RemoteControlRequestKind::SetInterfaceWifiStation);
         let _controllers = available.insert(RemoteControlRequestKind::InventoryControllers);
         let _authorize = available.insert(RemoteControlRequestKind::AuthorizeController);
@@ -374,6 +375,7 @@ mod tests {
             describe_without_announce.insert(RemoteControlRequestKind::InventoryInterfaceConfig);
         let _ = describe_without_announce.insert(RemoteControlRequestKind::SetInterfaceLoRaProfile);
         let _ = describe_without_announce.insert(RemoteControlRequestKind::DescribeBuild);
+        let _ = describe_without_announce.insert(RemoteControlRequestKind::DescribePower);
         let _ = describe_without_announce.insert(RemoteControlRequestKind::SetInterfaceWifiStation);
         let _ = describe_without_announce.insert(RemoteControlRequestKind::InventoryControllers);
         let _ = describe_without_announce.insert(RemoteControlRequestKind::AuthorizeController);

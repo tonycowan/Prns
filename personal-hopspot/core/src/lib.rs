@@ -16,6 +16,7 @@ mod interface_mode_store;
 mod mobile;
 pub mod node_pages;
 mod persistence;
+mod power_publish;
 mod radio_profile_store;
 mod remote_control_inventory;
 #[cfg(feature = "display")]
@@ -87,6 +88,7 @@ pub use prns_core::capabilities::power::{
     BatteryGauge, BatteryPercent, BatterySource, ChargingState, ExternalPowerState, NoBattery,
     PowerSnapshot,
 };
+pub use power_publish::{latest_power_snapshot, publish_power_snapshot};
 pub use radio_profile_store::{
     LoadedRadioProfile, RadioProfileLoadNotice, RadioProfileStore, RadioProfileStoreError,
 };

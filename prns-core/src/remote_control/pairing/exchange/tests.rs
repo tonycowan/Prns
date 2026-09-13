@@ -129,7 +129,7 @@ fn pairing_exchange_discriminants_and_bounds_are_stable() {
     assert_eq!(RemoteControlPairingMessageKind::Commit.wire_value(), 3);
     assert_eq!(RemoteControlPairingMessageKind::Completed.wire_value(), 4);
     assert_eq!(RemoteControlPairingRequest::MAX_ENCODED_LEN, 98);
-    assert_eq!(RemoteControlPairingResponse::MAX_ENCODED_LEN, 151);
+    assert_eq!(RemoteControlPairingResponse::MAX_ENCODED_LEN, 152);
     const {
         assert!(
             RemoteControlPairingRequest::MAX_ENCODED_LEN
@@ -243,17 +243,17 @@ fn the_transcript_and_confirmation_code_have_a_pinned_vector() {
     assert_eq!(
         prepared.transcript().digest().as_bytes(),
         &[
-            0xcb, 0x6b, 0x1e, 0x4e, 0x1e, 0x95, 0xf6, 0xb7, 0x10, 0x0d, 0xec, 0x97, 0x4b, 0xc0,
-            0x56, 0x79, 0x11, 0x89, 0x86, 0x67, 0xf5, 0xaa, 0x68, 0x3e, 0x20, 0xc5, 0xc2, 0x1d,
-            0x19, 0x60, 0x93, 0x4f,
+            0xb2, 0x00, 0x03, 0xc2, 0xfe, 0x8d, 0x3a, 0x99, 0x66, 0xc2, 0xee, 0x4f, 0x2f, 0x49,
+            0x49, 0xb8, 0x87, 0x18, 0x7f, 0x2b, 0xbe, 0x6f, 0xd9, 0xda, 0xce, 0x6a, 0xec, 0xcf,
+            0x38, 0xa3, 0xc4, 0x83,
         ],
     );
-    assert_eq!(prepared.transcript().confirmation_code().value(), 616_523);
+    assert_eq!(prepared.transcript().confirmation_code().value(), 976_690);
     assert_eq!(
         RemoteControlPairingAttemptId::from(prepared.transcript())
             .confirmation_code()
             .value(),
-        616_523,
+        976_690,
     );
 }
 

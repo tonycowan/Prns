@@ -21,6 +21,7 @@ use crate::remote_control::{
 use crate::routing::links::request::REQUEST_WIRE_OVERHEAD;
 use crate::units::ByteLimit;
 use crate::wire::DestinationHash;
+use prns_core::capabilities::power::PowerSnapshot;
 
 use super::request_endpoints::{
     Decline, InboundRequest, RequestContext, RequestEndpoint, RequestEndpointPolicy, RespondToken,
@@ -213,6 +214,10 @@ pub trait RemoteControlHostControls {
 
     fn build_version(&self) -> RemoteControlBuildVersion {
         RemoteControlBuildVersion::empty()
+    }
+
+    fn power_snapshot(&self) -> PowerSnapshot {
+        PowerSnapshot::UNKNOWN
     }
 
     fn sleep_radios(&self) -> RemoteControlSleepOutcome {
@@ -579,6 +584,32 @@ impl RemoteControlDescribeBuild {
     }
 }
 
+pub struct RemoteControlDescribePower;
+
+impl RemoteControlDescribePower {
+    pub const REQUEST: RemoteControlRequest = RemoteControlRequest::DescribePower;
+    pub const RESPONSE_CAPACITY: usize = Self::REQUEST.maximum_response_encoded_len();
+    pub const MAXIMUM_RESPONSE_BYTES: ByteLimit =
+        ByteLimit::Maximum(Self::RESPONSE_CAPACITY as u64);
+
+    pub fn write_request(out: &mut [u8]) -> Result<usize, RemoteControlError> {
+        Self::REQUEST
+            .write_into(out)
+            .map_err(RemoteControlError::Encode)
+    }
+
+    pub fn parse_response(bytes: &[u8]) -> Result<PowerSnapshot, RemoteControlError> {
+        match RemoteControlResponse::parse(bytes).map_err(RemoteControlError::Response)? {
+            RemoteControlResponse::DescribePower(snapshot) => Ok(snapshot),
+            RemoteControlResponse::ProtocolError(error) => Err(RemoteControlError::Remote(error)),
+            response => Err(RemoteControlError::UnexpectedResponse {
+                expected: RemoteControlResponseKind::DescribePower,
+                found: response.kind(),
+            }),
+        }
+    }
+}
+
 pub struct RemoteControlSleepRadios;
 
 impl RemoteControlSleepRadios {
@@ -767,6 +798,10 @@ impl RemoteControlRequestEndpoint {
                 require_available(available_requests, RemoteControlRequestKind::DescribeBuild)?;
                 Ok(AdmittedRemoteControlOperation::DescribeBuild)
             }
+            Ok(RemoteControlRequest::DescribePower) => {
+                require_available(available_requests, RemoteControlRequestKind::DescribePower)?;
+                Ok(AdmittedRemoteControlOperation::DescribePower)
+            }
             Ok(RemoteControlRequest::SleepRadios) => {
                 require_available(available_requests, RemoteControlRequestKind::SleepRadios)?;
                 Ok(AdmittedRemoteControlOperation::SleepRadios)
@@ -878,6 +913,9 @@ impl RemoteControlRequestEndpoint {
             AdmittedRemoteControlOperation::DescribeBuild => {
                 RemoteControlResponse::DescribeBuild(context.state.build_version())
             }
+            AdmittedRemoteControlOperation::DescribePower => {
+                RemoteControlResponse::DescribePower(context.state.power_snapshot())
+            }
             AdmittedRemoteControlOperation::SleepRadios => {
                 RemoteControlResponse::SleepRadios(context.state.sleep_radios())
             }
@@ -961,6 +999,7 @@ enum AdmittedRemoteControlOperation {
     AuthorizeControllerReady(RemoteControlAuthorizeControllerOutcome),
     RevokeControllerReady(RemoteControlRevokeControllerOutcome),
     DescribeBuild,
+    DescribePower,
     SleepRadios,
     WakeRadios,
     ProtocolError(RemoteControlProtocolError),

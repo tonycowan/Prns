@@ -1,3 +1,4 @@
+use crate::capabilities::power::PowerSnapshot;
 use crate::identity::{IdentityHash, IDENTITY_PUBLIC_KEY_LEN};
 use crate::interfaces::{InterfaceId, InterfaceMode, INTERFACE_ID_LEN};
 use crate::wire::TRUNCATED_HASH_BYTE_LEN;
@@ -63,6 +64,7 @@ prns_macros::iterable_enum! {
         InventoryControllers = 0x0E,
         AuthorizeController = 0x0F,
         RevokeController = 0x10,
+        DescribePower = 0x11,
     }
 }
 
@@ -137,6 +139,10 @@ impl RemoteControlRequestKind {
                 RemoteControlBuildVersion::MAX_ENCODED_LEN,
                 RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
             )),
+            Self::DescribePower => MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
+                PowerSnapshot::ENCODED_LEN,
+                RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
+            )),
             Self::SleepRadios | Self::WakeRadios => {
                 MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
                     RemoteControlSleepOutcome::ENCODED_LEN,
@@ -167,6 +173,7 @@ prns_macros::iterable_enum! {
         InventoryControllers = 0x0E,
         AuthorizeController = 0x0F,
         RevokeController = 0x10,
+        DescribePower = 0x11,
         ProtocolError = 0xFF,
     }
 }
@@ -272,6 +279,7 @@ pub enum RemoteControlRequest {
         hash: IdentityHash,
     },
     DescribeBuild,
+    DescribePower,
     SleepRadios,
     WakeRadios,
 }
@@ -310,6 +318,7 @@ impl RemoteControlRequest {
             Self::AuthorizeController { .. } => RemoteControlRequestKind::AuthorizeController,
             Self::RevokeController { .. } => RemoteControlRequestKind::RevokeController,
             Self::DescribeBuild => RemoteControlRequestKind::DescribeBuild,
+            Self::DescribePower => RemoteControlRequestKind::DescribePower,
             Self::SleepRadios => RemoteControlRequestKind::SleepRadios,
             Self::WakeRadios => RemoteControlRequestKind::WakeRadios,
         }
@@ -323,6 +332,7 @@ impl RemoteControlRequest {
             | Self::InventoryInterfaces
             | Self::InventoryControllers
             | Self::DescribeBuild
+            | Self::DescribePower
             | Self::SleepRadios
             | Self::WakeRadios => MESSAGE_HEADER_ENCODED_LEN,
             Self::SetInterfacePower { .. }
@@ -378,6 +388,7 @@ impl RemoteControlRequest {
             RemoteControlRequestKind::AuthorizeController => parse_authorize_controller(body),
             RemoteControlRequestKind::RevokeController => parse_revoke_controller(body),
             RemoteControlRequestKind::DescribeBuild if body.is_empty() => Ok(Self::DescribeBuild),
+            RemoteControlRequestKind::DescribePower if body.is_empty() => Ok(Self::DescribePower),
             RemoteControlRequestKind::SleepRadios if body.is_empty() => Ok(Self::SleepRadios),
             RemoteControlRequestKind::WakeRadios if body.is_empty() => Ok(Self::WakeRadios),
             RemoteControlRequestKind::SetInterfacePower => parse_set_interface_power(body),
@@ -400,6 +411,7 @@ impl RemoteControlRequest {
             | RemoteControlRequestKind::InventoryInterfaces
             | RemoteControlRequestKind::InventoryControllers
             | RemoteControlRequestKind::DescribeBuild
+            | RemoteControlRequestKind::DescribePower
             | RemoteControlRequestKind::SleepRadios
             | RemoteControlRequestKind::WakeRadios => {
                 Err(RemoteControlRequestParseError::Malformed)
@@ -426,6 +438,7 @@ impl RemoteControlRequest {
             | Self::InventoryInterfaces
             | Self::InventoryControllers
             | Self::DescribeBuild
+            | Self::DescribePower
             | Self::SleepRadios
             | Self::WakeRadios => {}
             Self::SetInterfacePower { id, power } => {
@@ -950,8 +963,11 @@ impl RemoteControlRequestSet {
             let _authorize = requests.insert(RemoteControlRequestKind::AuthorizeController);
             let _revoke = requests.insert(RemoteControlRequestKind::RevokeController);
         }
-        if requests.supports(RemoteControlRequestKind::Describe) {
+        if requests.supports(RemoteControlRequestKind::Describe)
+            || requests.supports(RemoteControlRequestKind::DescribeBuild)
+        {
             let _build = requests.insert(RemoteControlRequestKind::DescribeBuild);
+            let _power = requests.insert(RemoteControlRequestKind::DescribePower);
         }
         requests
     }
@@ -1060,6 +1076,7 @@ pub enum RemoteControlResponse {
     AuthorizeController(RemoteControlAuthorizeControllerOutcome),
     RevokeController(RemoteControlRevokeControllerOutcome),
     DescribeBuild(RemoteControlBuildVersion),
+    DescribePower(PowerSnapshot),
     SleepRadios(RemoteControlSleepOutcome),
     WakeRadios(RemoteControlSleepOutcome),
     ProtocolError(RemoteControlProtocolError),
@@ -1110,6 +1127,7 @@ impl RemoteControlResponse {
             Self::AuthorizeController(_) => RemoteControlResponseKind::AuthorizeController,
             Self::RevokeController(_) => RemoteControlResponseKind::RevokeController,
             Self::DescribeBuild(_) => RemoteControlResponseKind::DescribeBuild,
+            Self::DescribePower(_) => RemoteControlResponseKind::DescribePower,
             Self::SleepRadios(_) => RemoteControlResponseKind::SleepRadios,
             Self::WakeRadios(_) => RemoteControlResponseKind::WakeRadios,
             Self::ProtocolError(_) => RemoteControlResponseKind::ProtocolError,
@@ -1135,6 +1153,7 @@ impl RemoteControlResponse {
             Self::AuthorizeController(_) => RemoteControlAuthorizeControllerOutcome::ENCODED_LEN,
             Self::RevokeController(_) => RemoteControlRevokeControllerOutcome::ENCODED_LEN,
             Self::DescribeBuild(version) => version.encoded_body_len(),
+            Self::DescribePower(snapshot) => snapshot.encoded_body_len(),
             Self::SleepRadios(_) | Self::WakeRadios(_) => RemoteControlSleepOutcome::ENCODED_LEN,
             Self::ProtocolError(error) => error.encoded_body_len(),
         };
@@ -1203,6 +1222,9 @@ impl RemoteControlResponse {
             RemoteControlResponseKind::DescribeBuild => {
                 parse_build_version(body).map(Self::DescribeBuild)
             }
+            RemoteControlResponseKind::DescribePower => {
+                parse_power_snapshot(body).map(Self::DescribePower)
+            }
             RemoteControlResponseKind::SleepRadios => {
                 parse_sleep_outcome(body).map(Self::SleepRadios)
             }
@@ -1247,6 +1269,7 @@ impl RemoteControlResponse {
             }
             Self::RevokeController(outcome) => write_revoke_controller_outcome(*outcome, body),
             Self::DescribeBuild(version) => write_build_version(*version, body),
+            Self::DescribePower(snapshot) => write_power_snapshot(*snapshot, body),
             Self::SleepRadios(outcome) | Self::WakeRadios(outcome) => {
                 write_sleep_outcome(*outcome, body)
             }
@@ -1405,6 +1428,20 @@ fn parse_build_version(
         return Err(RemoteControlResponseParseError::Malformed);
     };
     RemoteControlBuildVersion::from_text(text).ok_or(RemoteControlResponseParseError::Malformed)
+}
+
+fn parse_power_snapshot(body: &[u8]) -> Result<PowerSnapshot, RemoteControlResponseParseError> {
+    let Some((snapshot, rest)) = PowerSnapshot::parse(body) else {
+        return Err(if body.len() < PowerSnapshot::ENCODED_LEN {
+            RemoteControlResponseParseError::Truncated
+        } else {
+            RemoteControlResponseParseError::Malformed
+        });
+    };
+    if !rest.is_empty() {
+        return Err(RemoteControlResponseParseError::Malformed);
+    }
+    Ok(snapshot)
 }
 
 fn parse_lora_outcome(
@@ -1589,6 +1626,10 @@ fn write_revoke_controller_outcome(outcome: RemoteControlRevokeControllerOutcome
 
 fn write_build_version(version: RemoteControlBuildVersion, body: &mut [u8]) {
     version.write_body(body);
+}
+
+fn write_power_snapshot(snapshot: PowerSnapshot, body: &mut [u8]) {
+    let _ = snapshot.write_into(body);
 }
 
 fn write_sleep_outcome(outcome: RemoteControlSleepOutcome, body: &mut [u8]) {

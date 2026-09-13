@@ -227,6 +227,13 @@ list of interfaces; expand an interface to manage that feature.
    (SSID flashed once) for the live apply to join. Below each
    target address are the last
    announce time in local time and a second line with hop count and inbound path. A stored
+   PRNS build string and a **Battery** reading (percent, or USB when plugged with no
+   cell) appear above the address when Connect/monitor is live and the board firmware
+   exposes them; older firmware simply omits Battery. On MeshTower V2, percent comes from
+   the VBAT ADC and external power from the HUSB238 USB-PD sink (20 V contract →
+   charging; other attach → USB; SoftDevice 5 V alone is not treated as pack power).
+   Controller-only updates cannot
+   invent a reading — flash the board after this feature lands. A stored
    target starts Offline after this app restarts because reachability is not
    persisted; the node list itself is loaded from this install's persist and
    roster replica, then sibling roster deltas correct it. Nodes start

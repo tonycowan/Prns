@@ -344,6 +344,7 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlRequestKind::InventoryControllers,
             RemoteControlRequestKind::AuthorizeController,
             RemoteControlRequestKind::RevokeController,
+            RemoteControlRequestKind::DescribePower,
         ],
     );
     assert_eq!(
@@ -365,6 +366,7 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlResponseKind::InventoryControllers,
             RemoteControlResponseKind::AuthorizeController,
             RemoteControlResponseKind::RevokeController,
+            RemoteControlResponseKind::DescribePower,
             RemoteControlResponseKind::ProtocolError,
         ],
     );
@@ -426,6 +428,7 @@ fn protocol_discriminants_are_stable_typed_values() {
         RemoteControlRequestKind::RevokeController.wire_value(),
         0x10
     );
+    assert_eq!(RemoteControlRequestKind::DescribePower.wire_value(), 0x11);
     assert_eq!(RemoteControlResponseKind::Describe.wire_value(), 0x01);
     assert_eq!(RemoteControlResponseKind::AnnounceSelf.wire_value(), 0x02);
     assert_eq!(
@@ -475,6 +478,7 @@ fn protocol_discriminants_are_stable_typed_values() {
         RemoteControlResponseKind::RevokeController.wire_value(),
         0x10
     );
+    assert_eq!(RemoteControlResponseKind::DescribePower.wire_value(), 0x11);
     assert_eq!(RemoteControlResponseKind::ProtocolError.wire_value(), 0xFF,);
     assert_eq!(
         RemoteControlProtocolErrorKind::MalformedRequest.wire_value(),
@@ -553,6 +557,49 @@ fn describe_build_carries_a_length_prefixed_version_and_rejects_trailers() {
     let truncated = RemoteControlBuildVersion::from_label(&"v".repeat(80), "deadbeef");
     let expected = "v".repeat(48);
     assert_eq!(truncated.as_str(), Some(expected.as_str()));
+}
+
+#[test]
+fn describe_power_carries_a_fixed_power_snapshot_and_rejects_trailers() {
+    use crate::capabilities::power::{
+        BatteryPercent, ChargingState, ExternalPowerState, PowerSnapshot,
+    };
+
+    let snapshot = PowerSnapshot::new(
+        Some(BatteryPercent::saturating(73)),
+        ExternalPowerState::Present {
+            charging: ChargingState::Charging,
+        },
+    );
+    let request = RemoteControlRequest::DescribePower;
+    let mut request_bytes = [0u8; RemoteControlRequest::DescribePower.encoded_len()];
+    assert_eq!(
+        request.write_into(&mut request_bytes),
+        Ok(request.encoded_len())
+    );
+    assert_eq!(RemoteControlRequest::parse(&request_bytes), Ok(request));
+    assert_eq!(
+        RemoteControlRequest::parse(&[
+            RemoteControlProtocolVersion::V1.wire_value(),
+            RemoteControlRequestKind::DescribePower.wire_value(),
+            0x00,
+        ]),
+        Err(crate::remote_control::RemoteControlRequestParseError::Malformed),
+    );
+
+    let response = RemoteControlResponse::DescribePower(snapshot);
+    let mut response_bytes = [0u8; RemoteControlResponse::MAX_ENCODED_LEN];
+    let written = response.write_into(&mut response_bytes).unwrap();
+    let encoded = response_bytes
+        .get(..written)
+        .expect("encode stays in buffer");
+    assert_eq!(RemoteControlResponse::parse(encoded), Ok(response));
+    let mut trailing = encoded.to_vec();
+    trailing.push(0x00);
+    assert_eq!(
+        RemoteControlResponse::parse(&trailing),
+        Err(crate::remote_control::RemoteControlResponseParseError::Malformed),
+    );
 }
 
 #[test]
@@ -652,6 +699,7 @@ fn operator_edit_grants_pick_up_later_interface_edit_kinds() {
     assert!(!stored.supports(RemoteControlRequestKind::AuthorizeController));
     assert!(!stored.supports(RemoteControlRequestKind::RevokeController));
     assert!(!stored.supports(RemoteControlRequestKind::DescribeBuild));
+    assert!(!stored.supports(RemoteControlRequestKind::DescribePower));
     let expanded = stored.with_current_operator_edits();
     assert!(expanded.supports(RemoteControlRequestKind::SetInterfaceGroup));
     assert!(expanded.supports(RemoteControlRequestKind::SetInterfaceMode));
@@ -663,12 +711,21 @@ fn operator_edit_grants_pick_up_later_interface_edit_kinds() {
     assert!(expanded.supports(RemoteControlRequestKind::AuthorizeController));
     assert!(expanded.supports(RemoteControlRequestKind::RevokeController));
     assert!(!expanded.supports(RemoteControlRequestKind::DescribeBuild));
+    assert!(!expanded.supports(RemoteControlRequestKind::DescribePower));
     let describe_only = RemoteControlRequestSet::only(RemoteControlRequestKind::Describe);
-    let mut describe_and_build = describe_only;
-    assert!(describe_and_build.insert(RemoteControlRequestKind::DescribeBuild));
+    let mut describe_and_facts = describe_only;
+    assert!(describe_and_facts.insert(RemoteControlRequestKind::DescribeBuild));
+    assert!(describe_and_facts.insert(RemoteControlRequestKind::DescribePower));
     assert_eq!(
         describe_only.with_current_operator_edits(),
-        describe_and_build,
+        describe_and_facts,
+    );
+    let build_only = RemoteControlRequestSet::only(RemoteControlRequestKind::DescribeBuild);
+    let mut build_and_power = build_only;
+    assert!(build_and_power.insert(RemoteControlRequestKind::DescribePower));
+    assert_eq!(
+        build_only.with_current_operator_edits(),
+        build_and_power,
     );
 }
 
@@ -691,6 +748,7 @@ fn describe_response_reports_its_available_requests_canonically() {
     assert!(available.supports(RemoteControlRequestKind::InventoryInterfaceConfig));
     assert!(available.supports(RemoteControlRequestKind::SetInterfaceLoRaProfile));
     assert!(available.supports(RemoteControlRequestKind::DescribeBuild));
+    assert!(available.supports(RemoteControlRequestKind::DescribePower));
     assert!(available.supports(RemoteControlRequestKind::SetInterfaceWifiStation));
     assert!(available.supports(RemoteControlRequestKind::InventoryControllers));
     assert!(available.supports(RemoteControlRequestKind::AuthorizeController));

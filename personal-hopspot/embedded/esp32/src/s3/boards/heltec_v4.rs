@@ -48,6 +48,11 @@ static GNSS_SHARED: GnssShared = GnssShared::new();
 /// (flat). Tuned above ADC/load noise (load dips pull the fast average *down*, never up).
 const CHARGE_RISE_MV: u32 = 16;
 
+/// Charger float / open VBAT with USB only sits near a full LiPo (~4.1–4.2 V). That is
+/// indistinguishable from a truly full cell by voltage alone, so while a USB host is attached we
+/// suppress SoC in this band and report external power instead of inventing ~99%.
+const USB_FLOAT_SUPPRESS_MV: u32 = 4_050;
+
 /// The Heltec V4's battery sense: VBAT on a 49:10 divider into ADC1 (GPIO1), gated by GPIO37. The
 /// shared [`BatteryGauge`](screen::BatteryGauge) owns the percentage curve; this reads the divided
 /// millivolts and keeps two EMAs (fast + slow) so [`external_power`](Self::external_power) can infer the
@@ -63,10 +68,27 @@ pub struct HeltecBattery {
     _ctrl: Output<'static>,
     fast_ema_mv: u32,
     slow_ema_mv: u32,
+    last_sof: u16,
+    usb_host: bool,
+}
+
+impl HeltecBattery {
+    /// USB Serial/JTAG SOF advancing means a USB host is actively clocking the bus.
+    fn poll_usb_host(&mut self) -> bool {
+        let frame = esp_hal::peripherals::USB_DEVICE::regs()
+            .fram_num()
+            .read()
+            .sof_frame_index()
+            .bits();
+        let advanced = frame != self.last_sof;
+        self.last_sof = frame;
+        advanced
+    }
 }
 
 impl screen::BatterySource for HeltecBattery {
     fn read_millivolts(&mut self) -> Option<u32> {
+        self.usb_host = self.poll_usb_host();
         for _ in 0..1000 {
             if let Ok(raw) = self.adc.read_oneshot(&mut self.pin) {
                 let mv = raw as u32 * VBAT_DIVIDER_NUM / VBAT_DIVIDER_DEN;
@@ -77,17 +99,26 @@ impl screen::BatterySource for HeltecBattery {
                     self.fast_ema_mv = (self.fast_ema_mv * 3 + mv) / 4;
                     self.slow_ema_mv = (self.slow_ema_mv * 15 + mv) / 16;
                 }
+                if self.usb_host && mv >= USB_FLOAT_SUPPRESS_MV {
+                    return None;
+                }
                 return Some(mv);
             }
         }
         None
     }
 
-    /// Inferred charging: the fast voltage average leading the slow one by [`CHARGE_RISE_MV`] means
-    /// the terminal voltage is stepping/trending up (plug-in or active charge). Fades when the cell
-    /// is full (flat) or on unplug (step down) — an approximation that answers "did plugging in
-    /// actually start charging?", which is the signal that matters on a board with no charge pin.
+    /// USB host SOF → external power is present. Otherwise infer charging from the voltage trend
+    /// (no dedicated VBUS/charge pin on this board).
     fn external_power(&mut self) -> screen::ExternalPowerState {
+        if self.usb_host {
+            let charging = if self.fast_ema_mv > self.slow_ema_mv.saturating_add(CHARGE_RISE_MV) {
+                screen::ChargingState::Charging
+            } else {
+                screen::ChargingState::Unknown
+            };
+            return screen::ExternalPowerState::Present { charging };
+        }
         if self.fast_ema_mv > self.slow_ema_mv.saturating_add(CHARGE_RISE_MV) {
             screen::ExternalPowerState::Present {
                 charging: screen::ChargingState::Charging,
@@ -373,6 +404,8 @@ impl Esp32S3Board for HeltecBoard {
             _ctrl: adc_ctrl,
             fast_ema_mv: 0,
             slow_ema_mv: 0,
+            last_sof: 0,
+            usb_host: false,
         };
 
         S3BoardHardware {

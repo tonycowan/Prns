@@ -152,6 +152,7 @@ pub(super) fn face(input: FaceInput) -> impl Future {
                 Some(battery_mv),
                 hopspot::ExternalPowerState::from_presence(bluetooth::usb_vbus_present()),
             );
+            hopspot::publish_power_snapshot(battery_state);
             let snapshots = snapshots(lora_status, usb_status, working_interface_modes);
             let mut cards = cards(&snapshots, lora_status.id(), usb_status.id());
             let now_ms = embassy_time::Instant::now().as_millis();

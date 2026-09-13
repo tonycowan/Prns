@@ -2,6 +2,8 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join4;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+#[cfg(feature = "board-mesh-tower-v2")]
+use embassy_time::{with_timeout, Duration};
 #[cfg(not(feature = "board-mesh-tower-v2"))]
 use embassy_time::Timer;
 use embassy_usb::{Builder, Config as UsbConfig};
@@ -257,6 +259,8 @@ pub async fn run(spawner: Spawner) -> ! {
         usb: usb_driver,
         vbus,
         radio,
+        battery,
+        pd_sink,
         status_led,
         button,
     } = hardware;
@@ -506,8 +510,36 @@ pub async fn run(spawner: Spawner) -> ! {
         usb.run(),
         usb_device.run(usb_seam),
         async {
+            let mut battery = battery;
+            let mut pd_sink = pd_sink;
+            let mut battery_gauge = hopspot::BatteryGauge::lipo();
+            let mut ticks_to_sample: u16 = 0;
             loop {
                 selected::maintain().await;
+                if ticks_to_sample == 0 {
+                    // Sense with Meshtastic's MeshTower ADC sequence; fold into our
+                    // PowerSnapshot for DescribePower (BatteryGauge + optional HUSB238).
+                    let millivolts = battery.sample_millivolts().await;
+                    // SoftDevice USBREGSTATUS is MCU 5 V only. HUSB238 reports real USB-PD
+                    // attach / 20 V pack-charge contracts. Bound the I²C wait so a stuck bus
+                    // cannot starve ADC publishes.
+                    let external = match with_timeout(
+                        Duration::from_millis(50),
+                        pd_sink.external_power(),
+                    )
+                    .await
+                    {
+                        Ok(state) => state,
+                        Err(_) => hopspot::ExternalPowerState::Unknown,
+                    };
+                    let snapshot = battery_gauge.update(millivolts, external);
+                    hopspot::publish_power_snapshot(snapshot);
+                    // board::maintain waits ~1 ms; sample about every five seconds
+                    // (Meshtastic AnalogBatteryLevel min_read_interval).
+                    ticks_to_sample = 5_000;
+                } else {
+                    ticks_to_sample -= 1;
+                }
             }
         },
         super::bootloader_entry::wait(),
