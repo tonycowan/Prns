@@ -94,6 +94,7 @@ impl BleBackend<{ AndroidBleBackend::MAX_PEERS }> for AndroidBleBackend {
                         l2cap_up: pending.l2cap_up,
                         l2cap_opens: pending.l2cap_opens,
                         work: pending.work,
+                        details_notify: None,
                     };
                     if dialed {
                         return BleEvent::LinkReady {

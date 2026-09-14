@@ -277,6 +277,8 @@ impl Esp32S3Board for HeltecV4R8Board {
             pin: vbat_pin,
             fast_ema_mv: 0,
             slow_ema_mv: 0,
+            last_sof: 0,
+            usb_host: false,
         };
 
         S3BoardHardware {

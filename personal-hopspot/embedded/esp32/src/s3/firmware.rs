@@ -7,7 +7,7 @@ use personal_hopspot_core::display::{
 #[cfg(feature = "lora")]
 use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::remote_control::{
-    RemoteControlBuildVersion, RemoteControlGroupOutcome, RemoteControlInitialControllerGrants,
+    RemoteControlBuildVersion, RemoteControlGroupOutcome,
     RemoteControlInterfaceConfigOutcome, RemoteControlInterfaceGroup,
     RemoteControlInterfaceInventory, RemoteControlInterfacePeersOutcome,
     RemoteControlInterfacePower, RemoteControlLoRaOutcome, RemoteControlLoRaProfile,

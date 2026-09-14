@@ -33,6 +33,17 @@ pub(super) struct LinkSignal {
     notify: Notify,
 }
 
+impl LinkSignal {
+    pub(super) async fn wait_until_up(&self) {
+        loop {
+            if self.is_up.load(Ordering::Acquire) {
+                return;
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct WorkSignal {
     generation: Mutex<u64>,

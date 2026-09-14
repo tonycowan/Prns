@@ -40,17 +40,60 @@ const ACTIVITY_LOG_LIMIT: usize = 80;
 const STYLES: &str = r#"
 :root { font-family: Inter, system-ui, sans-serif; color: #17221b; background: #edf2ed; }
 * { box-sizing: border-box; }
-body { margin: 0; }
+html, body { margin: 0; height: 100%; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
-.shell { min-height: 100vh; display: flex; flex-direction: column; }
-.app-bar { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 12px 18px; background: #183d2b; color: #f5faf6; }
+.shell {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.app-bar {
+  flex: 0 0 auto;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+  background: #183d2b;
+  color: #f5faf6;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, .18);
+}
 .app-bar-nav { display: flex; align-items: center; gap: 4px; }
 .app-bar h1 { margin: 0; font-size: 20px; font-weight: 700; text-align: center; letter-spacing: .01em; }
-.app-bar button { border: 0; background: transparent; color: #dbe9df; width: 40px; height: 40px; border-radius: 8px; padding: 8px; display: grid; place-items: center; }
-.app-bar button:hover, .app-bar button.active { color: white; background: #2d6046; }
+.app-bar button {
+  border: 0;
+  background: transparent;
+  color: #b7cfc0;
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  padding: 8px;
+  display: grid;
+  place-items: center;
+}
+.app-bar button:hover { color: white; background: #2d6046; }
+.app-bar button.active {
+  color: #143326;
+  background: #eef7f1;
+  box-shadow: 0 0 0 2px rgba(238, 247, 241, .35), inset 0 0 0 1px #9fcdb3;
+}
+.app-bar button.active:hover { color: #143326; background: #e4f2e9; }
 .app-bar svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.content { padding: 28px 38px 38px; max-width: 1050px; width: 100%; margin: 0 auto; }
+.app-bar button.active svg { stroke-width: 2.35; }
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 28px 38px 38px;
+  max-width: 1050px;
+  width: 100%;
+  margin: 0 auto;
+}
 @media (max-width: 720px) {
   .content { padding: 16px 14px 28px; }
   .app-bar { padding: 10px 12px; gap: 8px; }
