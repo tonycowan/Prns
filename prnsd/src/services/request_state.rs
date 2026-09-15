@@ -366,7 +366,7 @@ fn remote_control_peer(snapshot: &InterfaceSnapshot) -> RemoteControlInterfacePe
         rate_bytes_per_sec: rate_bytes_per_sec(snapshot),
         radio: snapshot.radio,
         details: snapshot.details,
-            link_local: None,
+        link_local: None,
     }
 }
 
