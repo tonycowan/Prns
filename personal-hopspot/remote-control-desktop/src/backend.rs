@@ -73,8 +73,8 @@ use crate::roster_sync::{
     persist_replica, replica_forgets_target, replica_known_targets, replica_message, replica_path,
     retract_unsyncable_peer_alias_values, roster_sync_destination_hash, sibling_alias_is_syncable,
     strip_local_sibling_alias, write_pull, RosterDelta, RosterLabel, RosterLabelKind, RosterShared,
-    RosterSync, TargetAttention, THIS_CONTROLLER_ALIAS_LINK, THIS_CONTROLLER_PEER_ALIAS,
-    ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS, ROSTER_SYNC_REQUEST_ENDPOINT_ID,
+    RosterSync, TargetAttention, ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS,
+    ROSTER_SYNC_REQUEST_ENDPOINT_ID, THIS_CONTROLLER_ALIAS_LINK, THIS_CONTROLLER_PEER_ALIAS,
 };
 
 const IDENTITY_HASH_BYTES: usize = 16;
@@ -2425,10 +2425,7 @@ impl RemoteControlBackend {
         );
         match self.session()?.handle.request_path(destination).await {
             Ok(found) => {
-                eprintln!(
-                    "rnprobe: path found for {target_id} hops={}",
-                    found.hops.0
-                );
+                eprintln!("rnprobe: path found for {target_id} hops={}", found.hops.0);
                 Ok(())
             }
             Err(error) => {
@@ -2706,8 +2703,7 @@ impl RemoteControlBackend {
                     if endpoint_matches_wifi_ll_keys(endpoint, &controller_ll) {
                         // Local-only label: do not publish to roster (sibling "this" would be wrong).
                         let _ = auto_fill_this_controller_peer_alias(session, &peer.id);
-                    } else if let Some(sibling_hash) = match_wifi_ll_to_sibling(session, endpoint)
-                    {
+                    } else if let Some(sibling_hash) = match_wifi_ll_to_sibling(session, endpoint) {
                         if let Some(alias) =
                             stored_alias(sibling_aliases.get(&sibling_hash).map(String::as_str))
                         {
@@ -3467,7 +3463,8 @@ impl ControllerSession {
         sibling_aliases_map.retain(|key, _| sibling_alias_is_syncable(key, &instance_hex));
         persist_target_names(&sibling_aliases_path, &sibling_aliases_map);
         sibling_wifi_ll_map.retain(|key, value| {
-            sibling_alias_is_syncable(key, &instance_hex) && normalize_stored_wifi_ll(value).is_some()
+            sibling_alias_is_syncable(key, &instance_hex)
+                && normalize_stored_wifi_ll(value).is_some()
         });
         for value in sibling_wifi_ll_map.values_mut() {
             if let Some(normalized) = normalize_stored_wifi_ll(value) {
@@ -4390,17 +4387,13 @@ fn load_or_create_instance_secret(
 fn encode_clone_labels(labels: &[RosterLabel], instance_hex: &str) -> Vec<u8> {
     let labels: Vec<_> = labels
         .iter()
-        .filter(|label| {
-            match label.kind {
-                RosterLabelKind::SiblingAlias => {
-                    sibling_alias_is_syncable(&label.key, instance_hex)
-                }
-                RosterLabelKind::PeerAlias => {
-                    peer_alias_is_syncable(&label.key)
-                        && peer_alias_value_is_syncable(label.value.as_deref())
-                }
-                _ => true,
+        .filter(|label| match label.kind {
+            RosterLabelKind::SiblingAlias => sibling_alias_is_syncable(&label.key, instance_hex),
+            RosterLabelKind::PeerAlias => {
+                peer_alias_is_syncable(&label.key)
+                    && peer_alias_value_is_syncable(label.value.as_deref())
             }
+            _ => true,
         })
         .cloned()
         .collect();
@@ -5286,12 +5279,10 @@ fn apply_remote_card(entry: &mut InterfaceEntry, card: &RemoteControlInterfaceCa
     entry.extras = hopspot_extra_facts(entry.detail.as_deref(), kind, None);
     if kind == Some(InterfaceKind::AutoWifi) {
         if let Some(group) = entry.group.take() {
-            if parse_ipv6_fact(&group).is_some_and(|addr| {
-                matches!(addr, IpAddr::V6(v6) if v6.is_unicast_link_local())
-            }) {
-                entry
-                    .extras
-                    .push(interface_fact("IPv6", group));
+            if parse_ipv6_fact(&group)
+                .is_some_and(|addr| matches!(addr, IpAddr::V6(v6) if v6.is_unicast_link_local()))
+            {
+                entry.extras.push(interface_fact("IPv6", group));
             } else {
                 entry.group = Some(group);
             }
@@ -5846,9 +5837,7 @@ fn match_wifi_ll_to_target(session: &ControllerSession, endpoint: &str) -> Optio
 
 fn remember_sibling_wifi_ll(session: &ControllerSession, instance_hash: &str, value: Option<&str>) {
     let id = instance_hash.trim();
-    if id.is_empty()
-        || !sibling_alias_is_syncable(id, &session.controller_identity.instance_hash)
-    {
+    if id.is_empty() || !sibling_alias_is_syncable(id, &session.controller_identity.instance_hash) {
         return;
     }
     let mut known = session
@@ -7060,7 +7049,6 @@ mod tests {
         TargetStatus, CONTROLLER_IDENTITY_FILE, DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE,
         MANAGER_ALIASES_FILE, TARGET_MONITOR_TTL, THIS_CONTROLLER_PEER_ALIAS,
     };
-    use std::collections::HashSet;
     use personal_rns::identity::IdentityHash;
     use personal_rns::interfaces::bluetooth_auto::BleIdentity;
     use personal_rns::interfaces::{
@@ -7074,6 +7062,7 @@ mod tests {
     use personal_rns::routing::NextHop;
     use personal_rns::units::InstantMillis;
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -7339,7 +7328,7 @@ mod tests {
                 membership: Membership::Independent,
                 radio: personal_rns::interfaces::RadioIndication::for_kind(id.kind()),
                 details: personal_rns::interfaces::PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             None,
             None,
@@ -7361,7 +7350,7 @@ mod tests {
                     membership: Membership::Independent,
                     radio: personal_rns::interfaces::RadioIndication::for_kind(id.kind()),
                     details: personal_rns::interfaces::PeerDetails::NotApplicable,
-            link_local: None,
+                    link_local: None,
                 },
                 None,
                 None,
@@ -7496,7 +7485,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             Some("192.168.1.1:42699"),
         );
@@ -7518,7 +7507,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             Some("192.168.1.36:54716"),
         );
@@ -7540,7 +7529,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             Some("fe80::aea7:4ff:fee1:4b3c%14"),
         );
@@ -7598,7 +7587,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             Some("127.0.0.1:42699"),
         );
@@ -7627,7 +7616,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             Some("fe80::aea7:4ff:fee1:4b3c%14"),
         );
@@ -7804,7 +7793,7 @@ mod tests {
                 membership: Membership::Independent,
                 radio: personal_rns::interfaces::RadioIndication::for_kind(id.kind()),
                 details: personal_rns::interfaces::PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             None,
             None,
@@ -7857,7 +7846,7 @@ mod tests {
                 membership: Membership::Independent,
                 radio: personal_rns::interfaces::RadioIndication::for_kind(id.kind()),
                 details: personal_rns::interfaces::PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             None,
             Some(identity),
@@ -7905,7 +7894,7 @@ mod tests {
                 },
                 radio: RadioIndication::for_kind(Some(InterfaceKind::BluetoothPeer)),
                 details: PeerDetails::NotApplicable,
-            link_local: None,
+                link_local: None,
             },
             Some("7a1b2c3d… @ AA:BB:CC:DD:EE:FF"),
         );

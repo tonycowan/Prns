@@ -24,9 +24,7 @@ pub fn launch_controller() {
                 .with_max_level(log::LevelFilter::Debug)
                 .with_filter(
                     android_logger::FilterBuilder::new()
-                        .parse(
-                            "warn,prns_interfaces_tokio::wifi_auto=debug,prns_ffi::mdns=debug",
-                        )
+                        .parse("warn,prns_interfaces_tokio::wifi_auto=debug,prns_ffi::mdns=debug")
                         .build(),
                 ),
         );
