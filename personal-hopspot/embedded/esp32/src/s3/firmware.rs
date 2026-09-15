@@ -7,11 +7,10 @@ use personal_hopspot_core::display::{
 #[cfg(feature = "lora")]
 use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::remote_control::{
-    RemoteControlBuildVersion, RemoteControlGroupOutcome,
-    RemoteControlInterfaceConfigOutcome, RemoteControlInterfaceGroup,
-    RemoteControlInterfaceInventory, RemoteControlInterfacePeersOutcome,
-    RemoteControlInterfacePower, RemoteControlLoRaOutcome, RemoteControlLoRaProfile,
-    RemoteControlPairingAttemptTimeout, RemoteControlPairingExpiresAfter,
+    RemoteControlBuildVersion, RemoteControlGroupOutcome, RemoteControlInterfaceConfigOutcome,
+    RemoteControlInterfaceGroup, RemoteControlInterfaceInventory,
+    RemoteControlInterfacePeersOutcome, RemoteControlInterfacePower, RemoteControlLoRaOutcome,
+    RemoteControlLoRaProfile, RemoteControlPairingAttemptTimeout, RemoteControlPairingExpiresAfter,
     RemoteControlPairingPermissions, RemoteControlPairingPublicAppDataBytes,
     RemoteControlPowerOutcome, RemoteControlRequestSet, RemoteControlSelfAnnouncement,
     RemoteControlService, RemoteControlSleepOutcome, RemoteControlWifiStation,
@@ -135,6 +134,14 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
         let mut group = [0u8; 32];
         let ble_group = ble.copy_group(&mut group);
         let wifi_ssid = self.wifi.as_ref().map(|_| current_station_ssid());
+        let wifi_link_local = self.wifi.as_ref().map(|_| {
+            let mac = base_mac_address();
+            let mut octets = [0u8; 6];
+            octets.copy_from_slice(&mac.as_bytes()[..6]);
+            personal_rns::interfaces::wifi_auto::link_local_from_mac(
+                personal_rns::interfaces::MacAddress::new(octets),
+            )
+        });
         personal_hopspot_core::remote_control_interface_config_from_snapshots(
             &self.interface_snapshots(),
             id,
@@ -154,6 +161,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
                         }
                     },
                     wifi_ssid.as_deref(),
+                    wifi_link_local,
                     self.ble_identity,
                 );
             },

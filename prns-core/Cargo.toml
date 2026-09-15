@@ -58,10 +58,13 @@ keyring-libdbus = ["_keyring-vault", "keyring/sync-secret-service"]
 _keyring-vault = ["std", "dep:keyring", "keyring/crypto-rust", "keyring/apple-native", "keyring/windows-native"]
 # The embedded identity vault's flash backend (`FlashVault`). Persists the secret key to a board-owned NOR flash region over `embedded-storage`, generated once on first boot. no_std, no alloc; the board supplies the driver and the region bounds. Off by default. Only an embedded host links it.
 flash = ["dep:embedded-storage", "dep:embedded-storage-async"]
+# Temporary debug/tracing for path-request reply chain on embedded hosts.
+log = ["dep:log"]
 
 [dependencies]
 prns-macros = { version = "=0.3.7", path = "../prns-macros" }
 cfg-if = "1.0"
+log = { version = "0.4", optional = true, default-features = false }
 
 # Crypto: no_std and alloc-free. Runtime entropy is seeded and reseeded by an audited host source.
 sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }

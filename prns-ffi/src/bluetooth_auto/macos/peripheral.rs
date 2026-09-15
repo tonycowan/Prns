@@ -277,8 +277,9 @@ define_class!(
                 crate::diagnostic_log::error!("bluetooth: L2CAP publish FAILED: {error:?}");
                 let _ = self.ivars().events.send(Event::L2capPublishFailed);
             } else {
-                crate::diagnostic_log::info!("bluetooth: published L2CAP channel, PSM {psm:#06x}");
-                eprintln!("bluetooth: published L2CAP channel, PSM {psm:#06x}");
+                super::ble_log(&format!(
+                    "bluetooth: published L2CAP channel, PSM {psm:#06x}"
+                ));
                 let _ = self.ivars().events.send(Event::L2capPublished { psm });
             }
         }
@@ -293,27 +294,32 @@ define_class!(
             if let Some(error) = error {
                 let line = format!("bluetooth: L2CAP channel open FAILED: {error:?}");
                 crate::diagnostic_log::warn!("{line}");
-                eprintln!("{line}");
+                if super::ble_console_enabled() {
+                    eprintln!("{line}");
+                }
             }
             let Some(channel) = channel else {
                 let line =
                     "bluetooth: L2CAP open callback with no channel — data plane not established";
                 crate::diagnostic_log::warn!("{line}");
-                eprintln!("{line}");
+                if super::ble_console_enabled() {
+                    eprintln!("{line}");
+                }
                 return;
             };
             let Some((peer_id, data)) = wire_l2cap(channel, &self.ivars().queue) else {
                 let line = "bluetooth: L2CAP channel exposes no streams — dropping";
                 crate::diagnostic_log::warn!("{line}");
-                eprintln!("{line}");
+                if super::ble_console_enabled() {
+                    eprintln!("{line}");
+                }
                 return;
             };
             let line = format!(
                 "bluetooth: {:02x?} L2CAP channel opened — delivering data plane to armed acceptor",
                 peer_id.address().octets()
             );
-            crate::diagnostic_log::info!("{line}");
-            eprintln!("{line}");
+            super::ble_log(&line);
             self.ivars()
                 .pending_l2cap
                 .borrow_mut()

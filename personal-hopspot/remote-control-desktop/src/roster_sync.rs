@@ -28,6 +28,10 @@ const PULL_DOMAIN: &[u8] = b"reticulum.controller.roster.pull.v1";
 const CONTROLLER_USB_HOST_DESKTOP: [u8; 8] = [0xD0; 8];
 const CONTROLLER_USB_HOST_ANDROID: [u8; 8] = [0xD1; 8];
 const SIBLING_REMOVED_MARK: &str = "removed";
+/// Local display name for a wifi peer whose LL is *this* install. Must never ride roster sync.
+pub const THIS_CONTROLLER_PEER_ALIAS: &str = "This Controller";
+/// `peer-alias-links` value for [`THIS_CONTROLLER_PEER_ALIAS`] rows (local-only).
+pub const THIS_CONTROLLER_ALIAS_LINK: &str = "__this_controller__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RosterMessageKind {
@@ -52,6 +56,8 @@ pub enum RosterLabelKind {
     SiblingRemoved,
     PairingAdvertDismissed,
     TargetLooking,
+    /// Instance hash → that sibling's wifi link-local (`fe80::…`). Only the signer may publish their own.
+    SiblingWifiLl,
 }
 
 impl RosterLabelKind {
@@ -65,6 +71,7 @@ impl RosterLabelKind {
             Self::SiblingRemoved => 6,
             Self::PairingAdvertDismissed => 7,
             Self::TargetLooking => 8,
+            Self::SiblingWifiLl => 9,
         }
     }
 
@@ -78,6 +85,7 @@ impl RosterLabelKind {
             6 => Some(Self::SiblingRemoved),
             7 => Some(Self::PairingAdvertDismissed),
             8 => Some(Self::TargetLooking),
+            9 => Some(Self::SiblingWifiLl),
             _ => None,
         }
     }
@@ -92,6 +100,7 @@ impl RosterLabelKind {
             Self::SiblingRemoved => "sibling-removed",
             Self::PairingAdvertDismissed => "pairing-advert",
             Self::TargetLooking => "target-looking",
+            Self::SiblingWifiLl => "sibling-wifi-ll",
         }
     }
 
@@ -105,6 +114,7 @@ impl RosterLabelKind {
             "sibling-removed" => Some(Self::SiblingRemoved),
             "pairing-advert" => Some(Self::PairingAdvertDismissed),
             "target-looking" => Some(Self::TargetLooking),
+            "sibling-wifi-ll" => Some(Self::SiblingWifiLl),
             _ => None,
         }
     }
@@ -271,6 +281,7 @@ pub fn forget_sibling_locally(replica: &mut RosterReplica, hash: IdentityHash) {
         Some(SIBLING_REMOVED_MARK),
     );
     note_local_label(replica, RosterLabelKind::SiblingAlias, &key, None);
+    note_local_label(replica, RosterLabelKind::SiblingWifiLl, &key, None);
 }
 
 fn sibling_is_removed(replica: &RosterReplica, hash: IdentityHash) -> bool {
@@ -358,6 +369,11 @@ pub fn note_local_label(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned);
+    // Refuse to *publish* the local-only "This Controller" string. Clears (None) stay allowed
+    // so a prior mistaken seed can be retracted to siblings.
+    if kind == RosterLabelKind::PeerAlias && !peer_alias_value_is_syncable(next_value.as_deref()) {
+        return;
+    }
     if replica
         .labels
         .iter()
@@ -390,7 +406,9 @@ pub fn import_seed_labels(
         if key.is_empty() || value.is_empty() {
             continue;
         }
-        if kind == RosterLabelKind::PeerAlias && !peer_alias_is_syncable(key) {
+        if kind == RosterLabelKind::PeerAlias
+            && (!peer_alias_is_syncable(key) || !peer_alias_value_is_syncable(Some(value)))
+        {
             continue;
         }
         if label_clock(replica, kind, key) > 0 {
@@ -414,6 +432,49 @@ pub fn peer_alias_is_syncable(peer_id: &str) -> bool {
     match parse_hex::<8>(peer_id) {
         Ok(bytes) => bytes != CONTROLLER_USB_HOST_DESKTOP && bytes != CONTROLLER_USB_HOST_ANDROID,
         Err(()) => true,
+    }
+}
+
+/// "This Controller" names the local AutoWifi LL view of *this* install — never a shared fact.
+#[must_use]
+pub fn peer_alias_value_is_syncable(value: Option<&str>) -> bool {
+    !value
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .is_some_and(|name| name.eq_ignore_ascii_case(THIS_CONTROLLER_PEER_ALIAS))
+}
+
+/// Links owned by this-controller / sibling-controller auto-fill stay off the roster.
+#[must_use]
+pub fn peer_alias_link_is_local_only(
+    link: &str,
+    sibling_instance_hashes: impl IntoIterator<Item = impl AsRef<str>>,
+) -> bool {
+    let link = link.trim();
+    if link.is_empty() {
+        return false;
+    }
+    if link == THIS_CONTROLLER_ALIAS_LINK {
+        return true;
+    }
+    sibling_instance_hashes
+        .into_iter()
+        .any(|hash| link.eq_ignore_ascii_case(hash.as_ref().trim()))
+}
+
+/// Retract any PeerAlias rows whose value is local-only so siblings stop showing them.
+pub fn retract_unsyncable_peer_alias_values(replica: &mut RosterReplica) {
+    let bad_keys = replica
+        .labels
+        .iter()
+        .filter(|label| {
+            label.kind == RosterLabelKind::PeerAlias
+                && !peer_alias_value_is_syncable(label.value.as_deref())
+        })
+        .map(|label| label.key.clone())
+        .collect::<Vec<_>>();
+    for key in bad_keys {
+        note_local_label(replica, RosterLabelKind::PeerAlias, &key, None);
     }
 }
 
@@ -551,12 +612,22 @@ pub fn merge_roster(local: &RosterReplica, delta: &RosterDelta) -> (RosterReplic
     forgets.dedup();
     let mut labels = Vec::new();
     for label in &delta.labels {
-        if label.kind == RosterLabelKind::PeerAlias && !peer_alias_is_syncable(&label.key) {
+        if label.kind == RosterLabelKind::PeerAlias
+            && (!peer_alias_is_syncable(&label.key)
+                || !peer_alias_value_is_syncable(label.value.as_deref()))
+        {
             continue;
         }
         if label.kind == RosterLabelKind::SiblingAlias {
             let signer_hex = encode_hex(delta.signer.identity_hash().as_bytes());
             if !sibling_alias_is_syncable(&label.key, &signer_hex) {
+                continue;
+            }
+        }
+        if label.kind == RosterLabelKind::SiblingWifiLl {
+            let signer_hex = encode_hex(delta.signer.identity_hash().as_bytes());
+            // Only the owning instance may publish its wifi LL.
+            if !label.key.eq_ignore_ascii_case(&signer_hex) {
                 continue;
             }
         }
@@ -1540,6 +1611,26 @@ mod tests {
     }
 
     #[test]
+    fn this_controller_peer_alias_value_is_not_syncable() {
+        assert!(!peer_alias_value_is_syncable(Some("This Controller")));
+        assert!(!peer_alias_value_is_syncable(Some("this controller")));
+        assert!(peer_alias_value_is_syncable(Some("Hv4A")));
+        assert!(peer_alias_value_is_syncable(None));
+        assert!(peer_alias_link_is_local_only(
+            THIS_CONTROLLER_ALIAS_LINK,
+            std::iter::empty::<&str>()
+        ));
+        assert!(peer_alias_link_is_local_only(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        ));
+        assert!(!peer_alias_link_is_local_only(
+            "7abab434e6cd6dc7dac44b01f93eec16",
+            ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        ));
+    }
+
+    #[test]
     fn seed_import_skips_usb_host_peer_aliases() {
         let mut replica = RosterReplica::default();
         let mut values = std::collections::HashMap::new();
@@ -1548,6 +1639,75 @@ mod tests {
         import_seed_labels(&mut replica, RosterLabelKind::PeerAlias, &values);
         assert_eq!(replica.labels.len(), 1);
         assert_eq!(replica.labels[0].key, "aabbccddeeff0011");
+    }
+
+    #[test]
+    fn seed_import_skips_this_controller_peer_alias_value() {
+        let mut replica = RosterReplica::default();
+        let mut values = std::collections::HashMap::new();
+        values.insert(
+            "08530421d2659610".to_string(),
+            THIS_CONTROLLER_PEER_ALIAS.to_string(),
+        );
+        values.insert("aabbccddeeff0011".to_string(), "tower".to_string());
+        import_seed_labels(&mut replica, RosterLabelKind::PeerAlias, &values);
+        assert_eq!(replica.labels.len(), 1);
+        assert_eq!(replica.labels[0].key, "aabbccddeeff0011");
+    }
+
+    #[test]
+    fn retract_clears_this_controller_peer_alias_from_replica() {
+        let mut replica = RosterReplica {
+            clock: 10,
+            labels: vec![RosterLabel {
+                kind: RosterLabelKind::PeerAlias,
+                key: "08530421d2659610".to_string(),
+                value: Some(THIS_CONTROLLER_PEER_ALIAS.to_string()),
+                clock: 10,
+            }],
+            ..RosterReplica::default()
+        };
+        retract_unsyncable_peer_alias_values(&mut replica);
+        let label = replica
+            .labels
+            .iter()
+            .find(|label| label.key == "08530421d2659610")
+            .expect("retract keeps a clear row");
+        assert_eq!(label.value, None);
+        assert!(label.clock > 10);
+    }
+
+    #[test]
+    fn merge_drops_this_controller_peer_alias_values() {
+        let local = RosterReplica::default();
+        let delta = RosterDelta {
+            clock: 1,
+            signer: secret(0x11).public(),
+            upserts: Vec::new(),
+            tombstones: Vec::new(),
+            siblings: Vec::new(),
+            labels: vec![
+                RosterLabel {
+                    kind: RosterLabelKind::PeerAlias,
+                    key: "08530421d2659610".to_string(),
+                    value: Some(THIS_CONTROLLER_PEER_ALIAS.to_string()),
+                    clock: 1,
+                },
+                RosterLabel {
+                    kind: RosterLabelKind::PeerAlias,
+                    key: "aabbccddeeff0011".to_string(),
+                    value: Some("tower".to_string()),
+                    clock: 1,
+                },
+            ],
+        };
+        let (merged, plan) = merge_roster(&local, &delta);
+        assert!(merged
+            .labels
+            .iter()
+            .all(|label| label.key != "08530421d2659610"));
+        assert_eq!(plan.labels.len(), 1);
+        assert_eq!(plan.labels[0].key, "aabbccddeeff0011");
     }
 
     #[test]
@@ -1664,6 +1824,90 @@ mod tests {
         assert_eq!(
             RosterLabelKind::from_token(RosterLabelKind::TargetLooking.token()),
             Some(RosterLabelKind::TargetLooking)
+        );
+    }
+
+    #[test]
+    fn sibling_wifi_ll_wire_and_file_round_trip() {
+        let replica = RosterReplica {
+            clock: 3,
+            upserts: Vec::new(),
+            tombstones: Vec::new(),
+            siblings: Vec::new(),
+            labels: vec![RosterLabel {
+                kind: RosterLabelKind::SiblingWifiLl,
+                key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                value: Some("fe80::494:446c:eb84:e48b".to_string()),
+                clock: 3,
+            }],
+        };
+        let parsed = parse_replica(&format_replica(&replica));
+        assert_eq!(parsed.labels, replica.labels);
+        assert_eq!(
+            RosterLabelKind::from_wire(RosterLabelKind::SiblingWifiLl.wire()),
+            Some(RosterLabelKind::SiblingWifiLl)
+        );
+        assert_eq!(
+            RosterLabelKind::from_token(RosterLabelKind::SiblingWifiLl.token()),
+            Some(RosterLabelKind::SiblingWifiLl)
+        );
+    }
+
+    #[test]
+    fn sibling_wifi_ll_must_be_the_signer() {
+        let signer = secret(0x11).public();
+        let signer_hex = encode_hex(signer.identity_hash().as_bytes());
+        let other = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let local = RosterReplica::default();
+        let delta = RosterDelta {
+            clock: 2,
+            signer,
+            upserts: Vec::new(),
+            tombstones: Vec::new(),
+            siblings: Vec::new(),
+            labels: vec![
+                RosterLabel {
+                    kind: RosterLabelKind::SiblingWifiLl,
+                    key: other.to_string(),
+                    value: Some("fe80::1".to_string()),
+                    clock: 2,
+                },
+                RosterLabel {
+                    kind: RosterLabelKind::SiblingWifiLl,
+                    key: signer_hex.clone(),
+                    value: Some("fe80::494:446c:eb84:e48b".to_string()),
+                    clock: 2,
+                },
+            ],
+        };
+        let (merged, plan) = merge_roster(&local, &delta);
+        assert_eq!(plan.labels.len(), 1);
+        assert_eq!(plan.labels[0].key, signer_hex);
+        assert_eq!(
+            merged.labels[0].value.as_deref(),
+            Some("fe80::494:446c:eb84:e48b")
+        );
+    }
+
+    #[test]
+    fn replica_message_includes_signer_sibling_wifi_ll() {
+        let signer = secret(0x44);
+        let self_hex = encode_hex(signer.identity_hash().as_bytes());
+        let mut replica = RosterReplica::default();
+        note_local_label(
+            &mut replica,
+            RosterLabelKind::SiblingWifiLl,
+            &self_hex,
+            Some("fe80::494:446c:eb84:e48b"),
+        );
+        let message = replica_message(&signer, &replica, &[]).unwrap();
+        let delta = parse_replica_reply(&message).unwrap();
+        assert_eq!(delta.labels.len(), 1);
+        assert_eq!(delta.labels[0].kind, RosterLabelKind::SiblingWifiLl);
+        assert_eq!(delta.labels[0].key, self_hex);
+        assert_eq!(
+            delta.labels[0].value.as_deref(),
+            Some("fe80::494:446c:eb84:e48b")
         );
     }
 

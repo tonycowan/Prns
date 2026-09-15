@@ -283,7 +283,21 @@ pub(super) fn enqueue_for_wire(
     target: InterfaceId,
     bytes: &[u8],
 ) {
-    let _ = attempt_enqueue_for_wire(egress, ifacs, target, bytes);
+    let delivery = attempt_enqueue_for_wire(egress, ifacs, target, bytes);
+    #[cfg(feature = "log")]
+    {
+        let outcome = match delivery {
+            PacerDelivery::Admitted => "Enqueued",
+            PacerDelivery::Backpressured => "LaneFull",
+            PacerDelivery::Discarded => "NoLaneOrTooLarge",
+        };
+        log::info!(
+            target: "personal_hopspot_esp32",
+            "path-req: egress enqueue={outcome} len={}",
+            bytes.len()
+        );
+    }
+    let _ = delivery;
 }
 
 fn attempt_enqueue_for_wire(

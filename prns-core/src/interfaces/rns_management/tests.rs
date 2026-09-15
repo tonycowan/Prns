@@ -57,6 +57,7 @@ fn interface_stats_preserve_live_counters_and_access_code_fields() {
             membership: Membership::Independent,
             radio: crate::interfaces::RadioIndication::for_kind(Some(InterfaceKind::TcpClient)),
             details: crate::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
         },
         Some(RnsInterfaceAccessCode::new(
             [0x33; 64],
@@ -114,6 +115,7 @@ fn interface_stats_encode_nested_fleet_peers_with_rssi() {
             links: 0,
             transported_links: 0,
             membership: Membership::Independent,
+            link_local: None,
         },
         None,
     )
@@ -137,6 +139,7 @@ fn interface_stats_encode_nested_fleet_peers_with_rssi() {
             membership: Membership::FleetMember {
                 supervisor_id: supervisor,
             },
+            link_local: None,
         },
         None,
     )

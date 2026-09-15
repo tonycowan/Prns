@@ -373,6 +373,13 @@ impl<S: StorageLayout> EngineState<S> {
                         settle(sink, command_id, Settlement::AnnounceNow(Ok(())));
                     }
                     AnnounceSignPurpose::PathResponse { target } => {
+                        #[cfg(feature = "log")]
+                        log::debug!(
+                            "path-req: signed Send dest={} target={} len={}",
+                            crate::path_req_trace::DestHex(&dispatch.destination),
+                            crate::path_req_trace::BytesHex(target.as_bytes()),
+                            dispatch.wire_bytes
+                        );
                         sink(EngineReaction::Directive(Directive::Send {
                             target,
                             bytes: &frame[..dispatch.wire_bytes],
@@ -386,6 +393,10 @@ impl<S: StorageLayout> EngineState<S> {
                 }
             }
             Err(failure) => {
+                #[cfg(feature = "log")]
+                if matches!(purpose, AnnounceSignPurpose::PathResponse { .. }) {
+                    log::debug!("path-req: sign_failed={failure:?}");
+                }
                 if let AnnounceSignPurpose::Command { command_id, .. } = purpose {
                     #[cfg(feature = "runtime-metrics")]
                     match failure {

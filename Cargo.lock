@@ -3071,6 +3071,7 @@ dependencies = [
  "hmac 0.13.0",
  "hybrid-array",
  "keyring",
+ "log",
  "md-5 0.11.0",
  "memchr",
  "prns-macros",
@@ -3094,6 +3095,7 @@ version = "0.3.7"
 dependencies = [
  "cfg-if",
  "dispatch2",
+ "libc",
  "log",
  "objc2 0.6.4",
  "objc2-core-bluetooth 0.3.2",

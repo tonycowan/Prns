@@ -176,8 +176,7 @@ fn describe_rns_frame(frame: &[u8]) -> String {
 }
 
 fn log_ble_event(line: &str) {
-    crate::diagnostic_log::info!("{line}");
-    eprintln!("{line}");
+    super::ble_log(line);
 }
 
 fn log_ble_wire(lane: &str, peer: Option<&[u8; 6]>, frame: &[u8], fragments: usize, result: &str) {

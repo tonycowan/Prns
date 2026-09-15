@@ -137,6 +137,13 @@ impl<S: StorageLayout> EngineState<S> {
                 } else {
                     AnnounceOrigin::Relay
                 };
+                #[cfg(feature = "log")]
+                if directed_to.is_some() {
+                    log::debug!(
+                        "path-req: fire dest={} hops={emit_hops} directed=1",
+                        crate::path_req_trace::DestHex(&entry.destination)
+                    );
+                }
                 let mut buf = [0u8; BROADCAST_MTU];
                 let directive = ReemitAnnounce {
                     announce: stored.announce.clone(),

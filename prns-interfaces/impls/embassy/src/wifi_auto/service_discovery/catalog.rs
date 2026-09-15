@@ -553,7 +553,7 @@ mod tests {
         ttl_seconds: u32,
     ) -> Vec<u8, { super::super::UDP_SERVICE_DISCOVERY_PACKET_BYTES }> {
         let mut packet = [0u8; super::super::UDP_SERVICE_DISCOVERY_PACKET_BYTES];
-        let length = build_publication_packet(&mut packet, instance, address, None, ttl_seconds)
+        let length = build_publication_packet(&mut packet, instance, address, ttl_seconds)
             .expect("publication fits");
         Vec::from_slice(&packet[..length]).expect("publication capacity matches output")
     }

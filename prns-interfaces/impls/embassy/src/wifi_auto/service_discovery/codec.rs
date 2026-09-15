@@ -1,4 +1,4 @@
-use ::core::net::{Ipv4Addr, Ipv6Addr};
+use ::core::net::Ipv6Addr;
 use ::core::ops::Deref;
 
 use heapless::Vec;
@@ -8,8 +8,6 @@ use prns_core::interfaces::wifi_auto as contract;
 pub(super) const MDNS_PORT: u16 = 5353;
 pub(super) const MDNS_HOP_LIMIT: u8 = 255;
 pub(super) const MDNS_IPV6_GROUP: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
-/// IPv4 mDNS group — preferred on APs that isolate IPv6 link-local multicast.
-pub(super) const MDNS_IPV4_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 pub(super) const DNS_CLASS_IN: u16 = 1;
 pub(super) const DNS_CACHE_FLUSH_CLASS_IN: u16 = 0x8001;
 pub(super) const DNS_TYPE_A: u16 = 1;
@@ -19,7 +17,7 @@ pub(super) const DNS_TYPE_PTR: u16 = 12;
 pub(super) const DNS_TYPE_SRV: u16 = 33;
 pub(super) const DNS_TYPE_TXT: u16 = 16;
 const DNS_RESPONSE_FLAGS: u16 = 0x8400;
-/// PTR + SRV + TXT + AAAA; optional A adds one more.
+/// PTR + SRV + TXT + AAAA.
 pub(super) const DNS_CORE_RECORD_COUNT: u16 = 4;
 const DNS_NAME_CAPACITY: usize = 96;
 const DNS_POINTER_HOP_LIMIT: u8 = 8;
@@ -101,6 +99,10 @@ impl DiscoveryInstance {
         Self { label }
     }
 
+    pub(super) fn label(&self) -> &str {
+        core::str::from_utf8(&self.label).unwrap_or("prns-?")
+    }
+
     pub(super) fn service_labels(&self) -> [&[u8]; 4] {
         [
             &self.label,
@@ -119,15 +121,13 @@ pub(super) fn build_publication_packet(
     output: &mut [u8],
     instance: &DiscoveryInstance,
     ipv6: Ipv6Addr,
-    ipv4: Option<Ipv4Addr>,
     ttl_seconds: u32,
 ) -> Result<usize, PacketBuildError> {
-    let answer_count = DNS_CORE_RECORD_COUNT + u16::from(ipv4.is_some());
     let mut writer = PacketWriter::new(output);
     writer.write_u16(0)?;
     writer.write_u16(DNS_RESPONSE_FLAGS)?;
     writer.write_u16(0)?;
-    writer.write_u16(answer_count)?;
+    writer.write_u16(DNS_CORE_RECORD_COUNT)?;
     writer.write_u16(0)?;
     writer.write_u16(0)?;
 
@@ -176,15 +176,6 @@ pub(super) fn build_publication_packet(
         ttl_seconds,
         |writer| writer.write_bytes(&ipv6.octets()),
     )?;
-    if let Some(ipv4) = ipv4 {
-        writer.write_record(
-            &host_labels,
-            DNS_TYPE_A,
-            DNS_CACHE_FLUSH_CLASS_IN,
-            ttl_seconds,
-            |writer| writer.write_bytes(&ipv4.octets()),
-        )?;
-    }
     Ok(writer.len())
 }
 
@@ -596,7 +587,6 @@ mod tests {
             &mut packet,
             &instance,
             LINK_LOCAL,
-            None,
             super::super::PUBLICATION_TTL_SECONDS,
         )
         .expect("the fixed publication capacity fits the complete record set");
@@ -616,35 +606,30 @@ mod tests {
     }
 
     #[test]
-    fn publication_includes_optional_ipv4_a_record() {
+    fn publication_is_link_local_aaaa_only() {
         let instance = DiscoveryInstance::from_random_bytes(INSTANCE_RANDOM);
-        let ipv4 = Ipv4Addr::new(192, 168, 1, 127);
         let mut packet = [0u8; super::super::UDP_SERVICE_DISCOVERY_PACKET_BYTES];
         let length = build_publication_packet(
             &mut packet,
             &instance,
             LINK_LOCAL,
-            Some(ipv4),
             super::super::PUBLICATION_TTL_SECONDS,
         )
-        .expect("A + AAAA publication fits");
-        assert_eq!(
-            read_u16(&packet[..length], 6),
-            Some(DNS_CORE_RECORD_COUNT + 1)
-        );
-        assert!(packet[..length]
-            .windows(ipv4.octets().len())
-            .any(|window| window == ipv4.octets()));
+        .expect("LL AAAA publication fits");
+        assert_eq!(read_u16(&packet[..length], 6), Some(DNS_CORE_RECORD_COUNT));
         assert!(packet[..length]
             .windows(LINK_LOCAL.octets().len())
             .any(|window| window == LINK_LOCAL.octets()));
+        // No IPv4 A record type appears as an RR type field adjacent to class/TTL framing;
+        // assert the stable LL octets are present and answer count stays at the core four.
+        assert_eq!(instance.label(), "prns-0123456789abcdef");
     }
 
     #[test]
     fn goodbye_uses_zero_ttl_for_every_record() {
         let instance = DiscoveryInstance::from_random_bytes(INSTANCE_RANDOM);
         let mut packet = [0u8; super::super::UDP_SERVICE_DISCOVERY_PACKET_BYTES];
-        let length = build_publication_packet(&mut packet, &instance, LINK_LOCAL, None, 0)
+        let length = build_publication_packet(&mut packet, &instance, LINK_LOCAL, 0)
             .expect("the fixed publication capacity fits the goodbye record set");
         let mut cursor = 12;
         for _ in 0..DNS_CORE_RECORD_COUNT {
@@ -678,7 +663,6 @@ mod tests {
             &mut response,
             &instance,
             LINK_LOCAL,
-            None,
             super::super::PUBLICATION_TTL_SECONDS,
         )
         .expect("publication fits");

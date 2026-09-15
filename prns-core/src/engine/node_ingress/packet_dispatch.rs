@@ -272,17 +272,40 @@ impl<S: StorageLayout> EngineState<S> {
                 }
             }
             IngestPacketOutcome::AnswerPathRequest { destination } => {
-                if interfaces.is_egress_eligible(source, Egress::Transmit) {
-                    if let Ok(owed) = self.prepare_path_response_announce_sign(
+                let egress_ok = interfaces.is_egress_eligible(source, Egress::Transmit);
+                if egress_ok {
+                    match self.prepare_path_response_announce_sign(
                         &destination,
                         source,
                         now,
                         &mut *fill_random,
                     ) {
-                        sink(EngineReaction::Directive(Directive::Fulfill(
-                            OwedWork::Crypto(CryptoOwed::AnnounceSign(owed)),
-                        )));
+                        Ok(owed) => {
+                            #[cfg(feature = "log")]
+                            log::debug!(
+                                "path-req: answer egress=ok prepare=ok dest={}",
+                                crate::path_req_trace::DestHex(&destination)
+                            );
+                            sink(EngineReaction::Directive(Directive::Fulfill(
+                                OwedWork::Crypto(CryptoOwed::AnnounceSign(owed)),
+                            )));
+                        }
+                        Err(failure) => {
+                            #[cfg(feature = "log")]
+                            log::debug!(
+                                "path-req: answer egress=ok prepare=err={failure:?} dest={}",
+                                crate::path_req_trace::DestHex(&destination)
+                            );
+                            #[cfg(not(feature = "log"))]
+                            let _ = failure;
+                        }
                     }
+                } else {
+                    #[cfg(feature = "log")]
+                    log::debug!(
+                        "path-req: answer egress=deny prepare=skipped dest={}",
+                        crate::path_req_trace::DestHex(&destination)
+                    );
                 }
             }
             IngestPacketOutcome::ScheduledPathResponse { .. } => {

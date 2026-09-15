@@ -115,13 +115,14 @@ fn inventory_response_len(inventory: &RemoteControlInterfaceInventory) -> usize 
     INVENTORY_RESPONSE_HEADER_LEN.saturating_add(inventory.encoded_body_len())
 }
 
-/// Shared Hopspot name, LoRa tune, Auto Wi-Fi SSID, and BLE group labels for one config card.
+/// Shared Hopspot name, LoRa tune, Auto Wi-Fi SSID/LL, and BLE group labels for one config card.
 pub fn decorate_hopspot_remote_control_card(
     snapshot: &InterfaceSnapshot,
     card: &mut RemoteControlInterfaceCard,
     ble_group: Option<&str>,
     lora_profile: Option<RadioProfile>,
     wifi_ssid: Option<&str>,
+    wifi_link_local: Option<core::net::Ipv6Addr>,
     ble_identity: Option<BleIdentity>,
 ) {
     let Some(kind) = operator_kind(snapshot) else {
@@ -145,6 +146,11 @@ pub fn decorate_hopspot_remote_control_card(
     }
     if kind == InterfaceKind::AutoWifi {
         card.set_config(wifi_station_inventory_config(wifi_ssid.unwrap_or("")).as_str());
+        if let Some(address) = wifi_link_local.filter(|addr| addr.is_unicast_link_local()) {
+            let mut group = heapless::String::<32>::new();
+            let _ = write!(&mut group, "{address}");
+            card.set_group(group.as_str());
+        }
     }
     if kind == InterfaceKind::BluetoothAuto {
         if let Some(group) = ble_group.filter(|group| !group.is_empty()) {
@@ -208,6 +214,7 @@ fn remote_control_peer_for_supervisor(
             rate_bytes_per_sec: rate_bytes_per_sec(snapshot),
             radio: snapshot.radio,
             details: snapshot.details,
+            link_local: snapshot.link_local,
         }),
         Membership::Independent | Membership::FleetMember { .. } => None,
     }
@@ -245,6 +252,7 @@ mod tests {
             membership: Membership::Independent,
             radio: RadioIndication::for_kind(Some(kind)),
             details: PeerDetails::NotApplicable,
+            link_local: None,
         }
     }
 
@@ -290,6 +298,7 @@ mod tests {
                         snapshot,
                         card,
                         Some("lab"),
+                        None,
                         None,
                         None,
                         Some(BleIdentity::new(*b"stable-identity!")),
@@ -340,6 +349,9 @@ mod tests {
                         None,
                         None,
                         Some("field-lab"),
+                        Some(core::net::Ipv6Addr::new(
+                            0xfe80, 0, 0, 0, 0xaea7, 0x4ff, 0xfee1, 0x4b3c,
+                        )),
                         None,
                     )
                 },
@@ -348,6 +360,7 @@ mod tests {
             panic!("Auto Wi-Fi supervisor should return a config card");
         };
         assert_eq!(card.config.as_str(), "W,field-lab");
+        assert_eq!(card.group.as_str(), "fe80::aea7:4ff:fee1:4b3c");
         assert!(!card.config.as_str().contains("secret"));
     }
 
@@ -362,6 +375,9 @@ mod tests {
             let mut member = snapshot(InterfaceKind::WifiPeer);
             member.id = InterfaceId::new([InterfaceKind::WifiPeer as u8, suffix, 0, 0, 0, 0, 0, 0]);
             member.membership = Membership::FleetMember { supervisor_id };
+            if suffix == 1 {
+                member.link_local = Some(core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x22));
+            }
             assert!(snapshots.push(member).is_ok());
         }
 
@@ -382,6 +398,11 @@ mod tests {
         };
         assert_eq!(first.total, 12);
         assert_eq!(first.peers.len(), REMOTE_CONTROL_INTERFACE_PEER_CAP);
+        assert_eq!(
+            first.peers[0].link_local,
+            Some(core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x22))
+        );
+        assert!(first.peers[1].link_local.is_none());
         let RemoteControlInterfacePeersOutcome::Page(second) =
             remote_control_interface_peers_from_snapshots(&snapshots, supervisor_id, 8)
         else {
@@ -465,6 +486,7 @@ mod tests {
                         card,
                         Some("lab"),
                         Some(personal_rns::interfaces::lora::DEFAULT_915_PROFILE),
+                        None,
                         None,
                         None,
                     );

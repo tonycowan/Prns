@@ -8,8 +8,6 @@ use super::station::{
     StationCredentials,
 };
 use alloc::boxed::Box;
-use personal_rns::wifi_auto::MdnsMulticastFamily;
-
 fn psram_udp_socket<
     const RX_META: usize,
     const RX_BYTES: usize,
@@ -290,16 +288,15 @@ fn start_udp_service_discovery(
 ) {
     let socket = udp_service_discovery_socket(stack);
     let storage = crate::storage::allocate_psram(UdpServiceDiscoveryStorage::<MEMBERS>::new());
-    // IPv4 mDNS (224.0.0.251) — works on APs that block IPv6 LL multicast (Android path).
-    // Publication carries LL AAAA plus station IPv4 A when DHCP/static v4 is up.
-    let service_discovery = match UdpServiceDiscovery::with_multicast(
+    // LL-only IPv6 mDNS (FF02::FB:5353). Publication is unicast link-local AAAA only;
+    // classic LL multicast + DNS-SD converge on the same scoped UDP peer.
+    let service_discovery = match UdpServiceDiscovery::new(
         socket,
         stack,
         address,
         status,
         storage,
         runtime_entropy(),
-        MdnsMulticastFamily::Ipv4,
     ) {
         Ok(service_discovery) => service_discovery,
         Err(error) => {
@@ -315,7 +312,7 @@ fn start_udp_service_discovery(
         }
     };
     spawner.spawn(task);
-    log::info!("wifi-auto: UDP DNS-SD task started (IPv4 mDNS)");
+    log::info!("wifi-auto: UDP DNS-SD task started (IPv6 LL mDNS FF02::FB)");
 }
 
 fn build_tcp_rendezvous_listener(

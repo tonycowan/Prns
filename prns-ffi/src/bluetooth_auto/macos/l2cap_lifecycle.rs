@@ -125,8 +125,7 @@ fn spawn_l2cap_lane(
             let line = format!(
                 "bluetooth: {peer:02x?} L2CAP acceptor pending dropped before a channel arrived"
             );
-            crate::diagnostic_log::info!("{line}");
-            eprintln!("{line}");
+            super::ble_log(&line);
             if let Some(details) = &details {
                 details.publish(PeerDetails::BleGatt);
             }
@@ -135,8 +134,7 @@ fn spawn_l2cap_lane(
         let line = format!(
             "bluetooth: {peer:02x?} L2CAP fast lane up — data rides CoC; GATT stays available as floor"
         );
-        crate::diagnostic_log::info!("{line}");
-        eprintln!("{line}");
+        super::ble_log(&line);
         if let Some(details) = &details {
             details.publish(PeerDetails::BleCoc);
         }
@@ -164,8 +162,7 @@ fn spawn_l2cap_lane(
             while let Some(len) = deframer.next_frame(&mut frame) {
                 if first_frame {
                     let line = format!("bluetooth: {peer:02x?} L2CAP first inbound frame {len}B");
-                    crate::diagnostic_log::info!("{line}");
-                    eprintln!("{line}");
+                    super::ble_log(&line);
                     first_frame = false;
                 }
                 if frames.send(Box::from(&frame[..len])).await.is_err() {
@@ -180,8 +177,7 @@ fn spawn_l2cap_lane(
                 let line = format!(
                     "bluetooth: {peer:02x?} L2CAP reader exited — central-role link retains GATT floor"
                 );
-                crate::diagnostic_log::info!("{line}");
-                eprintln!("{line}");
+                super::ble_log(&line);
                 if let Some(details) = &details {
                     details.publish(PeerDetails::BleGatt);
                 }
@@ -195,7 +191,9 @@ fn spawn_l2cap_lane(
                     "bluetooth: {peer:02x?} L2CAP reader exited — inbound link teardown starting"
                 );
                 crate::diagnostic_log::warn!("{line}");
-                eprintln!("{line}");
+                if super::ble_console_enabled() {
+                    eprintln!("{line}");
+                }
                 let _ = end_tx.send(DataPlaneEnd::Terminated);
             }
         }

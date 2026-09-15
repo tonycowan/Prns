@@ -7,9 +7,7 @@ use mdns_sd::{
     IfKind, Receiver, ResolvedService, ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo,
 };
 
-use prns_core::interfaces::local_network::{
-    is_local_address, local_address_scope, LocalAddressScope,
-};
+use prns_core::interfaces::local_network::is_local_address;
 use prns_core::interfaces::wifi_auto as contract;
 use prns_core::interfaces::wifi_auto::{
     AdvertisementInsertion, AdvertisementRemoval, CandidateInsertion, CandidateInsertionError,
@@ -143,6 +141,11 @@ async fn run_central_session(
 ) -> Result<CentralDiscoverySessionEnd, MdnsDiscoveryError> {
     let central_publications = CentralPublications::fresh()?;
     let mut native_mdns_session = NativeMdnsSession::start()?;
+    crate::diagnostic_log::debug!(
+        "wifi-auto: mDNS central session browsing {} and {} over FF02::FB:5353",
+        DiscoveryTransport::Tcp.dns_sd_service_type(),
+        DiscoveryTransport::Udp.dns_sd_service_type()
+    );
     let tcp_service_events = native_mdns_session.browse(DiscoveryTransport::Tcp)?;
     let udp_service_events = native_mdns_session.browse(DiscoveryTransport::Udp)?;
     let mut eligible_ip_addresses = BTreeSet::new();
@@ -481,43 +484,29 @@ fn discovery_endpoints_for_address(
 ) -> BTreeSet<DiscoveryEndpoint> {
     let mut discovery_endpoints = BTreeSet::new();
     match scoped_ip_address {
-        ScopedIp::V4(ipv4_address) => {
-            let socket_address = SocketAddr::new(IpAddr::V4(*ipv4_address.addr()), service_port);
-            if let Some(discovery_endpoint) =
-                validated_socket_endpoint(socket_address, discovery_transport)
-            {
-                discovery_endpoints.insert(discovery_endpoint);
-            }
-        }
+        ScopedIp::V4(_) => {}
         ScopedIp::V6(ipv6_address) => {
             let ip_address = *ipv6_address.addr();
-            if ip_address.is_unicast_link_local() {
-                let reported_scope_id = ipv6_address.scope_id().index;
-                let scope_ids = if reported_scope_id != 0 {
-                    std::slice::from_ref(&reported_scope_id)
-                } else {
-                    fallback_scope_ids
-                };
-                for &scope_id in scope_ids {
-                    let socket_address =
-                        SocketAddr::V6(SocketAddrV6::new(ip_address, service_port, 0, scope_id));
-                    if let Some(discovery_endpoint) =
-                        validated_socket_endpoint(socket_address, discovery_transport)
-                    {
-                        if reported_scope_id == 0 {
-                            crate::diagnostic_log::debug!(
-                                "wifi-auto: mDNS link-local missing scope; using ifindex {scope_id}"
-                            );
-                        }
-                        discovery_endpoints.insert(discovery_endpoint);
-                    }
-                }
+            if !ip_address.is_unicast_link_local() {
+                return discovery_endpoints;
+            }
+            let reported_scope_id = ipv6_address.scope_id().index;
+            let scope_ids = if reported_scope_id != 0 {
+                std::slice::from_ref(&reported_scope_id)
             } else {
+                fallback_scope_ids
+            };
+            for &scope_id in scope_ids {
                 let socket_address =
-                    SocketAddr::V6(SocketAddrV6::new(ip_address, service_port, 0, 0));
+                    SocketAddr::V6(SocketAddrV6::new(ip_address, service_port, 0, scope_id));
                 if let Some(discovery_endpoint) =
                     validated_socket_endpoint(socket_address, discovery_transport)
                 {
+                    if reported_scope_id == 0 {
+                        crate::diagnostic_log::debug!(
+                            "wifi-auto: mDNS link-local missing scope; using ifindex {scope_id}"
+                        );
+                    }
                     discovery_endpoints.insert(discovery_endpoint);
                 }
             }
@@ -742,6 +731,12 @@ impl NativeMdnsSession {
         }
 
         let service_info = service_info_for(ephemeral_publication, &advertised_ip_addresses)?;
+        crate::diagnostic_log::debug!(
+            "wifi-auto: mDNS publishing {} on {:?} port {}",
+            ephemeral_publication.transport.dns_sd_service_type(),
+            advertised_ip_addresses,
+            ephemeral_publication.transport.port()
+        );
         self.daemon
             .register(service_info)
             .map_err(MdnsDiscoveryError::Mdns)?;
@@ -768,35 +763,22 @@ impl Drop for NativeMdnsSession {
 }
 
 fn advertised_ip_addresses(
-    discovery_transport: DiscoveryTransport,
+    _discovery_transport: DiscoveryTransport,
     eligible_ip_addresses: &BTreeSet<IpAddr>,
 ) -> BTreeSet<IpAddr> {
     let mut advertised_ip_addresses = eligible_ip_addresses
         .iter()
         .copied()
-        .filter(|ip_address| match (discovery_transport, ip_address) {
-            (DiscoveryTransport::Tcp, _) => true,
-            (DiscoveryTransport::Udp, IpAddr::V6(ipv6_address)) => {
-                ipv6_address.is_unicast_link_local()
-            }
-            (DiscoveryTransport::Udp, IpAddr::V4(_)) => false,
+        .filter(|ip_address| match ip_address {
+            IpAddr::V6(ipv6_address) => ipv6_address.is_unicast_link_local(),
+            IpAddr::V4(_) => false,
         })
         .collect::<Vec<_>>();
-    advertised_ip_addresses
-        .sort_by_key(|ip_address| (publication_address_preference(*ip_address), *ip_address));
+    advertised_ip_addresses.sort();
     advertised_ip_addresses.truncate(usize::from(
         contract::SERVICE_ADVERTISEMENT_CANDIDATE_CAPACITY,
     ));
     advertised_ip_addresses.into_iter().collect()
-}
-
-fn publication_address_preference(ip_address: IpAddr) -> u8 {
-    match ip_address {
-        IpAddr::V4(ipv4_address) if ipv4_address.is_private() => 0,
-        IpAddr::V6(_) if local_address_scope(ip_address) == Some(LocalAddressScope::Private) => 1,
-        IpAddr::V4(_) => 2,
-        IpAddr::V6(_) => 3,
-    }
 }
 
 fn service_info_for(
@@ -1054,7 +1036,21 @@ mod tests {
     }
 
     #[test]
-    fn native_publications_use_both_transport_contracts_and_one_address_policy() {
+    fn host_lan_mixed_addresses_publish_link_local_only_for_both_transports() {
+        let eligible_ip_addresses =
+            ip_address_set(&["192.168.1.18", "fe80::282f:4eff:fe59:3321", "fd00::1"]);
+        assert_eq!(
+            advertised_ip_addresses(DiscoveryTransport::Tcp, &eligible_ip_addresses),
+            ip_address_set(&["fe80::282f:4eff:fe59:3321"])
+        );
+        assert_eq!(
+            advertised_ip_addresses(DiscoveryTransport::Udp, &eligible_ip_addresses),
+            ip_address_set(&["fe80::282f:4eff:fe59:3321"])
+        );
+    }
+
+    #[test]
+    fn native_publications_use_both_transport_contracts_and_ll_only_addresses() {
         let central_publications = central_publications();
         let eligible_ip_addresses = ip_address_set(&["192.168.4.8", "fd00::8", "fe80::8"]);
         let tcp_addresses =
@@ -1064,7 +1060,7 @@ mod tests {
         let tcp_service_info = service_info_for(&central_publications.tcp, &tcp_addresses).unwrap();
         let udp_service_info = service_info_for(&central_publications.udp, &udp_addresses).unwrap();
 
-        assert_eq!(tcp_addresses, eligible_ip_addresses);
+        assert_eq!(tcp_addresses, ip_address_set(&["fe80::8"]));
         assert_eq!(udp_addresses, ip_address_set(&["fe80::8"]));
         assert_eq!(
             (
@@ -1093,19 +1089,21 @@ mod tests {
     }
 
     #[test]
-    fn native_publication_addresses_are_bounded_and_keep_the_best_candidates() {
+    fn native_publication_addresses_are_bounded_and_keep_link_local_only() {
         let eligible_ip_addresses = ip_address_set(&[
             "192.168.4.18",
-            "192.168.4.17",
-            "192.168.4.16",
-            "192.168.4.15",
-            "192.168.4.14",
-            "192.168.4.13",
-            "192.168.4.12",
-            "192.168.4.11",
             "192.168.4.10",
             "fd00::8",
             "fe80::8",
+            "fe80::9",
+            "fe80::a",
+            "fe80::b",
+            "fe80::c",
+            "fe80::d",
+            "fe80::e",
+            "fe80::f",
+            "fe80::10",
+            "fe80::11",
         ]);
 
         let advertised_ip_addresses =
@@ -1116,16 +1114,18 @@ mod tests {
             usize::from(contract::SERVICE_ADVERTISEMENT_CANDIDATE_CAPACITY)
         );
         assert!(advertised_ip_addresses.iter().all(|ip_address| {
-            matches!(ip_address, IpAddr::V4(ipv4_address) if ipv4_address.is_private())
+            matches!(ip_address, IpAddr::V6(ipv6_address) if ipv6_address.is_unicast_link_local())
         }));
-        assert!(advertised_ip_addresses.contains(&"192.168.4.10".parse().unwrap()));
-        assert!(!advertised_ip_addresses.contains(&"192.168.4.18".parse().unwrap()));
+        assert!(advertised_ip_addresses.contains(&"fe80::8".parse().unwrap()));
+        assert!(!advertised_ip_addresses.contains(&"192.168.4.10".parse().unwrap()));
+        assert!(!advertised_ip_addresses.contains(&"fd00::8".parse().unwrap()));
+        assert!(!advertised_ip_addresses.contains(&"fe80::11".parse().unwrap()));
     }
 
     #[test]
     fn native_endpoint_decoding_preserves_transport_and_ipv6_scope() {
         let tcp_endpoint = validated_socket_endpoint(
-            "192.168.4.8:42699".parse().unwrap(),
+            "[fe80::8%4]:42699".parse().unwrap(),
             DiscoveryTransport::Tcp,
         )
         .unwrap();
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn records_keep_all_valid_candidates_and_reject_our_own_record() {
+    fn records_keep_ll_candidates_and_reject_our_own_record() {
         let central_publications = central_publications();
         let peer_service = resolved_service(
             DiscoveryTransport::Tcp,
@@ -1212,24 +1212,28 @@ mod tests {
             contract::TCP_RENDEZVOUS_PORT,
             &[(contract::TXT_VERSION_KEY, contract::TXT_VERSION_VALUE)],
         );
+        assert_eq!(
+            build_service_advertisement(&peer_service, &central_publications, &[]),
+            Err(ServiceAdvertisementRejection::NoEligibleEndpoints)
+        );
         let peer_service_advertisement =
-            build_service_advertisement(&peer_service, &central_publications, &[])
-                .expect("peer is accepted");
+            build_service_advertisement(&peer_service, &central_publications, &[4])
+                .expect("scoped LL peer is accepted");
         assert_eq!(peer_service_advertisement.endpoints().len(), 1);
         assert_eq!(
             peer_service_advertisement.endpoints()[0].socket_addr(),
-            "192.168.4.8:42699".parse().unwrap()
+            "[fe80::1%4]:42699".parse().unwrap()
         );
 
         let local_service = resolved_service(
             DiscoveryTransport::Tcp,
             central_publications.tcp.instance_name.as_str(),
-            &["192.168.4.9".parse().unwrap()],
+            &["fe80::9".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[],
         );
         assert_eq!(
-            build_service_advertisement(&local_service, &central_publications, &[]),
+            build_service_advertisement(&local_service, &central_publications, &[4]),
             Err(ServiceAdvertisementRejection::OwnService)
         );
     }
@@ -1252,12 +1256,12 @@ mod tests {
         let incompatible_service = resolved_service(
             DiscoveryTransport::Tcp,
             "prns-version2",
-            &["192.168.4.8".parse().unwrap()],
+            &["fe80::8".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[(contract::TXT_VERSION_KEY, "2")],
         );
         assert_eq!(
-            build_service_advertisement(&incompatible_service, &central_publications, &[]),
+            build_service_advertisement(&incompatible_service, &central_publications, &[4]),
             Err(ServiceAdvertisementRejection::InvalidVersion(
                 DiscoveryVersionError::Unsupported(2)
             ))
@@ -1270,11 +1274,11 @@ mod tests {
         let legacy_service = resolved_service(
             DiscoveryTransport::Tcp,
             "prns-legacy",
-            &["192.168.4.8".parse().unwrap()],
+            &["fe80::8".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[],
         );
-        build_service_advertisement(&legacy_service, &central_publications, &[])
+        build_service_advertisement(&legacy_service, &central_publications, &[4])
             .expect("implicit v1 record is accepted");
     }
 
@@ -1330,10 +1334,11 @@ mod tests {
     #[test]
     fn snapshot_updates_known_services_at_capacity_and_removes_departures() {
         let central_publications = central_publications();
+        let local_scopes = [4];
         let first_service = resolved_service(
             DiscoveryTransport::Tcp,
             "first",
-            &["192.168.4.8".parse().unwrap()],
+            &["fe80::8".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[],
         );
@@ -1349,7 +1354,7 @@ mod tests {
                 &mut discovery_snapshot,
                 &ServiceEvent::ServiceResolved(Box::new(first_service)),
                 &central_publications,
-                &[],
+                &local_scopes,
             ),
             ServiceEventOutcome::SnapshotChanged
         );
@@ -1357,7 +1362,7 @@ mod tests {
         let repeated_service = resolved_service(
             DiscoveryTransport::Tcp,
             "first",
-            &["192.168.4.8".parse().unwrap()],
+            &["fe80::8".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[],
         );
@@ -1366,7 +1371,7 @@ mod tests {
                 &mut discovery_snapshot,
                 &ServiceEvent::ServiceResolved(Box::new(repeated_service)),
                 &central_publications,
-                &[],
+                &local_scopes,
             ),
             ServiceEventOutcome::SnapshotUnchanged
         );
@@ -1374,7 +1379,7 @@ mod tests {
         let overflow_service = resolved_service(
             DiscoveryTransport::Tcp,
             "overflow",
-            &["192.168.4.9".parse().unwrap()],
+            &["fe80::9".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[],
         );
@@ -1383,7 +1388,7 @@ mod tests {
                 &mut discovery_snapshot,
                 &ServiceEvent::ServiceResolved(Box::new(overflow_service)),
                 &central_publications,
-                &[],
+                &local_scopes,
             ),
             ServiceEventOutcome::RejectedAtCapacity
         );
@@ -1392,7 +1397,7 @@ mod tests {
         let replacement_service = resolved_service(
             DiscoveryTransport::Tcp,
             "first",
-            &["192.168.4.10".parse().unwrap()],
+            &["fe80::a".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[],
         );
@@ -1401,7 +1406,7 @@ mod tests {
                 &mut discovery_snapshot,
                 &ServiceEvent::ServiceResolved(Box::new(replacement_service)),
                 &central_publications,
-                &[],
+                &local_scopes,
             ),
             ServiceEventOutcome::SnapshotChanged
         );
@@ -1411,13 +1416,13 @@ mod tests {
                 .unwrap()
                 .endpoints()[0]
                 .ip(),
-            "192.168.4.10".parse::<IpAddr>().unwrap()
+            "fe80::a".parse::<IpAddr>().unwrap()
         );
 
         let incompatible_service = resolved_service(
             DiscoveryTransport::Tcp,
             "first",
-            &["192.168.4.10".parse().unwrap()],
+            &["fe80::a".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[(contract::TXT_VERSION_KEY, "2")],
         );
@@ -1426,7 +1431,7 @@ mod tests {
                 &mut discovery_snapshot,
                 &ServiceEvent::ServiceResolved(Box::new(incompatible_service)),
                 &central_publications,
-                &[],
+                &local_scopes,
             ),
             ServiceEventOutcome::SnapshotChanged
         );
@@ -1435,7 +1440,7 @@ mod tests {
         let restored_service = resolved_service(
             DiscoveryTransport::Tcp,
             "first",
-            &["192.168.4.10".parse().unwrap()],
+            &["fe80::a".parse().unwrap()],
             contract::TCP_RENDEZVOUS_PORT,
             &[],
         );
@@ -1444,7 +1449,7 @@ mod tests {
                 &mut discovery_snapshot,
                 &ServiceEvent::ServiceResolved(Box::new(restored_service)),
                 &central_publications,
-                &[],
+                &local_scopes,
             ),
             ServiceEventOutcome::SnapshotChanged
         );
@@ -1457,14 +1462,14 @@ mod tests {
                     first_service_name.as_str().to_owned(),
                 ),
                 &central_publications,
-                &[],
+                &local_scopes,
             ),
             ServiceEventOutcome::SnapshotChanged
         );
         assert!(discovery_snapshot.is_empty());
     }
 
-    /// Host mDNS must accept IPv4-only Auto records when IPv6 LL multicast is absent.
+    /// LL-only DNS-SD: IPv4-only records are rejected; mixed A+AAAA still scopes AAAA.
     mod without_ipv6_ll_multicast {
         use super::*;
         include!("mdns_without_ipv6_ll_multicast.rs");

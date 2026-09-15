@@ -308,6 +308,7 @@ mod tests {
             membership: Membership::Independent,
             radio: personal_rns::interfaces::RadioIndication::for_kind(Some(kind)),
             details: personal_rns::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
         }
     }
 

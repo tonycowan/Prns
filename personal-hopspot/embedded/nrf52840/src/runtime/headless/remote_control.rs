@@ -139,6 +139,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
                     ble_group,
                     LORA_CONTROL.current(),
                     None,
+                    None,
                     self.ble_identity,
                 );
             },
@@ -290,6 +291,7 @@ fn build_snapshots(
             membership: *membership,
             radio: status.radio(),
             details: status.details(),
+            link_local: None,
         });
     }
     snapshots

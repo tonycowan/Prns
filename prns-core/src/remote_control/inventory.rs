@@ -41,7 +41,9 @@ pub const REMOTE_CONTROL_INTERFACE_PEER_ENCODED_LEN: usize = INTERFACE_ID_LEN
     .saturating_add(4) // destinations
     .saturating_add(4) // rate_bytes_per_sec
     .saturating_add(RadioIndication::MAX_ENCODED_LEN)
-    .saturating_add(PeerDetails::ENCODED_LEN);
+    .saturating_add(PeerDetails::ENCODED_LEN)
+    .saturating_add(1) // link_local present
+    .saturating_add(16); // link_local octets when present (always reserved)
 const INVENTORY_CARD_TRAILER_TAG: u8 = 0x02;
 pub const REMOTE_CONTROL_INTERFACE_CARD_MAX_ENCODED_LEN: usize = 4usize
     .saturating_add(4)
@@ -89,6 +91,8 @@ pub struct RemoteControlInterfacePeer {
     pub rate_bytes_per_sec: u32,
     pub radio: RadioIndication,
     pub details: PeerDetails,
+    /// Unicast IPv6 link-local for wifi-auto UDP peers when known.
+    pub link_local: Option<core::net::Ipv6Addr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1500,6 +1504,22 @@ fn write_peer<'a>(
     if peer.details.write_into(details_slot).is_none() {
         return Err(super::RemoteControlMessageWriteError::BufferTooShort);
     }
+    let Some((present_out, rest)) = rest.split_first_mut() else {
+        return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+    };
+    let Some((ll_out, rest)) = rest.split_at_mut_checked(16) else {
+        return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+    };
+    match peer.link_local {
+        Some(address) => {
+            *present_out = 1;
+            ll_out.copy_from_slice(&address.octets());
+        }
+        None => {
+            *present_out = 0;
+            ll_out.fill(0);
+        }
+    }
     Ok(rest)
 }
 
@@ -1541,6 +1561,26 @@ fn parse_peer(
     let Some((details, _)) = PeerDetails::parse(details_bytes) else {
         return Err(super::RemoteControlResponseParseError::Malformed);
     };
+    let Some((present, rest)) = rest.split_first() else {
+        return Err(super::RemoteControlResponseParseError::Truncated);
+    };
+    let Some((ll_bytes, rest)) = rest.split_at_checked(16) else {
+        return Err(super::RemoteControlResponseParseError::Truncated);
+    };
+    let link_local = match *present {
+        0 => None,
+        1 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(ll_bytes);
+            let address = core::net::Ipv6Addr::from(octets);
+            if address.is_unicast_link_local() {
+                Some(address)
+            } else {
+                return Err(super::RemoteControlResponseParseError::Malformed);
+            }
+        }
+        _ => return Err(super::RemoteControlResponseParseError::Malformed),
+    };
     Ok((
         RemoteControlInterfacePeer {
             id: InterfaceId::new(id),
@@ -1572,6 +1612,7 @@ fn parse_peer(
             ),
             radio,
             details,
+            link_local,
         },
         rest,
     ))

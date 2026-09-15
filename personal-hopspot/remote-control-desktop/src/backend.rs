@@ -41,7 +41,7 @@ use personal_rns::remote_control::{
     REMOTE_CONTROL_APPLICATION_NAME,
 };
 use personal_rns::routing::NextHop;
-use personal_rns::runtime::{RequestPathError, RoutingControl};
+use personal_rns::runtime::RoutingControl;
 use personal_rns::units::InstantMillis;
 #[cfg(target_os = "android")]
 use personal_rns::usb_auto::{UsbAutoCandidate, UsbAutoHost};
@@ -69,11 +69,12 @@ use crate::roster_sync::{
     adopt_sibling, attention_for_target, decode_labels, encode_labels, forget_sibling_locally,
     forget_target_locally, import_seed_labels, load_replica, looking_instance, merge_roster,
     next_sibling_alias, note_local_label, note_local_upsert, parse_replica_reply,
-    peer_alias_is_syncable, persist_replica, replica_forgets_target, replica_known_targets,
-    replica_message, replica_path, roster_sync_destination_hash, sibling_alias_is_syncable,
+    peer_alias_is_syncable, peer_alias_link_is_local_only, peer_alias_value_is_syncable,
+    persist_replica, replica_forgets_target, replica_known_targets, replica_message, replica_path,
+    retract_unsyncable_peer_alias_values, roster_sync_destination_hash, sibling_alias_is_syncable,
     strip_local_sibling_alias, write_pull, RosterDelta, RosterLabel, RosterLabelKind, RosterShared,
-    RosterSync, TargetAttention, ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS,
-    ROSTER_SYNC_REQUEST_ENDPOINT_ID,
+    RosterSync, TargetAttention, THIS_CONTROLLER_ALIAS_LINK, THIS_CONTROLLER_PEER_ALIAS,
+    ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS, ROSTER_SYNC_REQUEST_ENDPOINT_ID,
 };
 
 const IDENTITY_HASH_BYTES: usize = 16;
@@ -88,6 +89,7 @@ const TARGET_BLE_PREFIXES_FILE: &str = "target-ble-prefixes";
 const TARGET_PEER_IDS_FILE: &str = "target-peer-ids";
 const MANAGER_ALIASES_FILE: &str = "manager-aliases";
 const SIBLING_ALIASES_FILE: &str = "sibling-aliases";
+const SIBLING_WIFI_LL_FILE: &str = "sibling-wifi-ll";
 const TCP_TARGET_FILE: &str = "tcp-target";
 const CONTROLLER_IDENTITY_FILE: &str = "controller";
 const INSTANCE_IDENTITY_FILE: &str = "instance";
@@ -1608,11 +1610,16 @@ impl RemoteControlBackend {
             }
         }
         if peer_alias_is_syncable(id) {
-            self.record_local_label(
-                RosterLabelKind::PeerAlias,
-                id,
-                (!name.is_empty()).then_some(name),
-            );
+            if name.is_empty() || peer_alias_value_is_syncable(Some(name)) {
+                self.record_local_label(
+                    RosterLabelKind::PeerAlias,
+                    id,
+                    (!name.is_empty()).then_some(name),
+                );
+            } else {
+                // Local-only display string (e.g. "This Controller") — retract any prior sync.
+                self.record_local_label(RosterLabelKind::PeerAlias, id, None);
+            }
         }
         Ok(())
     }
@@ -1688,6 +1695,8 @@ impl RemoteControlBackend {
             roster.applied_generation = roster.applied_generation.saturating_add(1);
         }
         remove_alias_map_key(&session.sibling_aliases, &session.sibling_aliases_path, id);
+        remove_alias_map_key(&session.sibling_wifi_ll, &session.sibling_wifi_ll_path, id);
+        refresh_sibling_linked_peer_aliases(session, id, None);
         persist_session_replica(session);
         let backend = self.clone();
         spawn(async move {
@@ -2410,12 +2419,23 @@ impl RemoteControlBackend {
     async fn request_control_path(&self, target_id: &str) -> Result<(), BackendError> {
         self.announce_operator().await?;
         let destination = self.require_control_destination(target_id).await?;
-        self.session()?
-            .handle
-            .request_path(destination)
-            .await
-            .map(|_| ())
-            .map_err(|error: RequestPathError| operation("connect to target", error))
+        eprintln!(
+            "rnprobe: request_path for {target_id} dest={}",
+            encode_hex(destination.as_bytes())
+        );
+        match self.session()?.handle.request_path(destination).await {
+            Ok(found) => {
+                eprintln!(
+                    "rnprobe: path found for {target_id} hops={}",
+                    found.hops.0
+                );
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!("rnprobe: request_path failed for {target_id}: {error:?}");
+                Err(operation("connect to target", error))
+            }
+        }
     }
 
     async fn require_control_destination(
@@ -2660,17 +2680,79 @@ impl RemoteControlBackend {
             for peer in &item.peers {
                 if let Some(matched) = match_peer_to_target(session, &peer.id) {
                     remember_target_peer_id(session, &matched, &peer.id);
+                } else if let Some(endpoint) = peer.endpoint.as_deref() {
+                    if let Some(matched) = match_wifi_ll_to_target(session, endpoint) {
+                        remember_target_peer_id(session, &matched, &peer.id);
+                    }
                 }
             }
         }
     }
 
     fn reconcile_peer_aliases_from_entries(&self, items: &[InterfaceEntry]) {
+        let Ok(session) = self.session() else {
+            return;
+        };
+        self.ensure_local_sibling_wifi_ll_published(session);
+        let controller_ll = session.local_power.wifi_link_local_keys();
+        let sibling_aliases = session
+            .sibling_aliases
+            .lock()
+            .expect("sibling aliases mutex poisoned")
+            .clone();
+        for item in items {
+            for peer in &item.peers {
+                if let Some(endpoint) = peer.endpoint.as_deref() {
+                    if endpoint_matches_wifi_ll_keys(endpoint, &controller_ll) {
+                        // Local-only label: do not publish to roster (sibling "this" would be wrong).
+                        let _ = auto_fill_this_controller_peer_alias(session, &peer.id);
+                    } else if let Some(sibling_hash) = match_wifi_ll_to_sibling(session, endpoint)
+                    {
+                        if let Some(alias) =
+                            stored_alias(sibling_aliases.get(&sibling_hash).map(String::as_str))
+                        {
+                            // Local-only: each install derives this from SiblingWifiLl + SiblingAlias.
+                            let _ = auto_fill_sibling_controller_peer_alias(
+                                session,
+                                &peer.id,
+                                &sibling_hash,
+                                &alias,
+                            );
+                        }
+                    } else if let Some(matched) = match_wifi_ll_to_target(session, endpoint) {
+                        remember_target_peer_id(session, &matched, &peer.id);
+                    }
+                }
+            }
+        }
         let peer_ids = items
             .iter()
             .flat_map(|item| item.peers.iter().map(|peer| peer.id.as_str()))
             .collect::<Vec<_>>();
         let _ = self.reconcile_peer_aliases(&peer_ids);
+    }
+
+    fn ensure_local_sibling_wifi_ll_published(&self, session: &ControllerSession) {
+        let instance = session.controller_identity.instance_hash.trim();
+        if instance.is_empty() {
+            return;
+        }
+        let Some(ll) = session.local_power.wifi_link_local_keys().into_iter().min() else {
+            // No local LL yet — absence on the roster is valid; do not clear a prior fact.
+            return;
+        };
+        let current = session.roster.lock().ok().and_then(|roster| {
+            roster.replica.labels.iter().find_map(|label| {
+                (label.kind == RosterLabelKind::SiblingWifiLl
+                    && label.key.eq_ignore_ascii_case(instance))
+                .then(|| label.value.clone())
+                .flatten()
+            })
+        });
+        if current.as_deref() == Some(ll.as_str()) {
+            return;
+        }
+        self.record_local_label(RosterLabelKind::SiblingWifiLl, instance, Some(&ll));
     }
 
     fn reconcile_peer_aliases(&self, peer_ids: &[&str]) -> Result<(), BackendError> {
@@ -3130,12 +3212,17 @@ struct ControllerSession {
     target_ble_prefixes_path: PathBuf,
     target_peer_ids: Mutex<HashMap<String, String>>,
     target_peer_ids_path: PathBuf,
+    /// Normalized station LL (`fe80::…`, no zone) → managed target id.
+    target_wifi_ll: Mutex<HashMap<String, String>>,
     manager_aliases: Mutex<HashMap<String, String>>,
     manager_aliases_path: PathBuf,
     target_aliases: Mutex<HashMap<String, String>>,
     target_aliases_path: PathBuf,
     sibling_aliases: Mutex<HashMap<String, String>>,
     sibling_aliases_path: PathBuf,
+    /// Sibling instance hash → normalized wifi LL (`fe80::…`, no zone).
+    sibling_wifi_ll: Mutex<HashMap<String, String>>,
+    sibling_wifi_ll_path: PathBuf,
     build_versions: Mutex<HashMap<String, String>>,
     batteries: Mutex<HashMap<String, String>>,
     battery_fetched_at: Mutex<HashMap<String, Instant>>,
@@ -3250,6 +3337,25 @@ impl LocalInterfacePower {
             Some(LocalPowerControl::Tokio(_) | LocalPowerControl::Ble(_)) | None => Vec::new(),
         }
     }
+
+    fn wifi_link_local_keys(&self) -> HashSet<String> {
+        let controls = self
+            .controls
+            .lock()
+            .expect("local interface power mutex poisoned");
+        let mut keys = HashSet::new();
+        for control in controls.values() {
+            let LocalPowerControl::Wifi(status) = control else {
+                continue;
+            };
+            for (addr, _) in status.local_addresses() {
+                if let Some(key) = normalize_link_local(addr) {
+                    keys.insert(key);
+                }
+            }
+        }
+        keys
+    }
 }
 
 impl InterfaceActivitySignature {
@@ -3327,7 +3433,7 @@ impl ControllerSession {
         let clone_events = clone.clone();
         let persist_dir = data_dir.join("node");
         let peer_aliases_path = data_dir.join(PEER_ALIASES_FILE);
-        let peer_aliases_map = load_target_names(&peer_aliases_path);
+        let mut peer_aliases_map = load_target_names(&peer_aliases_path);
         let peer_alias_links_path = data_dir.join(PEER_ALIAS_LINKS_FILE);
         let peer_alias_links_map = load_target_names(&peer_alias_links_path);
         let target_ble_prefixes_path = data_dir.join(TARGET_BLE_PREFIXES_FILE);
@@ -3340,6 +3446,8 @@ impl ControllerSession {
         let target_aliases_map = load_target_names(&target_aliases_path);
         let sibling_aliases_path = data_dir.join(SIBLING_ALIASES_FILE);
         let mut sibling_aliases_map = load_target_names(&sibling_aliases_path);
+        let sibling_wifi_ll_path = data_dir.join(SIBLING_WIFI_LL_FILE);
+        let mut sibling_wifi_ll_map = load_target_names(&sibling_wifi_ll_path);
         let target_names = pairing
             .lock()
             .expect("pairing state mutex poisoned")
@@ -3358,6 +3466,45 @@ impl ControllerSession {
         strip_local_sibling_alias(&mut roster_state.replica, &instance_hex);
         sibling_aliases_map.retain(|key, _| sibling_alias_is_syncable(key, &instance_hex));
         persist_target_names(&sibling_aliases_path, &sibling_aliases_map);
+        sibling_wifi_ll_map.retain(|key, value| {
+            sibling_alias_is_syncable(key, &instance_hex) && normalize_stored_wifi_ll(value).is_some()
+        });
+        for value in sibling_wifi_ll_map.values_mut() {
+            if let Some(normalized) = normalize_stored_wifi_ll(value) {
+                *value = normalized;
+            }
+        }
+        persist_target_names(&sibling_wifi_ll_path, &sibling_wifi_ll_map);
+        // Drop sibling-synced "This Controller" leftovers; keep local __this_controller__ rows.
+        let before_scrub = peer_aliases_map.len();
+        peer_aliases_map.retain(|peer_id, alias| {
+            if peer_alias_value_is_syncable(Some(alias)) {
+                return true;
+            }
+            peer_alias_links_map
+                .get(peer_id)
+                .is_some_and(|link| link == THIS_CONTROLLER_ALIAS_LINK)
+        });
+        if peer_aliases_map.len() != before_scrub {
+            persist_target_names(&peer_aliases_path, &peer_aliases_map);
+        }
+        // Local-only auto peer aliases live in peer-aliases for UI, but must not seed the roster.
+        let syncable_peer_aliases = peer_aliases_map
+            .iter()
+            .filter(|(peer_id, alias)| {
+                peer_alias_is_syncable(peer_id)
+                    && peer_alias_value_is_syncable(Some(alias))
+                    && peer_alias_links_map
+                        .get(peer_id.as_str())
+                        .map(|link| {
+                            !peer_alias_link_is_local_only(link, sibling_aliases_map.keys())
+                        })
+                        .unwrap_or(true)
+            })
+            .map(|(peer_id, alias)| (peer_id.clone(), alias.clone()))
+            .collect::<HashMap<_, _>>();
+        // Retract any prior mistaken "This Controller" PeerAlias before seeding other facts.
+        retract_unsyncable_peer_alias_values(&mut roster_state.replica);
         import_seed_labels(
             &mut roster_state.replica,
             RosterLabelKind::TargetName,
@@ -3376,12 +3523,17 @@ impl ControllerSession {
         import_seed_labels(
             &mut roster_state.replica,
             RosterLabelKind::PeerAlias,
-            &peer_aliases_map,
+            &syncable_peer_aliases,
         );
         import_seed_labels(
             &mut roster_state.replica,
             RosterLabelKind::SiblingAlias,
             &sibling_aliases_map,
+        );
+        import_seed_labels(
+            &mut roster_state.replica,
+            RosterLabelKind::SiblingWifiLl,
+            &sibling_wifi_ll_map,
         );
         persist_replica(&replica_path(&data_dir), &roster_state.replica);
         let roster = Arc::new(Mutex::new(roster_state));
@@ -3397,6 +3549,7 @@ impl ControllerSession {
         let manager_aliases = Mutex::new(manager_aliases_map);
         let target_aliases = Mutex::new(target_aliases_map);
         let sibling_aliases = Mutex::new(sibling_aliases_map);
+        let sibling_wifi_ll = Mutex::new(sibling_wifi_ll_map);
         let pairing_events = pairing.clone();
         let node = PrnsNode::new(PrnsNodeRecipe {
             transport_identity: None,
@@ -3728,12 +3881,15 @@ impl ControllerSession {
             target_ble_prefixes_path,
             target_peer_ids,
             target_peer_ids_path,
+            target_wifi_ll: Mutex::new(HashMap::new()),
             manager_aliases,
             manager_aliases_path,
             target_aliases,
             target_aliases_path,
             sibling_aliases,
             sibling_aliases_path,
+            sibling_wifi_ll,
+            sibling_wifi_ll_path,
             build_versions: Mutex::new(HashMap::new()),
             batteries: Mutex::new(HashMap::new()),
             battery_fetched_at: Mutex::new(HashMap::new()),
@@ -4235,8 +4391,16 @@ fn encode_clone_labels(labels: &[RosterLabel], instance_hex: &str) -> Vec<u8> {
     let labels: Vec<_> = labels
         .iter()
         .filter(|label| {
-            label.kind != RosterLabelKind::SiblingAlias
-                || sibling_alias_is_syncable(&label.key, instance_hex)
+            match label.kind {
+                RosterLabelKind::SiblingAlias => {
+                    sibling_alias_is_syncable(&label.key, instance_hex)
+                }
+                RosterLabelKind::PeerAlias => {
+                    peer_alias_is_syncable(&label.key)
+                        && peer_alias_value_is_syncable(label.value.as_deref())
+                }
+                _ => true,
+            }
         })
         .cloned()
         .collect();
@@ -4293,6 +4457,7 @@ fn remember_sibling_alias(session: &ControllerSession, instance_hash: &str, alia
         );
     }
     persist_session_replica(session);
+    refresh_sibling_linked_peer_aliases(session, id, Some(&name));
 }
 
 fn ensure_missing_sibling_aliases<'a>(
@@ -4409,7 +4574,23 @@ fn apply_roster_labels(session: &ControllerSession, labels: &[RosterLabel]) {
                 label.value.as_deref(),
             ),
             RosterLabelKind::PeerAlias => {
-                if peer_alias_is_syncable(&label.key) {
+                if !peer_alias_is_syncable(&label.key)
+                    || !peer_alias_value_is_syncable(label.value.as_deref())
+                {
+                    // Drop USB-host ids and the local-only "This Controller" string.
+                } else if label
+                    .value
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                    && session
+                        .peer_alias_links
+                        .lock()
+                        .ok()
+                        .and_then(|links| links.get(&label.key).cloned())
+                        .is_some_and(|link| link == THIS_CONTROLLER_ALIAS_LINK)
+                {
+                    // Roster clear must not erase this install's local AutoWifi self-label.
+                } else {
                     apply_map_label(
                         &session.peer_aliases,
                         &session.peer_aliases_path,
@@ -4427,6 +4608,31 @@ fn apply_roster_labels(session: &ControllerSession, labels: &[RosterLabel]) {
                         &label.key,
                         label.value.as_deref(),
                     );
+                    refresh_sibling_linked_peer_aliases(
+                        session,
+                        &label.key,
+                        stored_alias(label.value.as_deref()).as_deref(),
+                    );
+                }
+            }
+            RosterLabelKind::SiblingWifiLl => {
+                if !label
+                    .key
+                    .eq_ignore_ascii_case(&session.controller_identity.instance_hash)
+                {
+                    remember_sibling_wifi_ll(session, &label.key, label.value.as_deref());
+                    if let Some(alias) = stored_alias(
+                        session
+                            .sibling_aliases
+                            .lock()
+                            .expect("sibling aliases mutex poisoned")
+                            .get(&label.key)
+                            .map(String::as_str),
+                    ) {
+                        // Mapping arrived (or changed); peers matching this LL pick it up on
+                        // the next inventory reconcile. Refresh already-linked peers now.
+                        refresh_sibling_linked_peer_aliases(session, &label.key, Some(&alias));
+                    }
                 }
             }
             RosterLabelKind::SiblingRemoved => {
@@ -4447,6 +4653,12 @@ fn apply_roster_labels(session: &ControllerSession, labels: &[RosterLabel]) {
                         &session.sibling_aliases_path,
                         &label.key,
                     );
+                    remove_alias_map_key(
+                        &session.sibling_wifi_ll,
+                        &session.sibling_wifi_ll_path,
+                        &label.key,
+                    );
+                    refresh_sibling_linked_peer_aliases(session, &label.key, None);
                 }
             }
             RosterLabelKind::PairingAdvertDismissed => {
@@ -5072,6 +5284,19 @@ fn apply_remote_card(entry: &mut InterfaceEntry, card: &RemoteControlInterfaceCa
         .ok()
         .and_then(|bytes| operator_remote_kind(InterfaceId::new(bytes)));
     entry.extras = hopspot_extra_facts(entry.detail.as_deref(), kind, None);
+    if kind == Some(InterfaceKind::AutoWifi) {
+        if let Some(group) = entry.group.take() {
+            if parse_ipv6_fact(&group).is_some_and(|addr| {
+                matches!(addr, IpAddr::V6(v6) if v6.is_unicast_link_local())
+            }) {
+                entry
+                    .extras
+                    .push(interface_fact("IPv6", group));
+            } else {
+                entry.group = Some(group);
+            }
+        }
+    }
 }
 
 async fn fetch_interface_peers(
@@ -5116,10 +5341,14 @@ async fn fetch_interface_peer_page(
 }
 
 fn interface_peer_from_wire(peer: &RemoteControlInterfacePeer) -> InterfacePeer {
+    let endpoint = peer
+        .link_local
+        .filter(|address| address.is_unicast_link_local())
+        .map(|address| address.to_string());
     described_interface_peer(
         peer.id,
         peer.connection,
-        None,
+        endpoint.as_deref(),
         peer.tx_bytes,
         peer.rx_bytes,
         peer.links,
@@ -5365,7 +5594,7 @@ impl PeerPath {
     const fn detail(self) -> &'static str {
         match self {
             Self::WifiUdp => {
-                "IPv6 fe80 UDP on the LAN: Auto Wi-Fi peering tokens and Reticulum frames. Not TCP; a TCP row to the same node is another peer."
+                "IPv6 fe80 UDP on the LAN: Auto Wi-Fi peering tokens and Reticulum frames. Status is UDP peering. Health is whether an RNS link is up. Not TCP; a TCP row to the same node is another peer."
             }
             Self::TcpOutbound => {
                 "This device dialed them. Stock Auto Wi-Fi also dials the Wi-Fi gateway on port 42699; that row is not a mesh node if it never connects."
@@ -5416,7 +5645,7 @@ impl PeerPath {
 
 pub fn auto_wifi_peer_list_note(kind: &str) -> Option<&'static str> {
     (kind == "auto-wifi").then_some(
-        "Each row is one path, not one device. UDP and TCP both ways are separate. A TCP-out row that stays Retrying is usually the Wi-Fi gateway.",
+        "Each row is one path, not one device. UDP and TCP both ways are separate. Status is UDP peering. Health is the RNS plane. A TCP-out row that stays Retrying is usually the Wi-Fi gateway.",
     )
 }
 
@@ -5435,7 +5664,10 @@ fn peer_health(
     rx_bytes: u64,
     rate_bytes_per_sec: u32,
 ) -> Option<PeerHealth> {
-    if kind != Some(InterfaceKind::BluetoothPeer) {
+    if !matches!(
+        kind,
+        Some(InterfaceKind::BluetoothPeer | InterfaceKind::WifiPeer)
+    ) {
         return None;
     }
     if connection != ConnectionState::Connected {
@@ -5553,9 +5785,101 @@ fn wifi_peer_id_from_link_local(address: IpAddr) -> Option<String> {
     ))
 }
 
+fn normalize_link_local(address: IpAddr) -> Option<String> {
+    let IpAddr::V6(v6) = address else {
+        return None;
+    };
+    if !v6.is_unicast_link_local() {
+        return None;
+    }
+    Some(v6.to_string().to_ascii_lowercase())
+}
+
+fn normalize_stored_wifi_ll(value: &str) -> Option<String> {
+    let addr = parse_ipv6_fact(value)?;
+    normalize_link_local(addr)
+}
+
+fn endpoint_matches_wifi_ll_keys(endpoint: &str, keys: &HashSet<String>) -> bool {
+    let Some(addr) = parse_ipv6_fact(endpoint) else {
+        return false;
+    };
+    let Some(key) = normalize_link_local(addr) else {
+        return false;
+    };
+    keys.contains(&key)
+}
+
 fn parse_ipv6_fact(value: &str) -> Option<IpAddr> {
     let host = value.split('%').next()?.trim();
     host.parse::<Ipv6Addr>().ok().map(IpAddr::V6)
+}
+
+fn remember_target_wifi_ll(session: &ControllerSession, target_id: &str, address: IpAddr) {
+    let Some(key) = normalize_link_local(address) else {
+        return;
+    };
+    let target_id = target_id.trim();
+    if target_id.is_empty() {
+        return;
+    }
+    let mut known = session
+        .target_wifi_ll
+        .lock()
+        .expect("target wifi ll mutex poisoned");
+    if known.get(&key).is_some_and(|linked| linked == target_id) {
+        return;
+    }
+    known.insert(key, target_id.to_owned());
+}
+
+fn match_wifi_ll_to_target(session: &ControllerSession, endpoint: &str) -> Option<String> {
+    let addr = parse_ipv6_fact(endpoint)?;
+    let key = normalize_link_local(addr)?;
+    session
+        .target_wifi_ll
+        .lock()
+        .expect("target wifi ll mutex poisoned")
+        .get(&key)
+        .cloned()
+}
+
+fn remember_sibling_wifi_ll(session: &ControllerSession, instance_hash: &str, value: Option<&str>) {
+    let id = instance_hash.trim();
+    if id.is_empty()
+        || !sibling_alias_is_syncable(id, &session.controller_identity.instance_hash)
+    {
+        return;
+    }
+    let mut known = session
+        .sibling_wifi_ll
+        .lock()
+        .expect("sibling wifi ll mutex poisoned");
+    match value.and_then(normalize_stored_wifi_ll) {
+        Some(ll) => {
+            if known.get(id).is_some_and(|stored| stored == &ll) {
+                return;
+            }
+            known.insert(id.to_owned(), ll);
+        }
+        None => {
+            if known.remove(id).is_none() {
+                return;
+            }
+        }
+    }
+    persist_target_names(&session.sibling_wifi_ll_path, &known);
+}
+
+fn match_wifi_ll_to_sibling(session: &ControllerSession, endpoint: &str) -> Option<String> {
+    let addr = parse_ipv6_fact(endpoint)?;
+    let key = normalize_link_local(addr)?;
+    session
+        .sibling_wifi_ll
+        .lock()
+        .expect("sibling wifi ll mutex poisoned")
+        .iter()
+        .find_map(|(instance, ll)| (ll == &key).then(|| instance.clone()))
 }
 
 fn remember_wifi_peers_from_addresses(
@@ -5570,6 +5894,7 @@ fn remember_wifi_peers_from_addresses(
         let Some(addr) = parse_ipv6_fact(&fact.value) else {
             continue;
         };
+        remember_target_wifi_ll(session, target_id, addr);
         let Some(peer_id) = wifi_peer_id_from_link_local(addr) else {
             continue;
         };
@@ -5674,7 +5999,7 @@ fn auto_fill_peer_alias(
         drop(links);
         // Publish once if the roster does not already have this fact (no-op when unchanged).
         if let Some(backend) = backend {
-            if peer_alias_is_syncable(peer_id) {
+            if peer_alias_is_syncable(peer_id) && peer_alias_value_is_syncable(Some(alias)) {
                 backend.record_local_label(RosterLabelKind::PeerAlias, peer_id, Some(alias));
             }
         }
@@ -5693,11 +6018,149 @@ fn auto_fill_peer_alias(
     // Publish so siblings can name this peer before they ever connect to the node.
     // Remote TargetAlias apply passes backend=None so we do not echo PeerAlias back.
     if let Some(backend) = backend {
-        if peer_alias_is_syncable(peer_id) {
+        if peer_alias_is_syncable(peer_id) && peer_alias_value_is_syncable(Some(alias)) {
             backend.record_local_label(RosterLabelKind::PeerAlias, peer_id, Some(alias));
         }
     }
     Ok(())
+}
+
+/// Name a wifi peer whose LL is this Controller's AutoWifi address. Local-only (no roster).
+fn auto_fill_this_controller_peer_alias(
+    session: &ControllerSession,
+    peer_id: &str,
+) -> Result<(), BackendError> {
+    let peer_id = peer_id.trim();
+    if peer_id.is_empty() {
+        return Ok(());
+    }
+    let mut peers = session
+        .peer_aliases
+        .lock()
+        .expect("peer aliases mutex poisoned");
+    let mut links = session
+        .peer_alias_links
+        .lock()
+        .expect("peer alias links mutex poisoned");
+    let linked_here = links
+        .get(peer_id)
+        .is_some_and(|linked| linked == THIS_CONTROLLER_ALIAS_LINK);
+    let current = stored_alias(peers.get(peer_id).map(String::as_str));
+    if current.as_deref() == Some(THIS_CONTROLLER_PEER_ALIAS) {
+        if !linked_here {
+            links.insert(peer_id.to_owned(), THIS_CONTROLLER_ALIAS_LINK.to_owned());
+            persist_target_names(&session.peer_alias_links_path, &links);
+        }
+        return Ok(());
+    }
+    if current.is_some() && !linked_here {
+        return Ok(());
+    }
+    peers.insert(peer_id.to_owned(), THIS_CONTROLLER_PEER_ALIAS.to_owned());
+    persist_target_names(&session.peer_aliases_path, &peers);
+    links.insert(peer_id.to_owned(), THIS_CONTROLLER_ALIAS_LINK.to_owned());
+    persist_target_names(&session.peer_alias_links_path, &links);
+    Ok(())
+}
+
+/// Name a wifi peer whose LL is a sibling Controller. Local-only (no PeerAlias roster row).
+fn auto_fill_sibling_controller_peer_alias(
+    session: &ControllerSession,
+    peer_id: &str,
+    sibling_hash: &str,
+    alias: &str,
+) -> Result<(), BackendError> {
+    let peer_id = peer_id.trim();
+    let sibling_hash = sibling_hash.trim();
+    let alias = alias.trim();
+    if peer_id.is_empty() || sibling_hash.is_empty() || alias.is_empty() {
+        return Ok(());
+    }
+    if !sibling_alias_is_syncable(sibling_hash, &session.controller_identity.instance_hash) {
+        return Ok(());
+    }
+    let mut peers = session
+        .peer_aliases
+        .lock()
+        .expect("peer aliases mutex poisoned");
+    let mut links = session
+        .peer_alias_links
+        .lock()
+        .expect("peer alias links mutex poisoned");
+    let linked_here = links
+        .get(peer_id)
+        .is_some_and(|linked| linked == sibling_hash);
+    let current = stored_alias(peers.get(peer_id).map(String::as_str));
+    if current.as_deref() == Some(alias) {
+        if !linked_here {
+            links.insert(peer_id.to_owned(), sibling_hash.to_owned());
+            persist_target_names(&session.peer_alias_links_path, &links);
+        }
+        return Ok(());
+    }
+    if current.is_some() && !linked_here {
+        return Ok(());
+    }
+    peers.insert(peer_id.to_owned(), alias.to_owned());
+    persist_target_names(&session.peer_aliases_path, &peers);
+    links.insert(peer_id.to_owned(), sibling_hash.to_owned());
+    persist_target_names(&session.peer_alias_links_path, &links);
+    Ok(())
+}
+
+fn refresh_sibling_linked_peer_aliases(
+    session: &ControllerSession,
+    sibling_hash: &str,
+    alias: Option<&str>,
+) {
+    let sibling_hash = sibling_hash.trim();
+    if sibling_hash.is_empty() {
+        return;
+    }
+    let linked = {
+        let links = session
+            .peer_alias_links
+            .lock()
+            .expect("peer alias links mutex poisoned");
+        links
+            .iter()
+            .filter(|(_, linked)| linked.as_str() == sibling_hash)
+            .map(|(peer_id, _)| peer_id.clone())
+            .collect::<Vec<_>>()
+    };
+    match stored_alias(alias) {
+        Some(alias) => {
+            for peer_id in linked {
+                let _ = auto_fill_sibling_controller_peer_alias(
+                    session,
+                    &peer_id,
+                    sibling_hash,
+                    &alias,
+                );
+            }
+        }
+        None => {
+            let mut peers = session
+                .peer_aliases
+                .lock()
+                .expect("peer aliases mutex poisoned");
+            let mut links = session
+                .peer_alias_links
+                .lock()
+                .expect("peer alias links mutex poisoned");
+            let mut changed_peers = false;
+            for peer_id in linked {
+                links.remove(&peer_id);
+                if peers.remove(&peer_id).is_some() {
+                    changed_peers = true;
+                }
+            }
+            persist_target_names(&session.peer_alias_links_path, &links);
+            if changed_peers {
+                persist_target_names(&session.peer_aliases_path, &peers);
+            }
+        }
+    }
 }
 
 fn clear_linked_peer_aliases(
@@ -6580,13 +7043,14 @@ mod tests {
         attach_usb_link_peer, auto_wifi_peer_list_note, bluetooth_auto_name_prefix,
         bluetooth_auto_peer_list_note, bluetooth_auto_prefix_from_direct_peer,
         bluetooth_auto_title, clone_announce_is_usb_local, control_announce_satisfies,
-        controller_identity_secret_path, encode_hex, format_activity_age, format_announce_millis,
-        format_connect_label, format_hop_count, format_interface, format_managed_node_battery,
-        format_next_hop, format_target_announce, format_target_route, format_utc_millis,
-        generic_bluetooth_auto_title, instance_identity_secret_path, interface_peer,
-        interface_peer_from_wire, interface_power_from_connection, inventory_recovery_continues,
-        load_persisted_tcp_target, local_interface_config, local_interface_entry,
-        managed_targets_from_disk, monitor_remaining_at, operator_interface_kind,
+        controller_identity_secret_path, encode_hex, endpoint_matches_wifi_ll_keys,
+        format_activity_age, format_announce_millis, format_connect_label, format_hop_count,
+        format_interface, format_managed_node_battery, format_next_hop, format_target_announce,
+        format_target_route, format_utc_millis, generic_bluetooth_auto_title,
+        instance_identity_secret_path, interface_peer, interface_peer_from_wire,
+        interface_power_from_connection, inventory_recovery_continues, load_persisted_tcp_target,
+        local_interface_config, local_interface_entry, managed_targets_from_disk,
+        monitor_remaining_at, normalize_stored_wifi_ll, operator_interface_kind,
         operator_local_kind, parse_invitation_code, parse_target_names, parse_tcp_dial_target,
         path_is_better_than, path_is_direct_ble, peer_label, persist_tcp_target, radio_facts,
         remote_interface_entry, render_target_names, resolve_controller_tcp_target,
@@ -6594,8 +7058,9 @@ mod tests {
         should_wait_for_control_announce, stored_alias, target_label, BackendError, InterfaceEntry,
         InterfaceFact, InterfacePower, PeerHealth, RemoteControlAnnounceWait, TargetPath,
         TargetStatus, CONTROLLER_IDENTITY_FILE, DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE,
-        MANAGER_ALIASES_FILE, TARGET_MONITOR_TTL,
+        MANAGER_ALIASES_FILE, TARGET_MONITOR_TTL, THIS_CONTROLLER_PEER_ALIAS,
     };
+    use std::collections::HashSet;
     use personal_rns::identity::IdentityHash;
     use personal_rns::interfaces::bluetooth_auto::BleIdentity;
     use personal_rns::interfaces::{
@@ -6874,6 +7339,7 @@ mod tests {
                 membership: Membership::Independent,
                 radio: personal_rns::interfaces::RadioIndication::for_kind(id.kind()),
                 details: personal_rns::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
             },
             None,
             None,
@@ -6895,6 +7361,7 @@ mod tests {
                     membership: Membership::Independent,
                     radio: personal_rns::interfaces::RadioIndication::for_kind(id.kind()),
                     details: personal_rns::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
                 },
                 None,
                 None,
@@ -6932,7 +7399,20 @@ mod tests {
 
     #[test]
     fn auto_wifi_peer_cards_name_the_path_instead_of_a_bare_hash() {
+        let ll = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
         let udp = interface_peer_from_wire(&RemoteControlInterfacePeer {
+            id: InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, &ll.octets()),
+            connection: ConnectionState::Connected,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            links: 0,
+            destinations: 0,
+            rate_bytes_per_sec: 0,
+            radio: RadioIndication::NotRadio,
+            details: PeerDetails::NotApplicable,
+            link_local: Some(ll),
+        });
+        let bare = interface_peer_from_wire(&RemoteControlInterfacePeer {
             id: InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, b"fe80::1"),
             connection: ConnectionState::Connected,
             tx_bytes: 0,
@@ -6942,6 +7422,7 @@ mod tests {
             rate_bytes_per_sec: 0,
             radio: RadioIndication::NotRadio,
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         let tcp_out = interface_peer_from_wire(&RemoteControlInterfacePeer {
             id: InterfaceId::from_channel_tag(InterfaceKind::TcpClient, b"192.168.1.18:42699"),
@@ -6953,6 +7434,7 @@ mod tests {
             rate_bytes_per_sec: 0,
             radio: RadioIndication::NotRadio,
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         let tcp_in = interface_peer_from_wire(&RemoteControlInterfacePeer {
             id: InterfaceId::from_channel_tag(InterfaceKind::TcpServerPeer, b"192.168.1.36:54040"),
@@ -6964,19 +7446,27 @@ mod tests {
             rate_bytes_per_sec: 0,
             radio: RadioIndication::NotRadio,
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         assert_eq!(udp.role, "UDP");
-        assert!(udp.name.starts_with("UDP · P "));
+        assert_eq!(udp.endpoint.as_deref(), Some("fe80::1"));
+        assert_eq!(udp.endpoint_label.as_deref(), Some("Peer"));
+        assert!(udp.name.contains("fe80::1"));
         assert!(udp.detail.contains("TCP row"));
+        assert_eq!(udp.health, Some(PeerHealth::RadioOnlyIdle));
+        assert!(bare.endpoint.is_none());
+        assert!(bare.name.starts_with("UDP · P "));
         assert_eq!(tcp_out.role, "TCP out");
         assert!(tcp_out.name.starts_with("TCP out · P "));
         assert!(tcp_out.detail.contains("42699"));
+        assert_eq!(tcp_out.health, None);
         assert_eq!(tcp_in.role, "TCP in");
         assert!(tcp_in.name.starts_with("TCP in · P "));
+        assert_eq!(tcp_in.health, None);
         assert_eq!(
             auto_wifi_peer_list_note("auto-wifi"),
             Some(
-                "Each row is one path, not one device. UDP and TCP both ways are separate. A TCP-out row that stays Retrying is usually the Wi-Fi gateway."
+                "Each row is one path, not one device. UDP and TCP both ways are separate. Status is UDP peering. Health is the RNS plane. A TCP-out row that stays Retrying is usually the Wi-Fi gateway."
             )
         );
         assert_eq!(auto_wifi_peer_list_note("bluetooth-auto"), None);
@@ -7006,6 +7496,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
+            link_local: None,
             },
             Some("192.168.1.1:42699"),
         );
@@ -7027,6 +7518,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
+            link_local: None,
             },
             Some("192.168.1.36:54716"),
         );
@@ -7048,6 +7540,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
+            link_local: None,
             },
             Some("fe80::aea7:4ff:fee1:4b3c%14"),
         );
@@ -7105,6 +7598,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
+            link_local: None,
             },
             Some("127.0.0.1:42699"),
         );
@@ -7133,6 +7627,7 @@ mod tests {
                 },
                 radio: RadioIndication::NotRadio,
                 details: PeerDetails::NotApplicable,
+            link_local: None,
             },
             Some("fe80::aea7:4ff:fee1:4b3c%14"),
         );
@@ -7161,6 +7656,7 @@ mod tests {
             rate_bytes_per_sec: 0,
             radio: RadioIndication::for_kind(Some(InterfaceKind::BluetoothPeer)),
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         let mut aliases = HashMap::new();
         aliases.insert(encode_hex(id.as_bytes()), "Kitchen HV4".to_string());
@@ -7213,6 +7709,7 @@ mod tests {
             membership: Membership::Independent,
             radio: RadioIndication::for_kind(None),
             details: PeerDetails::NotApplicable,
+            link_local: None,
         };
         assert_eq!(
             operator_local_kind(&snapshot),
@@ -7307,6 +7804,7 @@ mod tests {
                 membership: Membership::Independent,
                 radio: personal_rns::interfaces::RadioIndication::for_kind(id.kind()),
                 details: personal_rns::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
             },
             None,
             None,
@@ -7359,6 +7857,7 @@ mod tests {
                 membership: Membership::Independent,
                 radio: personal_rns::interfaces::RadioIndication::for_kind(id.kind()),
                 details: personal_rns::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
             },
             None,
             Some(identity),
@@ -7406,6 +7905,7 @@ mod tests {
                 },
                 radio: RadioIndication::for_kind(Some(InterfaceKind::BluetoothPeer)),
                 details: PeerDetails::NotApplicable,
+            link_local: None,
             },
             Some("7a1b2c3d… @ AA:BB:CC:DD:EE:FF"),
         );
@@ -7430,6 +7930,7 @@ mod tests {
             rate_bytes_per_sec: 0,
             radio,
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         let busy = interface_peer_from_wire(&RemoteControlInterfacePeer {
             id,
@@ -7441,6 +7942,7 @@ mod tests {
             rate_bytes_per_sec: 0,
             radio,
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         let framed = interface_peer_from_wire(&RemoteControlInterfacePeer {
             id,
@@ -7452,6 +7954,7 @@ mod tests {
             rate_bytes_per_sec: 0,
             radio,
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         let live = interface_peer_from_wire(&RemoteControlInterfacePeer {
             id,
@@ -7463,6 +7966,7 @@ mod tests {
             rate_bytes_per_sec: 12,
             radio,
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         let retrying = interface_peer_from_wire(&RemoteControlInterfacePeer {
             id,
@@ -7474,6 +7978,7 @@ mod tests {
             rate_bytes_per_sec: 0,
             radio,
             details: PeerDetails::NotApplicable,
+            link_local: None,
         });
         assert_eq!(announced.health, Some(PeerHealth::RadioOnlyAnnounced));
         assert_eq!(busy.health, Some(PeerHealth::RadioOnlyAnnouncedWithFrames));
@@ -7487,6 +7992,71 @@ mod tests {
             )
         );
         assert_eq!(bluetooth_auto_peer_list_note("auto-wifi"), None);
+    }
+
+    #[test]
+    fn wifi_peer_health_separates_udp_peering_from_rns() {
+        let id = InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, b"fe80::1");
+        let radio = RadioIndication::for_kind(Some(InterfaceKind::WifiPeer));
+        let idle = interface_peer_from_wire(&RemoteControlInterfacePeer {
+            id,
+            connection: ConnectionState::Connected,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            links: 0,
+            destinations: 0,
+            rate_bytes_per_sec: 0,
+            radio,
+            details: PeerDetails::NotApplicable,
+            link_local: None,
+        });
+        let framed = interface_peer_from_wire(&RemoteControlInterfacePeer {
+            id,
+            connection: ConnectionState::Connected,
+            tx_bytes: 64,
+            rx_bytes: 0,
+            links: 0,
+            destinations: 0,
+            rate_bytes_per_sec: 0,
+            radio,
+            details: PeerDetails::NotApplicable,
+            link_local: None,
+        });
+        let announced = interface_peer_from_wire(&RemoteControlInterfacePeer {
+            id,
+            connection: ConnectionState::Connected,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            links: 0,
+            destinations: 2,
+            rate_bytes_per_sec: 0,
+            radio,
+            details: PeerDetails::NotApplicable,
+            link_local: None,
+        });
+        let live = interface_peer_from_wire(&RemoteControlInterfacePeer {
+            id,
+            connection: ConnectionState::Connected,
+            tx_bytes: 200,
+            rx_bytes: 80,
+            links: 1,
+            destinations: 2,
+            rate_bytes_per_sec: 8,
+            radio,
+            details: PeerDetails::NotApplicable,
+            link_local: None,
+        });
+        assert_eq!(idle.health, Some(PeerHealth::RadioOnlyIdle));
+        assert_eq!(framed.health, Some(PeerHealth::RadioOnlyFrames));
+        assert_eq!(announced.health, Some(PeerHealth::RadioOnlyAnnounced));
+        assert_eq!(live.health, Some(PeerHealth::RnsLive));
+        assert!(idle.detail.contains("Health"));
+        assert_eq!(
+            auto_wifi_peer_list_note("auto-wifi"),
+            Some(
+                "Each row is one path, not one device. UDP and TCP both ways are separate. Status is UDP peering. Health is the RNS plane. A TCP-out row that stays Retrying is usually the Wi-Fi gateway.",
+            )
+        );
     }
 
     #[test]
@@ -7522,6 +8092,76 @@ mod tests {
         assert_eq!(entry.name, "bluetooth-auto 7a1b");
         apply_bluetooth_auto_identity_title(&mut entry, None);
         assert_eq!(entry.name, "bluetooth-auto 7a1b");
+    }
+
+    #[test]
+    fn remote_auto_wifi_card_group_becomes_an_ipv6_fact() {
+        let id = InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, b"lan");
+        let mut card = RemoteControlInterfaceCard::empty();
+        card.set_name("auto-wifi");
+        card.set_config("W,field-lab");
+        card.set_group("fe80::aea7:4ff:fee1:4b3c");
+        let mut entry = remote_interface_entry(
+            &RemoteControlInterfaceEntry {
+                id,
+                kind: InterfaceKind::AutoWifi,
+                mode: InterfaceMode::Full,
+                connection: ConnectionState::Connected,
+                enabled: true,
+                tx_bytes: 0,
+                rx_bytes: 0,
+                links: 0,
+                rate_bytes_per_sec: 0,
+            },
+            Some(&card),
+        );
+        apply_remote_card(&mut entry, &card);
+        assert!(entry.group.is_none());
+        assert!(entry
+            .extras
+            .iter()
+            .any(|fact| fact.label == "IPv6" && fact.value == "fe80::aea7:4ff:fee1:4b3c"));
+        assert!(entry
+            .extras
+            .iter()
+            .any(|fact| fact.label == "SSID" && fact.value == "field-lab"));
+    }
+
+    #[test]
+    fn peer_endpoint_matching_controller_ll_ignores_scope() {
+        let mut keys = HashSet::new();
+        keys.insert("fe80::494:446c:eb84:e48b".to_string());
+        assert!(endpoint_matches_wifi_ll_keys(
+            "fe80::494:446c:eb84:e48b",
+            &keys
+        ));
+        assert!(endpoint_matches_wifi_ll_keys(
+            "fe80::494:446c:eb84:e48b%14",
+            &keys
+        ));
+        assert!(endpoint_matches_wifi_ll_keys(
+            "FE80::494:446C:EB84:E48B%en0",
+            &keys
+        ));
+        assert!(!endpoint_matches_wifi_ll_keys(
+            "fe80::aea7:4ff:fee1:4b3c",
+            &keys
+        ));
+        assert_eq!(THIS_CONTROLLER_PEER_ALIAS, "This Controller");
+    }
+
+    #[test]
+    fn normalize_stored_wifi_ll_rejects_non_link_local() {
+        assert_eq!(
+            normalize_stored_wifi_ll("fe80::494:446c:eb84:e48b%en0").as_deref(),
+            Some("fe80::494:446c:eb84:e48b")
+        );
+        assert_eq!(
+            normalize_stored_wifi_ll("FE80::494:446C:EB84:E48B").as_deref(),
+            Some("fe80::494:446c:eb84:e48b")
+        );
+        assert_eq!(normalize_stored_wifi_ll("2001:db8::1"), None);
+        assert_eq!(normalize_stored_wifi_ll("not-an-ip"), None);
     }
 
     #[test]
@@ -7569,6 +8209,7 @@ mod tests {
             rate_bytes_per_sec: 8,
             radio: RadioIndication::from_bluetooth_rssi(Some(-62)),
             details: PeerDetails::NotApplicable,
+            link_local: None,
         })
         .expect("one peer fits");
         let entry = remote_interface_entry(

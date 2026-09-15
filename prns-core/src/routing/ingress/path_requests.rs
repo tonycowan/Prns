@@ -123,6 +123,8 @@ impl<S: StorageLayout> EngineState<S> {
         interfaces: AttachedInterfaces<'_>,
     ) -> IngestPacketOutcome<'p> {
         let Ok(request) = PathRequest::parse(data.payload) else {
+            #[cfg(feature = "log")]
+            log::debug!("path-req: classify outcome=Ignore(Malformed) dest=? held_route=0");
             return IngestPacketOutcome::Ignored(IgnoreReason::Malformed);
         };
 
@@ -131,6 +133,8 @@ impl<S: StorageLayout> EngineState<S> {
             .observe(request.destination, request.id)
             == PathRequestNovelty::Duplicate
         {
+            #[cfg(feature = "log")]
+            log_path_req_classify_ignore(IgnoreReason::Duplicate, &request.destination, false);
             return IngestPacketOutcome::Ignored(IgnoreReason::Duplicate);
         }
 
@@ -139,9 +143,12 @@ impl<S: StorageLayout> EngineState<S> {
             .lookup(&request.destination, DestinationType::Single)
             .is_some()
         {
-            return IngestPacketOutcome::AnswerPathRequest {
+            let outcome = IngestPacketOutcome::AnswerPathRequest {
                 destination: request.destination,
             };
+            #[cfg(feature = "log")]
+            log_path_req_classify(&outcome, false, &request.destination);
+            return outcome;
         }
 
         self.reconcile_pending_link_route_evidence();
@@ -154,13 +161,16 @@ impl<S: StorageLayout> EngineState<S> {
             })
             .flatten();
         let Some(route) = held_route else {
-            return self.forward_unrouted_path_request(
+            let outcome = self.forward_unrouted_path_request(
                 &request,
                 source_interface,
                 from_local_client,
                 now,
                 interfaces,
             );
+            #[cfg(feature = "log")]
+            log_path_req_classify(&outcome, false, &request.destination);
+            return outcome;
         };
 
         if request_echoes_into_its_own_roaming_segment(
@@ -168,16 +178,26 @@ impl<S: StorageLayout> EngineState<S> {
             source_interface,
             interfaces,
         ) {
+            #[cfg(feature = "log")]
+            log_path_req_classify_ignore(IgnoreReason::LoopPrevented, &request.destination, true);
             return IngestPacketOutcome::Ignored(IgnoreReason::LoopPrevented);
         }
 
         if request.loops_back_through_requester(route.next_hop) {
+            #[cfg(feature = "log")]
+            log_path_req_classify_ignore(IgnoreReason::LoopPrevented, &request.destination, true);
             return IngestPacketOutcome::Ignored(IgnoreReason::LoopPrevented);
         }
 
         if self.routing_table.responsiveness_of(&request.destination)
             == Some(RouteResponsiveness::Unresponsive)
         {
+            #[cfg(feature = "log")]
+            log_path_req_classify_ignore(
+                IgnoreReason::RouteUnresponsive,
+                &request.destination,
+                true,
+            );
             return IngestPacketOutcome::Ignored(IgnoreReason::RouteUnresponsive);
         }
 
@@ -189,7 +209,7 @@ impl<S: StorageLayout> EngineState<S> {
                     .saturating_add(path_response_grace_ms(source_interface, interfaces)),
             )
         };
-        match self.scheduled_announces.schedule_directed(
+        let outcome = match self.scheduled_announces.schedule_directed(
             request.destination,
             due_at,
             source_interface,
@@ -206,7 +226,10 @@ impl<S: StorageLayout> EngineState<S> {
                     rejection,
                 }
             }
-        }
+        };
+        #[cfg(feature = "log")]
+        log_path_req_classify(&outcome, true, &request.destination);
+        outcome
     }
 
     fn forward_unrouted_path_request<'p>(
@@ -312,6 +335,65 @@ impl<S: StorageLayout> EngineState<S> {
             RecursiveOutcome::Opened => outcome,
         }
     }
+}
+
+#[cfg(feature = "log")]
+fn log_path_req_classify_ignore(
+    reason: IgnoreReason,
+    destination: &crate::wire::DestinationHash,
+    held_route: bool,
+) {
+    use crate::path_req_trace::DestHex;
+    log::debug!(
+        "path-req: classify outcome=Ignore({reason:?}) dest={} held_route={}",
+        DestHex(destination),
+        u8::from(held_route)
+    );
+}
+
+#[cfg(feature = "log")]
+fn log_path_req_classify(
+    outcome: &IngestPacketOutcome<'_>,
+    held_route: bool,
+    fallback_dest: &crate::wire::DestinationHash,
+) {
+    use crate::path_req_trace::DestHex;
+    let (label, dest) = match outcome {
+        IngestPacketOutcome::AnswerPathRequest { destination } => ("Answer", destination),
+        IngestPacketOutcome::ScheduledPathResponse { destination } => ("Scheduled", destination),
+        IngestPacketOutcome::PathResponseScheduleRejected { destination, .. } => {
+            ("ScheduleRejected", destination)
+        }
+        IngestPacketOutcome::ForwardRecursivePathRequest { destination, .. } => {
+            ("ForwardRecursive", destination)
+        }
+        IngestPacketOutcome::ForwardBoundaryPathRequest { destination, .. } => {
+            ("ForwardBoundary", destination)
+        }
+        IngestPacketOutcome::ForwardLocalClientPathRequest { destination, .. } => {
+            ("ForwardLocalClient", destination)
+        }
+        IngestPacketOutcome::RelayPathRequestToLocalClients { destination, .. } => {
+            ("RelayLocalClients", destination)
+        }
+        IngestPacketOutcome::Ignored(reason) => {
+            log_path_req_classify_ignore(*reason, fallback_dest, held_route);
+            return;
+        }
+        _ => {
+            log::debug!(
+                "path-req: classify outcome=Other dest={} held_route={}",
+                DestHex(fallback_dest),
+                u8::from(held_route)
+            );
+            return;
+        }
+    };
+    log::debug!(
+        "path-req: classify outcome={label} dest={} held_route={}",
+        DestHex(dest),
+        u8::from(held_route)
+    );
 }
 
 #[cfg(test)]

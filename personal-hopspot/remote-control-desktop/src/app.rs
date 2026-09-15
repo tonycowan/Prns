@@ -2047,9 +2047,11 @@ fn InterfaceAccordion(
                                                         div { dt { "Kind" } dd { "{entry.kind}" } }
                                                         div { dt { "Mode" } dd { "{interface_mode_label(entry.mode)}" } }
                                                         div { dt { "Connection" } dd { "{entry.connection}" } }
-                                                        if let Some(group) = entry.group.as_ref().filter(|value| !value.trim().is_empty()) {
+                                                        if entry.kind == "auto-wifi" {
+                                                            // Station LL is an IPv6 fact; BLE group UI does not apply.
+                                                        } else if let Some(group) = entry.group.as_ref().filter(|value| !value.trim().is_empty()) {
                                                             div { dt { "Group" } dd { "{group}" } }
-                                                        } else if entry.kind == "auto-wifi" {
+                                                        } else if entry.kind == "bluetooth-auto" {
                                                             div { dt { "Group" } dd { "{saved_group(&entry)}" } }
                                                         }
                                                         if let Some(ifac) = entry.ifac_bytes {

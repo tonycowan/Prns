@@ -19,7 +19,7 @@ pub use prns_interfaces_tokio::wifi_auto::{
 #[cfg(all(feature = "embassy-host", not(feature = "tokio-host")))]
 pub use prns_interfaces_embassy::wifi_auto::{
     tcp_rendezvous, AutoWifi, AutoWifiSegment, AutoWifiShared, AutoWifiStatus, AutoWifiTopology,
-    MdnsMulticastFamily, TcpRendezvousBuffers, TcpRendezvousClient, TcpRendezvousClients,
+    TcpRendezvousBuffers, TcpRendezvousClient, TcpRendezvousClients,
     TcpRendezvousExitCause, TcpRendezvousServer, TcpRendezvousStorage, TcpRendezvousWireSlot,
     TcpRendezvousWriteFailure, UdpServiceDiscovery, UdpServiceDiscoveryConstructionError,
     UdpServiceDiscoveryStorage, WifiMemberStatus, EMBEDDED_SERVICE_DISCOVERY_CAPACITY,

@@ -34,6 +34,8 @@ getrandom = "0.2"
 serde_json = "1"
 serialport = { version = "4.7", default-features = false }
 personal-rns = { path = "../../personal-rns", default-features = false, features = ["tokio-host", "tcp", "serial", "usb", "wifi-auto-apple", "shared-instance", "bluetooth-auto", "log", "tracing", "parallel-persistence", "parallel-resource-hash"] }
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "registry"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 personal-rns = { path = "../../personal-rns", default-features = false, features = ["tokio-host", "tcp", "wifi-auto-mdns", "bluetooth-auto", "usb", "log", "tracing", "parallel-persistence", "parallel-resource-hash"] }

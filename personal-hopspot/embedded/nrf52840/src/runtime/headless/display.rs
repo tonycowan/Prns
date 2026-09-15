@@ -532,6 +532,7 @@ fn snapshots(
             membership: *membership,
             radio: status.radio(),
             details: status.details(),
+            link_local: None,
         });
     }
     snapshots

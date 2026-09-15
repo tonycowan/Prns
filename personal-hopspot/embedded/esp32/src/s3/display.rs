@@ -188,6 +188,7 @@ pub(super) fn build_snapshots(
             membership: *membership,
             radio: status.radio(),
             details: status.details(),
+            link_local: status.link_local(),
         });
     }
     snapshots

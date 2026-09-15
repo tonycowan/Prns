@@ -259,6 +259,7 @@ impl PrnsNodeHandle {
                             membership: placement.membership,
                             radio: vitals.radio,
                             details: vitals.details,
+            link_local: None,
                         },
                         ifac: ifac.clone(),
                         group: group.clone(),

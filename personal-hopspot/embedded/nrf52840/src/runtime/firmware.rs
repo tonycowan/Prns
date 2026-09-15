@@ -125,6 +125,7 @@ impl RemoteControlHostControls for HopspotRemoteControlState {
                     ble_group,
                     LORA_CONTROL.current(),
                     None,
+                    None,
                     self.ble_identity,
                 );
             },

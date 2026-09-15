@@ -953,6 +953,7 @@ mod tests {
                 membership: Membership::Independent,
                 radio: personal_rns::interfaces::RadioIndication::NotRadio,
                 details: personal_rns::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
             }],
             |_| Some((screen::CardKind::Usb, screen::card_label("USB"))),
         )
