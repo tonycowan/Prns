@@ -600,9 +600,7 @@ mod dns_sd_ll {
                 )
             };
             if register_error != DNS_SERVICE_NO_ERROR {
-                crate::diagnostic_log::debug!(
-                    "mdns: DNSServiceRegister failed ({register_error})"
-                );
+                crate::diagnostic_log::debug!("mdns: DNSServiceRegister failed ({register_error})");
                 return Err(MdnsError::PublishFailed);
             }
             self._service_refs.push(service_ref);
@@ -707,8 +705,7 @@ mod dns_sd_ll {
                     let ipv6 = Ipv6Addr::from(octets);
                     if ipv6.is_unicast_link_local() {
                         // SAFETY: if_nametoindex accepts the same C string getifaddrs provided.
-                        let interface_index =
-                            unsafe { libc::if_nametoindex(interface.ifa_name) };
+                        let interface_index = unsafe { libc::if_nametoindex(interface.ifa_name) };
                         if interface_index != 0 {
                             hosts.push(LinkLocalHostAddress {
                                 address: ipv6,
@@ -1480,7 +1477,9 @@ mod native_thread_tests {
         assert!(!super::dns_sd_ll::interface_name_is_infrastructure("awdl0"));
         assert!(!super::dns_sd_ll::interface_name_is_infrastructure("llw0"));
         assert!(!super::dns_sd_ll::interface_name_is_infrastructure("utun5"));
-        assert!(!super::dns_sd_ll::interface_name_is_infrastructure("bridge0"));
+        assert!(!super::dns_sd_ll::interface_name_is_infrastructure(
+            "bridge0"
+        ));
         assert!(!super::dns_sd_ll::interface_name_is_infrastructure("ap1"));
     }
 

@@ -264,7 +264,7 @@ pub(crate) async fn run_pooled<
                                     | crate::engine::IgnoreReason::RateLimited
                                     | crate::engine::IgnoreReason::Malformed
                             ) {
-                                log::info!(
+                                log::debug!(
                                     target: "personal_hopspot_esp32",
                                     "path-req: ingest ignore={reason:?} bytes={inbound_len}"
                                 );

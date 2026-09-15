@@ -247,23 +247,23 @@ async fn run_inner<S, H, M, P, A, Store, const NOTIFY: usize, const COMMANDS: us
                             &mut should_prove,
                             &mut on_journaled,
                         );
-        if let Some(reason) = report.ignore_reason {
-            log_ingest_ignore(reason, inbound_context, source, inbound_len);
-            #[cfg(feature = "log")]
-            if matches!(
-                reason,
-                crate::engine::IgnoreReason::NotForUs
-                    | crate::engine::IgnoreReason::Duplicate
-                    | crate::engine::IgnoreReason::Superseded
-                    | crate::engine::IgnoreReason::RateLimited
-                    | crate::engine::IgnoreReason::Malformed
-            ) {
-                log::info!(
-                    target: "personal_hopspot_esp32",
-                    "path-req: ingest ignore={reason:?} bytes={inbound_len}"
-                );
-            }
-        }
+                        if let Some(reason) = report.ignore_reason {
+                            log_ingest_ignore(reason, inbound_context, source, inbound_len);
+                            #[cfg(feature = "log")]
+                            if matches!(
+                                reason,
+                                crate::engine::IgnoreReason::NotForUs
+                                    | crate::engine::IgnoreReason::Duplicate
+                                    | crate::engine::IgnoreReason::Superseded
+                                    | crate::engine::IgnoreReason::RateLimited
+                                    | crate::engine::IgnoreReason::Malformed
+                            ) {
+                                log::debug!(
+                                    target: "personal_hopspot_esp32",
+                                    "path-req: ingest ignore={reason:?} bytes={inbound_len}"
+                                );
+                            }
+                        }
                         account_protocol_violation(
                             frame_accounting_statuses,
                             source,

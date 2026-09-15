@@ -71,9 +71,7 @@ fn cbuuid(uuid: BleUuid) -> Retained<CBUUID> {
 /// Opt-in BLE stderr chatter (`PRNS_BLE_WIRE_LOG=1`). Routine events stay at debug for `RUST_LOG`.
 fn ble_console_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var_os("PRNS_BLE_WIRE_LOG").is_some_and(|value| value != "0")
-    })
+    *ENABLED.get_or_init(|| std::env::var_os("PRNS_BLE_WIRE_LOG").is_some_and(|value| value != "0"))
 }
 
 fn ble_log(line: &str) {

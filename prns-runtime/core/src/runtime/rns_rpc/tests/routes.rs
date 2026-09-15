@@ -111,7 +111,7 @@ async fn interface_stats_renders_each_held_interface_with_its_live_counters() {
                     membership: prns_core::interfaces::Membership::Independent,
                     radio: prns_core::interfaces::RadioIndication::NotRadio,
                     details: prns_core::interfaces::PeerDetails::NotApplicable,
-            link_local: None,
+                    link_local: None,
                 },
                 ifac: Some(InterfaceIfacSnapshot {
                     signature: [0x5a; 64],
@@ -146,7 +146,7 @@ async fn interface_stats_renders_each_held_interface_with_its_live_counters() {
                     membership: prns_core::interfaces::Membership::Independent,
                     radio: prns_core::interfaces::RadioIndication::NotRadio,
                     details: prns_core::interfaces::PeerDetails::NotApplicable,
-            link_local: None,
+                    link_local: None,
                 },
                 ifac: None,
                 group: None,
