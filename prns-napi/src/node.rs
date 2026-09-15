@@ -3263,7 +3263,6 @@ mod tests {
                 route_count: 0,
                 link_count: 0,
                 transported_link_count: 0,
-                link_local: None,
             }],
             routes: Vec::new(),
             active_link_count: 0,

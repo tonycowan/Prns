@@ -1400,7 +1400,6 @@ async fn collect_snapshot(
             route_count,
             link_count,
             transported_link_count,
-            link_local: None,
         });
     }
     let engine = handle.engine_inspection_snapshot().await?;

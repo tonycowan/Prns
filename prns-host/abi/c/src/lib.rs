@@ -105,7 +105,6 @@ pub struct PrnsInterfaceSnapshot {
     pub route_count: u32,
     pub link_count: u32,
     pub transported_link_count: u32,
-    link_local: None,
 }
 
 #[repr(C)]
@@ -1547,7 +1546,6 @@ impl PrnsHostInspection {
                 route_count: interface.route_count,
                 link_count: interface.link_count,
                 transported_link_count: interface.transported_link_count,
-                link_local: None,
             })
             .collect();
         inspection.routes = inspection

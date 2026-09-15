@@ -20,7 +20,6 @@ pub struct InterfaceSnapshot {
     pub route_count: u32,
     pub link_count: u32,
     pub transported_link_count: u32,
-    link_local: None,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
