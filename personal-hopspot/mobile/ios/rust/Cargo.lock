@@ -1495,6 +1495,7 @@ version = "0.3.7"
 dependencies = [
  "cfg-if",
  "dispatch2",
+ "libc",
  "objc2",
  "objc2-core-bluetooth",
  "objc2-core-foundation",
