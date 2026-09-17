@@ -1,0 +1,63 @@
+name: controller-windows-package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.96.0
+
+jobs:
+  package:
+    name: unsigned Windows Controller portable
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.96.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: controller-windows-package
+          workspaces: |
+            .
+            personal-hopspot/remote-control-desktop
+
+      - uses: cargo-bins/cargo-binstall@57726869e28f4038a847ec56e5fdd9142fded110
+        with:
+          version: "1.21.0"
+
+      - name: Install exact Dioxus CLI
+        shell: bash
+        run: cargo binstall --locked --no-confirm --force dioxus-cli@0.7.5
+
+      - name: Package unsigned Controller portable
+        shell: bash
+        run: |
+          dx --version | grep -E '(^| )0\.7\.5($| )'
+          ./tools/prns run release.controller.windows.package -- \
+            --out-dir target/controller-windows
+
+      - name: Confirm embedded hopspot-flash
+        shell: bash
+        run: |
+          dest="target/controller-windows/PRNS-Controller"
+          test -d "$dest"
+          test -f "$dest/personal-hopspot-remote-control-desktop.exe"
+          test -f "$dest/hopspot-flash.exe"
+          "$dest/hopspot-flash.exe" --version
+          test -f "$dest/HOPSPOT_FLASH_VERSION.txt"
+          test -f target/controller-windows/PRNS-Controller-windows-unsigned.zip
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PRNS-Controller-windows-unsigned
+          path: target/controller-windows/PRNS-Controller-windows-unsigned.zip
+          if-no-files-found: error
+          retention-days: 14
