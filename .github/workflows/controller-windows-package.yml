@@ -91,6 +91,10 @@ jobs:
         run: |
           dx --version | grep -E '(^| )0\.7\.5($| )'
           test -f target/controller-firmware-from/bundle.json
+          # This step already runs under Git Bash; pin it so tools/prns does not
+          # fall through to the WSL bash.exe stub on windows-latest.
+          export PRNS_BASH="$(command -v bash)"
+          export PATH="/c/Program Files/Git/bin:/c/Program Files/Git/usr/bin:$PATH"
           python tools/prns run release.controller.windows.package -- \
             --out-dir target/controller-windows \
             --firmware-from target/controller-firmware-from
