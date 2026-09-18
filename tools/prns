@@ -470,6 +470,48 @@ def doctor_profile(profile: dict) -> bool:
     return ok
 
 
+def resolve_entrypoint_binary(name: str) -> str:
+    """Resolve entrypoint programs so Windows prefers Git Bash over WSL."""
+    if name != "bash" or host_platform.system() != "Windows":
+        return name
+    explicit = os.environ.get("PRNS_BASH") or os.environ.get("GIT_BASH")
+    candidates: list[str] = []
+    if explicit:
+        candidates.append(explicit)
+        # Git Bash `command -v bash` often yields an MSYS path such as /usr/bin/bash
+        # or /c/Program Files/Git/bin/bash. Native Windows Python cannot exec those.
+        lowered = explicit.replace("\\", "/").lower()
+        if lowered in {"/usr/bin/bash", "/bin/bash"}:
+            candidates.extend(
+                (
+                    r"C:\Program Files\Git\bin\bash.exe",
+                    r"C:\Program Files\Git\usr\bin\bash.exe",
+                )
+            )
+        elif lowered.startswith("/c/"):
+            candidates.append("C:" + explicit[2:].replace("/", "\\"))
+    candidates.extend(
+        (
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        )
+    )
+    which = shutil.which("bash")
+    if which:
+        candidates.append(which)
+    for candidate in candidates:
+        path = Path(candidate)
+        if not path.is_file():
+            continue
+        normalized = str(path).replace("/", "\\").lower()
+        # System32\bash.exe and WindowsApps stubs open WSL, which is often
+        # unconfigured on CI images. Prefer a real Git Bash install instead.
+        if "\\windowsapps\\" in normalized or normalized.endswith("\\system32\\bash.exe"):
+            continue
+        return str(path)
+    return name
+
+
 def run_task(task: dict, arguments: list[str]) -> int:
     host = native_platform()
     if "any" not in task["platforms"] and host not in task["platforms"]:
@@ -483,6 +525,8 @@ def run_task(task: dict, arguments: list[str]) -> int:
     # prevents a release task from silently selecting a different interpreter.
     if command[0] in ("python", "python3"):
         command[0] = sys.executable
+    elif command[0] == "bash":
+        command[0] = resolve_entrypoint_binary("bash")
     print(
         f"[tool] task={task['id']} effect={task['effect']} platform={host}; "
         f"{task['summary']}",
