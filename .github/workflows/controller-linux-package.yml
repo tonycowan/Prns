@@ -50,6 +50,9 @@ jobs:
         run: cargo binstall --locked --no-confirm --force dioxus-cli@0.7.5
 
       - name: Install ESP release toolchain
+        env:
+          # espup hits the GitHub API; unauthenticated runners get 403 rate limits.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./tools/prns release toolchain esp install -- "${RUNNER_TEMP}/prns-esp-tools"
 
       - name: Package unsigned Controller portable

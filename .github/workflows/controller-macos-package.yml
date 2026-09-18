@@ -32,6 +32,9 @@ jobs:
           workspaces: |
 
       - name: Install ESP release toolchain
+        env:
+          # espup hits the GitHub API; unauthenticated runners get 403 rate limits.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./tools/prns release toolchain esp install -- "${RUNNER_TEMP}/prns-esp-tools"
 
       - name: Build hopspot-flash + stage firmware tree
