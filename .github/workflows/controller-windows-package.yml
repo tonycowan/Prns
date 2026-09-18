@@ -54,6 +54,7 @@ jobs:
           "$dest/hopspot-flash.exe" --version
           test -f "$dest/HOPSPOT_FLASH_VERSION.txt"
           test -f target/controller-windows/PRNS-Controller-windows-unsigned.zip
+          unzip -t target/controller-windows/PRNS-Controller-windows-unsigned.zip >/dev/null
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
