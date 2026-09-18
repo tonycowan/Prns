@@ -182,7 +182,18 @@ object NativeBridge {
 
     external fun nativeBleIdentity(buffer: ByteBuffer): Int
 
+    external fun nativeBleGroupTag(buffer: ByteBuffer): Int
+
+    external fun nativeBleDiscoveryGroup(): String?
+
+    external fun nativeBleSetDiscoveryGroup(groupId: String): Boolean
+
+    external fun nativeBleCycleDiscoveryGroup(): String?
+
     external fun nativeBleSighting(address: ByteBuffer, rssi: Int)
+
+    /** `1` dial, `0` accept, `-1` keep the v4 C′ path. */
+    external fun nativeBleTypedDialAction(rolePayload: ByteBuffer): Int
 
     external fun nativeBleDialFailed(address: ByteBuffer): Boolean
 

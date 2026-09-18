@@ -1,3 +1,6 @@
+use alloc::string::ToString;
+use embassy_futures::select::{select4, Either4};
+
 use super::super::captive_portal::station_wifi_mode;
 use super::super::*;
 use crate::wifi_data_path_recovery::{
@@ -135,9 +138,66 @@ const ESP_OK: i32 = 0;
 const ESP_ERR_WIFI_NOT_INIT: i32 = 12_289;
 const ESP_ERR_WIFI_NOT_STARTED: i32 = 12_290;
 
+#[derive(Clone)]
 pub(super) struct StationCredentials {
     pub(super) ssid: String,
     pub(super) password: String,
+}
+
+static LIVE_STATION_CREDENTIALS: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::RefCell<Option<StationCredentials>>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(None));
+static STATION_CREDENTIALS_CHANGED: embassy_sync::signal::Signal<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    u32,
+> = embassy_sync::signal::Signal::new();
+static STATION_CREDENTIALS_REVISION: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static STATION_CONNECT_TASK_LIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn install_station_credentials(credentials: StationCredentials) {
+    LIVE_STATION_CREDENTIALS.lock(|cell| {
+        *cell.borrow_mut() = Some(credentials);
+    });
+}
+
+#[must_use]
+pub(in crate::s3) fn current_station_ssid() -> heapless::String<32> {
+    LIVE_STATION_CREDENTIALS.lock(|cell| {
+        let mut ssid = heapless::String::new();
+        if let Some(live) = cell.borrow().as_ref() {
+            let _ = ssid.push_str(live.ssid.as_str());
+        }
+        ssid
+    })
+}
+
+#[must_use]
+pub(in crate::s3) fn station_connect_task_is_live() -> bool {
+    STATION_CONNECT_TASK_LIVE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub(in crate::s3) fn apply_remote_station_credentials(ssid: &str, password: &str) -> bool {
+    if ssid.is_empty() || ssid.len() > 32 || password.len() > 64 {
+        return false;
+    }
+    LIVE_STATION_CREDENTIALS.lock(|cell| {
+        *cell.borrow_mut() = Some(StationCredentials {
+            ssid: ssid.to_string(),
+            password: password.to_string(),
+        });
+    });
+    let revision = STATION_CREDENTIALS_REVISION
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1);
+    STATION_CREDENTIALS_CHANGED.signal(revision);
+    true
+}
+
+fn live_station_credentials() -> Option<StationCredentials> {
+    LIVE_STATION_CREDENTIALS.lock(|cell| cell.borrow().clone())
 }
 
 fn observed_authentication(authentication: Option<AuthenticationMethod>) -> ObservedAuthentication {
@@ -216,15 +276,20 @@ async fn stop_station_scan() {
 pub(super) async fn wifi_connect_task(
     mut controller: WifiController<'static>,
     status: AutoWifiStatus<MEMBERS>,
-    credentials: StationCredentials,
     ap_enabled: bool,
 ) -> ! {
-    let base = StationConfig::default()
-        .with_ssid(credentials.ssid.clone())
-        .with_password(credentials.password.clone());
+    STATION_CONNECT_TASK_LIVE.store(true, core::sync::atomic::Ordering::Relaxed);
     let mut recovery = StationRecovery::new(DiscoveryScope::FullBand);
 
     loop {
+        let Some(credentials) = live_station_credentials().filter(|live| !live.ssid.is_empty())
+        else {
+            STATION_CREDENTIALS_CHANGED.wait().await;
+            continue;
+        };
+        let base = StationConfig::default()
+            .with_ssid(credentials.ssid.clone())
+            .with_password(credentials.password.clone());
         let mut resumed = false;
         while !status.is_station_uplink_enabled() {
             WIFI_STATION_DATA_PATH_DEGRADED.store(false, Ordering::Release);
@@ -258,27 +323,31 @@ pub(super) async fn wifi_connect_task(
         }
         if controller.is_connected() {
             WIFI_STATION_JOINED.store(true, Ordering::Relaxed);
-            match select3(
+            match select4(
                 controller.wait_for_disconnect_async(),
                 status.wait_until_station_uplink_disabled(),
+                STATION_CREDENTIALS_CHANGED.wait(),
                 Timer::after(WIFI_LINK_CHECK_INTERVAL),
             )
             .await
             {
-                Either3::First(Ok(disconnected)) => {
+                Either4::First(Ok(disconnected)) => {
                     log::warn!(
                         "wifi: station disconnected ({:?}, rssi {})",
                         disconnected.reason,
                         disconnected.rssi
                     );
                 }
-                Either3::First(Err(error)) => {
+                Either4::First(Err(error)) => {
                     log::warn!("wifi: disconnect monitor failed: {error:?}");
                 }
-                Either3::Second(()) => {
+                Either4::Second(()) => {
                     let _ = controller.disconnect_async().await;
                 }
-                Either3::Third(()) => continue,
+                Either4::Third(_) => {
+                    let _ = controller.disconnect_async().await;
+                }
+                Either4::Fourth(()) => continue,
             }
             WIFI_STATION_JOINED.store(false, Ordering::Relaxed);
             continue;

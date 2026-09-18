@@ -340,6 +340,7 @@ mod tests {
             content: personal_hopspot_core::ScreenContent {
                 cards: &[],
                 local_docs: None,
+                interface_menu_details: None,
             },
             battery: personal_hopspot_core::PowerSnapshot::UNKNOWN,
             gnss: None,
@@ -356,6 +357,7 @@ mod tests {
             shared_instance_config_export:
                 personal_hopspot_core::SharedInstanceConfigExport::Unavailable,
             gnss: personal_hopspot_core::GnssAvailability::Unavailable,
+            ble_group_editor: personal_hopspot_core::BleGroupEditor::Unavailable,
         })
     }
 

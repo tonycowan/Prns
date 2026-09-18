@@ -82,11 +82,18 @@ impl RemoteControlControllerPairingRequest {
                     maximum,
                 },
             )?;
+        let remaining = expires_at.duration_since(now);
         Ok(Self {
             link_id: context.link_id(),
             data,
-            response_timeout: RequestResponseTimeout::LinkDefaultAtMost {
-                maximum: expires_at.duration_since(now),
+            // Begin expects an immediate Offer, so the link default is enough.
+            // Commit may wait for the target operator; keep the receipt until
+            // the remaining attempt window expires.
+            response_timeout: match request {
+                RemoteControlPairingRequest::Begin(_) => {
+                    RequestResponseTimeout::LinkDefaultAtMost { maximum: remaining }
+                }
+                RemoteControlPairingRequest::Commit(_) => RequestResponseTimeout::Exact(remaining),
             },
         })
     }
@@ -1370,9 +1377,7 @@ mod tests {
             data: packed(RemoteControlPairingRequest::Commit(
                 RemoteControlPairingCommit::new(&transcript),
             )),
-            response_timeout: RequestResponseTimeout::LinkDefaultAtMost {
-                maximum: DurationMillis(2_500),
-            },
+            response_timeout: RequestResponseTimeout::Exact(DurationMillis(2_500)),
             maximum_response_bytes: ByteLimit::Maximum(
                 RemoteControlPairingResponse::MAX_ENCODED_LEN as u64,
             ),

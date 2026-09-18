@@ -11,8 +11,6 @@ use crate::interfaces::{AttachedInterfaces, InterfaceId, InterfaceIfac, Interfac
 use crate::manifold::Host;
 use crate::remote_control::RemoteControlPairingAvailabilityVerification;
 use crate::routing::links::handshake::{link_proof_signature_valid, link_proof_signed_data};
-use crate::routing::links::resources::build_outgoing::BuildOutgoingResourceError;
-use crate::routing::links::resources::send::ResourceBuildCompleted;
 use crate::routing::links::resources::table::ResourceBuildReservation;
 use crate::routing::links::resources::ResourceHash;
 use crate::routing::links::LinkId;
@@ -57,6 +55,7 @@ pub(super) fn route_and_capture_owed_work(
     pending: &mut InlineOwedWorkQueue,
 ) {
     route_reaction_with_work(reaction, egress, ifacs, pacers, now, app, &mut |work| {
+        #[allow(unreachable_patterns)]
         let ready = match work {
             OwedWork::Crypto(crypto) => InlineReadyWork::Crypto(crypto),
             OwedWork::ResourceBuild(owed) => InlineReadyWork::ResourceBuildUnsupported {
@@ -69,6 +68,7 @@ pub(super) fn route_and_capture_owed_work(
                     hash: owed.hash,
                 }
             }
+            _ => return,
         };
         assert!(
             pending.push_back(ready).is_ok(),
@@ -153,9 +153,16 @@ where
                         } else {
                             LinkIdentityVerification::Invalid
                         };
-                    engine.resume_link_identity_verify(owed, verification, &mut |reaction| {
-                        route_reaction(reaction, egress, ifacs, pacers, now, on_journaled);
-                    });
+                    wake.compose(engine.resume_link_identity_verify(
+                        owed,
+                        verification,
+                        interfaces,
+                        now,
+                        &mut |entropy| host.fill_random(entropy),
+                        &mut |reaction| {
+                            route_reaction(reaction, egress, ifacs, pacers, now, on_journaled);
+                        },
+                    ));
                 }
                 CryptoOwed::TunnelSynthesizeVerify(owed) => {
                     let verification =
@@ -401,16 +408,8 @@ where
                 },
             },
             InlineReadyWork::ResourceBuildUnsupported { reservation } => {
-                wake.compose(engine.resume_resource_build(
-                    ResourceBuildCompleted {
-                        reservation,
-                        transfer: &[],
-                        names: &[],
-                        request_data: &[],
-                        outcome: Err(BuildOutgoingResourceError::BufferShapeMismatch),
-                    },
-                    now,
-                    &mut |entropy| host.fill_random(entropy),
+                wake.compose(engine.resume_resource_build_unavailable(
+                    reservation,
                     &mut |reaction| {
                         route_reaction(reaction, egress, ifacs, pacers, now, on_journaled);
                     },

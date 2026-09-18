@@ -21,6 +21,7 @@ use super::egress::{
     flush_due_pacers, ifac_for, route_reaction, soonest_pacer_release, EmbassyEgress,
     InterfacePacer, MAX_PACED_INTERFACES,
 };
+use super::ingest_trace::log_ingest_ignore;
 use super::inline_work::{
     fulfill_owed_work_inline, route_and_capture_owed_work, InlineOwedWorkQueue,
 };
@@ -135,6 +136,7 @@ async fn run_inner<S, H, M, P, A, Store, const NOTIFY: usize, const COMMANDS: us
     A: FnMut(&ResourceOffer) -> bool,
     Store: InterfaceInspectionStore,
 {
+    engine.use_inline_resource_work();
     let AppDeciders {
         mut should_prove,
         mut should_accept_resource,
@@ -202,13 +204,15 @@ async fn run_inner<S, H, M, P, A, Store, const NOTIFY: usize, const COMMANDS: us
                             None => frame,
                         };
                         let now = host.now();
-                        let packet = ClassifiedInboundPacket::classify(InboundPacket {
+                        let mut packet = ClassifiedInboundPacket::classify(InboundPacket {
                             arrived_at: now,
                             source_interface: source,
                             bytes,
                         });
-                        retain_packet_phy(store, &packet, packet_phy);
+                        retain_packet_phy(store, &mut packet, packet_phy);
                         let mut owed_work = InlineOwedWorkQueue::new();
+                        let inbound_context = packet.wire_context();
+                        let inbound_len = packet.payload_len();
                         let report = engine.ingest_classified_into_report(
                             packet,
                             IngestIo {
@@ -243,6 +247,23 @@ async fn run_inner<S, H, M, P, A, Store, const NOTIFY: usize, const COMMANDS: us
                             &mut should_prove,
                             &mut on_journaled,
                         );
+                        if let Some(reason) = report.ignore_reason {
+                            log_ingest_ignore(reason, inbound_context, source, inbound_len);
+                            #[cfg(feature = "log")]
+                            if matches!(
+                                reason,
+                                crate::engine::IgnoreReason::NotForUs
+                                    | crate::engine::IgnoreReason::Duplicate
+                                    | crate::engine::IgnoreReason::Superseded
+                                    | crate::engine::IgnoreReason::RateLimited
+                                    | crate::engine::IgnoreReason::Malformed
+                            ) {
+                                log::debug!(
+                                    target: "personal_hopspot_esp32",
+                                    "path-req: ingest ignore={reason:?} bytes={inbound_len}"
+                                );
+                            }
+                        }
                         account_protocol_violation(
                             frame_accounting_statuses,
                             source,

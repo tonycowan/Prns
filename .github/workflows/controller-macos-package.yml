@@ -1,0 +1,59 @@
+name: controller-macos-package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.96.0
+
+jobs:
+  package:
+    name: unsigned macOS Controller .app
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.96.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: controller-macos-package
+          workspaces: |
+            .
+            personal-hopspot/remote-control-desktop
+
+      - uses: cargo-bins/cargo-binstall@57726869e28f4038a847ec56e5fdd9142fded110
+        with:
+          version: "1.21.0"
+
+      - name: Install exact Dioxus CLI
+        run: cargo binstall --locked --no-confirm --force dioxus-cli@0.7.5
+
+      - name: Package unsigned Controller .app
+        run: |
+          dx --version | grep -E '(^| )0\.7\.5($| )'
+          ./tools/prns run release.controller.macos.package -- \
+            --out-dir target/controller-macos
+
+      - name: Confirm embedded hopspot-flash
+        run: |
+          app="$(find target/controller-macos -maxdepth 1 -type d -name '*.app' | head -n 1)"
+          test -n "$app"
+          test -x "$app/Contents/Resources/hopspot-flash"
+          "$app/Contents/Resources/hopspot-flash" --version
+          test -f "$app/Contents/Resources/HOPSPOT_FLASH_VERSION.txt"
+          test -f target/controller-macos/PRNS-Controller-macos-unsigned.zip
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PRNS-Controller-macos-unsigned
+          path: target/controller-macos/PRNS-Controller-macos-unsigned.zip
+          if-no-files-found: error
+          retention-days: 14

@@ -9,8 +9,9 @@ use tokio::sync::oneshot;
 
 use crate::engine::Departure;
 use crate::interfaces::{
-    ConnectionView, FrameAccounting, InterfaceId, InterfaceKind, InterfaceOriginKind,
-    InterfaceSnapshot, InterfaceStatus, InterfaceVitals, Membership, ReportsStatus, StatusView,
+    ConnectionView, FrameAccounting, InterfaceId, InterfaceKind, InterfaceMode,
+    InterfaceOriginKind, InterfaceSnapshot, InterfaceStatus, InterfaceVitals, Membership,
+    ReportsStatus, StatusView,
 };
 use crate::interfaces::{IfacContext, IfacSize};
 use crate::manifold::driver::{HostCommand, TokioInterfaceStatus};
@@ -18,6 +19,7 @@ use crate::manifold::interface_seam::Interface;
 use crate::node_introspection::{
     FrameAccountingCoverage, InterfaceIfacSnapshot, InterfaceInventoryEntry,
 };
+use crate::remote_control::RemoteControlModeOutcome;
 use prns_runtime::runtime::node_introspection::fold_logical_interface_inventory;
 
 use super::super::PrnsNodeHandle;
@@ -156,13 +158,56 @@ async fn runtime_attachment_carries_ifac_wire_and_status_metadata() {
                 links: 0,
                 transported_links: 0,
                 membership: Membership::Independent,
+                radio: crate::interfaces::RadioIndication::for_kind(id.kind()),
+                details: crate::interfaces::PeerDetails::NotApplicable,
+                link_local: None,
             },
             ifac: Some(InterfaceIfacSnapshot {
                 signature,
                 size: IfacSize::WIDE,
                 network_name: Some("private-net".into()),
             }),
+            group: None,
+            rssi: None,
+            group_id: None,
+            members: std::vec::Vec::new(),
         }]
+    );
+}
+
+#[tokio::test]
+async fn set_interface_mode_updates_inventory_and_commands_the_engine() {
+    let (handle, mut command_rx) = handle();
+    let interface = StatusInterface::new(b"mode-wire");
+    let id = interface.id();
+    let _attached = handle.add_interface(interface);
+    let HostCommand::AddInterface(_) = command_rx.recv().await.unwrap() else {
+        panic!("expected an interface add");
+    };
+
+    assert_eq!(
+        handle.set_interface_mode(id, InterfaceMode::Gateway),
+        RemoteControlModeOutcome::Applied,
+    );
+    let HostCommand::SetInterfaceMode {
+        id: commanded,
+        mode,
+    } = command_rx.recv().await.unwrap()
+    else {
+        panic!("expected a mode update");
+    };
+    assert_eq!(commanded, id);
+    assert_eq!(mode, InterfaceMode::Gateway);
+    assert_eq!(
+        handle
+            .interface_inventory()
+            .first()
+            .map(|entry| entry.snapshot.mode),
+        Some(InterfaceMode::Gateway),
+    );
+    assert_eq!(
+        handle.set_interface_mode(InterfaceId::new([0x9A; 8]), InterfaceMode::Roaming),
+        RemoteControlModeOutcome::UnknownInterface,
     );
 }
 
@@ -197,6 +242,21 @@ async fn a_fleet_member_inherits_its_supervisors_ifac() {
     );
 }
 
+#[test]
+fn fleet_can_name_a_member_after_add() {
+    let supervisor = InterfaceId::new([0x71; 8]);
+    let (fleet, _tail) = Fleet::detached(supervisor);
+    let interface = StatusInterface::new(b"named-member");
+    let id = interface.id();
+    let _attached = fleet.add(interface);
+    assert!(fleet.set_member_name(id, "192.168.1.1:42699"));
+    let map = fleet.interfaces.lock().unwrap();
+    assert_eq!(
+        map.get(&id).unwrap().name.as_deref(),
+        Some("192.168.1.1:42699")
+    );
+}
+
 fn registered_status(view: StatusView, membership: Membership) -> RegisteredInterface {
     RegisteredInterface {
         view,
@@ -209,6 +269,10 @@ fn registered_status(view: StatusView, membership: Membership) -> RegisteredInte
         gravity: crate::interfaces::InterfaceGravity::new(-27),
         ifac: None,
         name: None,
+        group: None,
+        group_apply: None,
+        rssi: None,
+        group_id: None,
         byte_accounting: ByteAccounting::OwnTraffic,
         retired_member_bytes: RetiredMemberBytes::default(),
         retired_member_frame_accounting: RetiredMemberFrameAccounting::default(),

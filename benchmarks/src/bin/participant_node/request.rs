@@ -6,6 +6,8 @@ pub(super) struct RequestServer {
     pub(super) scratch: Arc<Vec<u8>>,
 }
 
+impl personal_rns::runtime::RemoteControlHostControls for RequestServer {}
+
 pub(super) struct BenchSizedRequestEndpoint;
 
 impl RequestEndpoint<RequestServer> for BenchSizedRequestEndpoint {

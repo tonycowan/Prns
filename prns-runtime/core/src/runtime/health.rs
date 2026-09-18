@@ -84,6 +84,11 @@ mod tests {
             links: 1,
             transported_links: 0,
             membership: Membership::Independent,
+            radio: crate::interfaces::RadioIndication::for_kind(Some(
+                crate::interfaces::InterfaceKind::LocalClient,
+            )),
+            details: crate::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
         };
         let wifi_peer = InterfaceSnapshot {
             id: InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, b"peer"),
@@ -100,6 +105,9 @@ mod tests {
             membership: Membership::FleetMember {
                 supervisor_id: InterfaceId::from_channel_tag(InterfaceKind::AutoWifi, b"wifi"),
             },
+            radio: crate::interfaces::RadioIndication::for_kind(Some(InterfaceKind::WifiPeer)),
+            details: crate::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
         };
 
         let health =

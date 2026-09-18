@@ -1996,6 +1996,7 @@ dependencies = [
  "hmac",
  "hybrid-array",
  "md-5",
+ "memchr",
  "prns-macros",
  "rand_core 0.10.1",
  "rmp",
@@ -2011,6 +2012,7 @@ version = "0.3.7"
 dependencies = [
  "cfg-if",
  "dispatch2",
+ "libc",
  "log",
  "objc2",
  "objc2-core-bluetooth",

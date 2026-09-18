@@ -17,6 +17,9 @@ use crate::runtime::{
     AnnounceBackpressureEvent, AnnounceEgressOutcome, EgressLaneMetricsSnapshot,
     EgressMetricsSnapshot,
 };
+#[cfg(feature = "tracing")]
+use crate::wire::PacketType;
+use crate::wire::{WireContext, WirePacketHeader};
 
 use super::TokioGrantProducer;
 
@@ -54,6 +57,43 @@ pub(super) enum EgressEnqueueOutcome {
     LaneMissing,
 }
 
+#[derive(Clone, Copy)]
+enum EgressQueue {
+    Expedited,
+    Bulk,
+}
+
+fn egress_queue(frame: &[u8]) -> EgressQueue {
+    match WirePacketHeader::parse(frame) {
+        Ok((header, _)) if header.context == WireContext::Resource => EgressQueue::Bulk,
+        Ok(_) | Err(_) => EgressQueue::Expedited,
+    }
+}
+
+#[cfg(feature = "tracing")]
+fn trace_interesting_egress(target: InterfaceId, frame: &[u8], outcome: &'static str) {
+    let Ok((header, payload)) = WirePacketHeader::parse(frame) else {
+        return;
+    };
+    if header.packet_type == PacketType::Announce {
+        return;
+    }
+    tracing::info!(
+        target: "prns.runtime",
+        event = "wire_egress",
+        outcome,
+        interface = ?target.kind(),
+        packet = ?header.packet_type,
+        context = ?header.context,
+        dest = ?header.address.as_bytes(),
+        hops = header.hops,
+        payload = payload.len(),
+    );
+}
+
+#[cfg(not(feature = "tracing"))]
+fn trace_interesting_egress(_target: InterfaceId, _frame: &[u8], _outcome: &'static str) {}
+
 impl Egress {
     #[must_use]
     pub fn new(lanes: std::vec::Vec<(InterfaceId, TokioGrantProducer)>) -> Self {
@@ -85,22 +125,38 @@ impl Egress {
     }
 
     pub(super) fn enqueue(&mut self, target: InterfaceId, bytes: &[u8]) -> EgressEnqueueOutcome {
-        let outcome = self.try_enqueue(target, bytes);
+        let outcome = self.try_enqueue_as(target, bytes, egress_queue(bytes));
         self.record_generic_enqueue_outcome(outcome);
         outcome
     }
 
     fn try_enqueue(&mut self, target: InterfaceId, bytes: &[u8]) -> EgressEnqueueOutcome {
+        self.try_enqueue_as(target, bytes, egress_queue(bytes))
+    }
+
+    fn try_enqueue_as(
+        &mut self,
+        target: InterfaceId,
+        bytes: &[u8],
+        queue: EgressQueue,
+    ) -> EgressEnqueueOutcome {
         for lane in &mut self.lanes {
             if lane.id != target {
                 continue;
             }
 
             match lane.producer.try_grant() {
-                None => return EgressEnqueueOutcome::LaneFull,
+                None => {
+                    trace_interesting_egress(target, bytes, "lane_full");
+                    return EgressEnqueueOutcome::LaneFull;
+                }
                 Some(slot) => {
                     slot.fill(bytes);
-                    lane.producer.commit();
+                    match queue {
+                        EgressQueue::Expedited => lane.producer.commit_expedited(),
+                        EgressQueue::Bulk => lane.producer.commit(),
+                    }
+                    trace_interesting_egress(target, bytes, "enqueued");
 
                     #[cfg(feature = "runtime-metrics")]
                     {
@@ -112,6 +168,7 @@ impl Egress {
                 }
             }
         }
+        trace_interesting_egress(target, bytes, "lane_missing");
         EgressEnqueueOutcome::LaneMissing
     }
 
@@ -227,7 +284,11 @@ impl Egress {
                     }
                     if let Some(len) = fill(&mut slot.bytes[..hint]) {
                         slot.len = len.min(hint);
-                        lane.producer.commit();
+                        trace_interesting_egress(target, slot.frame(), "enqueued");
+                        match egress_queue(slot.frame()) {
+                            EgressQueue::Expedited => lane.producer.commit_expedited(),
+                            EgressQueue::Bulk => lane.producer.commit(),
+                        }
                         #[cfg(feature = "runtime-metrics")]
                         {
                             self.metrics.enqueued_frames =
@@ -237,6 +298,9 @@ impl Egress {
                 }
                 None => {
                     let _fill_result = fill(discard);
+                    if let Some(len) = _fill_result {
+                        trace_interesting_egress(target, &discard[..len], "lane_full");
+                    }
                     #[cfg(feature = "runtime-metrics")]
                     if _fill_result.is_some() {
                         self.metrics.full_lane_drops =
@@ -247,6 +311,9 @@ impl Egress {
             return;
         }
         let _fill_result = fill(discard);
+        if let Some(len) = _fill_result {
+            trace_interesting_egress(target, &discard[..len], "lane_missing");
+        }
         #[cfg(feature = "runtime-metrics")]
         if _fill_result.is_some() {
             self.metrics.missing_lane_drops = self.metrics.missing_lane_drops.saturating_add(1);
@@ -563,11 +630,14 @@ fn emit_for_wire(
     match ifac_for(ifacs, target) {
         Some(entry) => {
             if let Some(len) = fill(&mut scratch.emit) {
+                let queue = egress_queue(&scratch.emit[..len]);
                 if let Ok(masked_len) = entry
                     .context
                     .try_mask_outbound(&scratch.emit[..len], &mut scratch.masked)
                 {
-                    egress.enqueue(target, &scratch.masked[..masked_len]);
+                    let outcome =
+                        egress.try_enqueue_as(target, &scratch.masked[..masked_len], queue);
+                    egress.record_generic_enqueue_outcome(outcome);
                 } else {
                     egress.record_ifac_rejection();
                 }
@@ -595,7 +665,9 @@ fn enqueue_for_wire(
     match ifac_for(ifacs, target) {
         Some(entry) => match entry.context.try_mask_outbound(bytes, masked) {
             Ok(masked_len) => {
-                egress.enqueue(target, &masked[..masked_len]);
+                let outcome =
+                    egress.try_enqueue_as(target, &masked[..masked_len], egress_queue(bytes));
+                egress.record_generic_enqueue_outcome(outcome);
             }
             Err(_) => egress.record_ifac_rejection(),
         },

@@ -173,7 +173,7 @@ impl SlotChannels {
         self.peer_addr.lock(|cell| cell.set(bytes));
     }
 
-    fn addr(&self) -> [u8; 6] {
+    pub(super) fn addr(&self) -> [u8; 6] {
         self.peer_addr.lock(|cell| cell.get())
     }
 
@@ -234,8 +234,10 @@ pub struct BleHub {
     pub(super) advertise: Signal<BridgeMutex, bool>,
     pub(super) scan_enabled: Signal<BridgeMutex, bool>,
     pub(super) radio_enabled: AtomicBool,
+    advertising_wanted: AtomicBool,
     discovery: DiscoveryState,
     pub(super) local_address: BlockingMutex<BridgeMutex, Cell<[u8; 6]>>,
+    discovery_group_tag: BlockingMutex<BridgeMutex, Cell<[u8; 4]>>,
     status: BluetoothAutoStatus<PEER_CAPACITY>,
 }
 
@@ -257,14 +259,32 @@ impl BleHub {
             advertise: Signal::new(),
             scan_enabled: Signal::new(),
             radio_enabled: AtomicBool::new(false),
+            advertising_wanted: AtomicBool::new(false),
             discovery: DiscoveryState::new(),
             local_address: BlockingMutex::new(Cell::new([0; 6])),
+            discovery_group_tag: BlockingMutex::new(Cell::new(DEFAULT_GROUP_TAG)),
             status,
         }
     }
 
+    pub(super) fn set_peer_details(&self, address: [u8; 6], details: PeerDetails) {
+        self.status.set_details_for_address(address, details);
+    }
+
     pub fn set_local_address(&self, local_address: [u8; 6]) {
         self.local_address.lock(|cell| cell.set(local_address));
+    }
+
+    pub fn set_discovery_group_tag(&self, group_tag: [u8; 4]) {
+        self.discovery_group_tag.lock(|cell| cell.set(group_tag));
+        if self.advertising_wanted.load(Ordering::Relaxed) {
+            // Wake the acceptor so it rebuilds manufacturer data without cycling the radio.
+            self.advertise.signal(true);
+        }
+    }
+
+    pub fn discovery_group_tag(&self) -> [u8; 4] {
+        self.discovery_group_tag.lock(|cell| cell.get())
     }
 
     pub(super) async fn acquire_radio(&self) -> RadioPermit<'_> {
@@ -381,7 +401,24 @@ impl BleBackend<PEER_CAPACITY> for EmbeddedBleBackend {
     type Error = Closed;
     type Link = EmbeddedBleLink;
 
+    fn local_group_tag(&self) -> Option<[u8; 4]> {
+        Some(self.hub.discovery_group_tag())
+    }
+
+    fn drop_all_links(&mut self) {
+        for (assign, slot) in self.hub.assign.iter().zip(self.hub.slots.iter()) {
+            assign.clear();
+            slot.shutdown.signal(());
+        }
+        for index in 0..PEER_CAPACITY {
+            self.hub.connection_slots.request_close(index);
+        }
+    }
+
     async fn set_advertising(&mut self, mode: AdvertisingMode) -> Result<(), Closed> {
+        self.hub
+            .advertising_wanted
+            .store(mode.is_on(), Ordering::Relaxed);
         self.hub.advertise.signal(mode.is_on());
         Ok(())
     }
@@ -395,6 +432,7 @@ impl BleBackend<PEER_CAPACITY> for EmbeddedBleBackend {
         let enabled = mode.is_on();
         self.hub.radio_enabled.store(enabled, Ordering::Relaxed);
         if !enabled {
+            self.hub.advertising_wanted.store(false, Ordering::Relaxed);
             self.hub.advertise.signal(false);
             self.hub.scan_enabled.signal(false);
             self.hub.dial_request.clear();
@@ -596,15 +634,34 @@ impl EventHandler for ScanFunnel {
         for report in reports {
             let Ok(report) = report else { continue };
             let peer_address = BleAddress::from_hci_bytes(report.addr.into_inner());
-            let capabilities =
-                columba_role_capabilities(report.data).unwrap_or(BleRoleCapabilities::DualRole);
-            let should_dial = columba_connection_role(
+            let view = advertised_role_view(report.data);
+            let action = embedded_scan_dial_action(
+                Endpoint::Esp32(Esp32Host::Esp32),
                 self.local_address,
-                BleRoleCapabilities::DualRole,
                 peer_address,
-                capabilities,
-            ) == ColumbaConnectionRole::Dial;
-            if contains_service(report.data) && should_dial {
+                report.data,
+            );
+            if view.has_service || view.manufacturer == ManufacturerPresence::Present {
+                crate::diagnostic_log::info!(
+                    "ble: scan {:02x?} rssi={} svc={} mfg={:?} ver={:?} type={:?} node={:?} group={:02x?} tie={:?} elect={:?}",
+                    report.addr.into_inner(),
+                    report.rssi,
+                    view.has_service,
+                    view.manufacturer,
+                    view.version,
+                    view.type_byte,
+                    advertised_or_implied_node_type(report.data),
+                    view.group,
+                    view.dial_key,
+                    action
+                );
+            }
+            let should_dial = action == DialSightingAction::Dial;
+            let ours = view.has_service || view.manufacturer == ManufacturerPresence::Present;
+            if ours
+                && discovery_groups_match(self.hub.discovery_group_tag(), report.data)
+                && should_dial
+            {
                 let address = report.addr.into_inner();
                 let outcome = self.hub.admit_sighting(address, Instant::now().as_millis());
                 if outcome == SightingAdmissionOutcome::Admit {

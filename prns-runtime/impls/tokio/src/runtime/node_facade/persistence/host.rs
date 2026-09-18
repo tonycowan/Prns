@@ -344,7 +344,7 @@ struct WorkerStorage {
 }
 
 #[derive(Clone)]
-pub(crate) struct RemoteControlAuthorizationPersistence {
+pub struct RemoteControlAuthorizationPersistence {
     storage: Arc<Mutex<WorkerStorage>>,
 }
 
@@ -396,7 +396,8 @@ pub struct PersistenceWorker {
 }
 
 impl PersistenceWorker {
-    pub(crate) fn remote_control_authorization_persistence(
+    #[must_use]
+    pub fn remote_control_authorization_persistence(
         &self,
     ) -> RemoteControlAuthorizationPersistence {
         RemoteControlAuthorizationPersistence {

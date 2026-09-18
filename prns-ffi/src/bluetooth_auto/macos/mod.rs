@@ -17,14 +17,15 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_bluetooth::{
-    CBAdvertisementDataLocalNameKey, CBAdvertisementDataServiceUUIDsKey, CBCentralManager,
+    CBAdvertisementDataManufacturerDataKey, CBAdvertisementDataServiceUUIDsKey, CBCentralManager,
     CBCentralManagerScanOptionAllowDuplicatesKey, CBCharacteristic, CBPeer, CBPeripheral,
     CBPeripheralManager, CBUUID,
 };
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSNumber, NSString};
 
 use prns_core::interfaces::bluetooth_auto::{
-    BleAddress, BleUuid, BLE_SERVICE_UUID, COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID, COLUMBA_TX_UUID,
+    manufacturer_role_payload_with_node_type, AppleHost, BleAddress, BleUuid, Endpoint,
+    BLE_SERVICE_UUID, COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID, COLUMBA_TX_UUID, GROUP_TAG_LEN,
     NATIVE_CONTROL_UUID, NATIVE_DATA_UUID,
 };
 
@@ -67,6 +68,19 @@ fn cbuuid(uuid: BleUuid) -> Retained<CBUUID> {
     }
 }
 
+/// Opt-in BLE stderr chatter (`PRNS_BLE_WIRE_LOG=1`). Routine events stay at debug for `RUST_LOG`.
+fn ble_console_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PRNS_BLE_WIRE_LOG").is_some_and(|value| value != "0"))
+}
+
+fn ble_log(line: &str) {
+    crate::diagnostic_log::debug!("{line}");
+    if ble_console_enabled() {
+        eprintln!("{line}");
+    }
+}
+
 fn service_uuid() -> Retained<CBUUID> {
     cbuuid(BLE_SERVICE_UUID)
 }
@@ -100,16 +114,29 @@ fn cbuuid_eq(a: &CBUUID, b: &CBUUID) -> bool {
     a == b
 }
 
-fn advertisement_data(services: &NSArray<CBUUID>) -> Retained<NSDictionary<NSString, AnyObject>> {
+fn advertisement_data(
+    services: &NSArray<CBUUID>,
+    group_tag: [u8; GROUP_TAG_LEN],
+) -> Retained<NSDictionary<NSString, AnyObject>> {
     // SAFETY: CoreBluetooth exports this NSString constant with process lifetime.
     let uuids_key: &NSString = unsafe { CBAdvertisementDataServiceUUIDsKey };
     let uuids_value: &AnyObject = services;
+    // CoreBluetooth startAdvertising honors only ServiceUUIDs and LocalName.
+    // ManufacturerData is kept so Mac's own scan-path tests can round-trip a v6
+    // payload; the controller does not put it on the air.
     // SAFETY: CoreBluetooth exports this NSString constant with process lifetime.
-    let name_key: &NSString = unsafe { CBAdvertisementDataLocalNameKey };
-    let name = NSString::from_str("Prns");
-    let name_ref: &NSString = &name;
-    let name_value: &AnyObject = name_ref;
-    NSDictionary::from_slices(&[uuids_key, name_key], &[uuids_value, name_value])
+    let mfg_key: &NSString = unsafe { CBAdvertisementDataManufacturerDataKey };
+    let payload = manufacturer_role_payload_with_node_type(
+        Endpoint::CoreBluetooth(AppleHost::MacOs),
+        group_tag,
+    );
+    let mut mfg_bytes = [0u8; 8];
+    mfg_bytes[0] = 0xff;
+    mfg_bytes[1] = 0xff;
+    mfg_bytes[2..].copy_from_slice(&payload);
+    let mfg = NSData::with_bytes(&mfg_bytes);
+    let mfg_value: &AnyObject = &mfg;
+    NSDictionary::from_slices(&[uuids_key, mfg_key], &[uuids_value, mfg_value])
 }
 
 fn scan_options() -> Retained<NSDictionary<NSString, AnyObject>> {

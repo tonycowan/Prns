@@ -1,14 +1,15 @@
 use std::collections::HashSet;
 use std::env;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use nusb::{DeviceId, MaybeFuture};
 use prns_flash_manifest::{
     BoardBuild, BoardCatalog, BoardCatalogEntry, SoftdeviceIdentity, Uf2ApplicationUsb,
-    Uf2BoardIdMatch, Uf2BootloaderIdentity, Uf2MountLabel,
+    Uf2BoardDiscovery, Uf2BoardIdMatch, Uf2BootloaderIdentity, Uf2MountLabel,
 };
 
 use crate::error::AppError;
@@ -16,10 +17,103 @@ use crate::events::{Phase, Reporter};
 use crate::release::PreparedUf2Target;
 
 const REBOOT_TIMEOUT: Duration = Duration::from_secs(20);
-const APPLICATION_ENUMERATION_TIMEOUT: Duration = Duration::from_secs(20);
+const APPLICATION_AFTER_WRITE_TIMEOUT: Duration = Duration::from_secs(40);
 const PRNS_USB_VENDOR_ID: u16 = 0x1209;
 const PRNS_USB_PRODUCT_ID: u16 = 0x0001;
 const INFO_UF2_READ_LIMIT: u64 = 4097;
+const UF2_MAGIC_START0: u32 = 0x0A32_4655;
+const UF2_MAGIC_START1: u32 = 0x9E5D_5157;
+const UF2_MAGIC_END: u32 = 0x0AB1_6F30;
+const UF2_FLAG_FAMILY_ID: u32 = 0x0000_2000;
+const UF2_PAYLOAD: usize = 256;
+const UF2_BLOCK: usize = 512;
+
+fn encode_uf2_payload(data: &[u8], base: u32, family_id: u32) -> Vec<u8> {
+    let mut payload = data.to_vec();
+    let remainder = payload.len() % UF2_PAYLOAD;
+    if remainder != 0 {
+        payload.resize(payload.len() + (UF2_PAYLOAD - remainder), 0);
+    }
+    let blocks = payload.len() / UF2_PAYLOAD;
+    let mut out = Vec::with_capacity(blocks * UF2_BLOCK);
+    for index in 0..blocks {
+        let mut block = [0u8; UF2_BLOCK];
+        let header = [
+            UF2_MAGIC_START0,
+            UF2_MAGIC_START1,
+            UF2_FLAG_FAMILY_ID,
+            base.saturating_add((index * UF2_PAYLOAD) as u32),
+            UF2_PAYLOAD as u32,
+            index as u32,
+            blocks as u32,
+            family_id,
+        ];
+        for (slot, value) in header.into_iter().enumerate() {
+            let at = slot * 4;
+            block[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let start = index * UF2_PAYLOAD;
+        block[32..32 + UF2_PAYLOAD].copy_from_slice(&payload[start..start + UF2_PAYLOAD]);
+        block[UF2_BLOCK - 4..].copy_from_slice(&UF2_MAGIC_END.to_le_bytes());
+        out.extend_from_slice(&block);
+    }
+    out
+}
+
+fn extend_uf2_with_region(
+    existing: &[u8],
+    data: &[u8],
+    base: u32,
+    family_id: u32,
+) -> Result<Vec<u8>, AppError> {
+    if existing.is_empty() || !existing.len().is_multiple_of(UF2_BLOCK) {
+        return Err(AppError::uf2_delivery(
+            "prepared UF2 is not a whole number of 512-byte blocks",
+        ));
+    }
+    let extra = encode_uf2_payload(data, base, family_id);
+    let mut combined = existing.to_vec();
+    combined.extend(extra);
+    renumber_uf2_transfer(&mut combined)?;
+    Ok(combined)
+}
+
+fn renumber_uf2_transfer(bytes: &mut [u8]) -> Result<(), AppError> {
+    let blocks = bytes.len() / UF2_BLOCK;
+    let total = u32::try_from(blocks).map_err(|_| {
+        AppError::uf2_delivery("UF2 transfer has more blocks than a UF2 header can count")
+    })?;
+    for (index, block) in bytes.chunks_exact_mut(UF2_BLOCK).enumerate() {
+        if uf2_word(block, 0) != UF2_MAGIC_START0
+            || uf2_word(block, 4) != UF2_MAGIC_START1
+            || uf2_word(block, UF2_BLOCK - 4) != UF2_MAGIC_END
+        {
+            return Err(AppError::uf2_delivery(format!(
+                "UF2 block {index} is missing magic"
+            )));
+        }
+        let number = u32::try_from(index).map_err(|_| {
+            AppError::uf2_delivery("UF2 transfer has more blocks than a UF2 header can count")
+        })?;
+        block[20..24].copy_from_slice(&number.to_le_bytes());
+        block[24..28].copy_from_slice(&total.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn uf2_word(block: &[u8], offset: usize) -> u32 {
+    let mut word = [0u8; 4];
+    word.copy_from_slice(&block[offset..offset + 4]);
+    u32::from_le_bytes(word)
+}
+
+#[cfg(test)]
+fn uf2_transfer_totals(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(UF2_BLOCK)
+        .map(|block| uf2_word(block, 24))
+        .collect()
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct DetectedUf2Device {
@@ -101,6 +195,7 @@ pub(crate) fn flash(
     entry: &BoardCatalogEntry,
     target: &PreparedUf2Target,
     device: DetectedUf2Device,
+    rc_vault: Option<(u32, &[u8])>,
     reporter: Reporter,
 ) -> Result<(), AppError> {
     let board = CatalogedUf2Board::try_from_entry(entry)?;
@@ -118,32 +213,35 @@ pub(crate) fn flash(
         Some(board.slug()),
         &format!("Copying verified UF2 to {}…", destination.display()),
     );
-    let copy_outcome = copy_uf2(
-        &destination,
-        &mount,
-        target.part().bytes(),
-        &board,
-        reporter,
-    )?;
+    let firmware = match rc_vault {
+        Some((offset, bytes)) => extend_uf2_with_region(
+            target.part().bytes(),
+            bytes,
+            offset,
+            target.compatibility().family_id(),
+        )?,
+        None => target.part().bytes().to_vec(),
+    };
+    let copy_outcome = copy_uf2(&destination, &mount, &firmware, &board, reporter)?;
 
     if matches!(copy_outcome, Uf2CopyOutcome::Synchronized) {
         reporter.phase(
             Phase::Resetting,
             Some(board.slug()),
             &format!(
-                "Waiting for {} to disappear as the device reboots…",
+                "Waiting for {} to reboot and Personal Hopspot USB to enumerate…",
                 board.mount_label()
             ),
         );
-        wait_for_reboot(&mount, &board, REBOOT_TIMEOUT, Duration::from_millis(200))?;
     }
     if crate::esp::cancelled() {
         return Err(AppError::Cancelled);
     }
     wait_for_application_usb(
+        &mount,
         &board,
         &baseline_usb,
-        APPLICATION_ENUMERATION_TIMEOUT,
+        APPLICATION_AFTER_WRITE_TIMEOUT,
         Duration::from_millis(200),
     )?;
     reporter.success(
@@ -207,27 +305,58 @@ fn copy_uf2(
     board: &CatalogedUf2Board<'_>,
     reporter: Reporter,
 ) -> Result<Uf2CopyOutcome, AppError> {
-    let mut output = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(destination)
-        .map_err(|error| {
-            AppError::uf2_delivery(format!(
-                "could not create UF2 on {}: {error}",
-                board.mount_label()
-            ))
-        })?;
+    let staging = staging_uf2_path();
+    write_closed_staging(&staging, bytes, board, reporter)?;
+    reporter.phase(
+        Phase::Writing,
+        Some(board.slug()),
+        &format!("Copying UF2 onto {}…", board.mount_label()),
+    );
+    reporter.progress(Phase::Writing, Some(board.slug()), 0, bytes.len() as u64);
+    let copied = host_copy_and_exit(&staging, destination);
+    let _ = fs::remove_file(&staging);
+    if let Err(error) = copied {
+        return confirm_reboot_after_synchronization_interruption(
+            mount,
+            board,
+            reporter,
+            "UF2 copy failed",
+            error,
+            REBOOT_TIMEOUT,
+            Duration::from_millis(200),
+        );
+    }
+    reporter.progress(
+        Phase::Writing,
+        Some(board.slug()),
+        bytes.len() as u64,
+        bytes.len() as u64,
+    );
+    Ok(Uf2CopyOutcome::Synchronized)
+}
+
+fn staging_uf2_path() -> PathBuf {
+    std::env::temp_dir().join(format!("prns-hopspot-{}.uf2", std::process::id()))
+}
+
+fn write_closed_staging(
+    path: &Path,
+    bytes: &[u8],
+    board: &CatalogedUf2Board<'_>,
+    reporter: Reporter,
+) -> Result<(), AppError> {
+    let mut output = File::create(path)
+        .map_err(|error| AppError::uf2_delivery(format!("could not stage the UF2: {error}")))?;
     let mut written = 0usize;
     for chunk in bytes.chunks(64 * 1024) {
         if crate::esp::cancelled() {
             drop(output);
-            let _ = fs::remove_file(destination);
+            let _ = fs::remove_file(path);
             return Err(AppError::Cancelled);
         }
         output
             .write_all(chunk)
-            .map_err(|error| AppError::uf2_delivery(format!("UF2 copy failed: {error}")))?;
+            .map_err(|error| AppError::uf2_delivery(format!("could not stage the UF2: {error}")))?;
         written += chunk.len();
         reporter.progress(
             Phase::Writing,
@@ -236,31 +365,33 @@ fn copy_uf2(
             bytes.len() as u64,
         );
     }
-    let file_sync = output.flush().and_then(|_| output.sync_all());
     drop(output);
-    if let Err(error) = file_sync {
-        return confirm_reboot_after_synchronization_interruption(
-            mount,
-            board,
-            reporter,
-            "UF2 flush/sync failed",
-            error,
-            REBOOT_TIMEOUT,
-            Duration::from_millis(200),
-        );
+    Ok(())
+}
+
+fn host_copy_and_exit(from: &Path, to: &Path) -> std::io::Result<()> {
+    let output = copy_command(from, to).output()?;
+    if output.status.success() {
+        return Ok(());
     }
-    if let Err(error) = sync_mount_directory(mount) {
-        return confirm_reboot_after_synchronization_interruption(
-            mount,
-            board,
-            reporter,
-            &format!("{} directory sync failed", board.mount_label()),
-            error,
-            REBOOT_TIMEOUT,
-            Duration::from_millis(200),
-        );
+    Err(std::io::Error::other(
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
+}
+
+fn copy_command(from: &Path, to: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "copy", "/Y"]).arg(from).arg(to);
+        command
     }
-    Ok(Uf2CopyOutcome::Synchronized)
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("cp");
+        command.arg(from).arg(to);
+        command
+    }
 }
 
 fn confirm_reboot_after_synchronization_interruption(
@@ -309,6 +440,26 @@ fn wait_for_reboot(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplicationUsbStatus {
+    Ready,
+    Ambiguous,
+    Waiting,
+}
+
+fn application_usb_status(
+    newly_enumerated: usize,
+    current: usize,
+    bootloader_mounted: bool,
+) -> ApplicationUsbStatus {
+    match (newly_enumerated, current, bootloader_mounted) {
+        (1, 1, _) => ApplicationUsbStatus::Ready,
+        (1.., 2.., _) => ApplicationUsbStatus::Ambiguous,
+        (0, 1, false) => ApplicationUsbStatus::Ready,
+        _ => ApplicationUsbStatus::Waiting,
+    }
+}
+
 fn matching_prns_application_usb_ids(
     expected: &Uf2ApplicationUsb,
 ) -> Result<HashSet<DeviceId>, AppError> {
@@ -332,6 +483,7 @@ fn matching_prns_application_usb_ids(
 }
 
 fn wait_for_application_usb(
+    mount: &Path,
     board: &CatalogedUf2Board<'_>,
     baseline: &HashSet<DeviceId>,
     timeout: Duration,
@@ -345,26 +497,59 @@ fn wait_for_application_usb(
         let current =
             matching_prns_application_usb_ids(board.application_usb).map_err(|error| {
                 AppError::verify(format!(
-                "UF2 delivery completed, but application USB verification is incomplete: {error}"
-            ))
+                    "could not enumerate USB after writing {}: {error}",
+                    board.mount_label()
+                ))
             })?;
         let newly_enumerated = current.difference(baseline).count();
-        match (newly_enumerated, current.len()) {
-            (1, 1) => return Ok(()),
-            (1.., 2..) => {
+        let bootloader_mounted = mount.exists();
+        match application_usb_status(newly_enumerated, current.len(), bootloader_mounted) {
+            ApplicationUsbStatus::Ready => return Ok(()),
+            ApplicationUsbStatus::Ambiguous => {
                 return Err(AppError::verify(format!(
-                    "UF2 delivery completed, but multiple indistinguishable {:?} USB devices enumerated; application verification is incomplete",
+                    "multiple indistinguishable {:?} USB devices enumerated; application verification is incomplete",
                     board.application_usb.product
                 )));
             }
-            _ if Instant::now() >= deadline => {
-                return Err(AppError::verify(format!(
-                    "UF2 delivery completed, but no newly enumerated {:?} USB identity appeared within {timeout:?}; application verification is incomplete",
-                    board.application_usb.product
+            ApplicationUsbStatus::Waiting if Instant::now() >= deadline => {
+                return Err(AppError::verify(application_usb_timeout_detail(
+                    board,
+                    current.len(),
+                    bootloader_mounted,
+                    timeout,
                 )));
             }
-            _ => std::thread::sleep(poll),
+            ApplicationUsbStatus::Waiting => std::thread::sleep(poll),
         }
+    }
+}
+
+fn application_usb_timeout_detail(
+    board: &CatalogedUf2Board<'_>,
+    matching: usize,
+    bootloader_mounted: bool,
+    timeout: Duration,
+) -> String {
+    match (matching, bootloader_mounted) {
+        (0, true) => format!(
+            "{} stayed mounted and {:?} USB did not appear within {timeout:?}",
+            board.mount_label(),
+            board.application_usb.product
+        ),
+        (0, false) => format!(
+            "{} left, but {:?} USB did not appear within {timeout:?}",
+            board.mount_label(),
+            board.application_usb.product
+        ),
+        (_, true) => format!(
+            "{} stayed mounted; {:?} USB was already present and no new identity appeared within {timeout:?}",
+            board.mount_label(),
+            board.application_usb.product
+        ),
+        (_, false) => format!(
+            "{:?} USB was already present and no new identity appeared within {timeout:?}",
+            board.application_usb.product
+        ),
     }
 }
 
@@ -400,18 +585,6 @@ fn select_mount(
     }
 }
 
-#[cfg(unix)]
-fn sync_mount_directory(mount: &Path) -> std::io::Result<()> {
-    std::fs::File::open(mount).and_then(|directory| directory.sync_all())
-}
-
-#[cfg(windows)]
-fn sync_mount_directory(_mount: &Path) -> std::io::Result<()> {
-    // File::sync_all above flushes the copied UF2. Windows does not permit opening a directory
-    // with std::fs::File, so there is no additional portable directory handle to flush.
-    Ok(())
-}
-
 fn detect_mounts_for(board: &CatalogedUf2Board<'_>) -> Vec<PathBuf> {
     scan(
         std::slice::from_ref(board.board_id_match()),
@@ -424,9 +597,15 @@ pub(crate) fn detect_any_uf2_mounts(catalog: &BoardCatalog) -> Vec<PathBuf> {
         .boards
         .iter()
         .filter_map(|board| match &board.build {
-            BoardBuild::Uf2(build) => build.board_identity.validated().ok(),
-            BoardBuild::Esp(_) => None,
-            BoardBuild::NrfSerialDfu(build) => build.recovery.board_identity.validated().ok(),
+            BoardBuild::Uf2(build) if build.board_identity.discovery == Uf2BoardDiscovery::Auto => {
+                build.board_identity.validated().ok()
+            }
+            BoardBuild::NrfSerialDfu(build)
+                if build.recovery.board_identity.discovery == Uf2BoardDiscovery::Auto =>
+            {
+                build.recovery.board_identity.validated().ok()
+            }
+            BoardBuild::Esp(_) | BoardBuild::Uf2(_) | BoardBuild::NrfSerialDfu(_) => None,
         })
         .collect::<Vec<_>>();
     scan(&board_id_matches, None)
@@ -711,6 +890,70 @@ mod tests {
         assert!(!message.contains("--mount"));
         fs::remove_dir_all(first).expect("remove first mount");
         fs::remove_dir_all(second).expect("remove second mount");
+    }
+
+    #[test]
+    fn enrollment_vault_joins_the_firmware_uf2_as_one_transfer() {
+        let firmware = encode_uf2_payload(&[0x11; 512], 0x0002_6000, 0xada5_2840);
+        let glued = {
+            let mut bytes = firmware.clone();
+            bytes.extend(encode_uf2_payload(&[0x22; 256], 0x000e_2000, 0xada5_2840));
+            bytes
+        };
+        assert_eq!(
+            uf2_transfer_totals(&glued)
+                .into_iter()
+                .collect::<HashSet<_>>()
+                .len(),
+            2,
+            "concatenated vault UF2s keep two block counts"
+        );
+        let merged = extend_uf2_with_region(&firmware, &[0x22; 256], 0x000e_2000, 0xada5_2840)
+            .expect("merge");
+        let totals = uf2_transfer_totals(&merged);
+        assert_eq!(totals.len(), 3);
+        assert!(totals.iter().all(|total| *total == 3));
+        assert_eq!(uf2_word(&merged[0..UF2_BLOCK], 20), 0);
+        assert_eq!(uf2_word(&merged[UF2_BLOCK * 2..], 20), 2);
+        assert_eq!(uf2_word(&merged[UF2_BLOCK * 2..], 12), 0x000e_2000);
+    }
+
+    #[test]
+    fn uf2_copy_uses_a_child_process_that_exits() {
+        let from = Path::new("/tmp/prns-src.uf2");
+        let to = Path::new("/Volumes/HT-n5262/prns-hopspot.uf2");
+        let command = copy_command(from, to);
+        #[cfg(windows)]
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("cmd"));
+        #[cfg(not(windows))]
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("cp"));
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args.contains(&from.as_os_str()));
+        assert!(args.contains(&to.as_os_str()));
+    }
+
+    #[test]
+    fn application_usb_is_ready_when_the_same_device_returns_after_dfu() {
+        assert_eq!(
+            application_usb_status(1, 1, true),
+            ApplicationUsbStatus::Ready
+        );
+        assert_eq!(
+            application_usb_status(0, 1, false),
+            ApplicationUsbStatus::Ready
+        );
+        assert_eq!(
+            application_usb_status(0, 1, true),
+            ApplicationUsbStatus::Waiting
+        );
+        assert_eq!(
+            application_usb_status(0, 0, false),
+            ApplicationUsbStatus::Waiting
+        );
+        assert_eq!(
+            application_usb_status(2, 2, false),
+            ApplicationUsbStatus::Ambiguous
+        );
     }
 
     #[test]

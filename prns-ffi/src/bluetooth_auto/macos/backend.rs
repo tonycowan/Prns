@@ -22,7 +22,8 @@ use prns_core::interfaces::bluetooth_auto::{
 use prns_core::interfaces::bluetooth_auto::{BleAddress, BleIdentity, Control, Psm};
 
 use super::central::{
-    is_system_connected, CentralDelegate, CentralPeerSession, DialCommand, DialCompletion,
+    cancel_system_connection, is_system_connected, CentralDelegate, CentralPeerSession,
+    DialCommand, DialCompletion,
 };
 use super::gatt_link::{gatt_inbound_channel, ControlPlane, GattLink};
 use super::peripheral::PeripheralDelegate;
@@ -115,16 +116,22 @@ pub(super) enum DialAdmission {
     /// The target peer already owns an inbound peripheral session. Dialing that same peer as a
     /// central would create the dual-role link that handshake policy is trying to eliminate.
     YieldToInboundSession,
+    /// CoreBluetooth still lists a central-role connection, but Prns no longer has a session for
+    /// it. Cancel that zombie instead of yielding forever to a non-existent inbound owner.
+    CancelStaleSystemConnection,
 }
 
 pub(super) const fn dial_admission(
     already_system_connected: bool,
     target_has_inbound_session: bool,
+    has_central_session: bool,
 ) -> DialAdmission {
-    if already_system_connected {
-        DialAdmission::YieldToSystemConnection
-    } else if target_has_inbound_session {
+    if target_has_inbound_session {
         DialAdmission::YieldToInboundSession
+    } else if already_system_connected && has_central_session {
+        DialAdmission::YieldToSystemConnection
+    } else if already_system_connected {
+        DialAdmission::CancelStaleSystemConnection
     } else {
         DialAdmission::AttachCentralSession
     }
@@ -173,10 +180,11 @@ fn begin_dial(command: DialCommand, target_has_inbound_session: bool) {
     match dial_admission(
         is_system_connected(&central, peer_id),
         target_has_inbound_session,
+        delegate.has_session(peer_id),
     ) {
         DialAdmission::YieldToSystemConnection => {
             crate::diagnostic_log::debug!(
-                "bluetooth: yielding dial to {:02x?} — peer is already connected system-wide; inbound session retains connection ownership",
+                "bluetooth: yielding dial to {:02x?} — a live central session already owns this peer",
                 peer_id.address().octets()
             );
             session.reject();
@@ -187,6 +195,20 @@ fn begin_dial(command: DialCommand, target_has_inbound_session: bool) {
                 "bluetooth: yielding dial to {:02x?} — this peer already owns an inbound peripheral session",
                 peer_id.address().octets()
             );
+            session.reject();
+            return;
+        }
+        DialAdmission::CancelStaleSystemConnection => {
+            crate::diagnostic_log::debug!(
+                "bluetooth: cancelling stale system-wide connection to {:02x?} — no Prns session owns the link",
+                peer_id.address().octets()
+            );
+            cancel_system_connection(&central, peer_id);
+            // SAFETY: the retained manager and advertisement peripheral stay alive for this
+            // queue-confined cancel of a leftover CoreBluetooth object that may differ from the
+            // instance returned by retrieveConnectedPeripherals.
+            unsafe { central.cancelPeripheralConnection(&peripheral) };
+            delegate.note_stale_cancellation(peer_id);
             session.reject();
             return;
         }
@@ -272,7 +294,10 @@ impl MacosBleBackend {
     #[cfg(target_os = "macos")]
     pub const MAX_PEERS: usize = 8;
 
-    pub async fn prepare(identity: BleIdentity) -> Result<PreparedMacosBleBackend, MacosBleError> {
+    pub async fn prepare(
+        identity: BleIdentity,
+        group_tag: [u8; 4],
+    ) -> Result<PreparedMacosBleBackend, MacosBleError> {
         let (events_tx, events_rx) = tokio_mpsc::unbounded_channel::<Event>();
         let (keepalive, shutdown_rx) = sync_mpsc::channel::<()>();
         let (handles_tx, handles_rx) = oneshot::channel::<Handles>();
@@ -294,6 +319,7 @@ impl MacosBleBackend {
                     peripherals_for_thread,
                     restored_for_thread,
                     scan_activity_for_thread,
+                    group_tag,
                 );
                 let central_proto = ProtocolObject::from_ref(&*central_delegate);
                 #[cfg(target_os = "ios")]
@@ -314,7 +340,7 @@ impl MacosBleBackend {
                 };
 
                 let peripheral_delegate =
-                    PeripheralDelegate::new(events_tx, queue.clone(), identity);
+                    PeripheralDelegate::new(events_tx, queue.clone(), identity, group_tag);
                 let peripheral_proto = ProtocolObject::from_ref(&*peripheral_delegate);
                 #[cfg(target_os = "ios")]
                 let peripheral_options = Some(peripheral_manager_options());
@@ -362,8 +388,8 @@ impl MacosBleBackend {
         })
     }
 
-    pub async fn new(identity: BleIdentity) -> Result<Self, MacosBleError> {
-        Self::prepare(identity).await?.ready().await
+    pub async fn new(identity: BleIdentity, group_tag: [u8; 4]) -> Result<Self, MacosBleError> {
+        Self::prepare(identity, group_tag).await?.ready().await
     }
 
     pub fn psm(&self) -> Psm {
@@ -632,6 +658,7 @@ impl BleBackend<{ MacosBleBackend::MAX_PEERS }> for MacosBleBackend {
                     address,
                     data_inbound_rx: Some(data_inbound_rx),
                     l2cap_pending: None,
+                    details_notify: None,
                 },
                 peer_rssi,
             }
@@ -653,9 +680,10 @@ impl BleBackend<{ MacosBleBackend::MAX_PEERS }> for MacosBleBackend {
                 let central = central;
                 let delegate = delegate;
                 let peripheral = peripheral;
-                if delegate.0.remove_closed_session(peer_id) {
-                    cancel_connection(&central, &peripheral);
-                }
+                delegate.0.remove_session(peer_id);
+                cancel_system_connection(&central.0, peer_id);
+                cancel_connection(&central, &peripheral);
+                delegate.0.note_stale_cancellation(peer_id);
             });
         }
         self.peripheral_delegate.0.clear_closed_peer(address);

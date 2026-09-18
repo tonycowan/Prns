@@ -1,6 +1,6 @@
 //! nRF52 Bluetooth Auto transport shared by supported board targets.
 
-use core::cell::{Cell, UnsafeCell};
+use core::cell::{Cell, RefCell, UnsafeCell};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_futures::select::{select, select3, select4, Either, Either3};
@@ -14,7 +14,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Timer};
 
 use nrf_softdevice::ble::{
-    central, gatt_client, gatt_server, l2cap, peripheral, Address, Connection, GattError,
+    central, gatt_client, gatt_server, l2cap, peripheral, Address, Connection, GattError, TxPower,
 };
 use nrf_softdevice::{raw, RawError, SocEvent, Softdevice};
 
@@ -27,16 +27,17 @@ use personal_rns::bluetooth_auto::{
     BluetoothAutoShared, BluetoothAutoStatus, FrameLease, FramePoolError, SharedFramePool,
 };
 use personal_rns::interfaces::bluetooth_auto::{
-    columba_connection_role, columba_role_capabilities, contains_service, encode_advertisement,
-    encode_stream_frame, fragments_of, BleAddress, BleIdentity, BleRoleCapabilities,
-    ColumbaConnectionRole, Control, Fragment, L2capPlan, PeerProtocol, Reassembler, BLE_HW_MTU,
-    CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN, STREAM_FRAME_PREFIX_LEN,
+    advertised_role_view, default_group_tag, discovery_groups_match, embedded_scan_dial_action,
+    encode_advertisement_with_node_type, encode_stream_frame, fragments_of, group_tag, BleAddress,
+    BleIdentity, Control, DialSightingAction, Endpoint, Fragment, L2capPlan, ManufacturerPresence,
+    Nrf52Host, PeerProtocol, Reassembler, StreamDeframer, BLE_HW_MTU, CONTROL_MAX_LEN,
+    FRAGMENT_HEADER_LEN, GROUP_NAME, GROUP_TAG_LEN, STREAM_FRAME_PREFIX_LEN,
 };
 use personal_rns::interfaces::bluetooth_auto::{
     AdvertisingMode, BleBackend, BleEvent, BleLink, BleSink, BleSource, DialOutcome, Origin,
     RadioMode, ScanningMode,
 };
-use personal_rns::interfaces::{InterfaceId, InterfaceKind};
+use personal_rns::interfaces::{InterfaceId, InterfaceKind, PeerDetails};
 
 pub(super) use super::bluetooth_gatt_server::Server;
 use super::bluetooth_gatt_server::{ServerWrite, WriteDelivery, WriteTarget};
@@ -77,6 +78,127 @@ const PREFERRED_MIN_CONN_INTERVAL: u16 = 12;
 const PREFERRED_MAX_CONN_INTERVAL: u16 = 24;
 const PREFERRED_SLAVE_LATENCY: u16 = 0;
 const PREFERRED_SUPERVISION_TIMEOUT: u16 = 400;
+
+/// Discovery group id for SoftDevice advertise + passive scan.
+///
+/// Override at compile time without touching BLE identity flash:
+/// `PRNS_BLE_DISCOVERY_GROUP=mt-leg-a` / `mt-leg-b` (lab islands).
+/// Empty / unset keeps the open-mesh default (`reticulum`).
+/// A saved on-device group replaces this until flash is erased.
+const fn compile_time_discovery_group() -> &'static str {
+    match option_env!("PRNS_BLE_DISCOVERY_GROUP") {
+        Some(group) if !group.is_empty() => group,
+        _ => GROUP_NAME,
+    }
+}
+
+const GROUP_NAME_MAX: usize = 16;
+
+#[derive(Clone, Copy)]
+struct LiveDiscoveryGroup {
+    #[allow(dead_code)]
+    bytes: [u8; GROUP_NAME_MAX],
+    #[allow(dead_code)]
+    len: u8,
+    tag: [u8; GROUP_TAG_LEN],
+    installed: bool,
+}
+
+impl LiveDiscoveryGroup {
+    const fn uninstalled() -> Self {
+        Self {
+            bytes: [0; GROUP_NAME_MAX],
+            len: 0,
+            tag: [0; GROUP_TAG_LEN],
+            installed: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or(GROUP_NAME)
+    }
+}
+
+fn group_tag_for(name: &[u8]) -> [u8; GROUP_TAG_LEN] {
+    if name == GROUP_NAME.as_bytes() {
+        default_group_tag()
+    } else {
+        group_tag(name)
+    }
+}
+
+static LIVE_GROUP: BlockingMutex<Mtx, Cell<LiveDiscoveryGroup>> =
+    BlockingMutex::new(Cell::new(LiveDiscoveryGroup::uninstalled()));
+
+fn ensure_installed() {
+    let already = LIVE_GROUP.lock(|slot| slot.get().installed);
+    if already {
+        return;
+    }
+    let _ = set_discovery_group(compile_time_discovery_group());
+}
+
+#[cfg(any(
+    feature = "board-t-echo",
+    feature = "board-t096",
+    feature = "board-t114"
+))]
+pub(super) fn local_discovery_group() -> heapless::String<GROUP_NAME_MAX> {
+    ensure_installed();
+    LIVE_GROUP.lock(|slot| {
+        let group = slot.get();
+        let mut name = heapless::String::new();
+        let _ = name.push_str(group.as_str());
+        name
+    })
+}
+
+pub(crate) fn local_discovery_group_tag() -> [u8; GROUP_TAG_LEN] {
+    ensure_installed();
+    LIVE_GROUP.lock(|slot| slot.get().tag)
+}
+
+#[cfg(any(
+    feature = "board-t-echo",
+    feature = "board-t096",
+    feature = "board-t114"
+))]
+pub(crate) fn install_discovery_group(name: &str) {
+    let _ = set_discovery_group(name);
+}
+
+pub(crate) fn set_discovery_group(name: &str) -> bool {
+    let Some(live) = live_group_from(name) else {
+        return false;
+    };
+    LIVE_GROUP.lock(|slot| slot.set(live));
+    if HUB.advertising_wanted.load(Ordering::Relaxed) {
+        HUB.advertise.signal(true);
+    }
+    true
+}
+
+fn live_group_from(name: &str) -> Option<LiveDiscoveryGroup> {
+    let name = name.trim().as_bytes();
+    if name.is_empty() || name.len() > GROUP_NAME_MAX {
+        return None;
+    }
+    if !name.iter().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-' || *byte == b'_'
+    }) {
+        return None;
+    }
+    let mut bytes = [0u8; GROUP_NAME_MAX];
+    bytes[..name.len()].copy_from_slice(name);
+    Some(LiveDiscoveryGroup {
+        bytes,
+        len: name.len() as u8,
+        tag: group_tag_for(name),
+        installed: true,
+    })
+}
+
 const SIGHTING_PACING: Duration = Duration::from_millis(200);
 const SCAN_ERROR_BACKOFF: Duration = Duration::from_millis(500);
 /// One scan window before the scanner releases the central-radio permit (10 ms units), so a pending
@@ -91,8 +213,12 @@ const CONNECT_WINDOW_TICKS: u16 = 300;
 const CONNECT_SCAN_INTERVAL: u32 = 160;
 const CONNECT_SCAN_WINDOW: u32 = 128;
 
-const L2CAP_PSM: u16 = 0x0080;
+pub(super) const L2CAP_PSM: u16 = 0x0080;
 const L2CAP_MTU: usize = STREAM_FRAME_PREFIX_LEN + BLE_HW_MTU;
+/// SoftDevice delivers complete SDUs up to [`L2CAP_MTU`]. One max-size frame fits in that
+/// budget; absorb incrementally and drain between chunks so we do not keep a second SDU
+/// buffered inside each `serve_slot` future (MeshTower RAM is tight).
+const L2CAP_DEFRAMER_CAP: usize = L2CAP_MTU;
 const L2CAP_MPS: u16 = 247;
 const L2CAP_RX_QUEUE: u8 = 2;
 const L2CAP_TX_QUEUE: u8 = 2;
@@ -100,6 +226,10 @@ const L2CAP_CREDITS: u16 = 4;
 const L2CAP_POOL: usize = MEMBERS + 4;
 const L2CAP_HANDSHAKE_WINDOW: Duration = Duration::from_secs(5);
 const L2CAP_SETUP_RETRY: Duration = Duration::from_millis(150);
+
+fn publish_peer_details(address: [u8; 6], details: PeerDetails) {
+    BluetoothAutoStatus::new(&BLE_SHARED).set_details_for_address(address, details);
+}
 
 struct L2capPool {
     buffers: [UnsafeCell<[u8; L2CAP_MTU]>; L2CAP_POOL],
@@ -325,6 +455,9 @@ struct LinkChannels {
     /// hides an already-settled peer from sighting suppression (the redundant self-dial).
     address: BlockingMutex<Mtx, Cell<[u8; 6]>>,
     peer_protocol: BlockingMutex<Mtx, Cell<Option<PeerProtocol>>>,
+    /// Lives here (not in the `serve_slot` future) so embassy's pool_size=7 tasks do not each carry
+    /// a deframer-sized async state on MeshTower's tight RAM budget.
+    l2cap_deframer: BlockingMutex<Mtx, RefCell<StreamDeframer<L2CAP_DEFRAMER_CAP>>>,
 }
 
 impl LinkChannels {
@@ -341,6 +474,7 @@ impl LinkChannels {
             profile_ready: Signal::new(),
             address: BlockingMutex::new(Cell::new([0u8; 6])),
             peer_protocol: BlockingMutex::new(Cell::new(None)),
+            l2cap_deframer: BlockingMutex::new(RefCell::new(StreamDeframer::new())),
         }
     }
 
@@ -366,6 +500,8 @@ impl LinkChannels {
         self.data_plane.reset();
         self.profile_ready.reset();
         self.peer_protocol.lock(|current| current.set(None));
+        self.l2cap_deframer
+            .lock(|deframer| deframer.borrow_mut().clear());
         self.control_in.clear();
         self.control_out.clear();
         self.data_in.clear();
@@ -418,6 +554,7 @@ pub(super) struct BleHub {
     sightings: Channel<Mtx, SeenPeer, SIGHTING_DEPTH>,
     scan_enabled: Signal<Mtx, bool>,
     radio_enabled: AtomicBool,
+    advertising_wanted: AtomicBool,
 }
 
 impl BleHub {
@@ -433,6 +570,7 @@ impl BleHub {
             sightings: Channel::new(),
             scan_enabled: Signal::new(),
             radio_enabled: AtomicBool::new(false),
+            advertising_wanted: AtomicBool::new(false),
         }
     }
 
@@ -491,7 +629,23 @@ impl BleBackend<{ NrfBleBackend::MAX_PEERS }> for NrfBleBackend {
     type Error = Closed;
     type Link = NrfBleLink;
 
+    fn local_group_tag(&self) -> Option<[u8; 4]> {
+        Some(local_discovery_group_tag())
+    }
+
+    fn drop_all_links(&mut self) {
+        for (index, assign) in self.hub.assign.iter().enumerate() {
+            self.hub.connection_slots.request_close(index);
+            assign.clear();
+        }
+        self.hub.ready.clear();
+        self.hub.dial_failed.clear();
+    }
+
     async fn set_advertising(&mut self, mode: AdvertisingMode) -> Result<(), Closed> {
+        self.hub
+            .advertising_wanted
+            .store(mode.is_on(), Ordering::Relaxed);
         self.hub.advertise.signal(mode.is_on());
         Ok(())
     }
@@ -505,6 +659,7 @@ impl BleBackend<{ NrfBleBackend::MAX_PEERS }> for NrfBleBackend {
         let enabled = mode.is_on();
         self.hub.radio_enabled.store(enabled, Ordering::Relaxed);
         if !enabled {
+            self.hub.advertising_wanted.store(false, Ordering::Relaxed);
             self.hub.advertise.signal(false);
             self.hub.scan_enabled.signal(false);
             for (index, assign) in self.hub.assign.iter().enumerate() {
@@ -714,10 +869,55 @@ fn preferred_conn_params() -> raw::ble_gap_conn_params_t {
     }
 }
 
+/// MeshTower V2 BLE uses the nRF52840 internal 2.4 GHz radio (the KCT8103L FEM is LoRa-only).
+#[cfg(feature = "board-mesh-tower-v2")]
+fn preferred_tx_power() -> TxPower {
+    TxPower::Plus8dBm
+}
+
+#[cfg(not(feature = "board-mesh-tower-v2"))]
+fn preferred_tx_power() -> TxPower {
+    TxPower::ZerodBm
+}
+
+fn peripheral_adv_config() -> peripheral::Config {
+    let mut config = peripheral::Config::default();
+    config.tx_power = preferred_tx_power();
+    config
+}
+
+fn idle_scan_config() -> central::ScanConfig<'static> {
+    central::ScanConfig {
+        active: false,
+        extended: false,
+        interval: IDLE_SCAN_INTERVAL,
+        window: IDLE_SCAN_WINDOW,
+        timeout: SCAN_WINDOW_TICKS,
+        tx_power: preferred_tx_power(),
+        ..Default::default()
+    }
+}
+
 fn initiate_data_length_extension(conn: &mut Connection) {
     // `None` asks the SoftDevice for the largest data length supported by this build's connection
     // event and RAM configuration. Peers without DLE support retain the mandatory 27-byte floor.
     let _ = conn.data_length_update(None);
+}
+
+fn tune_link(conn: &mut Connection) {
+    if preferred_tx_power() != TxPower::ZerodBm {
+        if let Some(handle) = conn.handle() {
+            let ret = unsafe {
+                raw::sd_ble_gap_tx_power_set(
+                    raw::BLE_GAP_TX_POWER_ROLES_BLE_GAP_TX_POWER_ROLE_CONN as _,
+                    handle,
+                    preferred_tx_power() as i8,
+                )
+            };
+            let _ = RawError::convert(ret);
+        }
+    }
+    initiate_data_length_extension(conn);
 }
 
 #[derive(Clone, Copy)]
@@ -922,6 +1122,7 @@ async fn process_acknowledged_writes(slot: &'static LinkChannels) {
 
 async fn l2cap_pump(
     channel: &l2cap::Channel<L2capPacket>,
+    slot: &'static LinkChannels,
     data_out_rx: Receiver<'static, Mtx, SharedFrameLease, DATA_TOKEN_DEPTH>,
     data_in_tx: Sender<'static, Mtx, SharedFrameLease, DATA_TOKEN_DEPTH>,
 ) {
@@ -937,25 +1138,49 @@ async fn l2cap_pump(
         }
     };
     let inbound = async {
+        // Length-prefixed frames can span SDUs and pack more than one frame into a
+        // single SDU. Absorb in remaining-capacity chunks; drain with a stack body
+        // that never lives across an await (deframer state is on the slot).
         loop {
             let packet = match channel.rx().await {
                 Ok(packet) => packet,
                 Err(_) => break,
             };
             let bytes = packet.bytes();
-            if bytes.len() < STREAM_FRAME_PREFIX_LEN {
-                continue;
-            }
-            let len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
-            let frame = &bytes[STREAM_FRAME_PREFIX_LEN..];
-            if frame.len() < len {
-                continue;
-            }
-            if admit_inbound_frame_with_backpressure(&data_in_tx, &frame[..len])
-                .await
-                .is_err()
-            {
-                break;
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let room = slot
+                    .l2cap_deframer
+                    .lock(|deframer| deframer.borrow().remaining_capacity());
+                if room == 0 {
+                    let mut body = [0u8; BLE_HW_MTU];
+                    let Some(len) = slot
+                        .l2cap_deframer
+                        .lock(|deframer| deframer.borrow_mut().next_frame(&mut body))
+                    else {
+                        return;
+                    };
+                    let _ = admit_inbound_frame(&data_in_tx, &body[..len]);
+                    continue;
+                }
+                let take = room.min(bytes.len() - offset);
+                let absorbed = slot
+                    .l2cap_deframer
+                    .lock(|deframer| deframer.borrow_mut().absorb(&bytes[offset..offset + take]));
+                if !absorbed {
+                    return;
+                }
+                offset += take;
+                loop {
+                    let mut body = [0u8; BLE_HW_MTU];
+                    let Some(len) = slot
+                        .l2cap_deframer
+                        .lock(|deframer| deframer.borrow_mut().next_frame(&mut body))
+                    else {
+                        break;
+                    };
+                    let _ = admit_inbound_frame(&data_in_tx, &body[..len]);
+                }
             }
         }
     };
@@ -1022,18 +1247,31 @@ async fn serve_peripheral(
         let plan = slot.data_plane.wait().await;
         let protocol = slot.peer_protocol().unwrap_or(PeerProtocol::Native);
         let channel = match (protocol, plan) {
-            (PeerProtocol::Native, L2capPlan::Accept) => with_timeout(
-                L2CAP_HANDSHAKE_WINDOW,
-                l2cap.listen_with(conn, &l2cap_config(), |psm| psm == L2CAP_PSM),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .map(|(_psm, channel)| channel),
+            (PeerProtocol::Native, L2capPlan::Accept) => {
+                let accepted = with_timeout(
+                    L2CAP_HANDSHAKE_WINDOW,
+                    l2cap.listen_with(conn, &l2cap_config(), |psm| psm == L2CAP_PSM),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map(|(_psm, channel)| channel);
+                if accepted.is_some() {
+                    publish_peer_details(slot.address(), PeerDetails::BleCoc);
+                } else {
+                    publish_peer_details(slot.address(), PeerDetails::BleGatt);
+                    BluetoothAutoStatus::new(&BLE_SHARED).note_setup_failure();
+                }
+                accepted
+            }
+            (PeerProtocol::Native, L2capPlan::None) => {
+                publish_peer_details(slot.address(), PeerDetails::BleGatt);
+                None
+            }
             _ => None,
         };
         match channel {
-            Some(channel) => l2cap_pump(&channel, data_out_rx, data_in_tx).await,
+            Some(channel) => l2cap_pump(&channel, slot, data_out_rx, data_in_tx).await,
             None => loop {
                 let frame = data_out_rx.receive().await;
                 let frame = frame.lock().await;
@@ -1082,10 +1320,11 @@ async fn serve_central(
     config.scan_config.timeout = CONNECT_WINDOW_TICKS;
     config.scan_config.interval = CONNECT_SCAN_INTERVAL;
     config.scan_config.window = CONNECT_SCAN_WINDOW;
+    config.scan_config.tx_power = preferred_tx_power();
     config.conn_params = preferred_conn_params();
     let conn = match select(central::connect(sd, &config), worker.wait_for_close()).await {
         Either::First(Ok(mut conn)) => {
-            initiate_data_length_extension(&mut conn);
+            tune_link(&mut conn);
             conn
         }
         Either::First(Err(_)) => {
@@ -1193,20 +1432,33 @@ async fn serve_native_central(
 
     let data = async {
         let channel = match slot.data_plane.wait().await {
-            L2capPlan::Open { psm } => with_timeout(L2CAP_HANDSHAKE_WINDOW, async {
-                loop {
-                    if let Ok(channel) = l2cap.setup(&conn, &l2cap_config(), psm.get()).await {
-                        break channel;
+            L2capPlan::Open { psm } => {
+                let opened = with_timeout(L2CAP_HANDSHAKE_WINDOW, async {
+                    loop {
+                        if let Ok(channel) = l2cap.setup(&conn, &l2cap_config(), psm.get()).await {
+                            break channel;
+                        }
+                        Timer::after(L2CAP_SETUP_RETRY).await;
                     }
-                    Timer::after(L2CAP_SETUP_RETRY).await;
+                })
+                .await
+                .ok();
+                if opened.is_some() {
+                    publish_peer_details(slot.address(), PeerDetails::BleCoc);
+                } else {
+                    publish_peer_details(slot.address(), PeerDetails::BleGatt);
+                    BluetoothAutoStatus::new(&BLE_SHARED).note_setup_failure();
                 }
-            })
-            .await
-            .ok(),
-            _ => None,
+                opened
+            }
+            L2capPlan::None => {
+                publish_peer_details(slot.address(), PeerDetails::BleGatt);
+                None
+            }
+            L2capPlan::Accept => None,
         };
         match channel {
-            Some(channel) => l2cap_pump(&channel, data_out_rx, data_in_tx).await,
+            Some(channel) => l2cap_pump(&channel, slot, data_out_rx, data_in_tx).await,
             None => loop {
                 let frame = data_out_rx.receive().await;
                 let frame = frame.lock().await;
@@ -1322,11 +1574,12 @@ pub(super) async fn serve_slot(
         slot.reset();
         match job {
             SlotJob::Accept {
-                connection: conn,
+                connection: mut conn,
                 slot: lease,
             } => {
                 let ConnectionSlotOwners { worker, link } = lease.activate();
                 slot.set_address(conn.peer_address().bytes());
+                tune_link(&mut conn);
                 serve_peripheral(l2cap, server, &conn, slot, hub, link, &worker).await;
             }
             SlotJob::Dial {
@@ -1357,14 +1610,22 @@ pub(super) async fn acceptor(sd: &'static Softdevice, hub: &'static BleHub) -> !
         let index = slot.index();
 
         let mut adv_buf = [0u8; 31];
-        let adv_len =
-            encode_advertisement(&mut adv_buf, BleRoleCapabilities::DualRole).unwrap_or(0);
+        let adv_len = encode_advertisement_with_node_type(
+            &mut adv_buf,
+            Endpoint::Nrf52(Nrf52Host::Nrf52),
+            local_discovery_group_tag(),
+        )
+        .unwrap_or(0);
+        debug_assert_eq!(
+            adv_len, 31,
+            "SoftDevice classic ADV must fill the 31-byte budget with the group tag"
+        );
         let scan_data = [0x05u8, 0x09, b'P', b'r', b'n', b's'];
         let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
             adv_data: &adv_buf[..adv_len],
             scan_data: &scan_data,
         };
-        let adv_config = peripheral::Config::default();
+        let adv_config = peripheral_adv_config();
         let advertise = peripheral::advertise_connectable(sd, adv, &adv_config);
         match select(advertise, hub.advertise.wait()).await {
             Either::First(Ok(conn)) => {
@@ -1395,14 +1656,7 @@ pub(super) async fn scanner(sd: &'static Softdevice, hub: &'static BleHub) -> ! 
             continue;
         }
         let central_radio = hub.acquire_central_radio().await;
-        let config = central::ScanConfig {
-            active: false,
-            extended: false,
-            interval: IDLE_SCAN_INTERVAL,
-            window: IDLE_SCAN_WINDOW,
-            timeout: SCAN_WINDOW_TICKS,
-            ..Default::default()
-        };
+        let config = idle_scan_config();
         let scan = central::scan(sd, &config, |report| {
             if report.data.len == 0 {
                 return None;
@@ -1413,15 +1667,17 @@ pub(super) async fn scanner(sd: &'static Softdevice, hub: &'static BleHub) -> ! 
                 core::slice::from_raw_parts(report.data.p_data, report.data.len as usize)
             };
             let address = Address::from_raw(report.peer_addr);
-            let capabilities =
-                columba_role_capabilities(data).unwrap_or(BleRoleCapabilities::DualRole);
-            let should_dial = columba_connection_role(
+            let peer_address = BleAddress::from_hci_bytes(address.bytes());
+            let view = advertised_role_view(data);
+            let action = embedded_scan_dial_action(
+                Endpoint::Nrf52(Nrf52Host::Nrf52),
                 local_address,
-                BleRoleCapabilities::DualRole,
-                BleAddress::from_hci_bytes(address.bytes()),
-                capabilities,
-            ) == ColumbaConnectionRole::Dial;
-            if contains_service(data) && should_dial {
+                peer_address,
+                data,
+            );
+            let should_dial = action == DialSightingAction::Dial;
+            let ours = view.has_service || view.manufacturer == ManufacturerPresence::Present;
+            if ours && discovery_groups_match(local_discovery_group_tag(), data) && should_dial {
                 Some(SeenPeer {
                     address,
                     rssi: report.rssi,

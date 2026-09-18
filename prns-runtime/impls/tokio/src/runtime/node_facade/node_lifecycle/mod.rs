@@ -22,7 +22,8 @@ use crate::identity::held::HoldIdentityError;
 use crate::identity::{IdentityHash, Zeroizing, IDENTITY_SECRET_KEY_LEN};
 use crate::interfaces::InterfaceId;
 use crate::manifold::driver::{
-    self as manifold_driver, CryptoPoolConfig, Egress, HostCommand, TokioClock, TokioHost,
+    self as manifold_driver, CryptoPoolConfig, Egress, HostCommand, SchedulerPolicy, TokioClock,
+    TokioHost,
 };
 use crate::remote_control::{RemoteControlEndpoint, RemoteControlNodeIdentities};
 use crate::routing::announce::AnnounceObservation;
@@ -88,7 +89,9 @@ pub struct PrnsNode<St, R, F, S: StorageLayout> {
     iface_build_rx: UnboundedReceiver<DriverMsg>,
     accepted_announce_observer: Option<AcceptedAnnounceObserver>,
     pub(super) crypto_pool: CryptoPoolConfig,
+    scheduler_policy: SchedulerPolicy,
     persistence: Option<persistence::NodePersistence>,
+    authorization_persistence: Option<persistence::RemoteControlAuthorizationPersistence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +113,15 @@ where
     pub fn with_resource_memory_limits(mut self, limits: ResourceMemoryLimits) -> Self {
         self.node.engine.set_resource_memory_limits(limits);
         self
+    }
+
+    /// Pairing writes controller grants through this store immediately when the
+    /// recipe itself is `NoPersistence` and persistence is driven out-of-band.
+    pub fn attach_remote_control_authorization_persistence(
+        &mut self,
+        persistence: persistence::RemoteControlAuthorizationPersistence,
+    ) {
+        self.authorization_persistence = Some(persistence);
     }
 }
 
@@ -472,7 +484,9 @@ where
             iface_build_rx,
             accepted_announce_observer: None,
             crypto_pool: CryptoPoolConfig::host_default(),
+            scheduler_policy: SchedulerPolicy::production(),
             persistence: node_persistence,
+            authorization_persistence: None,
         }
     }
 
@@ -579,6 +593,13 @@ where
         self
     }
 
+    #[cfg(feature = "scheduler-tuning")]
+    #[must_use]
+    pub fn with_scheduler_policy(mut self, scheduler_policy: SchedulerPolicy) -> Self {
+        self.scheduler_policy = scheduler_policy;
+        self
+    }
+
     /// A `Send + Clone` handle for other tasks or threads to drive the node while
     /// [`run`](Self::run) or [`run_until`](Self::run_until) owns the executor-local loop. The run
     /// future deliberately keeps its engine, manifold, interface driver, and request runner on one
@@ -669,7 +690,10 @@ where
     /// Dropping or cancelling this future cannot perform asynchronous cleanup. Call
     /// [`run_until`](Self::run_until) when recipe-managed persistence must land a final
     /// state and ratchet flush.
-    pub async fn run(self) -> Result<(), NodeRunError> {
+    pub async fn run(self) -> Result<(), NodeRunError>
+    where
+        St: prns_runtime::runtime::RemoteControlHostControls,
+    {
         self.run_with_proof_decider(|_| false).await
     }
 
@@ -683,6 +707,7 @@ where
     pub async fn run_with_proof_decider<P>(self, should_prove: P) -> Result<(), NodeRunError>
     where
         P: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         self.run_until_with_proof_decider(core::future::pending::<()>(), should_prove)
             .await
@@ -695,7 +720,10 @@ where
     /// and commits its final state and ratchet snapshots. Successful shutdown flushes,
     /// or a terminal persistence failure, reach the recipe's `on_event` callback before
     /// this method returns.
-    pub async fn run_until(self, shutdown: impl Future<Output = ()>) -> Result<(), NodeRunError> {
+    pub async fn run_until(self, shutdown: impl Future<Output = ()>) -> Result<(), NodeRunError>
+    where
+        St: prns_runtime::runtime::RemoteControlHostControls,
+    {
         self.run_until_with_proof_decider(shutdown, |_| false).await
     }
 
@@ -707,7 +735,9 @@ where
     ) -> Result<(), NodeRunError>
     where
         P: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
+        let attached_authorization_persistence = self.authorization_persistence.take();
         let restored = match self.persistence.take() {
             Some(node_persistence) => {
                 let report = node_persistence.restore(&mut self);
@@ -728,7 +758,9 @@ where
             iface_build_rx,
             mut accepted_announce_observer,
             crypto_pool,
+            scheduler_policy,
             persistence: _,
+            authorization_persistence: _,
         } = self;
         let AssembledNode {
             engine,
@@ -754,7 +786,7 @@ where
                         Some(persistence_restored_diagnostic(&report)),
                     )
                 }
-                None => (None, None, None, None),
+                None => (None, None, attached_authorization_persistence, None),
             };
         let (remote_control_pairing_persistence, mut remote_control_pairing_persistence_rx) =
             remote_control_pairing_persistence_lane();
@@ -820,6 +852,7 @@ where
                 },
                 store,
                 crypto_pool,
+                scheduler_policy,
                 crate::manifold::AppDeciders {
                     should_prove,
                     should_accept_resource: move |offer| admission_decider.permits(offer),

@@ -12,7 +12,7 @@ use personal_hopspot_core as hopspot;
 use personal_rns::engine::{AnnounceAppData, AnnounceNow, AnnounceTarget, PrnsCommand};
 use personal_rns::interfaces::lora::{RadioProfile, DEFAULT_915_PROFILE};
 use personal_rns::interfaces::{
-    InterfaceGravity, InterfaceId, InterfaceMode, InterfaceSnapshot, InterfaceStatus, Membership,
+    InterfaceGravity, InterfaceId, InterfaceSnapshot, InterfaceStatus, Membership,
 };
 use personal_rns::lora::{LoRaApplyOutcome, LoRaSpectrumStatus};
 use personal_rns::manifold::embassy::EmbassyInterfaceStatus;
@@ -43,9 +43,12 @@ pub(super) struct FaceInput {
     pub(super) display: board::Display,
     pub(super) battery: board::Battery,
     pub(super) profile_store: ProfileStore,
+    pub(super) interface_mode_store: InterfaceModeStore,
     pub(super) identity_startup_notice: Option<hopspot::UiNotice>,
     pub(super) profile_startup_notice: Option<hopspot::UiNotice>,
+    pub(super) interface_mode_startup_notice: Option<hopspot::UiNotice>,
     pub(super) lora_profile: RadioProfile,
+    pub(super) working_interface_modes: hopspot::InterfaceModeTable,
     pub(super) lora_status: &'static EmbassyInterfaceStatus,
     pub(super) usb_status: &'static EmbassyInterfaceStatus,
     pub(super) lora_spectrum: &'static LoRaSpectrumStatus,
@@ -53,6 +56,7 @@ pub(super) struct FaceInput {
 }
 
 type ProfileStore = hopspot::RadioProfileStore<super::super::learned_state::BoardFlash>;
+type InterfaceModeStore = hopspot::InterfaceModeStore<super::super::learned_state::BoardFlash>;
 
 pub(super) const fn heartbeat_timing() -> &'static super::super::heartbeat::HeartbeatTiming {
     &super::super::heartbeat::NORMAL
@@ -79,6 +83,11 @@ pub(super) async fn load_profile(
         hopspot::RadioProfileLoadNotice::Recovered => hopspot::UiNotice::ProfileRecovered,
         hopspot::RadioProfileLoadNotice::Reset => hopspot::UiNotice::ProfileReset,
     });
+    if let Some((bytes, len)) = store.load_ble_discovery_group().await {
+        if let Ok(name) = core::str::from_utf8(&bytes[..len as usize]) {
+            super::super::bluetooth_auto::install_discovery_group(name);
+        }
+    }
     LoadedProfile {
         store,
         profile: loaded.profile,
@@ -91,9 +100,12 @@ pub(super) fn face(input: FaceInput) -> impl Future {
         display,
         mut battery,
         mut profile_store,
+        mut interface_mode_store,
         identity_startup_notice,
         profile_startup_notice,
+        interface_mode_startup_notice,
         lora_profile,
+        working_interface_modes,
         lora_status,
         usb_status,
         lora_spectrum,
@@ -111,16 +123,24 @@ pub(super) fn face(input: FaceInput) -> impl Future {
             gnss: hopspot::GnssAvailability::Available,
             #[cfg(feature = "board-t114")]
             gnss: hopspot::GnssAvailability::Unavailable,
+            ble_group_editor: hopspot::BleGroupEditor::Available,
         });
         let mut activity = hopspot::CardActivityTracker::<{ MEMBERS + 4 }>::new();
         let mut battery_gauge = hopspot::BatteryGauge::lipo();
         let mut persistence_notice = hopspot::PersistenceNotice::new();
         let mut working_lora_profile = lora_profile;
-        let startup_notice = identity_startup_notice.or(profile_startup_notice);
+        let mut working_interface_modes = working_interface_modes;
+        let startup_notice = identity_startup_notice
+            .or(profile_startup_notice)
+            .or(interface_mode_startup_notice);
         let mut pending_startup_notice = identity_startup_notice
             .is_some()
-            .then_some(profile_startup_notice)
-            .flatten();
+            .then_some(profile_startup_notice.or(interface_mode_startup_notice))
+            .flatten()
+            .or(profile_startup_notice
+                .is_some()
+                .then_some(interface_mode_startup_notice)
+                .flatten());
         if let Some(notice) = startup_notice {
             ui_state.show_notice(notice);
         }
@@ -132,7 +152,8 @@ pub(super) fn face(input: FaceInput) -> impl Future {
                 Some(battery_mv),
                 hopspot::ExternalPowerState::from_presence(bluetooth::usb_vbus_present()),
             );
-            let snapshots = snapshots(lora_status, usb_status);
+            hopspot::publish_power_snapshot(battery_state);
+            let snapshots = snapshots(lora_status, usb_status, working_interface_modes);
             let mut cards = cards(&snapshots, lora_status.id(), usb_status.id());
             let now_ms = embassy_time::Instant::now().as_millis();
             if let Some((until, owner)) = notice_until_ms {
@@ -152,6 +173,7 @@ pub(super) fn face(input: FaceInput) -> impl Future {
             let content = hopspot::ScreenContent {
                 cards: &cards,
                 local_docs: None,
+                interface_menu_details: None,
             };
             ui_state.sync(content);
             persistence_notice.update(
@@ -159,10 +181,14 @@ pub(super) fn face(input: FaceInput) -> impl Future {
                 super::super::learned_state::persistence_state(),
                 now_ms,
             );
-            let mut details = hopspot::snapshots_to_interface_menu_details(
-                ui_state.selected_card(content.cards),
-                &snapshots,
-            );
+            let mut details = {
+                let group = super::super::bluetooth_auto::local_discovery_group();
+                hopspot::ble_interface_menu_details(
+                    Some(group.as_str()),
+                    ui_state.selected_card(content.cards),
+                    &snapshots,
+                )
+            };
             if ui_state
                 .selected_card(content.cards)
                 .is_some_and(|card| card.id() == BLE_SUPERVISOR_ID)
@@ -179,6 +205,7 @@ pub(super) fn face(input: FaceInput) -> impl Future {
                 .selected_card(content.cards)
                 .is_some_and(|card| card.id() == lora_status.id())
             {
+                details.push_lora_profile(working_lora_profile);
                 let spectrum = lora_spectrum.snapshot();
                 details.push_lora_spectrum(hopspot::LoRaSpectrumMenuDetails {
                     channel_busy_per_mille: spectrum.channel_busy_per_mille,
@@ -343,7 +370,7 @@ pub(super) fn face(input: FaceInput) -> impl Future {
                                 async {
                                     LORA_CONTROL.apply(profile).await == LoRaApplyOutcome::Applied
                                 },
-                                || async { profile_store.save(profile).await.is_ok() },
+                                || async { profile_store.save(profile, None).await.is_ok() },
                             )
                             .await;
                             if result.applied() {
@@ -372,8 +399,62 @@ pub(super) fn face(input: FaceInput) -> impl Future {
                         hopspot::UiAction::None
                         | hopspot::UiAction::ToggleStationUplink
                         | hopspot::UiAction::SwapRadioMode
+                        | hopspot::UiAction::OpenRemotePairing
+                        | hopspot::UiAction::ApproveRemotePairing
+                        | hopspot::UiAction::RejectRemotePairing
                         | hopspot::UiAction::OpenDocs
                         | hopspot::UiAction::CopySharedInstanceConfig => {}
+                        hopspot::UiAction::OpenBleGroupEditor => {
+                            let group = super::super::bluetooth_auto::local_discovery_group();
+                            ui_state.open_ble_group_editor(group.as_str());
+                        }
+                        hopspot::UiAction::SetBleDiscoveryGroup(name) => {
+                            let result = if !super::super::bluetooth_auto::set_discovery_group(
+                                name.as_str(),
+                            ) {
+                                hopspot::RadioProfileChangeResult::ApplyFailed
+                            } else if profile_store
+                                .save(working_lora_profile, Some(name.as_str().as_bytes()))
+                                .await
+                                .is_ok()
+                            {
+                                hopspot::RadioProfileChangeResult::Saved
+                            } else {
+                                hopspot::RadioProfileChangeResult::ProfileNotSaved
+                            };
+                            if result.applied() {
+                                BluetoothAutoStatus::new(&BLE_SHARED).reset_peers();
+                            }
+                            let notice = result.notice();
+                            ui_state.show_notice(notice);
+                            notice_until_ms = Some((now_ms + NOTICE_MS, notice));
+                        }
+                        hopspot::UiAction::OpenInterfaceModeEditor => {
+                            if let Some(card) = ui_state.selected_card(content.cards) {
+                                if let Some(slot) = hopspot::interface_mode_slot(card.kind()) {
+                                    ui_state.open_interface_mode_editor(
+                                        slot,
+                                        working_interface_modes.get(slot),
+                                    );
+                                }
+                            }
+                        }
+                        hopspot::UiAction::SetInterfaceMode { slot, selection } => {
+                            working_interface_modes.set(slot, selection);
+                            let result = hopspot::apply_and_persist_interface_modes(
+                                async { true },
+                                || async {
+                                    interface_mode_store
+                                        .save(working_interface_modes)
+                                        .await
+                                        .is_ok()
+                                },
+                            )
+                            .await;
+                            let notice = result.notice();
+                            ui_state.show_notice(notice);
+                            notice_until_ms = Some((now_ms + NOTICE_MS, notice));
+                        }
                     }
                 }
                 Either3::Second(()) | Either3::Third(()) => {}
@@ -421,6 +502,7 @@ where
 fn snapshots(
     lora: &EmbassyInterfaceStatus,
     usb: &EmbassyInterfaceStatus,
+    modes: hopspot::InterfaceModeTable,
 ) -> heapless::Vec<InterfaceSnapshot, { MEMBERS + 4 }> {
     let ble = BluetoothAutoStatus::new(&BLE_SHARED);
     let mut entries: heapless::Vec<(&dyn InterfaceStatus, Membership), { MEMBERS + 4 }> =
@@ -437,7 +519,7 @@ fn snapshots(
         let counts = INTERFACE_STORE.counts(status.id());
         let _ = snapshots.push(InterfaceSnapshot {
             id: status.id(),
-            mode: InterfaceMode::Full,
+            mode: hopspot::mode_from_table(modes, status.id().kind()),
             gravity: InterfaceGravity::ZERO,
             connection: status.connection(),
             failure_reason: status.failure_reason(),
@@ -448,6 +530,9 @@ fn snapshots(
             links: counts.links,
             transported_links: counts.transported_links,
             membership: *membership,
+            radio: status.radio(),
+            details: status.details(),
+            link_local: None,
         });
     }
     snapshots

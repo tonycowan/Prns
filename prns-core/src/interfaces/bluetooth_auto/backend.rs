@@ -79,6 +79,16 @@ pub trait BleBackend<const MAX_PEERS: usize> {
         None
     }
 
+    /// Live local discovery group tag when the backend owns a mutable group (e.g. Android).
+    fn local_group_tag(&self) -> Option<[u8; 4]> {
+        None
+    }
+
+    /// Ask the radio to drop every peer without cycling advertising/scanning.
+    ///
+    /// Used when the discovery group changes so existing links cannot linger across groups.
+    fn drop_all_links(&mut self) {}
+
     async fn set_advertising(&mut self, mode: AdvertisingMode) -> Result<(), Self::Error>;
     async fn set_scanning(&mut self, _mode: ScanningMode) -> Result<(), Self::Error> {
         Ok(())
@@ -118,6 +128,11 @@ pub trait BleLink {
     async fn control_recv(&mut self) -> Result<Control, Self::Error>;
 
     async fn upgrade(&mut self, plan: &L2capPlan) -> Result<(), Self::Error>;
+
+    /// Bind a host callback that learns GATT vs CoC after `upgrade` / `into_data` settle.
+    /// Default is a no-op; CoreBluetooth uses this because CoC attaches asynchronously.
+    #[cfg(feature = "tokio-host")]
+    fn bind_details_notify(&mut self, _notify: crate::interfaces::PeerDetailsNotify) {}
 
     fn into_data(self) -> (Self::Source, Self::Sink);
 }

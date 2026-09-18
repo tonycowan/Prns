@@ -1,10 +1,12 @@
 use embassy_nrf::nvmc::{Error as NvmcError, Nvmc};
 use personal_rns::identity::vault::{FlashVault, FlashVaultError};
 use personal_rns::remote_control::{
-    RemoteControlNodeIdentityBootstrap, RemoteControlNodeIdentityBootstrapError,
-    REMOTE_CONTROL_IDENTITY_VAULT_SLOTS,
+    load_factory_controller_grant, RemoteControlControllerGrant, RemoteControlControllerGrants,
+    RemoteControlInitialControllerGrants, RemoteControlNodeIdentityBootstrap,
+    RemoteControlNodeIdentityBootstrapError, REMOTE_CONTROL_IDENTITY_VAULT_SLOTS,
 };
 use prns_core::entropy::{EntropySource, RuntimeEntropy};
+use static_cell::StaticCell;
 
 #[cfg(any(
     feature = "board-t096",
@@ -30,6 +32,11 @@ mod tft;
 pub(crate) type RemoteControlIdentityBootstrapError =
     RemoteControlNodeIdentityBootstrapError<FlashVaultError<NvmcError>>;
 
+pub(crate) struct RemoteControlIdentityLoad {
+    pub(crate) bootstrap: RemoteControlNodeIdentityBootstrap,
+    pub(crate) factory_grant: Option<RemoteControlControllerGrant>,
+}
+
 pub(crate) struct RemoteControlIdentityFlash {
     offset: u32,
 }
@@ -43,13 +50,33 @@ impl RemoteControlIdentityFlash {
         &self,
         nvmc: &mut Nvmc<'_>,
         entropy: &mut RuntimeEntropy<S>,
-    ) -> Result<RemoteControlNodeIdentityBootstrap, RemoteControlIdentityBootstrapError> {
+    ) -> Result<RemoteControlIdentityLoad, RemoteControlIdentityBootstrapError> {
         let mut vault =
             FlashVault::<_, REMOTE_CONTROL_IDENTITY_VAULT_SLOTS>::new(nvmc, self.offset);
-        RemoteControlNodeIdentityBootstrap::load_or_generate_with_runtime_entropy(
+        let bootstrap = RemoteControlNodeIdentityBootstrap::load_or_generate_with_runtime_entropy(
             &mut vault, entropy,
-        )
+        )?;
+        let factory_grant = load_factory_controller_grant(&vault).unwrap_or(None);
+        Ok(RemoteControlIdentityLoad {
+            bootstrap,
+            factory_grant,
+        })
     }
+}
+
+pub(crate) fn factory_or_fallback_grants(
+    factory: Option<RemoteControlControllerGrant>,
+    fallback: RemoteControlInitialControllerGrants<'static>,
+) -> RemoteControlInitialControllerGrants<'static> {
+    let Some(grant) = factory else {
+        return fallback;
+    };
+    static FACTORY: StaticCell<[RemoteControlControllerGrant; 1]> = StaticCell::new();
+    let grants = FACTORY.init([grant]);
+    RemoteControlInitialControllerGrants::Grants(
+        RemoteControlControllerGrants::try_from(grants.as_slice())
+            .expect("the factory controller grant is a single distinct entry"),
+    )
 }
 
 #[cfg(feature = "board-mesh-tower-v2")]

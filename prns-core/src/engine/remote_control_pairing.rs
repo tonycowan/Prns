@@ -214,6 +214,53 @@ impl<S: StorageLayout> crate::engine::EngineState<S> {
         link_id
     }
 
+    pub(crate) fn admit_parked_remote_control_pairing_after_identify<F, Work>(
+        &mut self,
+        link_id: LinkId,
+        identity: crate::identity::IdentityHash,
+        interfaces: AttachedInterfaces<'_>,
+        now: InstantMillis,
+        fill_random: &mut F,
+        sink: &mut impl FnMut(EngineReaction<'_, Work>),
+    ) -> crate::engine::WakeSchedules
+    where
+        F: FnMut(&mut [u8]),
+    {
+        let Some(parked) = self
+            .remote_control_pairing
+            .take_parked_unidentified_request_for(link_id)
+        else {
+            return crate::engine::WakeSchedules::UNCHANGED;
+        };
+        match self.ingest_remote_control_pairing_request(
+            RemoteControlPairingRequestIngress {
+                destination: parked.destination,
+                link_id: parked.link_id,
+                request_id: parked.request_id,
+                requester: Some(identity),
+                path_hash: parked.path_hash,
+                data: parked.data.as_slice(),
+            },
+            interfaces,
+            now,
+            fill_random,
+            sink,
+        ) {
+            RemoteControlPairingRequestIngressOutcome::Pairing(_) => {
+                let mut wake = crate::engine::WakeSchedules::UNCHANGED;
+                wake.remote_control_pairing = self.remote_control_pairing_wake();
+                wake.receipt_timeouts = self.receipt_timeouts_wake();
+                wake.link_deadlines = self.link_deadlines_wake();
+                wake.resource_deadlines = self.resource_deadlines_wake();
+                wake.channel_timeouts = self.channel_timeouts_wake();
+                wake
+            }
+            RemoteControlPairingRequestIngressOutcome::ForwardToApplication => {
+                crate::engine::WakeSchedules::UNCHANGED
+            }
+        }
+    }
+
     pub fn configure_remote_control_pairing(
         &mut self,
         target_identity: crate::identity::IdentityHash,
@@ -275,6 +322,13 @@ impl<S: StorageLayout> crate::engine::EngineState<S> {
             return RemoteControlPairingRequestIngressOutcome::ForwardToApplication;
         }
         let Some(identified_controller) = ingress.requester else {
+            self.remote_control_pairing.park_unidentified_request(
+                ingress.destination,
+                ingress.link_id,
+                ingress.request_id,
+                ingress.path_hash,
+                ingress.data,
+            );
             return RemoteControlPairingRequestIngressOutcome::Pairing(
                 RemoteControlPairingRequestOutcome::Unidentified,
             );
@@ -325,12 +379,14 @@ impl<S: StorageLayout> crate::engine::EngineState<S> {
                         attempt_id,
                         grant,
                     } => {
-                        sink(EngineReaction::Journaled(
-                            crate::engine::Journaled::RemoteControlTargetPairingAuthorizationRequired {
-                                attempt_id,
-                                grant,
-                            },
-                        ));
+                        self.start_remote_control_target_pairing_authorization(
+                            attempt_id,
+                            grant,
+                            interfaces,
+                            now,
+                            fill_random,
+                            sink,
+                        );
                         RemoteControlPairingRequestOutcome::CommitAuthorizationOwed {
                             attempt_id,
                             grant,
@@ -631,7 +687,7 @@ impl<S: StorageLayout> crate::engine::EngineState<S> {
                 Some(OpenRemoteControlPairingRejection::AlreadyOpen)
             }
             RemoteControlPairingView::Closed
-                if open.attempt_timeout.duration() > open.expires_after.duration() =>
+                if open.attempt_timeout.duration() >= open.expires_after.duration() =>
             {
                 Some(
                     OpenRemoteControlPairingRejection::AttemptTimeoutExceedsWindow {
@@ -756,7 +812,7 @@ impl<S: StorageLayout> crate::engine::EngineState<S> {
         if let Err(error) = self.register_request_handler_hash(
             &destination,
             RequestPathHash::of(REMOTE_CONTROL_PAIRING_REQUEST_ENDPOINT_ID),
-            RequestPolicy::RequireIdentified,
+            RequestPolicy::AllowAll,
         ) {
             let _unregistered = self.unregister_destination(&destination);
             let _released = self.held_identities.release(&identity_hash);
@@ -987,39 +1043,50 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
     use super::*;
-    use crate::crypto::{x25519_diffie_hellman, x25519_public_key, X25519SecretKey};
+    use crate::crypto::{
+        x25519_diffie_hellman, x25519_public_key, Ed25519PublicKey, Ed25519Signature,
+        X25519SecretKey,
+    };
     use crate::engine::test_support::{fixed_secret_key, routable_descriptor, TestStorageLayout};
     use crate::engine::{
         ApproveRemoteControlTargetPairing, ApproveRemoteControlTargetPairingFailure,
         CloseRemoteControlPairing, CommandId, Directive, IngestIo, IssuedCommand, Journaled,
         PrnsCommand, RejectRemoteControlTargetPairing, RejectRemoteControlTargetPairingFailure,
-        RemoteControlTargetPairingApproval, RemoteControlTargetPairingAuthorizationPersistence,
-        RemoteControlTargetPairingFinalization, RemoteControlTargetPairingRejection,
-        SettleRemoteControlTargetPairingAuthorization,
+        RemoteControlServiceConfiguration, RemoteControlTargetPairingApproval,
+        RemoteControlTargetPairingAuthorizationPersistence, RemoteControlTargetPairingFinalization,
+        RemoteControlTargetPairingRejection, SettleRemoteControlTargetPairingAuthorization,
         SettleRemoteControlTargetPairingAuthorizationFailure, Settlement, WakeReason,
     };
-    use crate::identity::{IdentityPublicKeys, IdentitySigner};
+    use crate::identity::vault::IdentitySecretKey;
+    use crate::identity::{IdentityPublicKeys, IdentitySigner, IDENTITY_SECRET_KEY_LEN};
     use crate::interfaces::{EgressCapability, InboundPacket, InterfaceDescriptor, InterfaceId};
     use crate::remote_control::{
         BeginRemoteControlControllerPairingOutcome, RemoteControlControllerGrant,
-        RemoteControlControllerIdentity, RemoteControlControllerPairingAborted,
+        RemoteControlControllerIdentity, RemoteControlControllerIdentitySecret,
+        RemoteControlControllerPairingAborted, RemoteControlNodeIdentitySecrets,
         RemoteControlPairingAttemptTimeout, RemoteControlPairingBegin, RemoteControlPairingContext,
         RemoteControlPairingEndpoint, RemoteControlPairingExpiresAfter,
         RemoteControlPairingInvitationCode, RemoteControlPairingPermissions,
         RemoteControlPairingPublicAppDataBytes, RemoteControlPairingTranscript,
-        RemoteControlRequestKind, RemoteControlRequestSet, RemoteControlTargetPairingResponder,
-        RemoteControlTargetPairingView,
+        RemoteControlRequestKind, RemoteControlRequestSet, RemoteControlTargetIdentitySecret,
+        RemoteControlTargetPairingResponder, RemoteControlTargetPairingView,
     };
     use crate::routing::dedup::PacketHash;
     use crate::routing::links::data::write_link_packet;
+    use crate::routing::links::identify::{
+        LinkIdentityVerification, LinkIdentityVerifyOwed, IDENTIFY_SIGNED_DATA_LEN,
+    };
     use crate::routing::links::request::{
         parse_response_plaintext, write_request_plaintext, RequestId,
     };
     use crate::routing::links::table::RespondingLink;
     use crate::routing::links::LinkKey;
-    use crate::storage::TestFixedStorage;
-    use crate::units::{DurationMillis, RttMillis};
-    use crate::wire::{DestinationType, PacketType, WireContext, WirePacketHeader};
+    use crate::routing::request_handlers::RequestPolicy;
+    use crate::storage::{StorageLayout, TablePushError, TestFixedStorage};
+    use crate::units::{ByteLimit, DurationMillis, RttMillis};
+    use crate::wire::{
+        DestinationHash, DestinationType, PacketType, WireContext, WirePacketHeader,
+    };
 
     fn open(target: EgressTarget) -> OpenRemoteControlPairing {
         OpenRemoteControlPairing {
@@ -1095,6 +1162,19 @@ mod tests {
         LinkKey,
         RemoteControlControllerIdentity,
     ) {
+        open_pairing_link_maybe_identified(Some(identified_controller))
+    }
+
+    fn open_pairing_link_maybe_identified(
+        identified_controller: Option<crate::identity::IdentityHash>,
+    ) -> (
+        crate::engine::EngineState<TestStorageLayout>,
+        [InterfaceDescriptor; 1],
+        RemoteControlPairingEndpoint,
+        LinkId,
+        LinkKey,
+        RemoteControlControllerIdentity,
+    ) {
         let interface = InterfaceId::new([0xD1; 8]);
         let interfaces = [routable_descriptor(interface)];
         let mut engine = crate::engine::EngineState::<TestStorageLayout>::default();
@@ -1144,9 +1224,9 @@ mod tests {
                 InstantMillis(1_600),
             )
             .unwrap();
-        engine
-            .links
-            .note_identified(&link_id, identified_controller);
+        if let Some(identity) = identified_controller {
+            engine.links.note_identified(&link_id, identity);
+        }
         (
             engine,
             interfaces,
@@ -1155,6 +1235,17 @@ mod tests {
             peer_key,
             controller,
         )
+    }
+
+    fn open_unidentified_pairing_link() -> (
+        crate::engine::EngineState<TestStorageLayout>,
+        [InterfaceDescriptor; 1],
+        RemoteControlPairingEndpoint,
+        LinkId,
+        LinkKey,
+        RemoteControlControllerIdentity,
+    ) {
+        open_pairing_link_maybe_identified(None)
     }
 
     fn pairing_request_frame(
@@ -1338,7 +1429,7 @@ mod tests {
             },
             AttachedInterfaces::new(interfaces),
             InstantMillis(2_200),
-            &mut |_| panic!("accepted Commit needs no entropy before completion"),
+            &mut |bytes| bytes.fill(0xC0),
             &mut |reaction: EngineReaction<'_, crate::engine::NoOwedWork>| {
                 if let EngineReaction::Journaled(
                     Journaled::RemoteControlTargetPairingAuthorizationRequired {
@@ -1363,7 +1454,7 @@ mod tests {
         assert_eq!(authorization_required, Some((attempt_id, expected_grant)));
         assert!(matches!(
             engine.remote_control_target_pairing.view(),
-            RemoteControlTargetPairingView::Authorizing(attempt)
+            RemoteControlTargetPairingView::Completing(attempt)
                 if attempt.attempt_id() == attempt_id
         ));
         (attempt_id, transcript)
@@ -1589,11 +1680,9 @@ mod tests {
             ByteLimit::Maximum(PAIRING_REQUEST_PLAINTEXT_MAX as u64),
         );
         let pairing_path = RequestPathHash::of(REMOTE_CONTROL_PAIRING_REQUEST_ENDPOINT_ID);
-        assert!(!engine.request_handlers.permits(
-            &endpoint.destination_hash(),
-            &pairing_path,
-            None,
-        ));
+        assert!(engine
+            .request_handlers
+            .permits(&endpoint.destination_hash(), &pairing_path, None,));
         assert!(engine.request_handlers.permits(
             &endpoint.destination_hash(),
             &pairing_path,
@@ -2065,6 +2154,72 @@ mod tests {
     }
 
     #[test]
+    fn unidentified_pairing_begin_is_held_until_the_link_is_identified() {
+        let (mut engine, interfaces, endpoint, link_id, _, controller) =
+            open_unidentified_pairing_link();
+        let request_id = RequestId([0xE8; 16]);
+        let path_hash = RequestPathHash::of(REMOTE_CONTROL_PAIRING_REQUEST_ENDPOINT_ID);
+        let mut encoded = [0u8; RemoteControlPairingRequest::MAX_ENCODED_LEN];
+        let begin_len = RemoteControlPairingRequest::Begin(invited_begin(controller, endpoint))
+            .write_into(&mut encoded)
+            .unwrap();
+        let begin = packed_pairing_payload(&encoded[..begin_len]);
+        assert!(engine
+            .request_handlers
+            .permits(&endpoint.destination_hash(), &path_hash, None,));
+        assert_eq!(
+            engine.ingest_remote_control_pairing_request(
+                RemoteControlPairingRequestIngress {
+                    destination: endpoint.destination_hash(),
+                    link_id,
+                    request_id,
+                    requester: None,
+                    path_hash,
+                    data: &begin,
+                },
+                AttachedInterfaces::new(&interfaces),
+                InstantMillis(2_000),
+                &mut |bytes| bytes.fill(0xEA),
+                &mut |_: EngineReaction<'_, crate::engine::NoOwedWork>| {},
+            ),
+            RemoteControlPairingRequestIngressOutcome::Pairing(
+                RemoteControlPairingRequestOutcome::Unidentified,
+            ),
+        );
+        assert_eq!(
+            engine.remote_control_target_pairing.view(),
+            RemoteControlTargetPairingView::Idle,
+        );
+
+        let mut offers = 0usize;
+        engine.resume_link_identity_verify(
+            LinkIdentityVerifyOwed {
+                link_id,
+                identity: controller.identity_hash(),
+                signing_key: Ed25519PublicKey([0x11; 32]),
+                signed_data: [0x22; IDENTIFY_SIGNED_DATA_LEN],
+                signature: Ed25519Signature([0x33; 64]),
+                arrived_at: InstantMillis(2_100),
+            },
+            LinkIdentityVerification::Valid,
+            AttachedInterfaces::new(&interfaces),
+            InstantMillis(2_100),
+            &mut |bytes| bytes.fill(0xEB),
+            &mut |reaction: EngineReaction<'_, crate::engine::NoOwedWork>| {
+                if matches!(reaction, EngineReaction::Directive(Directive::Send { .. })) {
+                    offers += 1;
+                }
+            },
+        );
+        assert_eq!(offers, 1);
+        assert!(matches!(
+            engine.remote_control_target_pairing.view(),
+            RemoteControlTargetPairingView::AwaitingBoth(_)
+                | RemoteControlTargetPairingView::OfferPrepared(_)
+        ));
+    }
+
+    #[test]
     fn a_begin_that_discovers_expiry_emits_the_exact_aborted_attempt() {
         let controller = controller_identity();
         let (mut engine, interfaces, endpoint, link_id, _, _) =
@@ -2456,7 +2611,7 @@ mod tests {
             },
             AttachedInterfaces::new(&interfaces),
             InstantMillis(2_200),
-            &mut |_| panic!("target approval needs no entropy"),
+            &mut |bytes| bytes.fill(0xC1),
             &mut |reaction| match reaction {
                 EngineReaction::Journaled(
                     Journaled::RemoteControlTargetPairingAuthorizationRequired {
@@ -2485,12 +2640,12 @@ mod tests {
         );
         assert!(matches!(
             engine.remote_control_target_pairing.view(),
-            RemoteControlTargetPairingView::Authorizing(attempt)
+            RemoteControlTargetPairingView::Completing(attempt)
                 if attempt.attempt_id() == attempt_id
         ));
         assert_eq!(
             wake.remote_control_pairing,
-            crate::engine::WakeSchedule::At(InstantMillis(61_000)),
+            crate::engine::WakeSchedule::At(InstantMillis(32_000)),
         );
     }
 
@@ -2556,7 +2711,7 @@ mod tests {
             },
             AttachedInterfaces::new(&interfaces),
             InstantMillis(2_200),
-            &mut |_| panic!("accepted Commit needs no entropy before completion"),
+            &mut |bytes| bytes.fill(0xC2),
             &mut |reaction: EngineReaction<'_, crate::engine::NoOwedWork>| {
                 if let EngineReaction::Journaled(
                     Journaled::RemoteControlTargetPairingAuthorizationRequired {
@@ -2581,7 +2736,7 @@ mod tests {
         assert_eq!(authorization_required, Some((attempt_id, expected_grant)),);
         assert!(matches!(
             engine.remote_control_target_pairing.view(),
-            RemoteControlTargetPairingView::Authorizing(attempt)
+            RemoteControlTargetPairingView::Completing(attempt)
                 if attempt.attempt_id() == attempt_id
         ));
     }
@@ -2601,7 +2756,6 @@ mod tests {
             RequestId([0xF2; 16]),
             commit_request_id,
         );
-        let mut sent = std::vec::Vec::new();
         let mut settlement = None;
         let mut authorization_persisted = None;
         let mut unexpected_reactions = 0usize;
@@ -2619,8 +2773,8 @@ mod tests {
             InstantMillis(2_300),
             &mut |bytes| bytes.fill(0xF5),
             &mut |reaction| match reaction {
-                EngineReaction::Directive(Directive::Send { target, bytes }) => {
-                    sent.push((target, bytes.to_vec()));
+                EngineReaction::Directive(Directive::Send { .. }) => {
+                    unexpected_reactions += 1;
                 }
                 EngineReaction::Journaled(Journaled::CommandSettled {
                     settlement: observed,
@@ -2634,25 +2788,6 @@ mod tests {
                 }
             },
         );
-        let [(target, response_frame)] = sent.as_slice() else {
-            panic!("one completion response")
-        };
-        assert_eq!(*target, interfaces[0].id);
-        let (header, sealed) = WirePacketHeader::parse(response_frame).unwrap();
-        assert_eq!(header.context, WireContext::Response);
-        assert_eq!(header.address, link_id.to_address());
-        let mut plaintext = [0u8; BROADCAST_MTU];
-        let plaintext_len = peer_key.open(sealed, &mut plaintext).unwrap();
-        let (responded_to, packed_response) =
-            parse_response_plaintext(&plaintext[..plaintext_len]).unwrap();
-        assert_eq!(responded_to, commit_request_id);
-        let response =
-            RemoteControlPairingResponse::parse(parse_packed_binary(packed_response).unwrap())
-                .unwrap();
-        let RemoteControlPairingResponse::Completed(completed) = response else {
-            panic!("completed response")
-        };
-        assert_eq!(completed.verify(&transcript), Ok(()));
 
         let retry_request_id = RequestId([0xF6; 16]);
         let retry_commit = crate::remote_control::RemoteControlPairingCommit::new(&transcript);
@@ -2692,16 +2827,19 @@ mod tests {
         };
         assert_eq!(*retry_target, interfaces[0].id);
         let (_, retry_sealed) = WirePacketHeader::parse(retry_frame).unwrap();
+        let mut plaintext = [0u8; BROADCAST_MTU];
         let retry_plaintext_len = peer_key.open(retry_sealed, &mut plaintext).unwrap();
         let (retry_responded_to, retry_packed_response) =
             parse_response_plaintext(&plaintext[..retry_plaintext_len]).unwrap();
         assert_eq!(retry_responded_to, retry_request_id);
-        assert_eq!(
-            RemoteControlPairingResponse::parse(
-                parse_packed_binary(retry_packed_response).unwrap(),
-            ),
-            Ok(RemoteControlPairingResponse::Completed(completed)),
-        );
+        let response = RemoteControlPairingResponse::parse(
+            parse_packed_binary(retry_packed_response).unwrap(),
+        )
+        .unwrap();
+        let RemoteControlPairingResponse::Completed(completed) = response else {
+            panic!("completed response")
+        };
+        assert_eq!(completed.verify(&transcript), Ok(()));
         assert_eq!(
             settlement,
             Some(Settlement::SettleRemoteControlTargetPairingAuthorization(
@@ -2795,31 +2933,20 @@ mod tests {
                 EngineReaction::Journaled(_) => {}
             },
         );
-        assert_eq!(directives, 1);
+        assert_eq!(directives, 0);
         assert_eq!(
             settlement,
             Some(Settlement::SettleRemoteControlTargetPairingAuthorization(
-                Ok(
-                    RemoteControlTargetPairingFinalization::AuthorizationFailureRecorded {
-                        attempt_id,
-                        retired_link: link_id,
-                        responder: RemoteControlTargetPairingResponder::new(
-                            link_id,
-                            commit_request_id,
-                        ),
-                    },
-                )
+                Ok(RemoteControlTargetPairingFinalization::CompletionDispatched { attempt_id })
             ),),
         );
-        assert_eq!(
-            closed,
-            Some((link_id, crate::engine::LinkClosedReason::LocallyClosed)),
-        );
-        assert!(engine.links.phase_for(&link_id).is_none());
-        assert_eq!(
+        assert_eq!(closed, None);
+        assert!(engine.links.phase_for(&link_id).is_some());
+        assert!(matches!(
             engine.remote_control_target_pairing.view(),
-            RemoteControlTargetPairingView::Idle,
-        );
+            RemoteControlTargetPairingView::Completing(attempt)
+                if attempt.attempt_id() == attempt_id
+        ));
     }
 
     #[test]
@@ -2827,7 +2954,7 @@ mod tests {
         let controller = controller_identity();
         let (mut engine, interfaces, endpoint, link_id, _, _) =
             open_pairing_link(controller.identity_hash());
-        let (attempt_id, transcript) = authorize_target_pairing(
+        let (attempt_id, _) = authorize_target_pairing(
             &mut engine,
             &interfaces,
             endpoint,
@@ -2836,11 +2963,6 @@ mod tests {
             RequestId([0xB1; 16]),
             RequestId([0xB2; 16]),
         );
-        let grant = RemoteControlControllerGrant::new(
-            controller,
-            transcript.permissions().clone().into_permitted_requests(),
-        )
-        .unwrap();
         let mut directives = 0usize;
         let mut settlement = None;
         let mut closed = None;
@@ -2855,7 +2977,7 @@ mod tests {
                 ),
             },
             AttachedInterfaces::new(&interfaces),
-            InstantMillis(32_000),
+            InstantMillis(2_400),
             &mut |bytes| bytes.fill(0xB4),
             &mut |reaction| match reaction {
                 EngineReaction::Directive(_) => directives += 1,
@@ -2869,28 +2991,20 @@ mod tests {
                 EngineReaction::Journaled(_) => {}
             },
         );
-        assert_eq!(directives, 1);
+        assert_eq!(directives, 0);
         assert_eq!(
             settlement,
             Some(Settlement::SettleRemoteControlTargetPairingAuthorization(
-                Ok(
-                    RemoteControlTargetPairingFinalization::AuthorizationRollbackRequired {
-                        attempt_id,
-                        retired_link: link_id,
-                        grant,
-                    },
-                ),
+                Ok(RemoteControlTargetPairingFinalization::CompletionDispatched { attempt_id })
             )),
         );
-        assert_eq!(
-            closed,
-            Some((link_id, crate::engine::LinkClosedReason::LocallyClosed)),
-        );
-        assert!(engine.links.phase_for(&link_id).is_none());
-        assert_eq!(
+        assert_eq!(closed, None);
+        assert!(engine.links.phase_for(&link_id).is_some());
+        assert!(matches!(
             engine.remote_control_target_pairing.view(),
-            RemoteControlTargetPairingView::Idle,
-        );
+            RemoteControlTargetPairingView::Completing(attempt)
+                if attempt.attempt_id() == attempt_id
+        ));
     }
 
     #[test]
@@ -2950,7 +3064,7 @@ mod tests {
         );
         assert!(matches!(
             engine.remote_control_target_pairing.view(),
-            RemoteControlTargetPairingView::Authorizing(attempt)
+            RemoteControlTargetPairingView::Completing(attempt)
                 if attempt.attempt_id() == attempt_id
         ));
 
@@ -3037,14 +3151,7 @@ mod tests {
         assert_eq!(
             settlement,
             Some(Settlement::SettleRemoteControlTargetPairingAuthorization(
-                Err(
-                    SettleRemoteControlTargetPairingAuthorizationFailure::CompletionDispatchFailed {
-                        attempt_id,
-                        failure: RemoteControlPairingResponseDispatchFailure::EgressUnavailable {
-                            interface: interfaces[0].id,
-                        },
-                    },
-                ),
+                Ok(RemoteControlTargetPairingFinalization::CompletionDispatched { attempt_id }),
             )),
         );
         assert!(matches!(
@@ -3077,7 +3184,7 @@ mod tests {
                 EngineReaction::Journaled(_) => {}
             },
         );
-        assert_eq!(retry_directives, 1);
+        assert_eq!(retry_directives, 0);
         assert_eq!(
             retry_settlement,
             Some(Settlement::SettleRemoteControlTargetPairingAuthorization(
@@ -3562,6 +3669,49 @@ mod tests {
             engine.remote_control_pairing_view(),
             RemoteControlPairingView::Closed,
         );
+
+        // Equal durations are also rejected: Begin needs the full attempt
+        // deadline to fit in remaining window time, so equal values only work
+        // at the exact open instant.
+        let mut equal = open(EgressTarget::AllInterfaces);
+        equal.expires_after =
+            RemoteControlPairingExpiresAfter::try_from(DurationMillis(10_000)).unwrap();
+        equal.attempt_timeout =
+            RemoteControlPairingAttemptTimeout::try_from(DurationMillis(10_000)).unwrap();
+        let expected_equal = OpenRemoteControlPairingRejection::AttemptTimeoutExceedsWindow {
+            attempt_timeout: equal.attempt_timeout,
+            pairing_expires_after: equal.expires_after,
+        };
+        settlement = None;
+        engine.ingest_command_into(
+            IssuedCommand {
+                id: CommandId(54),
+                command: PrnsCommand::OpenRemoteControlPairing(equal),
+            },
+            AttachedInterfaces::new(&interfaces),
+            InstantMillis(1_000),
+            &mut |_| entropy_calls += 1,
+            &mut |reaction| {
+                if let EngineReaction::Journaled(Journaled::CommandSettled {
+                    settlement: observed,
+                    ..
+                }) = reaction
+                {
+                    settlement = Some(observed);
+                }
+            },
+        );
+        assert_eq!(
+            settlement,
+            Some(Settlement::OpenRemoteControlPairing(Err(
+                OpenRemoteControlPairingFailure::Rejected(expected_equal),
+            ))),
+        );
+        assert_eq!(entropy_calls, 0);
+        assert_eq!(
+            engine.remote_control_pairing_view(),
+            RemoteControlPairingView::Closed,
+        );
     }
 
     #[test]
@@ -3655,6 +3805,71 @@ mod tests {
             engine.remote_control_pairing_view(),
             RemoteControlPairingView::Closed,
         );
+    }
+
+    #[test]
+    fn hopspot_page_routes_need_a_second_remote_control_handler_slot_for_pairing() {
+        const PAGE_PATHS: [&str; 4] = [
+            "/page/index.mu",
+            "/page/quickstart.mu",
+            "/page/coming-from-rns.mu",
+            "/page/source.mu",
+        ];
+        type FullAfterPages = TestFixedStorage<8, 8, 512, 5, 4, 16, 2, 2, 2, 2, 4, 2>;
+        type RoomForPairing = TestFixedStorage<8, 8, 512, 6, 4, 16, 2, 2, 2, 2, 4, 2>;
+
+        fn prepare<S: StorageLayout>(engine: &mut crate::engine::EngineState<S>) {
+            engine
+                .configure_remote_control_service(RemoteControlServiceConfiguration {
+                    identity_secrets: RemoteControlNodeIdentitySecrets::new(
+                        RemoteControlControllerIdentitySecret::from(IdentitySecretKey::new(
+                            [0x31; IDENTITY_SECRET_KEY_LEN],
+                        )),
+                        RemoteControlTargetIdentitySecret::from(IdentitySecretKey::new(
+                            [0x32; IDENTITY_SECRET_KEY_LEN],
+                        )),
+                    )
+                    .unwrap(),
+                    maximum_request_bytes: ByteLimit::Maximum(512),
+                })
+                .unwrap();
+            let pages = DestinationHash::new([0x44; 16]);
+            for path in PAGE_PATHS {
+                engine
+                    .register_request_handler(&pages, path, RequestPolicy::AllowAll)
+                    .unwrap();
+            }
+        }
+
+        let interface = InterfaceId::new([0x97; 8]);
+        let interfaces = [routable_descriptor(interface)];
+
+        let mut tight = crate::engine::EngineState::<FullAfterPages>::default();
+        prepare(&mut tight);
+        assert_eq!(
+            tight.open_remote_control_pairing_into(
+                open(EgressTarget::AllInterfaces),
+                AttachedInterfaces::new(&interfaces),
+                InstantMillis(1_000),
+                &mut fill_pairing_entropy,
+                &mut |_| {},
+            ),
+            Err(OpenRemoteControlPairingFailure::RegisterRequestEndpoint(
+                TablePushError::TableFull,
+            )),
+        );
+
+        let mut room = crate::engine::EngineState::<RoomForPairing>::default();
+        prepare(&mut room);
+        assert!(room
+            .open_remote_control_pairing_into(
+                open(EgressTarget::AllInterfaces),
+                AttachedInterfaces::new(&interfaces),
+                InstantMillis(1_000),
+                &mut fill_pairing_entropy,
+                &mut |_| {},
+            )
+            .is_ok());
     }
 
     #[test]

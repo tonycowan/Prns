@@ -20,11 +20,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::shutdown::ShutdownSignal;
-use crate::{cli, interface_discovery, nnpages, observability, persistence, services, splash};
+use crate::{
+    cli, interface_discovery, nnpages, observability, persistence, remote_control_pairing,
+    services, splash,
+};
 use personal_rns::browser_rendezvous::{AutoWifiDevicePolicy, BrowserRendezvous};
 use personal_rns::config::{SharedInstance, TransportIdentityPolicy};
 use personal_rns::engine::{
-    EngineProtocolPolicy, LinkMtuDiscovery, LocalHopCountOverride, ProofForm,
+    AnnounceAppData, AnnounceNow, AnnounceTarget, EgressTarget, EngineProtocolPolicy,
+    LinkMtuDiscovery, LocalHopCountOverride, OpenRemoteControlPairing, ProofForm,
     RecursivePathRequestDefault,
 };
 use personal_rns::identity::in_memory::InMemoryNodeIdentity;
@@ -32,16 +36,20 @@ use personal_rns::identity::IdentitySigner;
 use personal_rns::interfaces::ConnectionState;
 use personal_rns::node_introspection::logical_interface_inventory;
 use personal_rns::remote_control::{
-    RemoteControlInitialControllerGrants, RemoteControlSelfAnnouncement, RemoteControlService,
+    RemoteControlInitialControllerGrants, RemoteControlPairingAttemptTimeout,
+    RemoteControlPairingExpiresAfter, RemoteControlPairingPermissions,
+    RemoteControlPairingPublicAppDataBytes, RemoteControlRequestSet, RemoteControlSelfAnnouncement,
+    RemoteControlService,
 };
-use personal_rns::routing::announce::ExpandNameError;
+use personal_rns::routing::announce::{derive_single_destination_hash, ExpandNameError};
 use personal_rns::runtime::{
-    wall_clock_timeline_origin, CryptoPoolConfig, Diagnostic, ManuallyAttached, NodePersistence,
-    NodeRunError, PersistenceFlushStatus, PoolWorkers, PrnsEvent, PrnsNode, PrnsNodeRecipe,
-    RemoteControlFileIdentityBootstrapError,
+    wall_clock_timeline_origin, CryptoPoolConfig, Diagnostic, ManuallyAttached, Message,
+    NodePersistence, NodeRunError, PersistenceFlushStatus, PoolWorkers, PrnsEvent, PrnsNode,
+    PrnsNodeRecipe, RemoteControlFileIdentityBootstrapError, RemoteControlPairingControl,
 };
 use personal_rns::shared_instance::{RnsBlackholeFiles, SharedInstanceCredentials};
 use personal_rns::storage::GrowableHeap;
+use personal_rns::units::DurationMillis;
 use personal_rns::PlanRuntimeContext;
 use prnsd_control::{config_digest, ManagedProcess, ReloadRequest, ReloadResult, ServiceError};
 
@@ -278,6 +286,11 @@ pub(super) async fn run(
             }
         };
     let (remote_control_identity_secrets, _) = remote_control_identity_bootstrap.into_parts();
+    let remote_control_target_destination = remote_control_identity_secrets
+        .identities()
+        .target()
+        .endpoint()
+        .destination_hash();
     let persistent_secret = match identity::load_or_create_transport_identity(&storage_dir) {
         Ok(secret) => secret,
         Err(error) => match cli.persistence_policy {
@@ -398,8 +411,20 @@ pub(super) async fn run(
         routing_enabled.then_some(services::TransportStatusIdentity {
             transport: visible_identity_hash,
             network: network_identity_hash,
+            probe_responder: plan.probe_responder.is_enabled().then(|| {
+                derive_single_destination_hash(&visible_identity_hash, "rnstransport", &["probe"])
+                    .expect("rnstransport.probe is a valid destination name")
+            }),
         });
+    let soft_power = std::sync::Arc::new(services::SoftInterfacePowerRegistry::default());
+    let pending_pairing_confirmation: remote_control_pairing::PendingPairingConfirmation =
+        Arc::new(std::sync::Mutex::new(None));
+    let open_pairing_state: remote_control_pairing::OpenPairingState =
+        Arc::new(std::sync::Mutex::new(None));
     let request_nnpages = nnpages.clone();
+    let soft_power_for_state = soft_power.clone();
+    let pending_pairing_for_events = Arc::clone(&pending_pairing_confirmation);
+    let open_pairing_for_events = Arc::clone(&open_pairing_state);
     let mut prns = PrnsNode::new_with_handle(move |handle| PrnsNodeRecipe {
         transport_identity: transport_secret,
         remote_control,
@@ -409,15 +434,51 @@ pub(super) async fn run(
             remote_management_transport,
             started,
             request_nnpages,
+            soft_power_for_state,
         ),
         storage: GrowableHeap,
         request_endpoints: services::DaemonRequestRoutes,
         interfaces: ManuallyAttached,
+        // Recipe persistence is driven out-of-band via `persistence::prepare_worker`
+        // (ratchet rotations / managed shutdown). Remote-control pairing still
+        // applies grants in-memory when this is `NoPersistence`; see
+        // `remote_control_pairing_persistence` in prns-runtime-tokio.
         persistence: NoPersistence,
-        on_event: move |event, _state: &services::DaemonRequestState| {
-            if let PrnsEvent::Diagnostic(Diagnostic::SelfRatchetRotated { destination }) = event {
+        on_event: move |event, _state: &services::DaemonRequestState| match event {
+            PrnsEvent::Diagnostic(Diagnostic::SelfRatchetRotated { destination }) => {
                 let _ = rotated_tx.send(destination);
             }
+            PrnsEvent::Diagnostic(Diagnostic::RemoteControlPairingExpired { .. }) => {
+                if let Ok(mut state) = open_pairing_for_events.lock() {
+                    *state = None;
+                }
+                if let Ok(mut pending) = pending_pairing_for_events.lock() {
+                    *pending = None;
+                }
+            }
+            PrnsEvent::Message(Message::RemoteControlTargetPairingConfirmationRequired(
+                confirmation,
+            )) => {
+                let digits = confirmation.confirmation().confirmation_code().to_string();
+                tracing::info!(
+                    event = "remote_control_pairing_confirmation_required",
+                    confirmation_digits = %digits,
+                );
+                if let Ok(mut pending) = pending_pairing_for_events.lock() {
+                    *pending = Some(confirmation);
+                }
+            }
+            PrnsEvent::Message(
+                Message::RemoteControlTargetPairingExpired { .. }
+                | Message::RemoteControlTargetPairingLinkClosed { .. }
+                | Message::RemoteControlTargetPairingCompletionRetentionExpired { .. }
+                | Message::RemoteControlTargetPairingCompletionLinkClosed { .. },
+            ) => {
+                if let Ok(mut pending) = pending_pairing_for_events.lock() {
+                    *pending = None;
+                }
+            }
+            PrnsEvent::Message(_) | PrnsEvent::Diagnostic(_) => {}
         },
     })
     .with_timeline_origin(timeline_origin)
@@ -490,7 +551,8 @@ pub(super) async fn run(
             }
         },
         None => services::ManagementDestinations::none(),
-    };
+    }
+    .with_remote_control_endpoint(remote_control_target_destination);
     let node_page_destination = management_destinations.node_page_destination();
 
     if plan.panic_on_interface_error && startup.failed != 0 {
@@ -517,11 +579,12 @@ pub(super) async fn run(
                     progress: observability.state_restore_progress(),
                 },
             );
-            persistence = Some(persistence::prepare_worker(
-                node_persistence,
-                prns_handle.clone(),
-                rotated_rx,
-            ));
+            let worker =
+                persistence::prepare_worker(node_persistence, prns_handle.clone(), rotated_rx);
+            prns.attach_remote_control_authorization_persistence(
+                worker.authorization_persistence(),
+            );
+            persistence = Some(worker);
         }
     }
 
@@ -619,6 +682,7 @@ pub(super) async fn run(
     ));
     let mut nnpages_refresh_tick = Box::pin(tokio::time::sleep(NNPAGES_REFRESH_INTERVAL));
     let mut nnpages_refresh_tasks = tokio::task::JoinSet::new();
+    let mut pairing_control_tasks = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             result = &mut node_run => {
@@ -717,6 +781,33 @@ pub(super) async fn run(
                 nnpages_refresh_tick
                     .as_mut()
                     .reset(tokio::time::Instant::now() + NNPAGES_REFRESH_INTERVAL);
+            }
+            request = remote_control_pairing::next_control_request(&config_dir) => {
+                match request {
+                    Ok(request) => {
+                        // Spawn so the select keeps polling `node_run`; awaiting settle
+                        // inline would deadlock the manifold that completes the command.
+                        let handle = prns_handle.clone();
+                        let open_state = Arc::clone(&open_pairing_state);
+                        let pending_confirmation = Arc::clone(&pending_pairing_confirmation);
+                        pairing_control_tasks.spawn(async move {
+                            execute_pairing_control(
+                                request,
+                                &handle,
+                                &open_state,
+                                &pending_confirmation,
+                                remote_control_target_destination,
+                            )
+                            .await;
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            event = "remote_control_pairing_request_failed",
+                            error = %error,
+                        );
+                    }
+                }
             }
             request = nnpages::next_control_request(&config_dir) => {
                 match request {
@@ -828,8 +919,17 @@ pub(super) async fn run(
                     );
                 }
             }
+            completed = pairing_control_tasks.join_next(), if !pairing_control_tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    tracing::warn!(
+                        event = "remote_control_pairing_task_failed",
+                        error = %error,
+                    );
+                }
+            }
         }
     }
+    pairing_control_tasks.shutdown().await;
     nnpages_refresh_tasks.shutdown().await;
     drop(persistence_run);
     drop(node_run);
@@ -848,6 +948,227 @@ pub(super) async fn run(
     match terminal_error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+async fn execute_pairing_control(
+    request: remote_control_pairing::ClaimedPairingControlRequest,
+    handle: &personal_rns::runtime::PrnsNodeHandle,
+    open_state: &remote_control_pairing::OpenPairingState,
+    pending_confirmation: &remote_control_pairing::PendingPairingConfirmation,
+    remote_control_target_destination: personal_rns::wire::DestinationHash,
+) {
+    use remote_control_pairing::{
+        PairingControlFailure as Failure, PairingControlKind as Kind,
+        PairingControlSuccess as Success, PairingStatus, PairingWindowSnapshot,
+    };
+
+    let result = match request.kind() {
+        Kind::Open => {
+            // Open window must be strictly longer than attempt_timeout: Begin
+            // requires the full attempt deadline to fit inside the remaining
+            // pairing window. Equal values (e.g. both 120s) make Begin fail as
+            // soon as the operator takes any time after `pairing open`.
+            let expires_after = RemoteControlPairingExpiresAfter::try_from(DurationMillis(180_000));
+            // Operators need wall-clock time to compare digits and approve both
+            // sides; 30s was too tight and produced LinkClosed on the desktop.
+            let attempt_timeout =
+                RemoteControlPairingAttemptTimeout::try_from(DurationMillis(120_000));
+            let permissions =
+                RemoteControlPairingPermissions::try_from(RemoteControlRequestSet::all());
+            let public_app_data =
+                RemoteControlPairingPublicAppDataBytes::try_from(b"prnsd".as_slice());
+            let (Ok(expires_after), Ok(attempt_timeout), Ok(permissions), Ok(public_app_data)) =
+                (expires_after, attempt_timeout, permissions, public_app_data)
+            else {
+                request.finish(Err(Failure::StateUnavailable));
+                return;
+            };
+            match handle
+                .open_remote_control_pairing(OpenRemoteControlPairing {
+                    target: EgressTarget::AllInterfaces,
+                    expires_after,
+                    attempt_timeout,
+                    permissions,
+                    public_app_data,
+                })
+                .await
+            {
+                Ok(opened) => {
+                    let snapshot = PairingWindowSnapshot {
+                        invitation_code: opened.invitation_code.to_string(),
+                        endpoint_hash: data_encoding::HEXLOWER
+                            .encode(opened.endpoint.destination_hash().as_bytes()),
+                        expires_at_millis: opened.expires_at.0,
+                        confirmation_digits: None,
+                    };
+                    match open_state.lock() {
+                        Ok(mut state) => {
+                            *state = Some(snapshot.clone());
+                            match pending_confirmation.lock() {
+                                Ok(mut pending) => {
+                                    *pending = None;
+                                    Ok(Success::Opened(snapshot))
+                                }
+                                Err(_) => Err(Failure::StateUnavailable),
+                            }
+                        }
+                        Err(_) => Err(Failure::StateUnavailable),
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "remote_control_pairing_open_failed",
+                        error = ?error,
+                    );
+                    Err(Failure::OpenFailed)
+                }
+            }
+        }
+        Kind::Close => match handle.close_remote_control_pairing().await {
+            Ok(_) => {
+                if let Ok(mut state) = open_state.lock() {
+                    *state = None;
+                } else {
+                    request.finish(Err(Failure::StateUnavailable));
+                    return;
+                }
+                if let Ok(mut pending) = pending_confirmation.lock() {
+                    *pending = None;
+                    Ok(Success::Closed)
+                } else {
+                    Err(Failure::StateUnavailable)
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "remote_control_pairing_close_failed",
+                    error = ?error,
+                );
+                Err(Failure::CloseFailed)
+            }
+        },
+        Kind::Approve => {
+            let approval = match pending_confirmation.lock() {
+                Ok(pending) => pending.as_ref().map(|confirmation| confirmation.approval()),
+                Err(_) => {
+                    request.finish(Err(Failure::StateUnavailable));
+                    return;
+                }
+            };
+            let Some(approval) = approval else {
+                request.finish(Err(Failure::NoPendingConfirmation));
+                return;
+            };
+            match handle.approve_remote_control_target_pairing(approval).await {
+                Ok(outcome) => {
+                    let cleared = match pending_confirmation.lock() {
+                        Ok(mut pending) => {
+                            *pending = None;
+                            true
+                        }
+                        Err(_) => false,
+                    };
+                    if !cleared {
+                        Err(Failure::StateUnavailable)
+                    } else {
+                        tracing::info!(
+                            event = "remote_control_pairing_target_approved",
+                            outcome = ?outcome,
+                        );
+                        announce_remote_control_endpoint(handle, remote_control_target_destination)
+                            .await;
+                        Ok(Success::Approved)
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "remote_control_pairing_approve_failed",
+                        error = ?error,
+                    );
+                    Err(Failure::ApproveFailed)
+                }
+            }
+        }
+        Kind::Reject => {
+            let rejection = match pending_confirmation.lock() {
+                Ok(pending) => pending
+                    .as_ref()
+                    .map(|confirmation| confirmation.rejection()),
+                Err(_) => {
+                    request.finish(Err(Failure::StateUnavailable));
+                    return;
+                }
+            };
+            let Some(rejection) = rejection else {
+                request.finish(Err(Failure::NoPendingConfirmation));
+                return;
+            };
+            match handle.reject_remote_control_target_pairing(rejection).await {
+                Ok(_) => match pending_confirmation.lock() {
+                    Ok(mut pending) => {
+                        *pending = None;
+                        Ok(Success::Rejected)
+                    }
+                    Err(_) => Err(Failure::StateUnavailable),
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        event = "remote_control_pairing_reject_failed",
+                        error = ?error,
+                    );
+                    Err(Failure::RejectFailed)
+                }
+            }
+        }
+        Kind::Status => {
+            let confirmation_digits = match pending_confirmation.lock() {
+                Ok(pending) => pending.as_ref().map(|confirmation| {
+                    confirmation.confirmation().confirmation_code().to_string()
+                }),
+                Err(_) => {
+                    request.finish(Err(Failure::StateUnavailable));
+                    return;
+                }
+            };
+            match open_state.lock() {
+                Ok(state) => match state.as_ref() {
+                    Some(snapshot) => {
+                        let mut snapshot = snapshot.clone();
+                        snapshot.confirmation_digits = confirmation_digits;
+                        Ok(Success::Status(PairingStatus::Open(snapshot)))
+                    }
+                    None => Ok(Success::Status(PairingStatus::Closed)),
+                },
+                Err(_) => Err(Failure::StateUnavailable),
+            }
+        }
+    };
+    request.finish(result);
+}
+
+async fn announce_remote_control_endpoint(
+    handle: &personal_rns::runtime::PrnsNodeHandle,
+    destination: personal_rns::wire::DestinationHash,
+) {
+    if let Err(error) = handle
+        .announce_now(AnnounceNow {
+            destination,
+            target: AnnounceTarget::AllInterfaces,
+            app_data: AnnounceAppData::Registered,
+        })
+        .await
+    {
+        tracing::warn!(
+            event = "remote_control_announce_failed",
+            destination = ?destination.as_bytes(),
+            error = ?error,
+        );
+    } else {
+        tracing::info!(
+            event = "remote_control_endpoint_announced",
+            destination = ?destination.as_bytes(),
+        );
     }
 }
 

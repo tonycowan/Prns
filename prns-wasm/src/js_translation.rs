@@ -122,6 +122,7 @@ pub(crate) fn bluetooth_control_to_js(control: bluetooth_contract::Control) -> J
             endpoint,
             capabilities,
             peer_rssi,
+            group_tag,
         } => {
             set_str(&object, "type", "hello");
             set_bytes(&object, "identity", identity.as_bytes());
@@ -131,12 +132,16 @@ pub(crate) fn bluetooth_control_to_js(control: bluetooth_contract::Control) -> J
             if let Some(rssi) = peer_rssi {
                 set_i32(&object, "peerRssi", rssi as i32);
             }
+            if let Some(tag) = group_tag {
+                set_bytes(&object, "groupTag", &tag);
+            }
         }
         bluetooth_contract::Control::Welcome {
             identity,
             endpoint,
             capabilities,
             peer_rssi,
+            group_tag,
         } => {
             set_str(&object, "type", "welcome");
             set_bytes(&object, "identity", identity.as_bytes());
@@ -145,6 +150,9 @@ pub(crate) fn bluetooth_control_to_js(control: bluetooth_contract::Control) -> J
             set_u32(&object, "linkMtu", capabilities.link_mtu as u32);
             if let Some(rssi) = peer_rssi {
                 set_i32(&object, "peerRssi", rssi as i32);
+            }
+            if let Some(tag) = group_tag {
+                set_bytes(&object, "groupTag", &tag);
             }
         }
         bluetooth_contract::Control::Close { reason } => {

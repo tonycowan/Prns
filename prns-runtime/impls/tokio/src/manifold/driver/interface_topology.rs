@@ -2,14 +2,14 @@ use prns_core::interfaces::{AttachedInterfaces, IndexedAttachedInterfaces};
 
 use crate::engine::{Departure, EngineState, InstantMillis};
 use crate::interfaces::InterfaceIfac;
-use crate::interfaces::{FrameAccountingRecorder, InterfaceDescriptor, InterfaceId};
+use crate::interfaces::{FrameAccountingRecorder, InterfaceDescriptor, InterfaceId, InterfaceMode};
 use crate::manifold::interface_seam::{frame_cap_for, BROADCAST_WIRE_FRAME_LEN};
 use crate::manifold::Host;
 use crate::storage::StorageLayout;
 
 use super::egress::{Egress, InterfacePacer};
 use super::host_protocol::AddInterfaceCommand;
-use super::TokioGrantConsumer;
+use super::{HeapFrameSlot, TokioGrantConsumer};
 
 pub(super) struct InterfaceTopology {
     pub(super) interfaces: IndexedAttachedInterfaces,
@@ -113,6 +113,10 @@ impl InterfaceTopology {
         Some((id, frame_cap))
     }
 
+    pub(super) fn set_mode(&mut self, id: InterfaceId, mode: InterfaceMode) {
+        let _updated = self.interfaces.set_mode(id, mode);
+    }
+
     pub(super) fn detach<S: StorageLayout>(
         &mut self,
         engine: &mut EngineState<S>,
@@ -137,5 +141,11 @@ impl InterfaceTopology {
             .iter()
             .find(|recorder| recorder.id() == source)
             .cloned()
+    }
+
+    pub(super) fn return_inbound_slot(&mut self, source: InterfaceId, slot: HeapFrameSlot) {
+        if let Some((_, lane)) = self.inbound_lanes.iter_mut().find(|(id, _)| *id == source) {
+            lane.return_slot(slot);
+        }
     }
 }

@@ -24,7 +24,7 @@ use super::super::remote_control_pairing_persistence::{
     RemoteControlPairingPersistenceEvents, RemoteControlPairingPersistenceRequired,
 };
 use super::super::request_endpoints::RequestEndpointSet;
-use super::super::request_runner::{run_router, RunnerRequest};
+use super::super::request_runner::{run_router, trace_journaled, RunnerRequest};
 use super::super::{
     EmbassyInterfaceStore, EmbeddedFlashPersistence, EmbeddedPersistenceDiagnostic,
     EmbeddedPersistenceRestoreReport, InterfaceInspectionStore, ManifoldPersistence,
@@ -441,7 +441,10 @@ where
     }
 
     /// Runs the manifold with the caller's interface and supervisor tasks.
-    pub async fn run(self, drive: impl Future<Output = ()>) {
+    pub async fn run(self, drive: impl Future<Output = ()>)
+    where
+        St: prns_runtime::runtime::RemoteControlHostControls,
+    {
         self.run_with_inspection_store(&NoInterfaceInspectionStore, drive)
             .await;
     }
@@ -455,6 +458,7 @@ where
     pub async fn run_with_proof_decider<P>(self, should_prove: P, drive: impl Future<Output = ()>)
     where
         P: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         self.run_with_inspection_store_and_proof_decider(
             &NoInterfaceInspectionStore,
@@ -474,6 +478,7 @@ where
         drive: impl Future<Output = ()>,
     ) where
         M: Sync,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         const {
             assert!(
@@ -497,6 +502,7 @@ where
     ) where
         M: Sync,
         P: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         const {
             assert!(
@@ -511,6 +517,7 @@ where
     async fn run_with_inspection_store<Store>(self, store: &Store, drive: impl Future<Output = ()>)
     where
         Store: InterfaceInspectionStore,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         self.run_with_inspection_store_and_proof_decider(store, |_| false, drive)
             .await;
@@ -524,6 +531,7 @@ where
     ) where
         Store: InterfaceInspectionStore,
         P: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         let PrnsNode {
             node,
@@ -570,9 +578,8 @@ where
                     {
                         pairing_persistence_events.signal(required);
                     }
-                    if let Some(request) = RunnerRequest::copy_from(&journaled) {
-                        let _ = request_sender.try_send(request);
-                    }
+                    trace_journaled(&journaled);
+                    RunnerRequest::try_enqueue(&journaled, &request_sender);
                     on_event(PrnsEvent::from(journaled), &state);
                 });
             },
@@ -605,7 +612,10 @@ where
     }
 
     /// Runs only the manifold for boards that schedule interfaces separately.
-    pub async fn run_manifold(&mut self) {
+    pub async fn run_manifold(&mut self)
+    where
+        St: prns_runtime::runtime::RemoteControlHostControls,
+    {
         self.run_manifold_with_inspection_store(&NoInterfaceInspectionStore)
             .await;
     }
@@ -614,6 +624,7 @@ where
     pub async fn run_manifold_with_proof_decider<P>(&mut self, should_prove: P)
     where
         P: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         let mut persistence = NoManifoldPersistence;
         self.run_manifold_with_inspection_store_and_persistence_and_proof_decider(
@@ -633,6 +644,7 @@ where
         store: &EmbassyInterfaceStore<M, INTERFACES, PACKET_PHY_CAPACITY, PACKET_PHY_INDEX_BUCKETS>,
     ) where
         M: Sync,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         const {
             assert!(
@@ -655,6 +667,7 @@ where
     ) where
         M: Sync,
         P: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         const {
             assert!(
@@ -674,6 +687,7 @@ where
     async fn run_manifold_with_inspection_store<Store>(&mut self, store: &Store)
     where
         Store: InterfaceInspectionStore,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         let mut persistence = NoManifoldPersistence;
         self.run_manifold_with_inspection_store_and_persistence(store, &mut persistence)
@@ -697,6 +711,7 @@ where
         Fl: NorFlash,
         Keys: RouteSnapshotKeys,
         Observe: FnMut(EmbeddedPersistenceDiagnostic),
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         const {
             assert!(
@@ -728,6 +743,7 @@ where
         Keys: RouteSnapshotKeys,
         Observe: FnMut(EmbeddedPersistenceDiagnostic),
         Decide: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         const {
             assert!(
@@ -771,6 +787,7 @@ where
     ) where
         Store: InterfaceInspectionStore,
         P: ManifoldPersistence<S>,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         self.run_manifold_with_inspection_store_and_persistence_and_proof_decider(
             store,
@@ -793,6 +810,7 @@ where
         Store: InterfaceInspectionStore,
         P: ManifoldPersistence<S>,
         Decide: FnMut(&ProofRequest) -> bool,
+        St: prns_runtime::runtime::RemoteControlHostControls,
     {
         let PrnsNode {
             node,
@@ -841,9 +859,8 @@ where
                     {
                         pairing_persistence_events.signal(required);
                     }
-                    if let Some(request) = RunnerRequest::copy_from(&journaled) {
-                        let _ = request_sender.try_send(request);
-                    }
+                    trace_journaled(&journaled);
+                    RunnerRequest::try_enqueue(&journaled, &request_sender);
                     on_event(PrnsEvent::from(journaled), state);
                 });
             },

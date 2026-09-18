@@ -56,6 +56,7 @@ fn render_input<'a>(
         content: personal_hopspot_core::ScreenContent {
             cards: &[],
             local_docs: None,
+            interface_menu_details: None,
         },
         battery: personal_hopspot_core::PowerSnapshot::UNKNOWN,
         gnss: None,
@@ -72,6 +73,7 @@ fn ui_state(user_blanking: UserBlanking) -> personal_hopspot_core::UiState {
         shared_instance_config_export:
             personal_hopspot_core::SharedInstanceConfigExport::Unavailable,
         gnss: personal_hopspot_core::GnssAvailability::Unavailable,
+        ble_group_editor: personal_hopspot_core::BleGroupEditor::Unavailable,
     })
 }
 

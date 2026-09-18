@@ -100,7 +100,7 @@ setup = "Install Rust with rustup so the nRF52840 target and llvm-tools-preview 
 
 [[task]]
 id = "build.hopspot.mesh-tower-v2"
-summary = "Build the headless Heltec MeshTower V2 firmware with S140 6.1.1 Bluetooth Auto and package its recovery-compatible developer UF2."
+summary = "Build the headless Heltec MeshTower V2 firmware with S140 6.1.1 Bluetooth Auto and package its recovery-compatible developer UF2. Set PRNS_BLE_DISCOVERY_GROUP=mt-leg-a|mt-leg-b for lab BLE islands."
 domain = "build"
 effect = "workspace-write"
 platforms = ["linux", "macos"]
@@ -701,6 +701,36 @@ platforms = ["any"]
 audience = ["ci", "release"]
 entrypoint = ["python3", "tools/release/package-hopspot-flash.py"]
 requires = ["python3"]
+
+[[task]]
+id = "release.controller.macos.package"
+summary = "Build an unsigned macOS PRNS Controller .app with embedded hopspot-flash."
+domain = "release"
+effect = "workspace-write"
+platforms = ["macos"]
+audience = ["developer", "ci", "release"]
+entrypoint = ["bash", "tools/release/package-controller-macos.sh"]
+requires = ["bash", "cargo", "dx"]
+
+[[task]]
+id = "release.controller.linux.package"
+summary = "Build an unsigned Linux PRNS Controller portable folder with hopspot-flash beside the exe."
+domain = "release"
+effect = "workspace-write"
+platforms = ["linux"]
+audience = ["developer", "ci", "release"]
+entrypoint = ["bash", "tools/release/package-controller-linux.sh"]
+requires = ["bash", "cargo", "dx", "tar"]
+
+[[task]]
+id = "release.controller.windows.package"
+summary = "Build an unsigned Windows PRNS Controller portable folder with hopspot-flash.exe beside the exe."
+domain = "release"
+effect = "workspace-write"
+platforms = ["windows"]
+audience = ["developer", "ci", "release"]
+entrypoint = ["bash", "tools/release/package-controller-windows.sh"]
+requires = ["bash", "cargo", "dx"]
 
 [[task]]
 id = "release.attestation.record"

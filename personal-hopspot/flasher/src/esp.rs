@@ -49,11 +49,12 @@ pub(crate) fn flash(
     provisioning: &ProvisioningAction,
     port_name: Option<&str>,
     monitor: bool,
+    rc_vault: Option<(u32, &[u8])>,
     reporter: Reporter,
 ) -> Result<(), AppError> {
     let selected = select_port(port_name)?;
     let expected = expected_device(board)?;
-    let plan = sparse_plan(board, target, provisioning)?;
+    let plan = sparse_plan(board, target, provisioning, rc_vault)?;
     let total = plan.iter().map(|part| part.bytes.len() as u64).sum::<u64>();
 
     reporter.phase(
@@ -168,6 +169,7 @@ fn sparse_plan(
     board: &BoardCatalogEntry,
     target: &PreparedEspTarget,
     provisioning: &ProvisioningAction,
+    rc_vault: Option<(u32, &[u8])>,
 ) -> Result<Vec<SparsePart>, AppError> {
     if matches!(provisioning, ProvisioningAction::ConfigureWithTcp { .. })
         && !target.supports_tcp_client_provisioning()
@@ -194,6 +196,12 @@ fn sparse_plan(
         plan.push(SparsePart {
             offset: slot.offset,
             bytes: config,
+        });
+    }
+    if let Some((offset, bytes)) = rc_vault {
+        plan.push(SparsePart {
+            offset,
+            bytes: bytes.to_vec(),
         });
     }
     plan.sort_by_key(|part| part.offset);
@@ -336,9 +344,11 @@ fn map_flash_session_error(error: SessionError) -> AppError {
 }
 
 pub(crate) fn diagnostic_ports() -> Result<Vec<SerialPortInfo>, AppError> {
-    serialport::available_ports().map_err(|error| {
-        AppError::serial_port(format!("could not enumerate serial ports: {error}"))
-    })
+    serialport::available_ports()
+        .map(collapse_macos_serial_aliases)
+        .map_err(|error| {
+            AppError::serial_port(format!("could not enumerate serial ports: {error}"))
+        })
 }
 
 fn select_port(requested: Option<&str>) -> Result<SerialPortInfo, AppError> {
@@ -357,10 +367,12 @@ fn select_port_from(
                 AppError::serial_port(format!("serial port {requested:?} was not found"))
             });
     }
-    let mut candidates = ports
-        .into_iter()
-        .filter(is_likely_device_port)
-        .collect::<Vec<_>>();
+    let mut candidates = collapse_macos_serial_aliases(
+        ports
+            .into_iter()
+            .filter(is_likely_device_port)
+            .collect::<Vec<_>>(),
+    );
     match candidates.len() {
         0 => Err(AppError::serial_port(
             "no usable serial device was found; connect the board with a USB data cable",
@@ -405,6 +417,50 @@ fn validate_device_identity(
             "ESP board catalog is missing its flash capacity",
         )),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MacosSerialNode {
+    Callout,
+    Dialin,
+    Other,
+}
+
+fn macos_serial_node(name: &str) -> MacosSerialNode {
+    if macos_serial_stem(name, "cu.").is_some() {
+        MacosSerialNode::Callout
+    } else if macos_serial_stem(name, "tty.").is_some() {
+        MacosSerialNode::Dialin
+    } else {
+        MacosSerialNode::Other
+    }
+}
+
+fn macos_serial_stem<'a>(name: &'a str, kind: &str) -> Option<&'a str> {
+    name.strip_prefix("/dev/")
+        .unwrap_or(name)
+        .strip_prefix(kind)
+}
+
+fn macos_serial_identity(name: &str) -> String {
+    macos_serial_stem(name, "cu.")
+        .or_else(|| macos_serial_stem(name, "tty."))
+        .map(|stem| format!("macos:{stem}"))
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// macOS exposes each USB serial device as both `/dev/cu.*` and `/dev/tty.*`.
+fn collapse_macos_serial_aliases(mut ports: Vec<SerialPortInfo>) -> Vec<SerialPortInfo> {
+    ports.sort_by(|left, right| {
+        macos_serial_node(&left.port_name)
+            .cmp(&macos_serial_node(&right.port_name))
+            .then_with(|| left.port_name.cmp(&right.port_name))
+    });
+    let mut seen = std::collections::BTreeSet::new();
+    ports
+        .into_iter()
+        .filter(|port| seen.insert(macos_serial_identity(&port.port_name)))
+        .collect()
 }
 
 fn is_likely_device_port(port: &SerialPortInfo) -> bool {
@@ -732,6 +788,19 @@ mod port_tests {
                 .port_name,
             "/dev/cu.usbmodem2"
         );
+    }
+
+    #[test]
+    fn macos_cu_and_tty_nodes_are_the_same_usb_device() {
+        let selected = select_port_from(
+            vec![
+                port("/dev/tty.usbmodem101", SerialPortType::Unknown),
+                port("/dev/cu.usbmodem101", SerialPortType::Unknown),
+            ],
+            None,
+        )
+        .expect("one physical modem");
+        assert_eq!(selected.port_name, "/dev/cu.usbmodem101");
     }
 
     #[test]

@@ -1,3 +1,6 @@
+pub(in crate::screen) mod ble_group;
+pub(in crate::screen) mod interface_detail;
+pub(in crate::screen) mod interface_mode;
 pub(in crate::screen) mod lora;
 
 use core::future::Future;
@@ -5,11 +8,28 @@ use core::future::Future;
 use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::storage::DisplayedStorageLimits;
 
+use crate::interface_mode::{InterfaceModeSelection, InterfaceModeSlot};
 use crate::PersistenceState;
 
 use super::limits::storage_limit_page_count;
 use super::model::{Card, CardKind, ScreenContent};
+use ble_group::{
+    ble_group_editor_hold, ble_group_editor_tap, choice_cursor_for, BleGroupHold, BleGroupScreen,
+};
+pub use ble_group::{BleGroupName, DEFAULT_BLE_GROUP};
+use interface_detail::{
+    clamp_interface_detail_focus, interface_detail_page, interface_detail_page_count,
+    interface_detail_status_line_count, next_interface_detail_focus,
+};
+use interface_mode::{
+    clamp_interface_mode_editor_cursor, initial_interface_mode_editor_cursor,
+    interface_mode_editor_row, interface_mode_editor_row_count, selection_for_mode_choice,
+    InterfaceModeEditorRow,
+};
 use lora::{lora_editor_hold, lora_editor_tap, region_index, LoRaHold, LoRaScreen};
+
+pub use interface_detail::InterfaceDetailFocus;
+pub use interface_mode::interface_mode_slot;
 
 const INITIAL_VISIBLE_FOCUS_ITEMS: usize = 3;
 const SCROLLED_VISIBLE_FOCUS_ITEMS: usize = 2;
@@ -24,10 +44,11 @@ pub(in crate::screen) enum GlobalMenuItem {
     DisplayAutoOff,
     Sleep,
     RadioMode,
+    PairRemote,
     Back,
 }
 
-const GLOBAL_MENU_ORDER: [GlobalMenuItem; 8] = [
+const GLOBAL_MENU_ORDER: [GlobalMenuItem; 9] = [
     GlobalMenuItem::Announce,
     GlobalMenuItem::Limits,
     GlobalMenuItem::Gnss,
@@ -35,6 +56,7 @@ const GLOBAL_MENU_ORDER: [GlobalMenuItem; 8] = [
     GlobalMenuItem::DisplayAutoOff,
     GlobalMenuItem::Sleep,
     GlobalMenuItem::RadioMode,
+    GlobalMenuItem::PairRemote,
     GlobalMenuItem::Back,
 ];
 
@@ -49,18 +71,27 @@ pub(in crate::screen) const SLEEP_MENU_ITEM: usize = 4;
 #[cfg(test)]
 pub(in crate::screen) const RADIO_MENU_ITEM_NO_DISPLAY: usize = 3;
 pub(in crate::screen) const POWER_MENU_ITEM: usize = 0;
-pub(in crate::screen) const POWER_ONLY_MENU_ITEMS: &[&str] = &["Power", "Back"];
-pub(in crate::screen) const SHARED_INSTANCE_MENU_ITEMS: &[&str] = &["Power", "RNS Config", "Back"];
+pub(in crate::screen) const POWER_ONLY_MENU_ITEMS: &[&str] = &["Power", "Mode", "Back"];
+pub(in crate::screen) const POWER_ONLY_MODE_MENU_ITEM: usize = 1;
+pub(in crate::screen) const SHARED_INSTANCE_MENU_ITEMS: &[&str] =
+    &["Power", "RNS Config", "Mode", "Back"];
 pub(in crate::screen) const SHARED_INSTANCE_CONFIG_MENU_ITEM: usize = 1;
-pub(in crate::screen) const WIFI_MENU_ITEMS: &[&str] = &["Power", "Station", "Back"];
+pub(in crate::screen) const SHARED_INSTANCE_MODE_MENU_ITEM: usize = 2;
+pub(in crate::screen) const WIFI_MENU_ITEMS: &[&str] = &["Power", "Station", "Mode", "Back"];
 pub(in crate::screen) const STATION_UPLINK_MENU_ITEM: usize = 1;
-const LORA_MENU_ITEMS: &[&str] = &["Power", "Tune", "Reset", "Back"];
+pub(in crate::screen) const WIFI_MODE_MENU_ITEM: usize = 2;
+const LORA_MENU_ITEMS: &[&str] = &["Power", "Tune", "Reset", "Mode", "Back"];
 pub(in crate::screen) const LORA_TUNE_MENU_ITEM: usize = 1;
 pub(in crate::screen) const LORA_RESET_MENU_ITEM: usize = 2;
+pub(in crate::screen) const LORA_MODE_MENU_ITEM: usize = 3;
+const BLE_GROUP_MENU_ITEMS: &[&str] = &["Power", "Group", "Mode", "Back"];
+pub(in crate::screen) const BLE_GROUP_MENU_ITEM: usize = 1;
+const BLE_GROUP_MODE_MENU_ITEM: usize = 2;
 
 pub(in crate::screen) fn interface_menu_items(
     kind: CardKind,
     shared_instance_config_export: SharedInstanceConfigExport,
+    ble_group_editor: BleGroupEditor,
 ) -> &'static [&'static str] {
     match kind {
         CardKind::LoRa => LORA_MENU_ITEMS,
@@ -70,13 +101,40 @@ pub(in crate::screen) fn interface_menu_items(
         {
             SHARED_INSTANCE_MENU_ITEMS
         }
+        CardKind::Ble if ble_group_editor == BleGroupEditor::Available => BLE_GROUP_MENU_ITEMS,
+        CardKind::Ble
+        | CardKind::Wifi
+        | CardKind::Peer
+        | CardKind::Usb
+        | CardKind::EspNow
+        | CardKind::SharedInstance
+        | CardKind::Tcp => POWER_ONLY_MENU_ITEMS,
+    }
+}
+
+pub(in crate::screen) fn mode_menu_item(
+    kind: CardKind,
+    shared_instance_config_export: SharedInstanceConfigExport,
+    ble_group_editor: BleGroupEditor,
+) -> Option<usize> {
+    match kind {
+        CardKind::LoRa => Some(LORA_MODE_MENU_ITEM),
+        CardKind::WifiStation | CardKind::WifiStationDisabled => Some(WIFI_MODE_MENU_ITEM),
+        CardKind::SharedInstance
+            if shared_instance_config_export == SharedInstanceConfigExport::Available =>
+        {
+            Some(SHARED_INSTANCE_MODE_MENU_ITEM)
+        }
+        CardKind::Ble if ble_group_editor == BleGroupEditor::Available => {
+            Some(BLE_GROUP_MODE_MENU_ITEM)
+        }
         CardKind::Wifi
         | CardKind::Peer
         | CardKind::Usb
         | CardKind::Ble
         | CardKind::EspNow
         | CardKind::SharedInstance
-        | CardKind::Tcp => POWER_ONLY_MENU_ITEMS,
+        | CardKind::Tcp => Some(POWER_ONLY_MODE_MENU_ITEM),
     }
 }
 
@@ -102,7 +160,17 @@ pub enum UiAction {
     OpenLoRaEditor,
     SetLoRaProfile(RadioProfile),
     ResetLoRaProfile,
+    OpenBleGroupEditor,
+    SetBleDiscoveryGroup(BleGroupName),
+    OpenInterfaceModeEditor,
+    SetInterfaceMode {
+        slot: InterfaceModeSlot,
+        selection: InterfaceModeSelection,
+    },
     SwapRadioMode,
+    OpenRemotePairing,
+    ApproveRemotePairing,
+    RejectRemotePairing,
     OpenDocs,
     CopySharedInstanceConfig,
 }
@@ -179,6 +247,47 @@ where
         RadioProfileChangeResult::Saved
     } else {
         RadioProfileChangeResult::ProfileNotSaved
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceModeChangeResult {
+    Saved,
+    ApplyFailed,
+    NotSaved,
+}
+
+impl InterfaceModeChangeResult {
+    #[must_use]
+    pub const fn applied(self) -> bool {
+        matches!(self, Self::Saved | Self::NotSaved)
+    }
+
+    #[must_use]
+    pub const fn notice(self) -> UiNotice {
+        match self {
+            Self::Saved => UiNotice::Saved,
+            Self::ApplyFailed => UiNotice::ApplyFailed,
+            Self::NotSaved => UiNotice::ProfileNotSaved,
+        }
+    }
+}
+
+pub async fn apply_and_persist_interface_modes<Apply, Persist, PersistFuture>(
+    apply: Apply,
+    persist: Persist,
+) -> InterfaceModeChangeResult
+where
+    Apply: Future<Output = bool>,
+    Persist: FnOnce() -> PersistFuture,
+    PersistFuture: Future<Output = bool>,
+{
+    if !apply.await {
+        InterfaceModeChangeResult::ApplyFailed
+    } else if persist().await {
+        InterfaceModeChangeResult::Saved
+    } else {
+        InterfaceModeChangeResult::NotSaved
     }
 }
 
@@ -344,12 +453,19 @@ pub enum GnssAvailability {
     Available,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleGroupEditor {
+    Unavailable,
+    Available,
+}
+
 pub struct UiConfiguration {
     pub storage_limits: DisplayedStorageLimits,
     pub user_blanking: UserBlanking,
     pub access_point: AccessPointState,
     pub shared_instance_config_export: SharedInstanceConfigExport,
     pub gnss: GnssAvailability,
+    pub ble_group_editor: BleGroupEditor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -361,6 +477,7 @@ pub struct UiState {
     pub(in crate::screen) access_point: AccessPointState,
     pub(in crate::screen) shared_instance_config_export: SharedInstanceConfigExport,
     pub(in crate::screen) gnss: GnssAvailability,
+    pub(in crate::screen) ble_group_editor: BleGroupEditor,
     pub(in crate::screen) gnss_visible: bool,
     pub(in crate::screen) notice: Option<UiNotice>,
     pub(in crate::screen) storage_limits: DisplayedStorageLimits,
@@ -376,7 +493,12 @@ pub(in crate::screen) enum UiMode {
         page: usize,
     },
     Sleeping,
-    InterfaceMenu {
+    InterfaceDetail {
+        kind: CardKind,
+        focus: InterfaceDetailFocus,
+        status_page: usize,
+    },
+    InterfaceOptions {
         selected_item: usize,
         kind: CardKind,
     },
@@ -384,7 +506,23 @@ pub(in crate::screen) enum UiMode {
         screen: LoRaScreen,
         profile: RadioProfile,
     },
+    BleGroupEditor {
+        screen: BleGroupScreen,
+        name: BleGroupName,
+    },
+    InterfaceModeEditor {
+        slot: InterfaceModeSlot,
+        cursor: usize,
+        draft: InterfaceModeSelection,
+    },
     ConfirmRadioSwap {
+        confirm: bool,
+    },
+    RemotePairingInvitation {
+        code: u32,
+    },
+    ConfirmRemotePairing {
+        code: u32,
         confirm: bool,
     },
 }
@@ -399,6 +537,7 @@ impl UiState {
             access_point: configuration.access_point,
             shared_instance_config_export: configuration.shared_instance_config_export,
             gnss: configuration.gnss,
+            ble_group_editor: configuration.ble_group_editor,
             gnss_visible: false,
             notice: None,
             storage_limits: configuration.storage_limits,
@@ -453,22 +592,48 @@ impl UiState {
             UiMode::Cards
             | UiMode::LimitsPage { .. }
             | UiMode::Sleeping
-            | UiMode::InterfaceMenu { .. }
+            | UiMode::InterfaceDetail { .. }
+            | UiMode::InterfaceOptions { .. }
             | UiMode::LoRaEditor { .. }
-            | UiMode::ConfirmRadioSwap { .. } => None,
+            | UiMode::InterfaceModeEditor { .. }
+            | UiMode::ConfirmRadioSwap { .. }
+            | UiMode::RemotePairingInvitation { .. }
+            | UiMode::ConfirmRemotePairing { .. }
+            | UiMode::BleGroupEditor { .. } => None,
         }
     }
 
-    pub(in crate::screen) fn interface_menu_selected_item(&self) -> Option<usize> {
+    #[cfg(test)]
+    pub(in crate::screen) fn interface_detail_focus(&self) -> Option<InterfaceDetailFocus> {
         match self.mode {
-            UiMode::InterfaceMenu { selected_item, .. } => Some(selected_item),
-            UiMode::Cards
-            | UiMode::GlobalMenu { .. }
-            | UiMode::LimitsPage { .. }
-            | UiMode::Sleeping
-            | UiMode::LoRaEditor { .. }
-            | UiMode::ConfirmRadioSwap { .. } => None,
+            UiMode::InterfaceDetail { focus, .. } => Some(focus),
+            _ => None,
         }
+    }
+
+    pub(in crate::screen) fn interface_options_selected_item(&self) -> Option<usize> {
+        match self.mode {
+            UiMode::InterfaceOptions { selected_item, .. } => Some(selected_item),
+            _ => None,
+        }
+    }
+
+    /// Compatibility alias used by older tests/call sites for the options submenu cursor.
+    #[cfg(test)]
+    pub(in crate::screen) fn interface_menu_selected_item(&self) -> Option<usize> {
+        self.interface_options_selected_item()
+    }
+
+    fn interface_detail_status_lines(&self, content: ScreenContent<'_, '_>) -> usize {
+        let detail_rows = content
+            .interface_menu_details
+            .map(|details| details.as_slice().len())
+            .unwrap_or(0);
+        let has_failure = self.selected_card(content.cards).is_some_and(|card| {
+            card.connection == personal_rns::interfaces::ConnectionState::Failed
+                && card.failure_reason.is_some()
+        });
+        interface_detail_status_line_count(detail_rows, has_failure)
     }
 
     pub fn open_lora_editor(&mut self, profile: RadioProfile) {
@@ -477,6 +642,39 @@ impl UiState {
                 cursor: region_index(profile.region),
             },
             profile,
+        };
+    }
+
+    pub fn show_remote_pairing_invitation(&mut self, code: u32) {
+        self.mode = UiMode::RemotePairingInvitation { code };
+    }
+
+    pub fn show_remote_pairing_confirmation(&mut self, code: u32) {
+        self.mode = UiMode::ConfirmRemotePairing {
+            code,
+            confirm: false,
+        };
+    }
+
+    pub fn open_ble_group_editor(&mut self, current: &str) {
+        let name = BleGroupName::parse(current).unwrap_or_else(BleGroupName::reticulum);
+        self.mode = UiMode::BleGroupEditor {
+            screen: BleGroupScreen::Choice {
+                cursor: choice_cursor_for(name),
+            },
+            name,
+        };
+    }
+
+    pub fn open_interface_mode_editor(
+        &mut self,
+        slot: InterfaceModeSlot,
+        selection: InterfaceModeSelection,
+    ) {
+        self.mode = UiMode::InterfaceModeEditor {
+            slot,
+            cursor: initial_interface_mode_editor_cursor(selection),
+            draft: selection,
         };
     }
 
@@ -501,6 +699,7 @@ impl UiState {
             GlobalMenuItem::Announce
             | GlobalMenuItem::Limits
             | GlobalMenuItem::Sleep
+            | GlobalMenuItem::PairRemote
             | GlobalMenuItem::Back => true,
         }
     }
@@ -530,6 +729,7 @@ impl UiState {
                 AccessPointState::Inactive => "AP Mode",
                 AccessPointState::Unsupported => "Radio Mode",
             },
+            GlobalMenuItem::PairRemote => "Pair remote",
             GlobalMenuItem::Back => "Back",
         }
     }
@@ -545,21 +745,60 @@ impl UiState {
             | UiMode::LimitsPage { .. }
             | UiMode::Sleeping
             | UiMode::LoRaEditor { .. }
-            | UiMode::ConfirmRadioSwap { .. } => {}
-            UiMode::InterfaceMenu { .. } if self.selected_card(content.cards).is_none() => {
+            | UiMode::InterfaceModeEditor { .. }
+            | UiMode::ConfirmRadioSwap { .. }
+            | UiMode::RemotePairingInvitation { .. }
+            | UiMode::ConfirmRemotePairing { .. }
+            | UiMode::BleGroupEditor { .. } => {}
+            UiMode::InterfaceDetail { .. } | UiMode::InterfaceOptions { .. }
+                if self.selected_card(content.cards).is_none() =>
+            {
                 self.mode = UiMode::Cards;
             }
-            UiMode::InterfaceMenu {
+            UiMode::InterfaceDetail {
+                kind,
+                focus,
+                status_page,
+            } => {
+                let status_lines = self.interface_detail_status_lines(content);
+                let page_count = interface_detail_page_count(status_lines);
+                let status_page = status_page.min(page_count.saturating_sub(1));
+                let page = interface_detail_page(status_lines, status_page);
+                self.mode = UiMode::InterfaceDetail {
+                    kind,
+                    focus: clamp_interface_detail_focus(focus, page),
+                    status_page,
+                };
+            }
+            UiMode::InterfaceOptions {
                 selected_item,
                 kind,
             } => {
-                self.mode = UiMode::InterfaceMenu {
+                self.mode = UiMode::InterfaceOptions {
                     selected_item: selected_item.min(
-                        interface_menu_items(kind, self.shared_instance_config_export).len() - 1,
+                        interface_menu_items(
+                            kind,
+                            self.shared_instance_config_export,
+                            self.ble_group_editor,
+                        )
+                        .len()
+                            - 1,
                     ),
                     kind,
                 };
             }
+        }
+        if let UiMode::InterfaceModeEditor {
+            slot,
+            cursor,
+            draft,
+        } = self.mode
+        {
+            self.mode = UiMode::InterfaceModeEditor {
+                slot,
+                cursor: clamp_interface_mode_editor_cursor(cursor),
+                draft,
+            };
         }
         if let UiMode::GlobalMenu { selected_item } = self.mode {
             let count = self.global_menu_item_count();
@@ -611,9 +850,10 @@ impl UiState {
             }
             (InputEvent::LongPress, UiMode::Cards) => {
                 if let Some(card) = self.selected_card(content.cards) {
-                    self.mode = UiMode::InterfaceMenu {
-                        selected_item: 0,
+                    self.mode = UiMode::InterfaceDetail {
                         kind: card.kind(),
+                        focus: InterfaceDetailFocus::Options,
+                        status_page: 0,
                     };
                 }
                 UiAction::None
@@ -660,6 +900,10 @@ impl UiState {
                         self.mode = UiMode::ConfirmRadioSwap { confirm: false };
                         UiAction::None
                     }
+                    Some(GlobalMenuItem::PairRemote) => {
+                        self.mode = UiMode::Cards;
+                        UiAction::OpenRemotePairing
+                    }
                     Some(GlobalMenuItem::Back) | None => {
                         self.mode = UiMode::Cards;
                         UiAction::None
@@ -678,43 +922,156 @@ impl UiState {
                     UiAction::None
                 }
             }
+            (InputEvent::ShortPress, UiMode::RemotePairingInvitation { .. }) => UiAction::None,
+            (InputEvent::LongPress, UiMode::RemotePairingInvitation { .. }) => {
+                self.mode = UiMode::Cards;
+                UiAction::None
+            }
+            (InputEvent::ShortPress, UiMode::ConfirmRemotePairing { code, confirm }) => {
+                self.mode = UiMode::ConfirmRemotePairing {
+                    code,
+                    confirm: !confirm,
+                };
+                UiAction::None
+            }
+            (InputEvent::LongPress, UiMode::ConfirmRemotePairing { confirm, .. }) => {
+                self.mode = UiMode::Cards;
+                if confirm {
+                    UiAction::ApproveRemotePairing
+                } else {
+                    UiAction::RejectRemotePairing
+                }
+            }
             (
                 InputEvent::ShortPress,
-                UiMode::InterfaceMenu {
+                UiMode::InterfaceDetail {
+                    kind,
+                    focus,
+                    status_page,
+                },
+            ) => {
+                let status_lines = self.interface_detail_status_lines(content);
+                let page = interface_detail_page(status_lines, status_page);
+                self.mode = UiMode::InterfaceDetail {
+                    kind,
+                    focus: next_interface_detail_focus(focus, page),
+                    status_page,
+                };
+                UiAction::None
+            }
+            (
+                InputEvent::LongPress,
+                UiMode::InterfaceDetail {
+                    kind,
+                    focus,
+                    status_page,
+                },
+            ) => {
+                let status_lines = self.interface_detail_status_lines(content);
+                let page_count = interface_detail_page_count(status_lines);
+                match focus {
+                    InterfaceDetailFocus::Options => {
+                        self.mode = UiMode::InterfaceOptions {
+                            selected_item: 0,
+                            kind,
+                        };
+                        UiAction::None
+                    }
+                    InterfaceDetailFocus::Next => {
+                        let next_page = (status_page + 1) % page_count.max(1);
+                        let page = interface_detail_page(status_lines, next_page);
+                        self.mode = UiMode::InterfaceDetail {
+                            kind,
+                            focus: clamp_interface_detail_focus(
+                                InterfaceDetailFocus::Options,
+                                page,
+                            ),
+                            status_page: next_page,
+                        };
+                        UiAction::None
+                    }
+                    InterfaceDetailFocus::Back => {
+                        self.mode = UiMode::Cards;
+                        UiAction::None
+                    }
+                }
+            }
+            (
+                InputEvent::ShortPress,
+                UiMode::InterfaceOptions {
                     selected_item,
                     kind,
                 },
             ) => {
-                self.mode = UiMode::InterfaceMenu {
+                self.mode = UiMode::InterfaceOptions {
                     selected_item: (selected_item + 1)
-                        % interface_menu_items(kind, self.shared_instance_config_export).len(),
+                        % interface_menu_items(
+                            kind,
+                            self.shared_instance_config_export,
+                            self.ble_group_editor,
+                        )
+                        .len(),
                     kind,
                 };
                 UiAction::None
             }
             (
                 InputEvent::LongPress,
-                UiMode::InterfaceMenu {
+                UiMode::InterfaceOptions {
                     selected_item,
                     kind,
                 },
             ) => {
-                self.mode = UiMode::Cards;
-                match (kind, selected_item) {
-                    (CardKind::SharedInstance, SHARED_INSTANCE_CONFIG_MENU_ITEM)
-                        if self.shared_instance_config_export
-                            == SharedInstanceConfigExport::Available =>
-                    {
-                        UiAction::CopySharedInstanceConfig
+                let items = interface_menu_items(
+                    kind,
+                    self.shared_instance_config_export,
+                    self.ble_group_editor,
+                );
+                let back_item = items.len().saturating_sub(1);
+                if selected_item == back_item {
+                    self.mode = UiMode::InterfaceDetail {
+                        kind,
+                        focus: InterfaceDetailFocus::Options,
+                        status_page: 0,
+                    };
+                    UiAction::None
+                } else {
+                    let mode_item = mode_menu_item(
+                        kind,
+                        self.shared_instance_config_export,
+                        self.ble_group_editor,
+                    );
+                    if mode_item == Some(selected_item) {
+                        self.mode = UiMode::Cards;
+                        if interface_mode_slot(kind).is_some() {
+                            UiAction::OpenInterfaceModeEditor
+                        } else {
+                            UiAction::None
+                        }
+                    } else {
+                        self.mode = UiMode::Cards;
+                        match (kind, selected_item) {
+                            (CardKind::SharedInstance, SHARED_INSTANCE_CONFIG_MENU_ITEM)
+                                if self.shared_instance_config_export
+                                    == SharedInstanceConfigExport::Available =>
+                            {
+                                UiAction::CopySharedInstanceConfig
+                            }
+                            (_, POWER_MENU_ITEM) => UiAction::ToggleSelectedInterface,
+                            (
+                                CardKind::WifiStation | CardKind::WifiStationDisabled,
+                                STATION_UPLINK_MENU_ITEM,
+                            ) => UiAction::ToggleStationUplink,
+                            (CardKind::LoRa, LORA_TUNE_MENU_ITEM) => UiAction::OpenLoRaEditor,
+                            (CardKind::LoRa, LORA_RESET_MENU_ITEM) => UiAction::ResetLoRaProfile,
+                            (CardKind::Ble, BLE_GROUP_MENU_ITEM)
+                                if self.ble_group_editor == BleGroupEditor::Available =>
+                            {
+                                UiAction::OpenBleGroupEditor
+                            }
+                            _ => UiAction::None,
+                        }
                     }
-                    (_, POWER_MENU_ITEM) => UiAction::ToggleSelectedInterface,
-                    (
-                        CardKind::WifiStation | CardKind::WifiStationDisabled,
-                        STATION_UPLINK_MENU_ITEM,
-                    ) => UiAction::ToggleStationUplink,
-                    (CardKind::LoRa, LORA_TUNE_MENU_ITEM) => UiAction::OpenLoRaEditor,
-                    (CardKind::LoRa, LORA_RESET_MENU_ITEM) => UiAction::ResetLoRaProfile,
-                    _ => UiAction::None,
                 }
             }
             (InputEvent::ShortPress, UiMode::LoRaEditor { screen, profile }) => {
@@ -738,6 +1095,63 @@ impl UiState {
                     }
                 }
             }
+            (InputEvent::ShortPress, UiMode::BleGroupEditor { screen, name }) => {
+                let (screen, name) = ble_group_editor_tap(screen, name);
+                self.mode = UiMode::BleGroupEditor { screen, name };
+                UiAction::None
+            }
+            (InputEvent::LongPress, UiMode::BleGroupEditor { screen, name }) => {
+                match ble_group_editor_hold(screen, name) {
+                    BleGroupHold::Stay { screen, name } => {
+                        self.mode = UiMode::BleGroupEditor { screen, name };
+                        UiAction::None
+                    }
+                    BleGroupHold::Commit(name) => {
+                        self.mode = UiMode::Cards;
+                        UiAction::SetBleDiscoveryGroup(name)
+                    }
+                    BleGroupHold::Cancel => {
+                        self.mode = UiMode::Cards;
+                        UiAction::None
+                    }
+                }
+            }
+            (
+                InputEvent::ShortPress,
+                UiMode::InterfaceModeEditor {
+                    slot,
+                    cursor,
+                    draft,
+                },
+            ) => {
+                let count = interface_mode_editor_row_count();
+                self.mode = UiMode::InterfaceModeEditor {
+                    slot,
+                    cursor: (cursor + 1) % count,
+                    draft,
+                };
+                UiAction::None
+            }
+            (
+                InputEvent::LongPress,
+                UiMode::InterfaceModeEditor {
+                    slot,
+                    cursor,
+                    draft,
+                },
+            ) => match interface_mode_editor_row(cursor) {
+                Some(InterfaceModeEditorRow::Mode(mode)) => {
+                    self.mode = UiMode::Cards;
+                    UiAction::SetInterfaceMode {
+                        slot,
+                        selection: selection_for_mode_choice(draft, mode),
+                    }
+                }
+                Some(InterfaceModeEditorRow::Back) | None => {
+                    self.mode = UiMode::Cards;
+                    UiAction::None
+                }
+            },
         };
         self.sync(content);
         action

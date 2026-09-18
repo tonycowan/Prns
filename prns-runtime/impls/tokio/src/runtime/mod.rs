@@ -19,6 +19,8 @@ mod tracing_events;
 pub use prns_runtime::runtime::*;
 
 pub use crate::manifold::driver::{CryptoPoolConfig, PoolWorkers};
+#[cfg(feature = "scheduler-tuning")]
+pub use crate::manifold::driver::{SchedulerPolicy, SchedulerPolicyError, SchedulerPolicyInput};
 pub(crate) use destination_identity_retention::{
     apply_destination_identity_retention_command, settle_destination_identity_retention,
     DestinationIdentityRetentionHostCommand,
@@ -43,10 +45,11 @@ pub use node_facade::{
     PersistenceFlushStatus, PersistenceIntent, PersistenceRestoreReport, PersistenceTrigger,
     PersistenceWorker, PrepareFlushError, PreparedFlush, PreparedResourceReceiver, PrnsNode,
     PrnsNodeHandle, PrnsNodeLocalHandle, RatchetSeedReport, RegionFlush,
-    RegisterRequestEndpointError, RemoteControlAuthorizationSeedReport, RemoteControlHandle,
-    RemoteControlTargetHandle, RequestOptions, RequestPathError, ResourceAdmissionPeer,
-    ResourceOfferAdmission, ResourceOfferMonitor, ResourceProgress, ResourceReceipt,
-    ResourceReceiveError, ResourceSendError, ResponseSendError, RouteSeedProgress, RouteSeedReport,
+    RegisterRequestEndpointError, RemoteControlAuthorizationPersistence,
+    RemoteControlAuthorizationSeedReport, RemoteControlHandle, RemoteControlTargetHandle,
+    RequestOptions, RequestPathError, ResourceAdmissionPeer, ResourceOfferAdmission,
+    ResourceOfferMonitor, ResourceProgress, ResourceReceipt, ResourceReceiveError,
+    ResourceSendError, ResponseSendError, RouteSeedProgress, RouteSeedReport,
     RuntimeRequestHandlerError, SaveOnLearn, SaveOnLearnWiring, SegmentCompression,
     SharedInstanceIdentityError, StreamId, TunnelSeedReport, AUTO_COMPRESS_MAX_LEN,
 };

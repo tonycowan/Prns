@@ -7,7 +7,8 @@ use personal_rns::engine::{
     EngineReaction, EngineState, IdentifySignCompleted, IngestIo, InstantMillis, IssuedCommand,
     LinkIdentityVerification, LinkReceiptSignCompleted, NoOwedWork, OwedWork, ProofSignCompleted,
     ReceiptProofVerification, ResourceDecompressionCompleted, ResourceOpenCompleted,
-    TunnelSynthesizeSignCompleted, TunnelSynthesizeVerification,
+    TunnelSynthesizeSignCompleted, TunnelSynthesizeVerification, WholeResourceOpenCompleted,
+    WholeResourceOpenOutcome, WholeResourceOpenReservation,
 };
 use personal_rns::identity::{decrypt_token_in_place_with_ratchets, OpenedToken};
 use personal_rns::interfaces::{AttachedInterfaces, InboundPacket};
@@ -15,8 +16,14 @@ use personal_rns::remote_control::RemoteControlPairingAvailabilityVerification;
 use personal_rns::routing::ingress::AnnounceVerification;
 use personal_rns::routing::links::handshake::{link_proof_signature_valid, link_proof_signed_data};
 use personal_rns::routing::links::resources::build_outgoing::BuildOutgoingResourceError;
-use personal_rns::routing::links::resources::send::ResourceBuildCompleted;
-use personal_rns::routing::links::resources::table::ResourceBuildReservation;
+use personal_rns::routing::links::resources::receive::part_hash::ResourcePartHashResult;
+use personal_rns::routing::links::resources::send::{
+    ResourceBuildCompleted, ResourceSealCompleted, ResourceSealOutcome, ResourceSealReservation,
+    UnavailableResourceSeal,
+};
+use personal_rns::routing::links::resources::table::{
+    ResourceBuildReservation, ResourceBuildTransfer,
+};
 use personal_rns::routing::links::resources::ResourceHash;
 use personal_rns::routing::links::LinkId;
 use personal_rns::storage::GrowableHeap;
@@ -32,7 +39,14 @@ enum ReadyWork {
     ResourceBuildUnsupported {
         reservation: ResourceBuildReservation,
     },
+    ResourceSealUnsupported {
+        reservation: ResourceSealReservation,
+    },
+    ResourcePartHash(ResourcePartHashResult<Vec<u8>>),
     ResourceOpen(ResourceOpenCompleted<'static>),
+    WholeResourceOpenUnsupported {
+        reservation: WholeResourceOpenReservation,
+    },
     ResourceDecompressionUnsupported {
         link_id: LinkId,
         hash: ResourceHash,
@@ -55,7 +69,17 @@ fn route_or_capture_work(
                 OwedWork::ResourceBuild(owed) => ReadyWork::ResourceBuildUnsupported {
                     reservation: owed.reservation(),
                 },
+                OwedWork::ResourceSeal(owed) => ReadyWork::ResourceSealUnsupported {
+                    reservation: owed.plan().reservation(),
+                },
+                OwedWork::ResourcePartHash(owed) => {
+                    let (plan, source) = owed.into_parts();
+                    ReadyWork::ResourcePartHash(plan.calculate(source.to_vec()))
+                }
                 OwedWork::ResourceOpen(owed) => ReadyWork::ResourceOpen(owed.fulfill_inline()),
+                OwedWork::WholeResourceOpen(owed) => ReadyWork::WholeResourceOpenUnsupported {
+                    reservation: owed.plan().reservation(),
+                },
                 OwedWork::ResourceDecompression(owed) => {
                     ReadyWork::ResourceDecompressionUnsupported {
                         link_id: owed.link_id,
@@ -183,9 +207,16 @@ fn drive_ready_work(
                         } else {
                             LinkIdentityVerification::Invalid
                         };
-                    engine.resume_link_identity_verify(owed, verification, &mut |reaction| {
-                        capture.absorb(reaction, scratch)
-                    });
+                    engine.resume_link_identity_verify(
+                        owed,
+                        verification,
+                        interfaces,
+                        now,
+                        &mut |bytes| entropy.fill(bytes),
+                        &mut |reaction: EngineReaction<'_, OwedWork<'_>>| {
+                            capture.absorb(reaction, scratch)
+                        },
+                    );
                 }
                 CryptoOwed::TunnelSynthesizeVerify(owed) => {
                     let verification =
@@ -374,7 +405,7 @@ fn drive_ready_work(
                 engine.resume_resource_build(
                     ResourceBuildCompleted {
                         reservation,
-                        transfer: &[],
+                        transfer: ResourceBuildTransfer::Borrowed(&[]),
                         names: &[],
                         request_data: &[],
                         outcome: Err(BuildOutgoingResourceError::BufferShapeMismatch),
@@ -386,10 +417,43 @@ fn drive_ready_work(
                     },
                 );
             }
+            ReadyWork::ResourceSealUnsupported { reservation } => {
+                engine.resume_resource_seal(
+                    ResourceSealCompleted {
+                        reservation,
+                        outcome: ResourceSealOutcome::Unavailable(
+                            UnavailableResourceSeal::Resident,
+                        ),
+                    },
+                    now,
+                    &mut |bytes| entropy.fill(bytes),
+                    &mut |reaction| route_or_capture_work(reaction, capture, scratch, ready),
+                );
+            }
+            ReadyWork::ResourcePartHash(result) => {
+                let _completion_and_part = result.complete_with(|completed| {
+                    engine.resume_resource_part_hash(
+                        completed,
+                        now,
+                        &mut |bytes| entropy.fill(bytes),
+                        &mut |reaction| route_or_capture_work(reaction, capture, scratch, ready),
+                    );
+                });
+            }
             ReadyWork::ResourceOpen(completed) => {
                 engine.resume_resource_open(completed, now, &mut |reaction| {
                     route_or_capture_work(reaction, capture, scratch, ready)
                 });
+            }
+            ReadyWork::WholeResourceOpenUnsupported { reservation } => {
+                engine.resume_whole_resource_open(
+                    WholeResourceOpenCompleted {
+                        reservation,
+                        outcome: WholeResourceOpenOutcome::Unavailable,
+                    },
+                    now,
+                    &mut |reaction| route_or_capture_work(reaction, capture, scratch, ready),
+                );
             }
             ReadyWork::ResourceDecompressionUnsupported { link_id, hash } => {
                 engine.resume_resource_decompression(

@@ -35,8 +35,11 @@
 //! one-slot manifold lane provides the ingress handoff. ESP32-S3 Hopspots place
 //! the FIFO in PSRAM, while T-Echo supplies static SRAM storage.
 
+use core::cell::Cell;
+
 use embassy_futures::select::{select, select4, select5, Either, Either4, Either5};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use embassy_sync::channel::DynamicSender;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
@@ -514,6 +517,7 @@ pub struct LoRaControl {
     requests: Signal<CriticalSectionRawMutex, LoRaApplyRequest>,
     results: Signal<CriticalSectionRawMutex, LoRaApplyResult>,
     next_id: AtomicU32,
+    current: CriticalSectionMutex<Cell<Option<RadioProfile>>>,
 }
 
 impl LoRaControl {
@@ -523,7 +527,18 @@ impl LoRaControl {
             requests: Signal::new(),
             results: Signal::new(),
             next_id: AtomicU32::new(1),
+            current: CriticalSectionMutex::new(Cell::new(None)),
         }
+    }
+
+    /// Last profile published at construction or after a successful apply.
+    #[must_use]
+    pub fn current(&self) -> Option<RadioProfile> {
+        self.current.lock(|cell| cell.get())
+    }
+
+    fn publish(&self, profile: RadioProfile) {
+        self.current.lock(|cell| cell.set(Some(profile)));
     }
 
     pub fn signal(&self, profile: RadioProfile) {
@@ -810,6 +825,7 @@ impl<'a, R: LoRaRadio> LoRaInterface<'a, R> {
         let duty = airtime_policy
             .resolve(profile.region)
             .map_err(LoRaConfigError::AirtimePolicy)?;
+        control.publish(profile);
         Ok(Self {
             id,
             radio,
@@ -1013,6 +1029,7 @@ impl<R: LoRaRadio> Interface for LoRaInterface<'_, R> {
                             access_suspended = true;
                             duty_was_held = false;
                             reported_deferrals = 0;
+                            control.publish(profile);
                         }
                         control.complete(request.id, changed);
                     }
@@ -1369,6 +1386,7 @@ impl<R: LoRaRadio> Interface for LoRaInterface<'_, R> {
                             noise = NoiseFloor::new();
                             service_age.reset(profile);
                             continuation = false;
+                            control.publish(profile);
                         }
                         control.complete(request.id, changed);
                     }
@@ -1579,6 +1597,14 @@ mod tests {
             control.complete(request.id, false);
         }));
         assert_eq!(outcome, LoRaApplyOutcome::Rejected);
+    }
+
+    #[test]
+    fn control_publishes_the_current_profile() {
+        let control = LoRaControl::new();
+        assert_eq!(control.current(), None);
+        control.publish(DEFAULT_915_PROFILE);
+        assert_eq!(control.current(), Some(DEFAULT_915_PROFILE));
     }
 
     #[test]

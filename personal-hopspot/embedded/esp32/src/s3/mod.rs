@@ -22,7 +22,7 @@ use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 use esp_hal::Async;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{select4, Either4};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{
@@ -240,9 +240,9 @@ type InterfaceStore = EmbassyInterfaceStore<
 >;
 /// The fully-spelled node type, so it can ride to core 1 as a concrete `#[task]` argument.
 type S3Node = PrnsNode<
-    (),
+    firmware::HopspotRemoteControlState,
     screen::node_pages::NodePageRoutes,
-    for<'a> fn(PrnsEvent<'a>, &()),
+    for<'a> fn(PrnsEvent<'a>, &firmware::HopspotRemoteControlState),
     EngineStorageType,
     EmbassyHost<Mtx, S3EntropySource>,
     Mtx,
@@ -269,7 +269,10 @@ mod display;
 use captive_portal::ap_ssid;
 use configuration::{hopspot_wifi_config, HopspotWifiConfig};
 use configuration::{HopspotTcpClientConfig, HopspotTcpClientHost};
-use connectivity::{build_tcp, build_wifi, espnow_channel_policy, EspNowAdapter, ESPNOW_PHY};
+use connectivity::{
+    apply_remote_station_credentials, build_tcp, build_wifi, current_station_ssid,
+    espnow_channel_policy, station_connect_task_is_live, EspNowAdapter, ESPNOW_PHY,
+};
 use display::build_interface_menu_details;
 use display::{build_cards, build_snapshots, button_task};
 
@@ -307,6 +310,11 @@ static BLE_OUTBOUND_WAKE: Signal<Mtx, ()> = Signal::new();
 static COMPLETION: CompletionPool<Mtx, COMPLETIONS_CAP> = CompletionPool::new();
 const BUTTON_EVENT_CAPACITY: usize = 4;
 static BUTTON_EVENTS: Channel<Mtx, screen::InputEvent, BUTTON_EVENT_CAPACITY> = Channel::new();
+static REMOTE_PAIRING_EVENTS: Channel<
+    Mtx,
+    personal_rns::runtime::RemoteControlTargetPairingConfirmation,
+    1,
+> = Channel::new();
 /// Per-interface engine counts the manifold (core 1) pushes into and the render task (core 0) reads —
 /// a `CriticalSectionRawMutex` store so the `&'static` shared across cores stays `Sync`. Capacity is a
 /// power of two above the interface ceiling, so a live interface's counts never get dropped.
@@ -320,8 +328,6 @@ static WIFI_STATION_JOINED: AtomicBool = AtomicBool::new(false);
 static WIFI_STATION_DATA_PATH_DEGRADED: AtomicBool = AtomicBool::new(false);
 static WIFI_DRIVER_RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CORE_ONE_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
-
-fn ignore_events(_event: PrnsEvent<'_>, _state: &()) {}
 
 const BOOT_PHASE_MAGIC: u32 = 0x5052_0000;
 
@@ -603,19 +609,33 @@ const RADIO_MODE_BLE: u32 = 0x424C_4501;
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static mut RADIO_MODE_FLAG: u32 = 0;
 
-fn boot_radio_mode(_station_configured: bool) -> RadioMode {
+fn boot_radio_mode(station_configured: bool) -> RadioMode {
     #[cfg(feature = "wifi-security-probe")]
-    return RadioMode::AccessPoint;
+    {
+        let _ = station_configured;
+        return RadioMode::AccessPoint;
+    }
 
     // SAFETY: Boot reads the aligned RTC-fast persistent word before concurrent tasks start;
     // volatile semantics are not required because reset is the only cross-execution boundary.
     #[cfg(not(feature = "wifi-security-probe"))]
     let flag = unsafe { core::ptr::addr_of!(RADIO_MODE_FLAG).read() };
     #[cfg(not(feature = "wifi-security-probe"))]
+    radio_mode_from_flag(flag, station_configured)
+}
+
+/// Power-on and fresh flash leave the RTC flag at 0. SoftAP is the setup
+/// path so the LAN card exists before a station SSID is written; an
+/// explicit BLE choice or a provisioned station keeps BLE.
+const fn radio_mode_from_flag(flag: u32, station_configured: bool) -> RadioMode {
     if flag == RADIO_MODE_AP {
         RadioMode::AccessPoint
-    } else {
+    } else if flag == RADIO_MODE_BLE {
         RadioMode::Ble
+    } else if station_configured {
+        RadioMode::Ble
+    } else {
+        RadioMode::AccessPoint
     }
 }
 
@@ -632,3 +652,32 @@ fn request_radio_mode(mode: RadioMode) -> ! {
 
 mod firmware;
 pub(super) use firmware::run;
+
+#[cfg(test)]
+mod radio_mode_tests {
+    use super::{radio_mode_from_flag, RadioMode, RADIO_MODE_AP, RADIO_MODE_BLE};
+
+    #[test]
+    fn unset_flag_without_station_uses_softap() {
+        assert_eq!(radio_mode_from_flag(0, false), RadioMode::AccessPoint);
+    }
+
+    #[test]
+    fn unset_flag_with_station_uses_ble() {
+        assert_eq!(radio_mode_from_flag(0, true), RadioMode::Ble);
+    }
+
+    #[test]
+    fn explicit_flags_win() {
+        assert_eq!(
+            radio_mode_from_flag(RADIO_MODE_AP, false),
+            RadioMode::AccessPoint
+        );
+        assert_eq!(radio_mode_from_flag(RADIO_MODE_BLE, false), RadioMode::Ble);
+        assert_eq!(
+            radio_mode_from_flag(RADIO_MODE_AP, true),
+            RadioMode::AccessPoint
+        );
+        assert_eq!(radio_mode_from_flag(RADIO_MODE_BLE, true), RadioMode::Ble);
+    }
+}

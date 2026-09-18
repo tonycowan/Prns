@@ -34,6 +34,7 @@ const NODE_REQUEST_HANDLER_CAPACITY: usize =
     <personal_hopspot_core::node_pages::NodePageRoutes as RequestEndpointSet<()>>::REGISTRATIONS
         .len()
         + REMOTE_CONTROL_STORAGE.request_handlers();
+// Remote Control advertises two handlers: live `/remote-control` plus Pair remote.
 
 /// The engine's storage recipe: the small coordination shell stays inline in SRAM, while
 /// high-count or bulky columns (including links, routes, announces, history, app-data, and

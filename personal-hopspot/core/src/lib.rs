@@ -10,11 +10,15 @@ mod destinations;
 mod flash_identity;
 mod flash_layout;
 mod identity;
+mod interface_mode;
+mod interface_mode_store;
 #[cfg(feature = "display")]
 mod mobile;
 pub mod node_pages;
 mod persistence;
+mod power_publish;
 mod radio_profile_store;
+mod remote_control_inventory;
 #[cfg(feature = "display")]
 mod screen;
 mod soft_ap;
@@ -29,18 +33,20 @@ pub use flash_identity::{
 };
 pub use flash_layout::{
     FirmwareAddressRange, HopspotS3FlashLayout, Nrf52840FirmwareMemory, ESP32_4_MIB_FLASH_CAPACITY,
-    ESP32_4_MIB_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET, HELTEC_DISPLAY_NRF52840_FIRMWARE_MEMORY,
-    HELTEC_DISPLAY_NRF52840_JOURNAL_LAYOUT, HELTEC_DISPLAY_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET,
-    HOPSPOT_FLASH_PAGE_BYTES, MESH_TOWER_V2_BLE_IDENTITY_FLASH_OFFSET,
-    MESH_TOWER_V2_FIRMWARE_MEMORY, MESH_TOWER_V2_JOURNAL_LAYOUT,
+    ESP32_4_MIB_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET, HELTEC_DISPLAY_INTERFACE_MODE_PAGES,
+    HELTEC_DISPLAY_NRF52840_FIRMWARE_MEMORY, HELTEC_DISPLAY_NRF52840_JOURNAL_LAYOUT,
+    HELTEC_DISPLAY_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET, HOPSPOT_FLASH_PAGE_BYTES,
+    MESH_TOWER_V2_BLE_IDENTITY_FLASH_OFFSET, MESH_TOWER_V2_FIRMWARE_MEMORY,
+    MESH_TOWER_V2_INTERFACE_MODE_PAGES, MESH_TOWER_V2_JOURNAL_LAYOUT,
     MESH_TOWER_V2_RADIO_PROFILE_FLASH_OFFSET, MESH_TOWER_V2_RECOVERY_BOOTLOADER_FLASH_OFFSET,
     MESH_TOWER_V2_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET, NRF52840_BLE_IDENTITY_FLASH_OFFSET,
     NRF52840_MIN_ARENA_BYTES, NRF52840_NODE_IDENTITY_FLASH_OFFSET, NRF52840_RADIO_PROFILE_PAGES,
     S3_16_MIB_FLASH_LAYOUT, S3_8_MIB_FLASH_LAYOUT, T096_APPLICATION_DATA_END,
     T096_FACTORY_RESERVED_FLASH_OFFSET, T096_RECOVERY_BOOTLOADER_FLASH_OFFSET,
-    T1000E_FIRMWARE_MEMORY, T1000E_JOURNAL_LAYOUT, T1000E_NODE_IDENTITY_FLASH_OFFSET,
-    T1000E_RECOVERY_BOOTLOADER_FLASH_OFFSET, T1000E_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET,
-    T114_RECOVERY_BOOTLOADER_FLASH_OFFSET, T_ECHO_BLE_IDENTITY_FLASH_OFFSET, T_ECHO_JOURNAL_LAYOUT,
+    T1000E_FIRMWARE_MEMORY, T1000E_INTERFACE_MODE_PAGES, T1000E_JOURNAL_LAYOUT,
+    T1000E_NODE_IDENTITY_FLASH_OFFSET, T1000E_RECOVERY_BOOTLOADER_FLASH_OFFSET,
+    T1000E_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET, T114_RECOVERY_BOOTLOADER_FLASH_OFFSET,
+    T_ECHO_BLE_IDENTITY_FLASH_OFFSET, T_ECHO_INTERFACE_MODE_PAGES, T_ECHO_JOURNAL_LAYOUT,
     T_ECHO_MIN_ARENA_BYTES, T_ECHO_REMOTE_CONTROL_IDENTITY_FLASH_OFFSET, T_ECHO_RESERVED_FLASH_END,
     T_ECHO_S140_V6_FIRMWARE_MEMORY, T_ECHO_S140_V7_FIRMWARE_MEMORY,
 };
@@ -53,6 +59,18 @@ pub use identity::{
     HopspotNodeIdentity, IdentityBootstrap, IdentityPersistence, IdentityStorageName,
     BLE_IDENTITY_STORAGE, NODE_IDENTITY_STORAGE,
 };
+pub use interface_mode::{
+    apply_selection_to_descriptor, interface_mode_label, interface_mode_menu_label,
+    interface_mode_slot_for_kind, mode_from_table, AnnouncesToInternal, InterfaceModeSelection,
+    InterfaceModeSlot, InterfaceModeTable, INTERFACE_MODE_CHOICES, INTERFACE_MODE_SLOT_COUNT,
+};
+#[cfg(feature = "host")]
+pub use interface_mode::{
+    load_host_interface_modes, save_host_interface_modes, INTERFACE_MODE_STORAGE,
+};
+pub use interface_mode_store::{
+    InterfaceModeLoadNotice, InterfaceModeStore, InterfaceModeStoreError, LoadedInterfaceModes,
+};
 #[cfg(feature = "display")]
 pub use mobile::{
     expand_face_rgba, InvalidMobileInputCode, MobileActionCode, MobileEngineFailure,
@@ -60,6 +78,7 @@ pub use mobile::{
     MOBILE_PANEL_WIDTH, MOBILE_PIXEL_COUNT, MOBILE_RGBA_BYTES,
 };
 pub use persistence::PersistenceState;
+pub use power_publish::{latest_power_snapshot, publish_power_snapshot};
 pub use prns_core::capabilities::positioning::gnss::{
     GnssFix, GnssReceiverCommand, GnssSnapshot, NmeaParser,
 };
@@ -73,14 +92,21 @@ pub use prns_core::capabilities::power::{
 pub use radio_profile_store::{
     LoadedRadioProfile, RadioProfileLoadNotice, RadioProfileStore, RadioProfileStoreError,
 };
+pub use remote_control_inventory::{
+    bluetooth_auto_interface_name, decorate_hopspot_remote_control_card,
+    hopspot_remote_control_build_version, remote_control_interface_config_from_snapshots,
+    remote_control_interface_peers_from_snapshots, remote_control_inventory_from_snapshots,
+};
 #[cfg(feature = "display")]
 pub use screen::{
-    apply_and_persist_radio_profile, card_label, card_label_max_chars, tcp_card_label,
-    AccessPointState, BluetoothRecoveryMenuDetails, Card, CardActivityTracker, CardKind, CardLabel,
-    GnssAvailability, InputEvent, InterfaceMenuDetails, LoRaSpectrumMenuDetails, LocalDocsAccess,
-    PersistenceNotice, PresentedNoticeTimer, RadioProfileChangeResult, ScreenContent,
-    SharedInstanceConfigExport, UiAction, UiConfiguration, UiNotice, UiState, UserBlanking,
-    WifiNetworkStatus, WifiStationStatus,
+    apply_and_persist_interface_modes, apply_and_persist_radio_profile, card_label,
+    card_label_max_chars, interface_mode_slot, tcp_card_label, AccessPointState, BleGroupEditor,
+    BleGroupName, BluetoothRecoveryMenuDetails, Card, CardActivityTracker, CardKind, CardLabel,
+    GnssAvailability, InputEvent, InterfaceDetailFocus, InterfaceMenuDetails,
+    InterfaceModeChangeResult, LoRaSpectrumMenuDetails, LocalDocsAccess, PersistenceNotice,
+    PresentedNoticeTimer, RadioProfileChangeResult, ScreenContent, SharedInstanceConfigExport,
+    UiAction, UiConfiguration, UiNotice, UiState, UserBlanking, WifiNetworkStatus,
+    WifiStationStatus, DEFAULT_BLE_GROUP,
 };
 #[cfg(feature = "display")]
 pub use screen::{display, face_64x128};
@@ -92,6 +118,7 @@ use personal_rns::engine::{
 };
 #[cfg(feature = "display")]
 use personal_rns::interfaces::{ConnectionState, InterfaceId, InterfaceSnapshot, Membership};
+use personal_rns::units::DurationMillis;
 
 pub const EMBEDDED_HOPSPOT_PROTOCOL_POLICY: EngineProtocolPolicy = EngineProtocolPolicy {
     proof_form: ProofForm::Implicit,
@@ -99,6 +126,14 @@ pub const EMBEDDED_HOPSPOT_PROTOCOL_POLICY: EngineProtocolPolicy = EngineProtoco
     local_hop_count_override: LocalHopCountOverride::Disabled,
     recursive_path_request_default: RecursivePathRequestDefault::Enabled,
 };
+
+/// Same windows as `prnsd pairing open`. The open window must be strictly
+/// longer than the attempt timeout so Begin still fits after the operator
+/// types the invitation. A 30s attempt window is too short for two-sided
+/// approval plus grant persist; persist after that deadline rolls the grant
+/// back and never sends Completed.
+pub const REMOTE_CONTROL_PAIRING_EXPIRES_AFTER: DurationMillis = DurationMillis(180_000);
+pub const REMOTE_CONTROL_PAIRING_ATTEMPT_TIMEOUT: DurationMillis = DurationMillis(120_000);
 
 /// The faces' redraw-coalescing window, in milliseconds. A burst of engine changes inside this span
 /// folds into one repaint (~30 fps). It bounds how fast a face repaints when things change; it is not
@@ -150,6 +185,7 @@ pub fn snapshots_to_cards<const N: usize>(
             id: snapshot.id,
             kind,
             label,
+            mode: snapshot.mode,
             connection: snapshot.connection,
             failure_reason: snapshot.failure_reason,
             tx_bytes: snapshot.tx_bytes,
@@ -201,7 +237,21 @@ pub fn snapshots_to_interface_menu_details(
     selected_card: Option<&Card>,
     snapshots: &[InterfaceSnapshot],
 ) -> InterfaceMenuDetails {
+    ble_interface_menu_details(None, selected_card, snapshots)
+}
+
+#[cfg(feature = "display")]
+pub fn ble_interface_menu_details(
+    group_id: Option<&str>,
+    selected_card: Option<&Card>,
+    snapshots: &[InterfaceSnapshot],
+) -> InterfaceMenuDetails {
     let mut details = InterfaceMenuDetails::empty();
+    if selected_card.is_some_and(|card| card.kind() == CardKind::Ble) {
+        if let Some(group_id) = group_id.filter(|group| !group.is_empty()) {
+            details.push_info("grp", group_id);
+        }
+    }
     let _ = push_snapshot_supervisor_peer_rows(&mut details, selected_card, snapshots);
     details
 }
@@ -256,6 +306,9 @@ mod tests {
             links: 0,
             transported_links: 0,
             membership: Membership::Independent,
+            radio: personal_rns::interfaces::RadioIndication::for_kind(Some(kind)),
+            details: personal_rns::interfaces::PeerDetails::NotApplicable,
+            link_local: None,
         }
     }
 
@@ -306,6 +359,7 @@ mod tests {
             id: supervisor_id,
             kind: CardKind::Ble,
             label: card_label("BLE"),
+            mode: personal_rns::interfaces::InterfaceMode::Full,
             connection: ConnectionState::Connected,
             failure_reason: None,
             tx_bytes: 0,
@@ -323,6 +377,51 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].text(), "Peers 1");
         assert_eq!(rows[1].text(), "P abcd Live");
+    }
+
+    #[test]
+    fn ble_details_show_read_only_group_above_peers() {
+        let supervisor_id =
+            InterfaceId::new([InterfaceKind::BluetoothAuto as u8, 0, 0, 0, 0, 0, 0, 0]);
+        let member_id = InterfaceId::new([
+            InterfaceKind::BluetoothPeer as u8,
+            0xab,
+            0xcd,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
+        let mut supervisor = snapshot(InterfaceKind::BluetoothAuto);
+        supervisor.id = supervisor_id;
+        let mut member = snapshot(InterfaceKind::BluetoothPeer);
+        member.id = member_id;
+        member.membership = Membership::FleetMember { supervisor_id };
+        let card = Card {
+            id: supervisor_id,
+            kind: CardKind::Ble,
+            label: card_label("BLE"),
+            mode: personal_rns::interfaces::InterfaceMode::Full,
+            connection: ConnectionState::Connected,
+            failure_reason: None,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            links: 0,
+            peers: Some(1),
+            destinations: 0,
+            rate_bytes_per_sec: 0,
+            last_activity_secs: None,
+        };
+
+        let details =
+            ble_interface_menu_details(Some("mt-leg-a"), Some(&card), &[supervisor, member]);
+        let rows = details.as_slice();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].text(), "grp mt-leg-a");
+        assert_eq!(rows[1].text(), "Peers 1");
+        assert_eq!(rows[2].text(), "P abcd Live");
     }
 
     #[test]
@@ -377,6 +476,7 @@ mod tests {
             id: supervisor_id,
             kind: CardKind::Wifi,
             label: card_label("LAN"),
+            mode: personal_rns::interfaces::InterfaceMode::Full,
             connection: ConnectionState::Disconnected,
             failure_reason: None,
             tx_bytes: 0,

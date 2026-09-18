@@ -7,6 +7,8 @@ use crate::engine::{
     Directive, EngineReaction, EngineState, InstantMillis, OwedWork,
     ResourceDecompressionCompleted, ResourceDecompressionOwed,
 };
+#[cfg(feature = "resource-work-offload")]
+use crate::engine::{WholeResourceOpenOwed, WholeResourceOpenPlan, WholeResourceOpenReservation};
 use crate::routing::delivery::receipts::{ReceiptTable, Receipts};
 use crate::routing::links::data::link_raw_frame_ceiling;
 use crate::routing::links::data::write_link_raw_packet;
@@ -18,8 +20,10 @@ use crate::routing::links::resources::assemble_incoming::{
 };
 use crate::routing::links::resources::assembly::AssemblyProgress;
 use crate::routing::links::resources::control::{write_proof_plaintext, PROOF_PLAINTEXT_LEN};
+#[cfg(feature = "resource-work-offload")]
+use crate::routing::links::resources::streamed_open::ResourceOpenLane;
 use crate::routing::links::resources::streamed_open::{
-    ExternalOpenVerification, OpenProgress, OpenedStream, ResourceOpenLane,
+    ExternalOpenVerification, OpenProgress, OpenedStream,
 };
 use crate::routing::links::resources::table::{IncomingResourceState, IncomingResourceStatus};
 use crate::routing::links::resources::{
@@ -66,6 +70,7 @@ impl<S: StorageLayout> EngineState<S> {
             LinkRole::Initiator { .. } => None,
         };
 
+        #[cfg(feature = "resource-work-offload")]
         if self.resource_open_lane == ResourceOpenLane::ExternalWhole
             && state.status == IncomingResourceStatus::Transferring
             && matches!(
@@ -73,11 +78,41 @@ impl<S: StorageLayout> EngineState<S> {
                 OpenProgress::NotBegun,
             )
         {
-            self.incoming_resources.state_mut(index).status = IncomingResourceStatus::AwaitingOpen;
+            let key = key.cloned();
+            let generation = self.incoming_resources.take_open_generation();
+            {
+                let state = self.incoming_resources.state_mut(index);
+                state.status = IncomingResourceStatus::AwaitingOpen;
+                state.open_generation = Some(generation);
+            }
+            let sealed_len = state.sealed_transfer_bytes;
+            let (_, open) = self
+                .incoming_resources
+                .transfer_and_streamed_open_mut(index);
+            *open = OpenProgress::Chewing {
+                dispatched: 0..sealed_len,
+            };
             self.incoming_resources.set_timeout_at(
                 index,
                 Some(InstantMillis(now.0.saturating_add(OPEN_VERDICT_GRACE_MS))),
             );
+            let sealed = self.incoming_resources.sealed_transfer(index);
+            sink(EngineReaction::Directive(Directive::Fulfill(
+                OwedWork::WholeResourceOpen(WholeResourceOpenOwed {
+                    plan: WholeResourceOpenPlan {
+                        reservation: WholeResourceOpenReservation {
+                            link_id: *link_id,
+                            hash: *hash,
+                            generation,
+                        },
+                        key,
+                        compression: state.compression,
+                        salt_nonce: state.salt_nonce,
+                        total_segments: state.total_segments,
+                    },
+                    sealed,
+                }),
+            )));
             return ConcludeResourceOutcome::AwaitingOpenVerdict;
         }
 

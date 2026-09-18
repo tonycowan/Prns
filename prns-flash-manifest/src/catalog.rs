@@ -332,12 +332,33 @@ pub struct Uf2Build {
     pub variants: Vec<Uf2BuildVariant>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Uf2BoardDiscovery {
+    /// This Board-ID may claim an unidentified UF2 volume.
+    #[default]
+    Auto,
+    /// This Board-ID is only used after the user selected this catalog entry.
+    Explicit,
+}
+
+impl Uf2BoardDiscovery {
+    fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Uf2BoardIdentity {
     #[serde(rename = "match")]
     pub match_kind: Uf2BoardIdMatchKind,
     pub value: String,
+    /// Auto-discovery refuses overlapping Board-IDs. Explicit entries may share
+    /// a bootloader identity with an auto-detected board because the user
+    /// already chose the firmware.
+    #[serde(default, skip_serializing_if = "Uf2BoardDiscovery::is_auto")]
+    pub discovery: Uf2BoardDiscovery,
 }
 
 impl Uf2BoardIdentity {
@@ -554,11 +575,15 @@ fn validate_uf2_board_identities(boards: &[BoardCatalogEntry]) -> Result<(), Cat
     let identities = boards
         .iter()
         .filter_map(|board| match &board.build {
-            BoardBuild::Uf2(build) => Some((board.slug.as_str(), &build.board_identity)),
-            BoardBuild::Esp(_) => None,
-            BoardBuild::NrfSerialDfu(build) => {
+            BoardBuild::Uf2(build) if build.board_identity.discovery.is_auto() => {
+                Some((board.slug.as_str(), &build.board_identity))
+            }
+            BoardBuild::NrfSerialDfu(build)
+                if build.recovery.board_identity.discovery.is_auto() =>
+            {
                 Some((board.slug.as_str(), &build.recovery.board_identity))
             }
+            BoardBuild::Esp(_) | BoardBuild::Uf2(_) | BoardBuild::NrfSerialDfu(_) => None,
         })
         .collect::<Vec<_>>();
     for (index, (slug, identity)) in identities.iter().enumerate() {
@@ -695,6 +720,27 @@ const T114_UF2_RECIPE: PinnedUf2Recipe = PinnedUf2Recipe {
     }],
 };
 
+const MESH_TOWER_V2_UF2_RECIPE: PinnedUf2Recipe = PinnedUf2Recipe {
+    preparation_profile: PreparationProfile::T114Uf2,
+    package: "t-echo",
+    binary: "heltec-mesh-tower-v2",
+    board_feature: "board-mesh-tower-v2",
+    manufacturer: "Stay Personal",
+    product: "Personal Hopspot (Heltec MeshTower V2)",
+    serial_number: "PERSONAL-RNS-MTWR-HOP",
+    variants: &[PinnedUf2Variant {
+        softdevice_family: "s140",
+        softdevice_version: "6.1.1",
+        fwid: "0x00b6",
+        application_base: "0x00026000",
+        application_end_exclusive: "0x000e3000",
+        family_id: "0xada52840",
+        application_link: Uf2ApplicationLink::SoftdeviceS140V6,
+        target_directory: "target/mesh-tower-v2",
+        filename: "heltec-mesh-tower-v2-s140-6.1.1.uf2",
+    }],
+};
+
 const T096_UF2_RECIPE: PinnedUf2Recipe = PinnedUf2Recipe {
     preparation_profile: PreparationProfile::T096Uf2,
     package: "t-echo",
@@ -721,6 +767,7 @@ fn pinned_uf2_recipe(slug: &str) -> Option<&'static PinnedUf2Recipe> {
         "t-echo" => Some(&T_ECHO_UF2_RECIPE),
         "t096" => Some(&T096_UF2_RECIPE),
         "t114" => Some(&T114_UF2_RECIPE),
+        "mesh-tower-v2" => Some(&MESH_TOWER_V2_UF2_RECIPE),
         _ => None,
     }
 }
@@ -1015,6 +1062,7 @@ mod tests {
                 ("t-echo", None, None),
                 ("t114", None, None),
                 ("t096", None, None),
+                ("mesh-tower-v2", None, None),
                 ("t1000-e", None, None),
             ]
         );
@@ -1057,6 +1105,37 @@ mod tests {
         assert_eq!(build.flash_frequency, "40m");
         assert_eq!(build.before_reset, "usb-reset");
         assert_eq!(build.after_reset, "watchdog-reset");
+        assert!(!catalog
+            .shipping_boards()
+            .any(|entry| entry.slug == board.slug));
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_tower_v2_is_explicit_because_it_shares_the_t114_board_id() -> Result<(), CatalogError> {
+        let catalog = board_catalog()?;
+        let board = catalog
+            .board("mesh-tower-v2")
+            .ok_or_else(|| CatalogError::InvalidBoard {
+                board: "mesh-tower-v2".to_string(),
+                message: "missing qualification target".to_string(),
+            })?;
+        let t114 = catalog
+            .board("t114")
+            .ok_or_else(|| CatalogError::InvalidBoard {
+                board: "t114".to_string(),
+                message: "missing shipping target".to_string(),
+            })?;
+        let BoardBuild::Uf2(build) = &board.build else {
+            return Err(invalid(board, "expected a UF2 build"));
+        };
+        let BoardBuild::Uf2(t114_build) = &t114.build else {
+            return Err(invalid(t114, "expected a UF2 build"));
+        };
+        assert_eq!(board.availability, BoardAvailability::Qualification);
+        assert_eq!(build.board_identity.value, t114_build.board_identity.value);
+        assert_eq!(build.board_identity.discovery, Uf2BoardDiscovery::Explicit);
+        assert_eq!(t114_build.board_identity.discovery, Uf2BoardDiscovery::Auto);
         assert!(!catalog
             .shipping_boards()
             .any(|entry| entry.slug == board.slug));
@@ -1311,6 +1390,7 @@ mod tests {
         build.board_identity = Uf2BoardIdentity {
             match_kind: Uf2BoardIdMatchKind::RevisionPrefix,
             value: "nrf52840-heltec-t114-v".to_string(),
+            discovery: Uf2BoardDiscovery::Auto,
         };
         catalog.validate()?;
         Ok(())
@@ -1343,11 +1423,34 @@ mod tests {
         recovery.board_identity = Uf2BoardIdentity {
             match_kind: Uf2BoardIdMatchKind::Exact,
             value: format!("{uf2_prefix}2"),
+            discovery: Uf2BoardDiscovery::Auto,
         };
         assert!(matches!(
             catalog.validate(),
             Err(CatalogError::OverlappingUf2BoardIdentities { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn an_explicit_uf2_identity_may_share_an_auto_detected_board_id(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let catalog = board_catalog()?;
+        let mesh = catalog
+            .board("mesh-tower-v2")
+            .ok_or("expected MeshTower V2")?;
+        let t114 = catalog.board("t114").ok_or("expected T114")?;
+        let BoardBuild::Uf2(mesh_build) = &mesh.build else {
+            return Err("expected MeshTower UF2".into());
+        };
+        let BoardBuild::Uf2(t114_build) = &t114.build else {
+            return Err("expected T114 UF2".into());
+        };
+        assert_eq!(
+            mesh_build.board_identity.value,
+            t114_build.board_identity.value
+        );
+        catalog.validate()?;
         Ok(())
     }
 

@@ -10,7 +10,7 @@ use crate::interfaces::{
 };
 use crate::manifold::wake_schedule::merge_wake_schedules_delta;
 use crate::manifold::Host;
-use crate::routing::dedup::PacketHash;
+use crate::routing::links::resources::receive::part_hash::ResourcePartHashPlan;
 use crate::routing::links::resources::ResourceOffer;
 use crate::routing::links::LinkId;
 use crate::runtime::InterfaceStore;
@@ -23,6 +23,38 @@ use super::egress::{
 use super::interface_topology::InterfaceTopology;
 use super::journal_delivery::JournalDispatch;
 use super::owed_work::PendingOwedWork;
+
+#[derive(Clone, Copy)]
+enum IngressBufferSource {
+    GrantSlot,
+    UnmaskScratch,
+}
+
+#[derive(Clone, Copy)]
+struct IngressPacketSpan {
+    start: usize,
+    len: usize,
+}
+
+impl IngressPacketSpan {
+    fn of(bytes: &[u8]) -> Self {
+        Self {
+            start: bytes.as_ptr() as usize,
+            len: bytes.len(),
+        }
+    }
+
+    fn locate(&self, part: &[u8]) -> Option<std::ops::Range<usize>> {
+        let start = (part.as_ptr() as usize).checked_sub(self.start)?;
+        let end = start.checked_add(part.len())?;
+        (end <= self.len).then_some(start..end)
+    }
+}
+
+struct DeferredResourcePartHash {
+    plan: ResourcePartHashPlan,
+    part: std::ops::Range<usize>,
+}
 
 // Ingress adds ordering barriers to the common reaction route. Keeping those
 // borrowed queues explicit avoids a second, partially initialized router type.
@@ -38,6 +70,8 @@ fn route_ingress_reaction<J>(
     crypto_pool: Option<&CryptoPool>,
     link_signs: &mut std::vec::Vec<LinkSignJob>,
     link_identity_barriers: &mut std::vec::Vec<(InterfaceId, LinkId)>,
+    packet_span: IngressPacketSpan,
+    deferred_resource_part_hash: &mut Option<DeferredResourcePartHash>,
     source: InterfaceId,
     now: InstantMillis,
 ) where
@@ -72,7 +106,21 @@ fn route_ingress_reaction<J>(
             OwedWork::ResourceBuild(owed) => {
                 owed_work.push(OwedWork::ResourceBuild(owed), crypto_pool);
             }
+            OwedWork::ResourceSeal(owed) => {
+                owed_work.push(OwedWork::ResourceSeal(owed), crypto_pool);
+            }
+            OwedWork::ResourcePartHash(owed) => {
+                let (plan, part) = owed.into_parts();
+                if let Some(part) = packet_span.locate(part) {
+                    *deferred_resource_part_hash = Some(DeferredResourcePartHash { plan, part });
+                } else {
+                    owed_work.push_resource_part_hash_copy(plan, part);
+                }
+            }
             OwedWork::ResourceOpen(owed) => owed_work.push_resource_open(owed, crypto_pool),
+            OwedWork::WholeResourceOpen(owed) => {
+                owed_work.push(OwedWork::WholeResourceOpen(owed), crypto_pool);
+            }
             OwedWork::ResourceDecompression(owed) => {
                 owed_work.push(OwedWork::ResourceDecompression(owed), crypto_pool);
             }
@@ -89,13 +137,6 @@ pub(super) struct InboundDispatch {
     /// cannot overtake that verdict merely because signature verification ran on a worker.
     link_identity_barriers: std::vec::Vec<(InterfaceId, LinkId)>,
 }
-
-// The minimum sixteen-job admission depth exposes at most fifteen link signs while retaining
-// room for the next packet's possible second crypto job. Split that common backlog across the
-// manifold (seven immediate proofs) and the pool (up to eight jobs). Seven remains a fixed latency
-// bound on larger hosts; their additional backlog goes to their larger pool instead of blocking
-// the manifold. Neither side waits for work, and a lone signature stays entirely inline.
-const INLINE_LINK_SIGN_TRANCHE: usize = 7;
 
 impl InboundDispatch {
     pub(super) fn new(frame_capacity: usize) -> Self {
@@ -143,7 +184,10 @@ impl InboundDispatch {
         }
     }
 
-    pub(super) fn process<S, H, J, P, A>(&mut self, context: InboundContext<'_, S, H, J, P, A>)
+    pub(super) fn process<S, H, J, P, A>(
+        &mut self,
+        context: InboundContext<'_, S, H, J, P, A>,
+    ) -> usize
     where
         S: StorageLayout,
         H: Host,
@@ -163,6 +207,7 @@ impl InboundDispatch {
             should_prove,
             should_accept_resource,
             max_frames_per_lane,
+            max_frames_total,
             owed_work,
             now,
         } = context;
@@ -173,7 +218,11 @@ impl InboundDispatch {
             inline_link_signs,
             link_identity_barriers,
         } = self;
-        for &source in ready_lanes.iter() {
+        let mut processed_frames = 0;
+        'lanes: for &source in ready_lanes.iter() {
+            if processed_frames == max_frames_total {
+                break;
+            }
             if !link_identity_barriers.is_empty()
                 && link_identity_barriers
                     .iter()
@@ -193,10 +242,13 @@ impl InboundDispatch {
             };
             lane.acknowledge();
             for _ in 0..max_frames_per_lane {
+                if processed_frames == max_frames_total {
+                    break;
+                }
                 if crypto_pool.is_some_and(|pool| {
                     !pool.has_queue_capacity(
                         owed_work
-                            .len()
+                            .pool_jobs_len()
                             .saturating_add(link_signs.len())
                             .saturating_add(2),
                     )
@@ -207,18 +259,22 @@ impl InboundDispatch {
                     break;
                 };
                 let packet_phy = slot.packet_phy;
-                let bytes = match ifac_for(&topology.ifacs, source) {
+                let (bytes, buffer_source) = match ifac_for(&topology.ifacs, source) {
                     Some(entry) => {
                         match entry
                             .context
                             .try_unmask_inbound(slot.frame(), unmask_scratch)
                         {
-                            Ok(clean_len) => &mut unmask_scratch[..clean_len],
+                            Ok(clean_len) => (
+                                &mut unmask_scratch[..clean_len],
+                                IngressBufferSource::UnmaskScratch,
+                            ),
                             Err(IfacUnmaskError::PacketTooShort) => {
                                 if let Some(recorder) = &frame_accounting {
                                     recorder.record(FrameAccountingEvent::ProtocolViolation);
                                 }
                                 lane.release();
+                                processed_frames += 1;
                                 continue;
                             }
                             Err(
@@ -227,21 +283,21 @@ impl InboundDispatch {
                                 | IfacUnmaskError::OutputTooSmall { .. },
                             ) => {
                                 lane.release();
+                                processed_frames += 1;
                                 continue;
                             }
                         }
                     }
-                    None => slot.frame_mut(),
+                    None => (slot.frame_mut(), IngressBufferSource::GrantSlot),
                 };
-                let packet = ClassifiedInboundPacket::classify(InboundPacket {
+                let packet_span = IngressPacketSpan::of(bytes);
+                let mut packet = ClassifiedInboundPacket::classify(InboundPacket {
                     arrived_at: now,
                     source_interface: source,
                     bytes,
                 });
-                let packet_hash = packet.packet_hash();
-                if let Some(packet_hash) = packet_hash {
-                    retain_packet_phy(packet_phy_store, packet_hash, packet_phy);
-                }
+                retain_packet_phy(packet_phy_store, &mut packet, packet_phy);
+                let mut deferred_resource_part_hash = None;
                 let ingest_report = engine.ingest_classified_into_report(
                     packet,
                     IngestIo {
@@ -262,6 +318,8 @@ impl InboundDispatch {
                                 crypto_pool,
                                 link_signs,
                                 link_identity_barriers,
+                                packet_span,
+                                &mut deferred_resource_part_hash,
                                 source,
                                 now,
                             );
@@ -277,7 +335,27 @@ impl InboundDispatch {
                         FrameAccountingEvent::ProtocolViolation
                     });
                 }
-                lane.release();
+                match (buffer_source, deferred_resource_part_hash) {
+                    (
+                        IngressBufferSource::GrantSlot,
+                        Some(DeferredResourcePartHash { plan, part }),
+                    ) => {
+                        if let Some(frame) = lane.take_peeked() {
+                            owed_work.push_resource_part_hash_grant_slot(plan, source, frame, part);
+                        }
+                    }
+                    (
+                        IngressBufferSource::UnmaskScratch,
+                        Some(DeferredResourcePartHash { plan, part }),
+                    ) => {
+                        owed_work.push_resource_part_hash_copy(plan, &unmask_scratch[part]);
+                        lane.release();
+                    }
+                    (IngressBufferSource::GrantSlot | IngressBufferSource::UnmaskScratch, None) => {
+                        lane.release();
+                    }
+                }
+                processed_frames += 1;
                 merge_wake_schedules_delta(
                     wake_schedules,
                     ingest_report.wake_schedules,
@@ -293,11 +371,7 @@ impl InboundDispatch {
                 }
             }
             {
-                let inline_signs = if crypto_pool.is_some() {
-                    INLINE_LINK_SIGN_TRANCHE
-                } else {
-                    usize::MAX
-                };
+                let inline_signs = crypto_pool.map_or(usize::MAX, |_| 0);
                 for _ in 0..inline_signs {
                     let Some(sign) = link_signs.pop() else {
                         break;
@@ -358,6 +432,9 @@ impl InboundDispatch {
                     }
                 }
             }
+            if processed_frames == max_frames_total {
+                break 'lanes;
+            }
         }
         ready_lanes.retain(|source| {
             topology
@@ -366,6 +443,10 @@ impl InboundDispatch {
                 .find(|(id, _)| id == source)
                 .is_some_and(|(_, lane)| lane.try_peek().is_some())
         });
+        if ready_lanes.len() > 1 {
+            ready_lanes.rotate_left(1);
+        }
+        processed_frames
     }
 }
 
@@ -388,19 +469,23 @@ where
     pub(super) should_prove: &'a mut P,
     pub(super) should_accept_resource: &'a mut A,
     pub(super) max_frames_per_lane: usize,
+    pub(super) max_frames_total: usize,
     pub(super) owed_work: &'a mut PendingOwedWork,
     pub(super) now: InstantMillis,
 }
 
 fn retain_packet_phy(
     store: Option<&InterfaceStore>,
-    packet_hash: PacketHash,
+    packet: &mut ClassifiedInboundPacket<'_>,
     packet_phy: PacketPhyStats,
 ) {
     if packet_phy.is_empty() {
         return;
     }
     let Some(store) = store else {
+        return;
+    };
+    let Some(packet_hash) = packet.resolve_packet_hash() else {
         return;
     };
     store.remember_packet_phy(packet_hash, packet_phy);
@@ -411,6 +496,7 @@ mod tests {
     use super::*;
     use crate::engine::test_support::{bytes_from_hex, RNS_1_4_2_ANNOUNCE};
     use crate::interfaces::{RssiDbm, SignalQualityTenthsPercent, SnrQuarterDb};
+    use crate::routing::dedup::PacketHash;
 
     #[test]
     fn link_identity_verdict_blocks_only_its_ingress_lane_until_completion() {
@@ -439,19 +525,20 @@ mod tests {
         let store = InterfaceStore::new();
         let mut raw = bytes_from_hex(RNS_1_4_2_ANNOUNCE);
         let expected = PacketHash::of_wire_packet(&raw).expect("the fixture is a wire packet");
-        let packet = ClassifiedInboundPacket::classify(InboundPacket {
+        let mut packet = ClassifiedInboundPacket::classify(InboundPacket {
             arrived_at: crate::engine::InstantMillis(7),
             source_interface: InterfaceId::new([0xC7; 8]),
             bytes: &mut raw,
         });
-        let packet_hash = packet.packet_hash().expect("the packet was classified");
         let packet_phy = PacketPhyStats {
             rssi: Some(RssiDbm::new(-103)),
             snr: Some(SnrQuarterDb::new(-11)),
             quality: SignalQualityTenthsPercent::new(731),
         };
 
-        retain_packet_phy(Some(&store), packet_hash, packet_phy);
+        retain_packet_phy(Some(&store), &mut packet, packet_phy);
+
+        let packet_hash = packet.packet_hash().expect("the packet was classified");
 
         assert_eq!(packet_hash, expected);
         assert_eq!(store.packet_phy(packet_hash), Some(packet_phy));

@@ -8,8 +8,8 @@ use crate::engine::remote_control_pairing::{
 use crate::engine::settlement::settle;
 use crate::engine::LinkClosedReason;
 use crate::engine::{
-    CryptoOwed, Directive, EngineReaction, EngineState, IngestPacketOutcome, InstantMillis,
-    Journaled, LinkEstablished, OwedWork, ProtocolViolationKind,
+    CryptoOwed, Directive, EngineReaction, EngineState, IgnoreReason, IngestPacketOutcome,
+    InstantMillis, Journaled, LinkEstablished, OwedWork, ProtocolViolationKind,
     RemoteControlControllerPairingRequestFailureCause,
     RemoteControlControllerPairingResponseArrival, RemoteControlControllerPairingResponseReceived,
     SendRequestFailure, SendRequestIntent, Settlement, WakeSchedule, WakeSchedules,
@@ -23,6 +23,12 @@ use crate::routing::links::establish::link_mtu_ceiling;
 use crate::routing::links::handshake::{negotiated_link_mtu, LinkProofSignOwed};
 use crate::routing::links::maintenance::{write_keepalive, KEEPALIVE_ECHO};
 use crate::routing::links::resources::receive::gate::AcceptedResourceAdmission;
+#[cfg(feature = "resource-work-offload")]
+use crate::routing::links::resources::receive::part_hash::{
+    ResourcePartHashCompleted, ResourcePartHashLanding,
+};
+#[cfg(feature = "resource-work-offload")]
+use crate::routing::links::resources::send::ResourceSealExecution;
 use crate::routing::links::resources::ResourceOffer;
 use crate::routing::proof::ProofRequest;
 use crate::storage::StorageLayout;
@@ -47,9 +53,45 @@ where
 pub struct IngestPacketReport {
     pub wake_schedules: WakeSchedules,
     pub protocol_violation: Option<ProtocolViolationKind>,
+    pub ignore_reason: Option<IgnoreReason>,
 }
 
 impl<S: StorageLayout> EngineState<S> {
+    #[cfg(feature = "resource-work-offload")]
+    pub fn resume_resource_part_hash<F, K>(
+        &mut self,
+        completed: ResourcePartHashCompleted<'_>,
+        now: InstantMillis,
+        fill_random: &mut F,
+        sink: &mut K,
+    ) -> WakeSchedules
+    where
+        F: FnMut(&mut [u8]),
+        K: FnMut(EngineReaction<'_, OwedWork<'_>>),
+    {
+        let mut wake = WakeSchedules::UNCHANGED;
+        match self.land_resource_part_hash(completed) {
+            ResourcePartHashLanding::Ignored(_) => {}
+            ResourcePartHashLanding::Pull { link_id, hash } => {
+                self.emit_resource_pull(&link_id, &hash, now, fill_random, sink);
+                self.emit_resource_open(&link_id, &hash, sink);
+                wake.resource_deadlines = self.resource_deadlines_wake();
+                wake.receipt_timeouts = self.receipt_timeouts_wake();
+            }
+            ResourcePartHashLanding::Assembly { link_id, hash } => {
+                self.emit_resource_open(&link_id, &hash, sink);
+                self.conclude_resource(&link_id, &hash, now, sink);
+                wake.resource_deadlines = self.resource_deadlines_wake();
+                wake.receipt_timeouts = self.receipt_timeouts_wake();
+            }
+            ResourcePartHashLanding::DeadlineAdvanced { link_id, hash } => {
+                self.emit_resource_open(&link_id, &hash, sink);
+                wake.resource_deadlines = self.resource_deadlines_wake();
+            }
+        }
+        wake
+    }
+
     pub fn ingest_packet_into<F, P, A, K>(
         &mut self,
         packet: InboundPacket<'_>,
@@ -119,6 +161,7 @@ impl<S: StorageLayout> EngineState<S> {
 
         //Consider cfg-gating this on metrics/observability?
         let protocol_violation = ProtocolViolationKind::of_outcome(&outcome);
+        let mut ignore_reason = None;
 
         wake_schedule_changes.held_announce_release = effects.held_announce_release;
         let accepted_observation = effects.accepted_announce.take();
@@ -229,17 +272,40 @@ impl<S: StorageLayout> EngineState<S> {
                 }
             }
             IngestPacketOutcome::AnswerPathRequest { destination } => {
-                if interfaces.is_egress_eligible(source, Egress::Transmit) {
-                    if let Ok(owed) = self.prepare_path_response_announce_sign(
+                let egress_ok = interfaces.is_egress_eligible(source, Egress::Transmit);
+                if egress_ok {
+                    match self.prepare_path_response_announce_sign(
                         &destination,
                         source,
                         now,
                         &mut *fill_random,
                     ) {
-                        sink(EngineReaction::Directive(Directive::Fulfill(
-                            OwedWork::Crypto(CryptoOwed::AnnounceSign(owed)),
-                        )));
+                        Ok(owed) => {
+                            #[cfg(feature = "log")]
+                            log::debug!(
+                                "path-req: answer egress=ok prepare=ok dest={}",
+                                crate::path_req_trace::DestHex(&destination)
+                            );
+                            sink(EngineReaction::Directive(Directive::Fulfill(
+                                OwedWork::Crypto(CryptoOwed::AnnounceSign(owed)),
+                            )));
+                        }
+                        Err(failure) => {
+                            #[cfg(feature = "log")]
+                            log::debug!(
+                                "path-req: answer egress=ok prepare=err={failure:?} dest={}",
+                                crate::path_req_trace::DestHex(&destination)
+                            );
+                            #[cfg(not(feature = "log"))]
+                            let _ = failure;
+                        }
                     }
+                } else {
+                    #[cfg(feature = "log")]
+                    log::debug!(
+                        "path-req: answer egress=deny prepare=skipped dest={}",
+                        crate::path_req_trace::DestHex(&destination)
+                    );
                 }
             }
             IngestPacketOutcome::ScheduledPathResponse { .. } => {
@@ -472,7 +538,23 @@ impl<S: StorageLayout> EngineState<S> {
             }
             IngestPacketOutcome::OwesResourceParts(request) => {
                 self.serve_resource_request(&request, source, now, fill_random, sink);
+                #[cfg(feature = "resource-work-offload")]
+                match self.resource_seal_execution {
+                    ResourceSealExecution::Inline => {
+                        self.seal_staged_continuation(&request.link_id, fill_random, sink);
+                    }
+                    ResourceSealExecution::ExternalBorrowed
+                    | ResourceSealExecution::ExternalOwned => {
+                        self.request_resource_seal(&request.link_id, sink);
+                    }
+                }
                 wake_schedule_changes.resource_deadlines = self.resource_deadlines_wake();
+            }
+            #[cfg(feature = "resource-work-offload")]
+            IngestPacketOutcome::OwesResourcePartHash(owed) => {
+                sink(EngineReaction::Directive(Directive::Fulfill(
+                    OwedWork::ResourcePartHash(owed),
+                )));
             }
             IngestPacketOutcome::OwesResourcePull { link_id, hash } => {
                 self.emit_resource_pull(&link_id, &hash, now, fill_random, sink);
@@ -761,15 +843,17 @@ impl<S: StorageLayout> EngineState<S> {
                     },
                 ));
             }
-            IngestPacketOutcome::Ignored(_reason) => {
+            IngestPacketOutcome::Ignored(reason) => {
                 #[cfg(feature = "runtime-metrics")]
-                self.ignored_packet_counts.record(_reason);
+                self.ignored_packet_counts.record(reason);
+                ignore_reason = Some(reason);
             }
         }
         wake_schedule_changes.link_deadlines = self.link_deadlines_wake();
         IngestPacketReport {
             wake_schedules: wake_schedule_changes,
             protocol_violation,
+            ignore_reason,
         }
     }
 }

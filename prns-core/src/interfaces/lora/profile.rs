@@ -1,3 +1,6 @@
+use core::fmt::Write as _;
+
+use heapless::String as HeaplessString;
 use heapless::Vec as HeaplessVec;
 
 use crate::interfaces::AirtimeDutyCycle;
@@ -10,6 +13,9 @@ const DUTY_TEN_PERCENT_PER_MILLE: u16 = 100;
 const MODULATION_TAG_LORA: u8 = 0x00;
 
 pub const CHANNEL_TAG_CAP: usize = 11;
+/// Compact Remote Control card text. Must stay inside
+/// `REMOTE_CONTROL_INTERFACE_CONFIG_CAP` (48).
+pub const INVENTORY_CONFIG_CAP: usize = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frequency(u32);
@@ -142,6 +148,59 @@ impl Region {
             Self::Kr920 => "KR920",
             Self::Jp920 => "JP920",
             Self::Unlimited => "Custom",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "US915" => Some(Self::Us915),
+            "AU915" => Some(Self::Au915),
+            "EU433" => Some(Self::Eu433),
+            "EU865" => Some(Self::Eu865),
+            "EU868" => Some(Self::Eu868),
+            "EU869" => Some(Self::Eu869),
+            "AS923" => Some(Self::As923),
+            "IN865" => Some(Self::In865),
+            "CN470" => Some(Self::Cn470),
+            "KR920" => Some(Self::Kr920),
+            "JP920" => Some(Self::Jp920),
+            "Custom" => Some(Self::Unlimited),
+            _ => None,
+        }
+    }
+
+    const fn inventory_index(self) -> u8 {
+        match self {
+            Self::Us915 => 0,
+            Self::Au915 => 1,
+            Self::Eu433 => 2,
+            Self::Eu865 => 3,
+            Self::Eu868 => 4,
+            Self::Eu869 => 5,
+            Self::As923 => 6,
+            Self::In865 => 7,
+            Self::Cn470 => 8,
+            Self::Kr920 => 9,
+            Self::Jp920 => 10,
+            Self::Unlimited => 11,
+        }
+    }
+
+    const fn from_inventory_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::Us915),
+            1 => Some(Self::Au915),
+            2 => Some(Self::Eu433),
+            3 => Some(Self::Eu865),
+            4 => Some(Self::Eu868),
+            5 => Some(Self::Eu869),
+            6 => Some(Self::As923),
+            7 => Some(Self::In865),
+            8 => Some(Self::Cn470),
+            9 => Some(Self::Kr920),
+            10 => Some(Self::Jp920),
+            11 => Some(Self::Unlimited),
+            _ => None,
         }
     }
 
@@ -347,6 +406,43 @@ impl RadioProfile {
         Ok(())
     }
 
+    /// Compact card text: `L,{region},{khz},{sf},{bw},{cr},{tx_dbm},{preamble}`.
+    ///
+    /// Bandwidth is `1`/`2`/`5` for 125/250/500 kHz so a six-supervisor
+    /// inventory still fits one link packet.
+    pub fn inventory_config(self) -> HeaplessString<INVENTORY_CONFIG_CAP> {
+        let Modulation::Lora {
+            spreading_factor,
+            bandwidth,
+            coding_rate,
+        } = self.modulation;
+        let mut out = HeaplessString::new();
+        if write!(
+            out,
+            "L,{},{},{},{},{},{},{}",
+            self.region.inventory_index(),
+            self.frequency.hz() / 1_000,
+            spreading_factor as u8,
+            bandwidth_inventory_code(bandwidth),
+            coding_rate.denominator(),
+            self.tx_power.dbm(),
+            self.preamble.count(),
+        )
+        .is_err()
+        {
+            out.clear();
+            let _ = out.push_str("LoRa");
+        }
+        out
+    }
+
+    pub fn parse_inventory_config(text: &str) -> Option<Self> {
+        if let Some(compact) = text.strip_prefix("L,") {
+            return parse_compact_inventory_config(compact);
+        }
+        parse_verbose_inventory_config(text)
+    }
+
     pub const fn nominal_bitrate_bps(self) -> u32 {
         self.modulation.nominal_bitrate_bps()
     }
@@ -396,6 +492,77 @@ pub const DEFAULT_915_PROFILE: RadioProfile = RadioProfile {
     region: Region::Us915,
 };
 
+const fn bandwidth_inventory_code(bandwidth: LoraBandwidth) -> u8 {
+    match bandwidth {
+        LoraBandwidth::Bw125kHz => 1,
+        LoraBandwidth::Bw250kHz => 2,
+        LoraBandwidth::Bw500kHz => 5,
+    }
+}
+
+fn bandwidth_from_inventory_code(code: u32) -> Option<LoraBandwidth> {
+    match code {
+        1 | 125 => Some(LoraBandwidth::Bw125kHz),
+        2 | 250 => Some(LoraBandwidth::Bw250kHz),
+        5 | 500 => Some(LoraBandwidth::Bw500kHz),
+        _ => None,
+    }
+}
+
+fn parse_compact_inventory_config(text: &str) -> Option<RadioProfile> {
+    let mut parts = text.split(',');
+    let region = Region::from_inventory_index(parts.next()?.parse().ok()?)?;
+    let frequency_khz: u32 = parts.next()?.parse().ok()?;
+    let spreading_factor = SpreadingFactor::from_number(parts.next()?.parse().ok()?)?;
+    let bandwidth = bandwidth_from_inventory_code(parts.next()?.parse().ok()?)?;
+    let coding_rate = CodingRate::from_denominator(parts.next()?.parse().ok()?)?;
+    let tx_power = parts.next()?.parse().ok()?;
+    let preamble = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(RadioProfile {
+        frequency: Frequency::new(frequency_khz.saturating_mul(1_000)),
+        modulation: Modulation::Lora {
+            spreading_factor,
+            bandwidth,
+            coding_rate,
+        },
+        tx_power: TxPower::new(tx_power),
+        preamble: PreambleSymbols::new(preamble),
+        region,
+    })
+}
+
+fn parse_verbose_inventory_config(text: &str) -> Option<RadioProfile> {
+    let mut parts = text.split(',');
+    if parts.next()? != "LoRa" {
+        return None;
+    }
+    let region = Region::from_label(parts.next()?)?;
+    let frequency_hz = parts.next()?.parse().ok()?;
+    let spreading_factor = SpreadingFactor::from_number(parts.next()?.parse().ok()?)?;
+    let bandwidth = bandwidth_from_inventory_code(parts.next()?.parse().ok()?)?;
+    let coding_rate = CodingRate::from_denominator(parts.next()?.parse().ok()?)?;
+    let tx_power = parts.next()?.parse().ok()?;
+    let preamble = parts.next()?.parse().ok()?;
+    let _preset = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(RadioProfile {
+        frequency: Frequency::new(frequency_hz),
+        modulation: Modulation::Lora {
+            spreading_factor,
+            bandwidth,
+            coding_rate,
+        },
+        tx_power: TxPower::new(tx_power),
+        preamble: PreambleSymbols::new(preamble),
+        region,
+    })
+}
+
 pub fn channel_tag(profile: &RadioProfile) -> HeaplessVec<u8, CHANNEL_TAG_CAP> {
     let mut tag = HeaplessVec::new();
     let _ = tag.extend_from_slice(&profile.frequency.hz().to_be_bytes());
@@ -441,6 +608,44 @@ mod tests {
         assert_eq!(
             DEFAULT_915_PROFILE.modulation,
             ModemPreset::MediumFast.modulation()
+        );
+    }
+
+    #[test]
+    fn inventory_config_round_trips_and_stays_inside_the_card_budget() {
+        let encoded = DEFAULT_915_PROFILE.inventory_config();
+        assert_eq!(encoded.as_str(), "L,0,915000,9,2,5,22,18");
+        assert!(encoded.len() <= INVENTORY_CONFIG_CAP);
+        assert_eq!(
+            RadioProfile::parse_inventory_config(encoded.as_str()),
+            Some(DEFAULT_915_PROFILE)
+        );
+        assert_eq!(RadioProfile::parse_inventory_config("LoRa"), None);
+        assert_eq!(
+            RadioProfile::parse_inventory_config("LoRa,US915,915000000,9,250,5,22,18,MF"),
+            Some(DEFAULT_915_PROFILE)
+        );
+
+        let custom = RadioProfile {
+            frequency: Frequency::new(150_000_000),
+            modulation: Modulation::Lora {
+                spreading_factor: SpreadingFactor::Sf12,
+                bandwidth: LoraBandwidth::Bw500kHz,
+                coding_rate: CodingRate::Cr48,
+            },
+            tx_power: TxPower::new(-9),
+            preamble: PreambleSymbols::new(65535),
+            region: Region::Unlimited,
+        };
+        let encoded = custom.inventory_config();
+        assert!(encoded.len() <= INVENTORY_CONFIG_CAP);
+        assert_eq!(
+            RadioProfile::parse_inventory_config(encoded.as_str()),
+            Some(custom)
+        );
+        assert_eq!(
+            INVENTORY_CONFIG_CAP,
+            crate::remote_control::REMOTE_CONTROL_INTERFACE_CONFIG_CAP
         );
     }
 

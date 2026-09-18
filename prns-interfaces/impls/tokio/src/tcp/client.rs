@@ -1,4 +1,5 @@
 use std::string::String;
+use std::sync::{Arc, Mutex};
 
 use crate::byte_stream::framing;
 use crate::reconnect::ReconnectPolicy;
@@ -17,7 +18,7 @@ use std::time::Duration;
 
 pub struct TcpClientInterface {
     id: InterfaceId,
-    target: String,
+    target: Arc<Mutex<String>>,
     channel_tag: std::vec::Vec<u8>,
     policy: EffectiveInterfacePolicy,
     connection: TcpConnectionSettings,
@@ -175,7 +176,7 @@ impl TcpClientInterface {
         let channel_tag = channel_tag(&target, framing);
         Self {
             id,
-            target,
+            target: Arc::new(Mutex::new(target)),
             channel_tag,
             policy,
             connection,
@@ -192,6 +193,18 @@ impl TcpClientInterface {
     #[must_use]
     pub fn status(&self) -> TokioInterfaceStatus {
         self.status.clone()
+    }
+
+    #[must_use]
+    pub fn target_handle(&self) -> Arc<Mutex<String>> {
+        Arc::clone(&self.target)
+    }
+
+    pub fn retarget(&self, target: impl Into<String>) {
+        *self
+            .target
+            .lock()
+            .expect("tcp client target mutex poisoned") = target.into();
     }
 }
 
@@ -229,26 +242,30 @@ impl Interface for TcpClientInterface {
         let mut reconnect_attempts = 0u32;
         let mut reconnect = self.connection.reconnect_policy.schedule();
         loop {
+            let target = self
+                .target
+                .lock()
+                .expect("tcp client target mutex poisoned")
+                .clone();
             #[cfg(feature = "tracing")]
             let connected = tracing::Instrument::instrument(
-                connect(self.target.as_str(), self.connection),
+                connect(target.as_str(), self.connection),
                 tracing::debug_span!(
                     target: "prns.interface",
                     "prns.interface.connect",
                     interface_kind = "tcp_client",
                     interface_origin,
-                    peer = %self.target,
+                    peer = %target,
                 ),
             )
             .await;
             #[cfg(not(feature = "tracing"))]
-            let connected = connect(self.target.as_str(), self.connection).await;
+            let connected = connect(target.as_str(), self.connection).await;
             if let Ok(stream) = connected {
                 let connected_at = tokio::time::Instant::now();
                 tune_for_tunnel(&stream, self.connection.tunnel);
                 crate::diagnostic_log::debug!(
-                    "tcp-client [{interface_origin}]: connected {}",
-                    self.target
+                    "tcp-client [{interface_origin}]: connected {target}"
                 );
                 self.status.set_connection(ConnectionState::Connected);
                 if self.framing == TcpWireFraming::Hdlc {
@@ -294,16 +311,14 @@ impl Interface for TcpClientInterface {
                     }
                 }
                 crate::diagnostic_log::debug!(
-                    "tcp-client [{interface_origin}]: dropped {}, retrying",
-                    self.target
+                    "tcp-client [{interface_origin}]: dropped {target}, retrying"
                 );
                 self.status.set_connection(ConnectionState::Disconnected);
                 reconnect_attempts = 0;
                 reconnect.record_connection_lifetime(connected_at.elapsed());
             } else {
                 crate::diagnostic_log::debug!(
-                    "tcp-client [{interface_origin}]: connect failed {}, retrying",
-                    self.target
+                    "tcp-client [{interface_origin}]: connect failed {target}, retrying"
                 );
                 self.status.set_connection(ConnectionState::Disconnected);
             }
@@ -535,6 +550,20 @@ mod tests {
                 .await
                 .expect("the frame leaves within the window");
         assert_eq!(received, outbound);
+    }
+
+    #[test]
+    fn retarget_changes_the_next_dial_string() {
+        let interface = TcpClientInterface::new("127.0.0.1:4242".to_string());
+        interface.retarget("gateway.example:4242");
+        assert_eq!(
+            interface
+                .target_handle()
+                .lock()
+                .expect("tcp client target mutex poisoned")
+                .as_str(),
+            "gateway.example:4242"
+        );
     }
 
     #[test]

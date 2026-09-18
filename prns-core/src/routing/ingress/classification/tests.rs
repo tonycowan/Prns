@@ -2,7 +2,8 @@ use super::*;
 use crate::engine::test_support::*;
 use crate::routing::ingress::testkit::{header_bytes, iface};
 use crate::wire::{
-    ContextFlag, DestinationType, PropagationType, TransportId, HEADER_MIN_LEN, MAX_HOP_COUNT,
+    ContextFlag, DestinationType, PropagationType, TransportId, WireContext, HEADER_MIN_LEN,
+    MAX_HOP_COUNT,
 };
 
 #[test]
@@ -80,6 +81,7 @@ fn rejected_packets_never_expose_a_canonical_hash() {
 fn recognized_non_announce_packets_classify_from_the_header() {
     for packet_type in [PacketType::Data, PacketType::LinkRequest, PacketType::Proof] {
         let mut bytes = header_bytes(packet_type);
+        let expected_hash = PacketHash::of_wire_packet(&bytes).unwrap();
         let packet = InboundPacket {
             arrived_at: InstantMillis(9),
             source_interface: iface(0x02),
@@ -87,6 +89,7 @@ fn recognized_non_announce_packets_classify_from_the_header() {
         };
 
         let classified = Ingress::classify(packet);
+        assert_eq!(classified.packet_hash(), Some(expected_hash));
         match packet_type {
             PacketType::Data => assert!(matches!(classified, Ingress::Data { .. })),
             PacketType::LinkRequest => {
@@ -96,6 +99,29 @@ fn recognized_non_announce_packets_classify_from_the_header() {
             PacketType::Announce => unreachable!(),
         }
     }
+}
+
+#[test]
+fn classified_packets_expose_the_inbound_wire_trace() {
+    let source = iface(0x02);
+    let mut bytes = header_bytes(PacketType::Data);
+    let classified = ClassifiedInboundPacket::classify(InboundPacket {
+        arrived_at: InstantMillis(9),
+        source_interface: source,
+        bytes: &mut bytes,
+    });
+    assert_eq!(classified.source_interface(), source);
+    assert_eq!(classified.wire_context(), Some(WireContext::None));
+    assert_eq!(classified.payload_len(), 0);
+
+    let mut malformed_bytes = [0x01];
+    let malformed = ClassifiedInboundPacket::classify(InboundPacket {
+        arrived_at: InstantMillis(7),
+        source_interface: iface(0x01),
+        bytes: &mut malformed_bytes,
+    });
+    assert_eq!(malformed.wire_context(), None);
+    assert_eq!(malformed.payload_len(), 0);
 }
 
 #[test]
@@ -177,7 +203,7 @@ fn data_packets_carry_their_typed_fields_through_classification() {
     assert_eq!(classified_source, iface(0x05));
     assert_eq!(source_interface, iface(0x05));
     assert_eq!(arrived_at, InstantMillis(21));
-    assert_eq!(packet_hash, expected_hash);
+    assert_eq!(packet_hash, DataPacketHash::Deferred);
 }
 
 #[test]

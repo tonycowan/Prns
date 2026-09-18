@@ -23,8 +23,12 @@ pub(super) fn stand_up(
         Some(native_service_discovery) => auto_wifi.with_host_discovery(native_service_discovery),
         None => auto_wifi,
     };
+    let handle = interface_construction.handle.clone();
+    let wifi_status = auto_wifi.status();
     let attached_auto_wifi = interface_construction.attach(auto_wifi);
-    Ok(attached_auto_wifi.id())
+    let id = attached_auto_wifi.id();
+    let _ = handle.register_interface_group_apply(id, move |group| wifi_status.set_group_id(group));
+    Ok(id)
 }
 
 fn auto_wifi_settings(

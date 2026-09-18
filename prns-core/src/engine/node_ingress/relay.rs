@@ -10,6 +10,7 @@ use crate::storage::StorageLayout;
 use crate::wire::{DestinationHash, BROADCAST_MTU};
 
 #[derive(Clone, Copy)]
+#[cfg_attr(feature = "log", derive(Debug))]
 pub(super) enum RelayAudience {
     AllNetworkInterfaces,
     OnlineNetworkInterfaces,
@@ -40,8 +41,14 @@ impl<S: StorageLayout> EngineState<S> {
         let Ok(wire_bytes) =
             write_path_request_wire_packet(request.destination, transport_id, request.id, &mut buf)
         else {
+            #[cfg(feature = "log")]
+            log::debug!(
+                "path-req: relay dest={} audience={audience:?} sent=0 reason=wire_encode",
+                crate::path_req_trace::DestHex(&request.destination)
+            );
             return;
         };
+        let mut sent = 0u32;
         for descriptor in interfaces {
             let path_audience = match audience {
                 RelayAudience::AllNetworkInterfaces | RelayAudience::OnlineNetworkInterfaces => {
@@ -77,6 +84,7 @@ impl<S: StorageLayout> EngineState<S> {
                             bytes: &buf[..wire_bytes],
                             on_send: &mut record_egress,
                         }));
+                        sent = sent.saturating_add(1);
                     }
                     RelayAudience::AllNetworkInterfaces => {
                         self.egress_path_request_limits
@@ -88,6 +96,7 @@ impl<S: StorageLayout> EngineState<S> {
                             target: descriptor.id,
                             bytes: &buf[..wire_bytes],
                         }));
+                        sent = sent.saturating_add(1);
                     }
                     RelayAudience::LocalClients => {
                         #[cfg(feature = "runtime-metrics")]
@@ -96,11 +105,17 @@ impl<S: StorageLayout> EngineState<S> {
                         sink(EngineReaction::Directive(Directive::Send {
                             target: descriptor.id,
                             bytes: &buf[..wire_bytes],
-                        }))
+                        }));
+                        sent = sent.saturating_add(1);
                     }
                 }
             }
         }
+        #[cfg(feature = "log")]
+        log::debug!(
+            "path-req: relay dest={} audience={audience:?} sent={sent}",
+            crate::path_req_trace::DestHex(&request.destination)
+        );
     }
 
     pub(super) fn relay_announce_to_local_clients<Work>(

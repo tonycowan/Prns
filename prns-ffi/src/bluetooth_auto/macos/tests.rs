@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 
 use objc2_core_bluetooth::CBCharacteristicProperties;
 use prns_core::interfaces::bluetooth_auto::{
-    AdvertisingMode, BleBackend, BleIdentity, Control, ScanningMode,
+    default_group_tag, dial_key_from_identity, group_tag, manufacturer_role_payload,
+    manufacturer_role_payload_with_node_type, AdvertisingMode, AndroidHost, BleAddress, BleBackend,
+    BleIdentity, BleRoleCapabilities, Control, Endpoint, Esp32Host, ScanningMode,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -12,8 +14,10 @@ use super::backend::{
 };
 use super::central::CentralPeerSession;
 use super::discovery::{
-    candidate_strength, discover_disposition, CandidateStrength, DiscoverDisposition,
-    DiscoveryGuard, PeripheralLinkState, SessionPresence, StaleCancellation, StaleLinkRecovery,
+    candidate_strength, dial_sighting_action, discover_disposition, discover_sighting_action,
+    CandidateStrength, DialSightingAction, DiscoverDisposition, DiscoveryGuard,
+    LegacyDualRolePolicy, ManufacturerPresence, PeripheralLinkState, SessionPresence,
+    StaleCancellation, StaleLinkRecovery,
 };
 use super::gatt_link::{
     gatt_inbound_channel, gatt_inbound_channel_with_budget, GattInboundSendError,
@@ -99,16 +103,70 @@ fn discovery_recovery_distinguishes_owned_stale_and_transitioning_links() {
 
 #[test]
 fn candidate_strength_accepts_prns_name_or_manufacturer_marker() {
-    assert_eq!(candidate_strength(true, None), CandidateStrength::Strong);
     assert_eq!(
-        candidate_strength(false, Some(&[0xff, 0xff, 0x03, 0x00])),
+        candidate_strength(true, None, default_group_tag()),
         CandidateStrength::Strong
     );
     assert_eq!(
-        candidate_strength(false, Some(&[0x4c, 0x00, 0x03, 0x00])),
+        candidate_strength(false, Some(&[0xff, 0xff, 0x03, 0x00]), default_group_tag()),
+        CandidateStrength::Strong
+    );
+    assert_eq!(
+        candidate_strength(false, Some(&[0x4c, 0x00, 0x03, 0x00]), default_group_tag()),
         CandidateStrength::Weak
     );
-    assert_eq!(candidate_strength(false, None), CandidateStrength::Weak);
+    assert_eq!(
+        candidate_strength(false, None, default_group_tag()),
+        CandidateStrength::Weak
+    );
+}
+
+#[test]
+fn candidate_strength_rejects_other_discovery_groups() {
+    let other = group_tag(b"mt-leg-b");
+    let default_body =
+        manufacturer_role_payload(BleRoleCapabilities::DualRole, default_group_tag());
+    let mut default_mfg = [0u8; 8];
+    default_mfg[0] = 0xff;
+    default_mfg[1] = 0xff;
+    default_mfg[2..].copy_from_slice(&default_body);
+
+    let other_body = manufacturer_role_payload(BleRoleCapabilities::DualRole, other);
+    let mut other_mfg = [0u8; 8];
+    other_mfg[0] = 0xff;
+    other_mfg[1] = 0xff;
+    other_mfg[2..].copy_from_slice(&other_body);
+
+    assert_eq!(
+        candidate_strength(false, Some(&default_mfg), other),
+        CandidateStrength::Rejected
+    );
+    assert_eq!(
+        candidate_strength(false, Some(&other_mfg), default_group_tag()),
+        CandidateStrength::Rejected
+    );
+    assert_eq!(
+        candidate_strength(false, Some(&other_mfg), other),
+        CandidateStrength::Strong
+    );
+    // Legacy name-only ads are the default group only.
+    assert_eq!(
+        candidate_strength(true, None, other),
+        CandidateStrength::Rejected
+    );
+}
+
+#[test]
+fn rejected_candidates_are_never_admitted() {
+    let now = Instant::now();
+    let peer = peer_id(7);
+    let mut guard = DiscoveryGuard::default();
+    assert!(!guard.admit_candidate(peer, CandidateStrength::Rejected, now));
+    assert!(!guard.admit_candidate(
+        peer,
+        CandidateStrength::Rejected,
+        now + Duration::from_secs(1)
+    ));
 }
 
 #[test]
@@ -176,19 +234,161 @@ fn dial_admission_is_scoped_to_the_target_peer() {
     let inbound_sessions = HashMap::from([(inbound_peer, ())]);
 
     assert_eq!(
-        dial_admission(true, false),
+        dial_admission(true, false, true),
         DialAdmission::YieldToSystemConnection
     );
     assert_eq!(
-        dial_admission(false, has_session_for_peer(&inbound_sessions, inbound_peer)),
+        dial_admission(true, false, false),
+        DialAdmission::CancelStaleSystemConnection
+    );
+    assert_eq!(
+        dial_admission(
+            true,
+            has_session_for_peer(&inbound_sessions, inbound_peer),
+            false
+        ),
         DialAdmission::YieldToInboundSession
     );
     assert_eq!(
         dial_admission(
             false,
-            has_session_for_peer(&inbound_sessions, unrelated_peer)
+            has_session_for_peer(&inbound_sessions, inbound_peer),
+            false
+        ),
+        DialAdmission::YieldToInboundSession
+    );
+    assert_eq!(
+        dial_admission(
+            false,
+            has_session_for_peer(&inbound_sessions, unrelated_peer),
+            false
         ),
         DialAdmission::AttachCentralSession
+    );
+}
+
+#[test]
+fn ba_sim_02_field_race_legacy_dual_role_fail_opens_dial() {
+    // SoftDevice / ESP / HV4: DualRole manufacturer without a shared dial key.
+    // Option C′ fail-opens Dial so Mac remains the initiator.
+    let local = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            local,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial,
+        "legacy DualRole with manufacturer must fail-open Dial (option C′)"
+    );
+}
+
+#[test]
+fn incomplete_adv_without_manufacturer_must_not_dial() {
+    // Android primary ADV is UUID-only; dial-key lives in the scan response.
+    // Fail-open Dial on that incomplete sighting races the phone's inbound dial.
+    let local = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            local,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Accept,
+        "UUID-only / no-manufacturer DualRole must Accept, not Dial"
+    );
+}
+
+#[test]
+fn dial_sighting_elects_on_shared_dial_key() {
+    let phone = dial_key_from_identity(BleIdentity::new([0x10; 16]));
+    let mac = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            mac,
+            Some(phone),
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Accept,
+        "Mac must Accept when phone dial-key wins sort"
+    );
+    assert_eq!(
+        dial_sighting_action(
+            phone,
+            Some(mac),
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial,
+        "phone must Dial when it wins dial-key sort"
+    );
+    assert_eq!(
+        dial_sighting_action(
+            mac,
+            None,
+            BleRoleCapabilities::PeripheralOnly,
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial
+    );
+    let _ = BleAddress::new([0; 6]);
+}
+
+#[test]
+fn v6_esp32_type_keeps_mac_from_dialing() {
+    let payload = manufacturer_role_payload_with_node_type(
+        Endpoint::Esp32(Esp32Host::Esp32),
+        default_group_tag(),
+    );
+    let mut mfg = [0u8; 8];
+    mfg[0] = 0xff;
+    mfg[1] = 0xff;
+    mfg[2..].copy_from_slice(&payload);
+    assert_eq!(
+        discover_sighting_action(Some(&mfg)),
+        DialSightingAction::Accept
+    );
+}
+
+#[test]
+fn v6_android_type_keeps_mac_from_dialing() {
+    let payload = manufacturer_role_payload_with_node_type(
+        Endpoint::Android(AndroidHost::Android),
+        default_group_tag(),
+    );
+    let mut mfg = [0u8; 8];
+    mfg[0] = 0xff;
+    mfg[1] = 0xff;
+    mfg[2..].copy_from_slice(&payload);
+    assert_eq!(
+        discover_sighting_action(Some(&mfg)),
+        DialSightingAction::Accept
+    );
+}
+
+#[test]
+fn v4_board_without_type_still_fail_opens_dial() {
+    let payload = manufacturer_role_payload(BleRoleCapabilities::DualRole, default_group_tag());
+    let mut mfg = [0u8; 8];
+    mfg[0] = 0xff;
+    mfg[1] = 0xff;
+    mfg[2..].copy_from_slice(&payload);
+    assert_eq!(
+        discover_sighting_action(Some(&mfg)),
+        DialSightingAction::Dial
+    );
+    assert_eq!(
+        discover_sighting_action(None),
+        DialSightingAction::Accept,
+        "implied Mac vs Mac is GattOnly, then C′ Accepts"
     );
 }
 
@@ -373,7 +573,7 @@ fn write_admission_serializes_acks_and_waits_for_unacknowledged_capacity() {
 #[tokio::test]
 #[ignore = "needs a real Bluetooth radio + Bluetooth permission; run with `--ignored` on a Mac"]
 async fn the_node_publishes_then_accepts_explicit_radio_modes() {
-    let mut backend = MacosBleBackend::new(BleIdentity::new([0; 16]))
+    let mut backend = MacosBleBackend::new(BleIdentity::new([0; 16]), default_group_tag())
         .await
         .expect("bluetooth should power on and publish both listeners");
     <MacosBleBackend as BleBackend<{ MacosBleBackend::MAX_PEERS }>>::set_advertising(

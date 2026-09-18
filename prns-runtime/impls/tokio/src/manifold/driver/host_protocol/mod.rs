@@ -7,10 +7,12 @@ use crate::engine::{
     CommandId, CommandTiming, Departure, IssuedCommand, PersistenceFlushCause,
     PersistenceFlushTarget, SendRequestFailure, Settlement,
 };
-use crate::interfaces::{ConnectionView, InterfaceDescriptor, InterfaceId};
+use crate::interfaces::{ConnectionView, InterfaceDescriptor, InterfaceId, InterfaceMode};
 use crate::manifold::grant_lane::{TokioGrantConsumer, TokioGrantProducer};
 use crate::routing::links::channel::byte_stream::StreamId;
 use crate::routing::links::request::RequestId;
+#[cfg(feature = "parallel-resource-hash")]
+use crate::routing::links::resources::build_outgoing::PreparedResourceDigest;
 use crate::routing::links::resources::{ResourceHash, ResourceMetadata, ResourceStrategy};
 use crate::routing::links::LinkId;
 use crate::routing::request_handlers::{RequestPathHash, RequestPolicy};
@@ -61,6 +63,10 @@ pub enum HostCommand {
     RemoveInterface {
         id: InterfaceId,
         departure: Departure,
+    },
+    SetInterfaceMode {
+        id: InterfaceId,
+        mode: InterfaceMode,
     },
     DropRoute {
         destination: DestinationHash,
@@ -270,11 +276,18 @@ pub struct SendResourceSegmentHostCommand {
     pub data: HostResourcePayload,
     pub compressed_candidate: Option<HostResourcePayload>,
     pub metadata: HostResourceMetadata,
+    pub(crate) digest: HostResourceDigestPreparation,
     pub request_id: Option<RequestId>,
     pub segment_index: u64,
     pub total_segments: u64,
     pub total_data_bytes: u64,
     pub completion: oneshot::Sender<Settlement>,
+}
+
+pub(crate) enum HostResourceDigestPreparation {
+    Calculate,
+    #[cfg(feature = "parallel-resource-hash")]
+    Prepared(PreparedResourceDigest),
 }
 
 /// Answer a request with `data` of any length: the engine picks the rung, a single RESPONSE packet when it fits the link MDU, an outgoing resource (named back to `request_id`) when it doesn't. Host-held payload, since a large answer never rides an enum; the request router's verb.

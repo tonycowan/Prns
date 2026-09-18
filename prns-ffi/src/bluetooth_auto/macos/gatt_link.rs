@@ -10,6 +10,8 @@ use prns_core::interfaces::bluetooth_auto::{
     CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN,
 };
 use prns_core::interfaces::bluetooth_auto::{BleLink, BleSink, BleSource};
+use prns_core::interfaces::PeerDetailsNotify;
+use prns_core::wire::{PacketType, WirePacketHeader};
 
 use super::data_plane::DataPlane;
 use super::gatt_write::{GattWriteMode, GattWriteRequest, GattWriteTarget};
@@ -156,54 +158,130 @@ enum GattWriter {
     },
 }
 
+fn describe_rns_frame(frame: &[u8]) -> String {
+    match WirePacketHeader::parse(frame) {
+        Ok((header, rest)) => format!(
+            "{:?} ctx={:?} dest={:02x}{:02x}{:02x}{:02x} hops={} payload={}",
+            header.packet_type,
+            header.context,
+            header.address.as_bytes()[0],
+            header.address.as_bytes()[1],
+            header.address.as_bytes()[2],
+            header.address.as_bytes()[3],
+            header.hops,
+            rest.len(),
+        ),
+        Err(_) => format!("unparsed len={}", frame.len()),
+    }
+}
+
+fn log_ble_event(line: &str) {
+    super::ble_log(line);
+}
+
+fn log_ble_wire(lane: &str, peer: Option<&[u8; 6]>, frame: &[u8], fragments: usize, result: &str) {
+    let peer = match peer {
+        Some(octets) => format!("{octets:02x?}"),
+        None => "unknown".to_string(),
+    };
+    log_ble_event(&format!(
+        "bluetooth wire: {lane} {peer} {} bytes fragments={fragments} {} -> {result}",
+        frame.len(),
+        describe_rns_frame(frame),
+    ));
+}
+
+fn control_plane_role(control: &ControlPlane) -> &'static str {
+    match control {
+        ControlPlane::Central { .. } => "central",
+        ControlPlane::Listener { .. } => "listener",
+    }
+}
+
 impl GattWriter {
+    fn peer_octets(&self) -> [u8; 6] {
+        match self {
+            Self::Central { peer_id, .. } | Self::Listener { peer_id, .. } => {
+                *peer_id.address().octets()
+            }
+        }
+    }
+
+    fn role(&self) -> &'static str {
+        match self {
+            Self::Central { .. } => "GATT-write",
+            Self::Listener { .. } => "GATT-notify",
+        }
+    }
+
     async fn send(&self, frame: &[u8]) -> Result<(), MacosBleError> {
         let fragment_mtu = match self {
             Self::Central { plan, .. } => plan.fragment_mtu(),
             Self::Listener { fragment_mtu, .. } => *fragment_mtu,
         };
+        let fragment_count = fragments_of(frame, fragment_mtu).count();
         let mut buf = [0u8; FRAGMENT_HEADER_LEN + BLE_HW_MTU];
-        for fragment in fragments_of(frame, fragment_mtu) {
-            let len = fragment
-                .encode(&mut buf)
-                .ok_or(MacosBleError::FrameTooLarge)?;
-            match self {
-                GattWriter::Central {
-                    peer_id,
-                    peripheral,
-                    characteristic,
-                    central_delegate,
-                    queue,
-                    plan,
-                    ..
-                } => {
-                    central_write(
-                        *peer_id,
+        let send = async {
+            for fragment in fragments_of(frame, fragment_mtu) {
+                let len = fragment
+                    .encode(&mut buf)
+                    .ok_or(MacosBleError::FrameTooLarge)?;
+                match self {
+                    GattWriter::Central {
+                        peer_id,
                         peripheral,
                         characteristic,
                         central_delegate,
                         queue,
-                        plan.mode(),
-                        &buf[..len],
-                    )
-                    .await?;
-                }
-                GattWriter::Listener {
-                    peer_id, delegate, ..
-                } => {
-                    let sent =
-                        delegate
-                            .0
-                            .notify(*peer_id, ListenerCharacteristic::Data, &buf[..len]);
-                    if !sent {
-                        crate::diagnostic_log::warn!(
-                            "bluetooth: GATT-data notify queue full — fragment dropped, peer will retransmit"
-                        );
+                        plan,
+                        ..
+                    } => {
+                        central_write(
+                            *peer_id,
+                            peripheral,
+                            characteristic,
+                            central_delegate,
+                            queue,
+                            plan.mode(),
+                            &buf[..len],
+                        )
+                        .await?;
+                    }
+                    GattWriter::Listener {
+                        peer_id, delegate, ..
+                    } => {
+                        let sent =
+                            delegate
+                                .0
+                                .notify(*peer_id, ListenerCharacteristic::Data, &buf[..len]);
+                        if !sent {
+                            crate::diagnostic_log::warn!(
+                                "bluetooth: GATT-data notify queue full — fragment dropped, peer will retransmit"
+                            );
+                        }
                     }
                 }
             }
+            Ok(())
+        };
+        let outcome = send.await;
+        match &outcome {
+            Ok(()) => log_ble_wire(
+                self.role(),
+                Some(&self.peer_octets()),
+                frame,
+                fragment_count,
+                "ok",
+            ),
+            Err(error) => log_ble_wire(
+                self.role(),
+                Some(&self.peer_octets()),
+                frame,
+                fragment_count,
+                &format!("{error:?}"),
+            ),
         }
-        Ok(())
+        outcome
     }
 }
 
@@ -251,6 +329,7 @@ pub struct GattLink {
     pub(super) address: BleAddress,
     pub(super) data_inbound_rx: Option<GattInboundReceiver>,
     pub(super) l2cap_pending: Option<oneshot::Receiver<DataPlane>>,
+    pub(super) details_notify: Option<PeerDetailsNotify>,
 }
 
 impl BleLink for GattLink {
@@ -357,6 +436,8 @@ impl BleLink for GattLink {
         if self.peer_protocol == PeerProtocol::Columba {
             return Ok(());
         }
+        let role = control_plane_role(&self.control);
+        let peer = self.address.octets();
         match plan {
             L2capPlan::Accept => {
                 let (tx, rx) = oneshot::channel::<DataPlane>();
@@ -371,32 +452,43 @@ impl BleLink for GattLink {
                     } => delegate.0.arm_pending_channel(*peer_id, tx),
                 };
                 self.l2cap_pending = Some(rx);
-                crate::diagnostic_log::debug!(
-                    "bluetooth: {:02x?} armed the L2CAP acceptor — the peer's CoC will upgrade the live GATT-floor link in the background",
-                    self.address.octets()
-                );
+                log_ble_event(&format!(
+                    "bluetooth: {peer:02x?} role={role} plan=Accept — armed L2CAP acceptor; peer CoC upgrades this GATT-floor link in the background"
+                ));
                 Ok(())
             }
-            L2capPlan::Open { .. } => {
-                crate::diagnostic_log::warn!(
-                    "bluetooth: {:02x?} asked to open a CoC, but the macOS backend is acceptor-only (a central-side open bonds) — staying on the GATT floor",
-                    self.address.octets()
-                );
+            L2capPlan::Open { psm } => {
+                log_ble_event(&format!(
+                    "bluetooth: {peer:02x?} role={role} plan=Open(psm={:#06x}) — macOS is acceptor-only; staying on GATT floor",
+                    psm.get()
+                ));
                 Ok(())
             }
-            L2capPlan::None => Ok(()),
+            L2capPlan::None => {
+                log_ble_event(&format!(
+                    "bluetooth: {peer:02x?} role={role} plan=None — GATT floor only (no CoC attempt)"
+                ));
+                Ok(())
+            }
         }
+    }
+
+    fn bind_details_notify(&mut self, notify: PeerDetailsNotify) {
+        self.details_notify = Some(notify);
     }
 
     fn into_data(self) -> (GattSource, GattSink) {
         let (merged_tx, merged_rx) = tokio_mpsc::channel::<Box<[u8]>>(16);
         let l2cap_failure_policy = self.control.l2cap_failure_policy();
+        let peer = *self.address.octets();
 
         let l2cap_lane = l2cap_lifecycle::start(
             self.data_inbound_rx,
             self.l2cap_pending,
             merged_tx.clone(),
             l2cap_failure_policy,
+            peer,
+            self.details_notify,
         );
         let (l2cap_pending, l2cap_end) = match l2cap_lane {
             Some(lane) => (Some(lane.write_ready), lane.link_end),
@@ -408,11 +500,13 @@ impl BleLink for GattLink {
             GattSource {
                 inbound: merged_rx,
                 l2cap_end,
+                peer,
             },
             GattSink {
                 gatt: gatt_writer(&self.control),
                 l2cap: None,
                 l2cap_pending,
+                peer,
             },
         )
     }
@@ -463,6 +557,7 @@ fn gatt_writer(control: &ControlPlane) -> Option<GattWriter> {
 pub struct GattSource {
     inbound: tokio_mpsc::Receiver<Box<[u8]>>,
     l2cap_end: Option<oneshot::Receiver<DataPlaneEnd>>,
+    peer: [u8; 6],
 }
 
 impl BleSource for GattSource {
@@ -478,6 +573,10 @@ impl BleSource for GattSource {
                 end = l2cap_end => {
                     self.l2cap_end = None;
                     if matches!(end, Ok(DataPlaneEnd::Terminated)) {
+                        log_ble_event(&format!(
+                            "bluetooth: {:02x?} L2CAP reader ended — tearing down inbound link",
+                            self.peer
+                        ));
                         return Err(MacosBleError::Closed);
                     }
                 }
@@ -488,6 +587,12 @@ impl BleSource for GattSource {
         };
         let len = frame.len().min(out.len());
         out[..len].copy_from_slice(&frame[..len]);
+        if !matches!(
+            WirePacketHeader::parse(&frame[..len]),
+            Ok((header, _)) if header.packet_type == PacketType::Announce
+        ) {
+            log_ble_wire("inbound", Some(&self.peer), &frame[..len], 1, "recv");
+        }
         Ok(len)
     }
 }
@@ -496,6 +601,7 @@ pub struct GattSink {
     gatt: Option<GattWriter>,
     l2cap: Option<WriteHalf>,
     l2cap_pending: Option<oneshot::Receiver<WriteHalf>>,
+    peer: [u8; 6],
 }
 
 impl BleSink for GattSink {
@@ -508,6 +614,10 @@ impl BleSink for GattSink {
                     Ok(half) => {
                         self.l2cap = Some(half);
                         self.l2cap_pending = None;
+                        log_ble_event(&format!(
+                            "bluetooth: {:02x?} L2CAP write half attached — egress prefers CoC",
+                            self.peer
+                        ));
                     }
                     Err(oneshot::error::TryRecvError::Closed) => self.l2cap_pending = None,
                     Err(oneshot::error::TryRecvError::Empty) => {}
@@ -516,15 +626,19 @@ impl BleSink for GattSink {
         }
         if let Some(l2cap) = &self.l2cap {
             match l2cap.send(frame) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    log_ble_wire("L2CAP", Some(&self.peer), frame, 1, "queued");
+                    return Ok(());
+                }
                 Err(err) => {
                     self.l2cap = None;
                     if self.gatt.is_none() {
                         return Err(err);
                     }
-                    crate::diagnostic_log::warn!(
-                        "bluetooth: L2CAP send failed — the fast lane is down, frames fall back to the GATT floor"
-                    );
+                    log_ble_event(&format!(
+                        "bluetooth: {:02x?} L2CAP send failed — fast lane down, falling back to GATT",
+                        self.peer
+                    ));
                 }
             }
         }
@@ -546,6 +660,7 @@ mod source_lifecycle_tests {
         let mut source = GattSource {
             inbound: gatt_rx,
             l2cap_end: Some(end_rx),
+            peer: [0; 6],
         };
 
         assert!(end_tx.send(DataPlaneEnd::Terminated).is_ok());
@@ -565,6 +680,7 @@ mod source_lifecycle_tests {
         let mut source = GattSource {
             inbound: gatt_rx,
             l2cap_end: Some(end_rx),
+            peer: [0; 6],
         };
 
         drop(end_tx);

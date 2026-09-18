@@ -1,4 +1,4 @@
-use super::identity::BleIdentity;
+use super::identity::{default_group_tag, BleIdentity, GROUP_TAG_LEN};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Psm(u16);
@@ -156,6 +156,20 @@ fn decode_endpoint(bytes: &[u8]) -> Option<Endpoint> {
     })
 }
 
+impl Endpoint {
+    /// Stack byte published in a v6 manufacturer payload (`host` assumed 0).
+    pub fn advertisement_type_byte(self) -> u8 {
+        endpoint_bytes(self)[0]
+    }
+
+    /// Reconstruct an endpoint from a v6 advertisement type byte.
+    ///
+    /// Host is 0 (`MacOs`, `Linux`, `Android`, …). iOS/iPadOS are not encoded yet.
+    pub fn from_advertisement_type_byte(byte: u8) -> Option<Self> {
+        decode_endpoint(&[byte, 0])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkCapabilities {
     pub l2cap: Option<Psm>,
@@ -173,7 +187,15 @@ const GREETING_ID_AT: usize = 1;
 const GREETING_ENDPOINT_AT: usize = GREETING_ID_AT + CONTROL_IDENTITY_LEN;
 const GREETING_CAP_AT: usize = GREETING_ENDPOINT_AT + ENDPOINT_LEN;
 const GREETING_RSSI_AT: usize = GREETING_CAP_AT + CONTROL_CAP_LEN;
-pub const CONTROL_MAX_LEN: usize = GREETING_RSSI_AT + CONTROL_RSSI_LEN;
+const GREETING_GROUP_AT: usize = GREETING_RSSI_AT + CONTROL_RSSI_LEN;
+/// Legacy Hello/Welcome length (no discovery group tag).
+pub const CONTROL_LEGACY_GREETING_LEN: usize = GREETING_GROUP_AT;
+/// Current Hello/Welcome length (includes optional discovery group tag).
+pub const CONTROL_MAX_LEN: usize = GREETING_GROUP_AT + GROUP_TAG_LEN;
+/// Body length after the control tag for identity+endpoint+caps (RSSI optional).
+const GREETING_BODY_MIN_LEN: usize = CONTROL_IDENTITY_LEN + ENDPOINT_LEN + CONTROL_CAP_LEN;
+/// Body length after the control tag for a legacy greeting (id+endpoint+caps+rssi).
+const GREETING_BODY_LEGACY_LEN: usize = GREETING_BODY_MIN_LEN + CONTROL_RSSI_LEN;
 
 fn encode_rssi(rssi: Option<i8>) -> u8 {
     rssi.filter(|&dbm| dbm != i8::MIN).unwrap_or(i8::MIN) as u8
@@ -224,6 +246,9 @@ fn known_arrangement(a: Endpoint, b: Endpoint) -> Option<L2capArrangement> {
     match (a, b) {
         (CoreBluetooth(MacOs), BlueZ(host)) => Some(L2capArrangement::Opens(BlueZ(host))),
         (CoreBluetooth(MacOs), Android(host)) => Some(L2capArrangement::Opens(Android(host))),
+        // Mac is acceptor-only for CoC. Embedded dual-role peers must dial and open.
+        (CoreBluetooth(MacOs), Esp32(host)) => Some(L2capArrangement::Opens(Esp32(host))),
+        (CoreBluetooth(MacOs), Nrf52(host)) => Some(L2capArrangement::Opens(Nrf52(host))),
         (CoreBluetooth(Ios | IpadOs), Android(_)) => Some(L2capArrangement::Opens(a)),
         (BlueZ(_), Android(_)) => Some(L2capArrangement::EitherOpens),
         (BlueZ(_), Nrf52(_)) => Some(L2capArrangement::EitherOpens),
@@ -355,16 +380,26 @@ pub enum Control {
         endpoint: Endpoint,
         capabilities: LinkCapabilities,
         peer_rssi: Option<i8>,
+        /// Absent on legacy wire; treated as the default reticulum group when matching.
+        group_tag: Option<[u8; GROUP_TAG_LEN]>,
     },
     Welcome {
         identity: BleIdentity,
         endpoint: Endpoint,
         capabilities: LinkCapabilities,
         peer_rssi: Option<i8>,
+        /// Absent on legacy wire; treated as the default reticulum group when matching.
+        group_tag: Option<[u8; GROUP_TAG_LEN]>,
     },
     Close {
         reason: CloseReason,
     },
+}
+
+/// Resolve a handshake/advertisement discovery group: missing → default reticulum tag.
+#[must_use]
+pub fn resolved_discovery_group(tag: Option<[u8; GROUP_TAG_LEN]>) -> [u8; GROUP_TAG_LEN] {
+    tag.unwrap_or_else(default_group_tag)
 }
 
 impl Control {
@@ -375,12 +410,14 @@ impl Control {
                 endpoint,
                 capabilities,
                 peer_rssi,
+                group_tag,
             } => encode_greeting(
                 CONTROL_HELLO,
                 identity,
                 *endpoint,
                 capabilities,
                 *peer_rssi,
+                *group_tag,
                 out,
             ),
             Control::Welcome {
@@ -388,12 +425,14 @@ impl Control {
                 endpoint,
                 capabilities,
                 peer_rssi,
+                group_tag,
             } => encode_greeting(
                 CONTROL_WELCOME,
                 identity,
                 *endpoint,
                 capabilities,
                 *peer_rssi,
+                *group_tag,
                 out,
             ),
             Control::Close { reason } => {
@@ -409,21 +448,25 @@ impl Control {
         let (tag, body) = bytes.split_first()?;
         match *tag {
             CONTROL_HELLO => {
-                let (identity, endpoint, capabilities, peer_rssi) = decode_greeting(body)?;
+                let (identity, endpoint, capabilities, peer_rssi, group_tag) =
+                    decode_greeting(body)?;
                 Some(Control::Hello {
                     identity,
                     endpoint,
                     capabilities,
                     peer_rssi,
+                    group_tag,
                 })
             }
             CONTROL_WELCOME => {
-                let (identity, endpoint, capabilities, peer_rssi) = decode_greeting(body)?;
+                let (identity, endpoint, capabilities, peer_rssi, group_tag) =
+                    decode_greeting(body)?;
                 Some(Control::Welcome {
                     identity,
                     endpoint,
                     capabilities,
                     peer_rssi,
+                    group_tag,
                 })
             }
             CONTROL_CLOSE => Some(Control::Close {
@@ -440,9 +483,15 @@ fn encode_greeting(
     endpoint: Endpoint,
     capabilities: &LinkCapabilities,
     peer_rssi: Option<i8>,
+    group_tag: Option<[u8; GROUP_TAG_LEN]>,
     out: &mut [u8],
 ) -> Option<usize> {
-    let slot = out.get_mut(..CONTROL_MAX_LEN)?;
+    let len = if group_tag.is_some() {
+        CONTROL_MAX_LEN
+    } else {
+        CONTROL_LEGACY_GREETING_LEN
+    };
+    let slot = out.get_mut(..len)?;
     slot[0] = tag;
     slot[GREETING_ID_AT..GREETING_ENDPOINT_AT].copy_from_slice(identity.as_bytes());
     slot[GREETING_ENDPOINT_AT..GREETING_CAP_AT].copy_from_slice(&endpoint_bytes(endpoint));
@@ -450,10 +499,24 @@ fn encode_greeting(
     capabilities.encode(&mut caps);
     slot[GREETING_CAP_AT..GREETING_RSSI_AT].copy_from_slice(&caps);
     slot[GREETING_RSSI_AT] = encode_rssi(peer_rssi);
-    Some(CONTROL_MAX_LEN)
+    if let Some(group) = group_tag {
+        slot[GREETING_GROUP_AT..CONTROL_MAX_LEN].copy_from_slice(&group);
+    }
+    Some(len)
 }
 
-fn decode_greeting(body: &[u8]) -> Option<(BleIdentity, Endpoint, LinkCapabilities, Option<i8>)> {
+type DecodedGreeting = (
+    BleIdentity,
+    Endpoint,
+    LinkCapabilities,
+    Option<i8>,
+    Option<[u8; GROUP_TAG_LEN]>,
+);
+
+fn decode_greeting(body: &[u8]) -> Option<DecodedGreeting> {
+    if body.len() < GREETING_BODY_MIN_LEN {
+        return None;
+    }
     let id_end = CONTROL_IDENTITY_LEN;
     let endpoint_end = id_end + ENDPOINT_LEN;
     let cap_end = endpoint_end + CONTROL_CAP_LEN;
@@ -461,11 +524,15 @@ fn decode_greeting(body: &[u8]) -> Option<(BleIdentity, Endpoint, LinkCapabiliti
     let endpoint = decode_endpoint(body.get(id_end..endpoint_end)?)?;
     let capabilities = LinkCapabilities::decode(body.get(endpoint_end..cap_end)?)?;
     let peer_rssi = body.get(cap_end).copied().and_then(decode_rssi);
+    let group_tag = body
+        .get(GREETING_BODY_LEGACY_LEN..GREETING_BODY_LEGACY_LEN + GROUP_TAG_LEN)
+        .and_then(|bytes| <[u8; GROUP_TAG_LEN]>::try_from(bytes).ok());
     Some((
         BleIdentity::new(identity_bytes),
         endpoint,
         capabilities,
         peer_rssi,
+        group_tag,
     ))
 }
 
@@ -474,6 +541,7 @@ pub struct LocalPeer {
     pub identity: BleIdentity,
     pub endpoint: Endpoint,
     pub capabilities: LinkCapabilities,
+    pub group_tag: [u8; GROUP_TAG_LEN],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,6 +591,7 @@ impl Handshake {
                 endpoint: local.endpoint,
                 capabilities: local.capabilities,
                 peer_rssi: measured_rssi,
+                group_tag: Some(local.group_tag),
             }),
             HandshakeRole::Listener => None,
         };
@@ -545,10 +614,14 @@ impl Handshake {
                     endpoint,
                     capabilities,
                     peer_rssi,
+                    group_tag,
                 },
             ) => {
                 if identity == self.local.identity {
                     return self.we_close(CloseReason::SelfConnection);
+                }
+                if !self.discovery_group_matches(group_tag) {
+                    return self.we_close(CloseReason::Incompatible);
                 }
                 HandshakeReaction {
                     reply: Some(Control::Welcome {
@@ -556,6 +629,7 @@ impl Handshake {
                         endpoint: self.local.endpoint,
                         capabilities: self.local.capabilities,
                         peer_rssi: self.measured_rssi,
+                        group_tag: Some(self.local.group_tag),
                     }),
                     outcome: HandshakeOutcome::Settled(EstablishedPeer {
                         identity,
@@ -574,10 +648,14 @@ impl Handshake {
                     endpoint,
                     capabilities,
                     peer_rssi,
+                    group_tag,
                 },
             ) => {
                 if identity == self.local.identity {
                     return self.we_close(CloseReason::SelfConnection);
+                }
+                if !self.discovery_group_matches(group_tag) {
+                    return self.we_close(CloseReason::Incompatible);
                 }
                 HandshakeReaction {
                     reply: None,
@@ -597,6 +675,10 @@ impl Handshake {
             },
             _ => self.we_close(CloseReason::Incompatible),
         }
+    }
+
+    fn discovery_group_matches(&self, peer_tag: Option<[u8; GROUP_TAG_LEN]>) -> bool {
+        resolved_discovery_group(peer_tag) == self.local.group_tag
     }
 
     fn we_close(&self, reason: CloseReason) -> HandshakeReaction {

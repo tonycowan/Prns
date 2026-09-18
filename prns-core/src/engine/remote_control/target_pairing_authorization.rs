@@ -6,13 +6,78 @@ use crate::engine::{
 use crate::interfaces::AttachedInterfaces;
 use crate::remote_control::{
     FailRemoteControlTargetPairingAuthorizationOutcome,
-    PersistRemoteControlTargetPairingAuthorizationOutcome, RemoteControlPairingResponse,
-    RemoteControlTargetPairingView,
+    PersistRemoteControlTargetPairingAuthorizationOutcome, RemoteControlControllerGrant,
+    RemoteControlPairingAttemptId, RemoteControlPairingResponse, RemoteControlTargetPairingView,
 };
 use crate::storage::StorageLayout;
 use crate::units::InstantMillis;
 
 impl<S: StorageLayout> EngineState<S> {
+    pub(crate) fn start_remote_control_target_pairing_authorization<F, Work>(
+        &mut self,
+        attempt_id: RemoteControlPairingAttemptId,
+        grant: RemoteControlControllerGrant,
+        interfaces: AttachedInterfaces<'_>,
+        now: InstantMillis,
+        fill_random: &mut F,
+        sink: &mut impl FnMut(EngineReaction<'_, Work>),
+    ) where
+        F: FnMut(&mut [u8]),
+    {
+        sink(EngineReaction::Journaled(
+            crate::engine::Journaled::RemoteControlTargetPairingAuthorizationRequired {
+                attempt_id,
+                grant,
+            },
+        ));
+        let target_identity = match self.remote_control_target_pairing.view() {
+            RemoteControlTargetPairingView::Authorizing(attempt)
+                if attempt.attempt_id() == attempt_id =>
+            {
+                attempt.target().identity_hash()
+            }
+            RemoteControlTargetPairingView::Authorizing(_)
+            | RemoteControlTargetPairingView::Completing(_)
+            | RemoteControlTargetPairingView::Idle
+            | RemoteControlTargetPairingView::OfferPrepared(_)
+            | RemoteControlTargetPairingView::AwaitingBoth(_)
+            | RemoteControlTargetPairingView::AwaitingTargetApproval(_)
+            | RemoteControlTargetPairingView::AwaitingControllerCommit(_) => return,
+        };
+        let Some(target_signer) = self.held_identities.get(&target_identity) else {
+            return;
+        };
+        match self
+            .remote_control_target_pairing
+            .authorization_persisted(attempt_id, &target_signer, now)
+        {
+            PersistRemoteControlTargetPairingAuthorizationOutcome::CompletionOwed {
+                responder,
+                completed,
+                ..
+            } => {
+                let _ = self.dispatch_remote_control_pairing_response(
+                    responder,
+                    RemoteControlPairingResponse::Completed(completed),
+                    interfaces,
+                    now,
+                    fill_random,
+                    sink,
+                );
+            }
+            PersistRemoteControlTargetPairingAuthorizationOutcome::AlreadyDispatched { .. }
+            | PersistRemoteControlTargetPairingAuthorizationOutcome::SigningFailed { .. }
+            | PersistRemoteControlTargetPairingAuthorizationOutcome::AuthorizationPersistedAfterDeadline {
+                ..
+            }
+            | PersistRemoteControlTargetPairingAuthorizationOutcome::CompletionRetentionExpired {
+                ..
+            }
+            | PersistRemoteControlTargetPairingAuthorizationOutcome::NoAuthorizationOwed
+            | PersistRemoteControlTargetPairingAuthorizationOutcome::AttemptMismatch { .. } => {}
+        }
+    }
+
     pub(crate) fn settle_remote_control_target_pairing_authorization_into<F>(
         &mut self,
         settlement: SettleRemoteControlTargetPairingAuthorization,
@@ -49,6 +114,11 @@ impl<S: StorageLayout> EngineState<S> {
                             ),
                             responder,
                         },
+                    ),
+                    FailRemoteControlTargetPairingAuthorizationOutcome::AlreadyFinalized {
+                        attempt_id,
+                    } => Ok(
+                        RemoteControlTargetPairingFinalization::CompletionDispatched { attempt_id },
                     ),
                     FailRemoteControlTargetPairingAuthorizationOutcome::NoAuthorizationOwed => Err(
                         SettleRemoteControlTargetPairingAuthorizationFailure::NoAuthorizationOwed {
@@ -110,6 +180,15 @@ impl<S: StorageLayout> EngineState<S> {
                         responder,
                         completed,
                     } => (attempt_id, responder, completed),
+                    PersistRemoteControlTargetPairingAuthorizationOutcome::AlreadyDispatched {
+                        attempt_id,
+                    } => {
+                        return Ok(
+                            RemoteControlTargetPairingFinalization::CompletionDispatched {
+                                attempt_id,
+                            },
+                        )
+                    }
                     PersistRemoteControlTargetPairingAuthorizationOutcome::SigningFailed {
                         attempt_id,
                         error,

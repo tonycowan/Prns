@@ -3,6 +3,7 @@ use crate::engine::ble_bridge;
 use jni::objects::{JByteBuffer, JClass};
 use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
+use prns_core::interfaces::bluetooth_auto::{typed_dial_override_code, AndroidHost, Endpoint};
 
 #[no_mangle]
 pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeBleSetPsm(
@@ -78,6 +79,27 @@ pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeBleIdentity(
     ble_bridge().local_identity(out) as jint
 }
 
+#[no_mangle]
+pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeBleGroupTag(
+    env: JNIEnv,
+    _class: JClass,
+    buffer: JByteBuffer,
+) -> jint {
+    let Ok(address) = env.get_direct_buffer_address(&buffer) else {
+        return 0;
+    };
+    let Ok(capacity) = env.get_direct_buffer_capacity(&buffer) else {
+        return 0;
+    };
+    if address.is_null() || capacity < 4 {
+        return 0;
+    }
+    // SAFETY: `address`/`capacity` describe the JVM-owned direct buffer, pinned for
+    // this call; nothing else aliases it while we copy the local BLE group tag into it.
+    let out = unsafe { core::slice::from_raw_parts_mut(address, capacity) };
+    ble_bridge().local_group_tag(out) as jint
+}
+
 fn ble_rssi(value: jint) -> Option<i8> {
     if value == 127 {
         None
@@ -112,6 +134,28 @@ fn ble_identity_octets(env: &JNIEnv, buffer: &JByteBuffer) -> Option<[u8; 16]> {
     let mut octets = [0u8; 16];
     octets.copy_from_slice(bytes);
     Some(octets)
+}
+
+fn ble_payload<'a>(env: &JNIEnv, buffer: &JByteBuffer) -> Option<&'a [u8]> {
+    let address = env.get_direct_buffer_address(buffer).ok()?;
+    let capacity = env.get_direct_buffer_capacity(buffer).ok()?;
+    if address.is_null() || capacity == 0 {
+        return None;
+    }
+    // SAFETY: `address` points at the JVM-owned direct buffer, pinned for this call.
+    Some(unsafe { core::slice::from_raw_parts(address, capacity) })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_personal_hopspot_NativeBridge_nativeBleTypedDialAction(
+    env: JNIEnv,
+    _class: JClass,
+    payload: JByteBuffer,
+) -> jint {
+    i32::from(typed_dial_override_code(
+        Endpoint::Android(AndroidHost::Android),
+        ble_payload(&env, &payload).unwrap_or(&[]),
+    ))
 }
 
 #[no_mangle]

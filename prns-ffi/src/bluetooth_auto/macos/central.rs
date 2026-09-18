@@ -19,8 +19,9 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use prns_core::interfaces::bluetooth_auto::{BleAddress, BleIdentity, Control, PeerProtocol};
 
 use super::discovery::{
-    advertisement_candidate_strength, discover_disposition, DiscoverDisposition, DiscoveryGuard,
-    PeripheralLinkState, SessionPresence, StaleCancellation, StaleLinkRecovery,
+    advertisement_candidate_strength, advertisement_manufacturer_bytes, discover_disposition,
+    discover_sighting_action, DiscoverDisposition, DiscoveryGuard, PeripheralLinkState,
+    SessionPresence, StaleCancellation, StaleLinkRecovery,
 };
 use super::gatt_link::GattInboundSender;
 use super::gatt_write::{
@@ -32,11 +33,12 @@ use super::{
     core_bluetooth_peer_id, data_uuid, service_uuid, CoreBluetoothPeerId, Event, MacosBleError,
     PeripheralTable, RestoredPeripherals, SendCharacteristicRef, SendPeripheral,
 };
+use prns_core::interfaces::bluetooth_auto::DialSightingAction;
 
-pub(super) fn is_system_connected(
+pub(super) fn connected_peripheral(
     central: &CBCentralManager,
     peer_id: CoreBluetoothPeerId,
-) -> bool {
+) -> Option<Retained<CBPeripheral>> {
     let uuid = service_uuid();
     let services = NSArray::from_slice(&[&*uuid]);
     // SAFETY: the live manager is queried on its serial dispatch queue and the retained service
@@ -44,7 +46,23 @@ pub(super) fn is_system_connected(
     let connected = unsafe { central.retrieveConnectedPeripheralsWithServices(&services) };
     connected
         .iter()
-        .any(|peripheral| core_bluetooth_peer_id(&peripheral) == peer_id)
+        .find(|peripheral| core_bluetooth_peer_id(peripheral) == peer_id)
+        .map(|peripheral| peripheral.retain())
+}
+
+pub(super) fn is_system_connected(
+    central: &CBCentralManager,
+    peer_id: CoreBluetoothPeerId,
+) -> bool {
+    connected_peripheral(central, peer_id).is_some()
+}
+
+pub(super) fn cancel_system_connection(central: &CBCentralManager, peer_id: CoreBluetoothPeerId) {
+    if let Some(peripheral) = connected_peripheral(central, peer_id) {
+        // SAFETY: both retained objects remain alive through this call and are messaged only on
+        // the CoreBluetooth serial dispatch queue.
+        unsafe { central.cancelPeripheralConnection(&peripheral) };
+    }
 }
 
 pub(super) struct DialChars {
@@ -217,9 +235,8 @@ impl CentralPeerSession {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn data_receiver_closed(&self) -> bool {
-        // The control receiver is handshake-only and closes when a link settles. The data
-        // receiver is retained by the attached member for the full lifetime of this role.
         self.data_tx.is_closed()
     }
 
@@ -279,6 +296,7 @@ pub(super) struct CentralDelegateIvars {
     peripherals: PeripheralTable,
     restored: RestoredPeripherals,
     scan_activity: Arc<AtomicBool>,
+    group_tag: [u8; 4],
     sessions: RefCell<HashMap<CoreBluetoothPeerId, CentralPeerSession>>,
     discovery_guard: RefCell<DiscoveryGuard>,
 }
@@ -342,7 +360,8 @@ define_class!(
             self.ivars().scan_activity.store(true, Ordering::Relaxed);
             let peer_id = core_bluetooth_peer_id(peripheral);
             let now = Instant::now();
-            let strength = advertisement_candidate_strength(advertisement_data);
+            let strength =
+                advertisement_candidate_strength(advertisement_data, self.ivars().group_tag);
             if cfg!(target_os = "macos")
                 && !self
                     .ivars()
@@ -395,6 +414,10 @@ define_class!(
                     return;
                 }
                 DiscoverDisposition::Adopt => {}
+            }
+            let manufacturer = advertisement_manufacturer_bytes(advertisement_data);
+            if discover_sighting_action(manufacturer.as_deref()) == DialSightingAction::Accept {
+                return;
             }
             let dbm = rssi.integerValue();
             let rssi = if dbm == 127 {
@@ -767,12 +790,14 @@ impl CentralDelegate {
         peripherals: PeripheralTable,
         restored: RestoredPeripherals,
         scan_activity: Arc<AtomicBool>,
+        group_tag: [u8; 4],
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(CentralDelegateIvars {
             events,
             peripherals,
             restored,
             scan_activity,
+            group_tag,
             sessions: RefCell::new(HashMap::new()),
             discovery_guard: RefCell::new(DiscoveryGuard::default()),
         });
@@ -786,7 +811,7 @@ impl CentralDelegate {
         peer_id: CoreBluetoothPeerId,
         session: CentralPeerSession,
     ) -> bool {
-        if self.ivars().sessions.borrow().contains_key(&peer_id) {
+        if self.has_session(peer_id) {
             session.reject();
             return false;
         }
@@ -794,23 +819,21 @@ impl CentralDelegate {
         true
     }
 
+    pub(super) fn has_session(&self, peer_id: CoreBluetoothPeerId) -> bool {
+        self.ivars().sessions.borrow().contains_key(&peer_id)
+    }
+
+    pub(super) fn note_stale_cancellation(&self, peer_id: CoreBluetoothPeerId) {
+        self.ivars()
+            .discovery_guard
+            .borrow_mut()
+            .record_stale_cancellation(peer_id, Instant::now());
+    }
+
     pub(super) fn remove_session(&self, peer_id: CoreBluetoothPeerId) {
         if let Some(session) = self.ivars().sessions.borrow_mut().remove(&peer_id) {
             session.fail();
         }
-    }
-
-    pub(super) fn remove_closed_session(&self, peer_id: CoreBluetoothPeerId) -> bool {
-        let link_closed = self
-            .ivars()
-            .sessions
-            .borrow()
-            .get(&peer_id)
-            .is_some_and(CentralPeerSession::data_receiver_closed);
-        if link_closed {
-            self.remove_session(peer_id);
-        }
-        link_closed
     }
 
     pub(super) fn submit_write(

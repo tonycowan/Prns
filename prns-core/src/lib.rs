@@ -22,6 +22,8 @@ pub mod lemire_index;
     feature = "signed-artifact"
 ))]
 pub mod message_pack;
+#[cfg(feature = "log")]
+pub(crate) mod path_req_trace;
 pub mod persistence;
 pub mod remote_control;
 pub mod rncp;

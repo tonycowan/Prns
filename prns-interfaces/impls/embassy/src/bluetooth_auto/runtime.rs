@@ -6,7 +6,7 @@ use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex};
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{with_deadline, with_timeout, Duration, Instant};
-use portable_atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use prns_core::engine::FanTarget;
 use prns_core::interfaces::bluetooth_auto::{
@@ -22,9 +22,8 @@ use prns_core::interfaces::bluetooth_auto::{
     RadioMode, ScanningMode,
 };
 use prns_core::interfaces::{
-    BitrateBps, ConnectionState, InterfaceId, InterfaceKind, InterfaceStatus,
+    BitrateBps, ConnectionState, InterfaceId, InterfaceKind, InterfaceStatus, PeerDetails,
 };
-use prns_runtime::atomic::AtomicU64;
 use prns_runtime::manifold::grant::FrameTarget;
 use prns_runtime::runtime::{EmbassyFleet as Fleet, OutboundFrame};
 
@@ -94,44 +93,64 @@ impl BluetoothRecoveryReason {
 
 pub struct BluetoothMemberStatus {
     id: CriticalSectionMutex<Cell<InterfaceId>>,
+    address: CriticalSectionMutex<Cell<[u8; 6]>>,
     connection: AtomicU8,
     rx: AtomicU64,
     tx: AtomicU64,
     active: AtomicBool,
+    details_tag: AtomicU8,
+    details_payload: AtomicU8,
 }
 
 impl BluetoothMemberStatus {
     const fn new() -> Self {
         Self {
             id: CriticalSectionMutex::new(Cell::new(InterfaceId::new([0u8; 8]))),
+            address: CriticalSectionMutex::new(Cell::new([0u8; 6])),
             connection: AtomicU8::new(ConnectionState::Disconnected.as_u8()),
             rx: AtomicU64::new(0),
             tx: AtomicU64::new(0),
             active: AtomicBool::new(false),
+            details_tag: AtomicU8::new(PeerDetails::NotApplicable.wire_tag()),
+            details_payload: AtomicU8::new(0),
         }
     }
 
-    fn assign(&self, id: InterfaceId) {
+    fn assign(&self, id: InterfaceId, address: BleAddress) {
         self.id.lock(|cell| cell.set(id));
+        self.address.lock(|cell| cell.set(*address.octets()));
         self.connection
             .store(ConnectionState::Connected.as_u8(), Ordering::Relaxed);
-        self.rx.store_relaxed(0);
-        self.tx.store_relaxed(0);
+        self.rx.store(0, Ordering::Relaxed);
+        self.tx.store(0, Ordering::Relaxed);
+        self.set_details(PeerDetails::Unknown);
         self.active.store(true, Ordering::Relaxed);
     }
 
     fn retire(&self) {
         self.connection
             .store(ConnectionState::Disconnected.as_u8(), Ordering::Relaxed);
+        self.set_details(PeerDetails::NotApplicable);
         self.active.store(false, Ordering::Relaxed);
     }
 
     fn add_rx(&self, bytes: u64) {
-        self.rx.fetch_add_relaxed(bytes);
+        self.rx.fetch_add(bytes, Ordering::Relaxed);
     }
 
     fn add_tx(&self, bytes: u64) {
-        self.tx.fetch_add_relaxed(bytes);
+        self.tx.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn set_details(&self, details: PeerDetails) {
+        self.details_tag
+            .store(details.wire_tag(), Ordering::Relaxed);
+        self.details_payload
+            .store(details.wire_payload(), Ordering::Relaxed);
+    }
+
+    fn peer_address(&self) -> [u8; 6] {
+        self.address.lock(|cell| cell.get())
     }
 }
 
@@ -145,11 +164,47 @@ impl InterfaceStatus for BluetoothMemberStatus {
     }
 
     fn rx_bytes(&self) -> u64 {
-        self.rx.load_relaxed()
+        self.rx.load(Ordering::Relaxed)
     }
 
     fn tx_bytes(&self) -> u64 {
-        self.tx.load_relaxed()
+        self.tx.load(Ordering::Relaxed)
+    }
+
+    fn details(&self) -> PeerDetails {
+        PeerDetails::from_wire(
+            self.details_tag.load(Ordering::Relaxed),
+            self.details_payload.load(Ordering::Relaxed),
+        )
+        .unwrap_or(PeerDetails::NotApplicable)
+    }
+}
+
+const DISCOVERY_GROUP_CAP: usize = 32;
+
+#[derive(Clone, Copy)]
+struct DiscoveryGroup {
+    bytes: [u8; DISCOVERY_GROUP_CAP],
+    len: u8,
+}
+
+impl DiscoveryGroup {
+    const fn reticulum() -> Self {
+        let src = b"reticulum";
+        let mut bytes = [0u8; DISCOVERY_GROUP_CAP];
+        let mut index = 0;
+        while index < src.len() {
+            bytes[index] = src[index];
+            index += 1;
+        }
+        Self {
+            bytes,
+            len: src.len() as u8,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.bytes.get(..usize::from(self.len)).unwrap_or(&[])
     }
 }
 
@@ -157,6 +212,10 @@ pub struct BluetoothAutoShared<const MEMBERS: usize> {
     id: InterfaceId,
     enabled: AtomicBool,
     enabled_changed: Signal<CriticalSectionRawMutex, bool>,
+    group: CriticalSectionMutex<Cell<DiscoveryGroup>>,
+    /// Bumped to force peer eviction (e.g. discovery-group change) without a radio cycle.
+    peers_epoch: AtomicU64,
+    peers_changed: Signal<CriticalSectionRawMutex, ()>,
     up: AtomicBool,
     failed: AtomicBool,
     fatal_failure_reason: CriticalSectionMutex<Cell<Option<&'static str>>>,
@@ -173,6 +232,9 @@ impl<const MEMBERS: usize> BluetoothAutoShared<MEMBERS> {
             id,
             enabled: AtomicBool::new(true),
             enabled_changed: Signal::new(),
+            group: CriticalSectionMutex::new(Cell::new(DiscoveryGroup::reticulum())),
+            peers_epoch: AtomicU64::new(0),
+            peers_changed: Signal::new(),
             up: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             fatal_failure_reason: CriticalSectionMutex::new(Cell::new(None)),
@@ -292,6 +354,38 @@ impl<const MEMBERS: usize> BluetoothAutoStatus<MEMBERS> {
         self.shared.failed.load(Ordering::Relaxed)
     }
 
+    pub fn set_group_id(&self, group: &[u8]) -> bool {
+        if group.is_empty() || group.len() > DISCOVERY_GROUP_CAP {
+            return false;
+        }
+        let mut stored = [0u8; DISCOVERY_GROUP_CAP];
+        stored[..group.len()].copy_from_slice(group);
+        let changed = self.shared.group.lock(|cell| {
+            if cell.get().as_bytes() == group {
+                return false;
+            }
+            cell.set(DiscoveryGroup {
+                bytes: stored,
+                len: group.len() as u8,
+            });
+            true
+        });
+        if changed {
+            self.reset_peers();
+        }
+        true
+    }
+
+    pub fn copy_group<'a>(&self, buf: &'a mut [u8; DISCOVERY_GROUP_CAP]) -> Option<&'a str> {
+        let len = self.shared.group.lock(|cell| {
+            let group = cell.get();
+            let len = usize::from(group.len);
+            buf[..len].copy_from_slice(&group.bytes[..len]);
+            len
+        });
+        core::str::from_utf8(buf.get(..len)?).ok()
+    }
+
     pub fn enable(&self) {
         self.update_enabled(true);
     }
@@ -303,6 +397,26 @@ impl<const MEMBERS: usize> BluetoothAutoStatus<MEMBERS> {
     pub fn toggle_enabled(&self) {
         let enabled = !self.shared.enabled.fetch_xor(true, Ordering::Relaxed);
         self.shared.enabled_changed.signal(enabled);
+    }
+
+    /// Evict settled peers and refresh the discovery group without cycling the radio.
+    pub fn reset_peers(&self) {
+        self.shared.peers_epoch.fetch_add(1, Ordering::Relaxed);
+        self.shared.peers_changed.signal(());
+    }
+
+    fn peers_epoch(&self) -> u64 {
+        self.shared.peers_epoch.load(Ordering::Relaxed)
+    }
+
+    async fn wait_for_peers_epoch(&self, seen: u64) -> u64 {
+        loop {
+            let current = self.peers_epoch();
+            if current != seen {
+                return current;
+            }
+            self.shared.peers_changed.wait().await;
+        }
     }
 
     fn update_enabled(&self, enabled: bool) {
@@ -355,6 +469,15 @@ impl<const MEMBERS: usize> BluetoothAutoStatus<MEMBERS> {
             .iter()
             .filter(|member| member.active.load(Ordering::Relaxed))
     }
+
+    pub fn set_details_for_address(&self, address: [u8; 6], details: PeerDetails) {
+        for member in self.members() {
+            if member.peer_address() == address {
+                member.set_details(details);
+                return;
+            }
+        }
+    }
 }
 
 impl<const MEMBERS: usize> InterfaceStatus for BluetoothAutoStatus<MEMBERS> {
@@ -389,7 +512,7 @@ impl<const MEMBERS: usize> InterfaceStatus for BluetoothAutoStatus<MEMBERS> {
         self.shared
             .members
             .iter()
-            .map(|member| member.rx.load_relaxed())
+            .map(|member| member.rx.load(Ordering::Relaxed))
             .sum()
     }
 
@@ -397,7 +520,7 @@ impl<const MEMBERS: usize> InterfaceStatus for BluetoothAutoStatus<MEMBERS> {
         self.shared
             .members
             .iter()
-            .map(|member| member.tx.load_relaxed())
+            .map(|member| member.tx.load(Ordering::Relaxed))
             .sum()
     }
 
@@ -532,6 +655,7 @@ enum SendState {
 
 enum SupervisorStep<L: BleLink> {
     Disabled,
+    PeersReset(u64),
     Handshake(HandshakeStep<L>),
     Backend(BleEvent<L>),
     Inbound(usize, Result<usize, <L::Source as BleSource>::Error>),
@@ -555,6 +679,7 @@ where
         identity: BleIdentity,
         endpoint: Endpoint,
         capabilities: LinkCapabilities,
+        group_tag: [u8; 4],
         shared: &'static BluetoothAutoShared<MEMBERS>,
     ) -> Self {
         Self {
@@ -563,6 +688,7 @@ where
                 identity,
                 endpoint,
                 capabilities,
+                group_tag,
             },
             status: BluetoothAutoStatus::new(shared),
             bitrate: contract::BLE_BITRATE_GUESS_BPS,
@@ -618,6 +744,7 @@ where
             &mut members,
         )
         .await;
+        let mut peers_epoch = status.peers_epoch();
 
         loop {
             if status.is_failed() {
@@ -648,6 +775,7 @@ where
                     &mut members,
                 )
                 .await;
+                peers_epoch = status.peers_epoch();
                 continue;
             }
             let step = next_step(
@@ -659,12 +787,40 @@ where
                 &mut inbufs,
                 &fleet,
                 outbound_first,
+                peers_epoch,
             )
             .await;
             outbound_first = !matches!(&step, SupervisorStep::Outbound);
             let now_ms = Instant::now().as_millis();
             match step {
                 SupervisorStep::Disabled => {}
+                SupervisorStep::PeersReset(epoch) => {
+                    peers_epoch = epoch;
+                    evict_settled_peers(
+                        &status,
+                        &mut fleet,
+                        &mut backend,
+                        &mut members,
+                        &mut handshakes,
+                        &mut pending,
+                    )
+                    .await;
+                    if let Some(group_tag) = backend.local_group_tag() {
+                        local.group_tag = group_tag;
+                    }
+                    manager = ConnectionPolicy::<MEMBERS, DIAL_TRACK>::new(local);
+                    manager.start(&mut |action| pending.push(action));
+                    apply_radio(
+                        &mut pending,
+                        &mut manager,
+                        &status,
+                        &mut fleet,
+                        &mut backend,
+                        &mut members,
+                    )
+                    .await;
+                    continue;
+                }
                 SupervisorStep::Handshake(HandshakeStep::Advanced) => {}
                 SupervisorStep::Handshake(HandshakeStep::Done(HandshakeDone {
                     address,
@@ -725,6 +881,9 @@ where
                     .await;
                 }
                 SupervisorStep::Backend(BleEvent::Inbound(link)) => {
+                    if let Some(group_tag) = backend.local_group_tag() {
+                        local.group_tag = group_tag;
+                    }
                     queue_handshake(
                         link,
                         Origin::Accepted,
@@ -736,6 +895,9 @@ where
                     .await;
                 }
                 SupervisorStep::Backend(BleEvent::LinkReady { link, origin, .. }) => {
+                    if let Some(group_tag) = backend.local_group_tag() {
+                        local.group_tag = group_tag;
+                    }
                     queue_handshake(
                         link,
                         origin,
@@ -818,41 +980,54 @@ async fn next_step<
     inbufs: &mut [[u8; contract::BLE_HW_MTU]; MEMBERS],
     fleet: &Fleet<M, FRAME, NOTIFY, LIFECYCLE>,
     outbound_first: bool,
+    peers_epoch: u64,
 ) -> SupervisorStep<B::Link>
 where
     B: BleBackend<MEMBERS>,
 {
     if outbound_first {
-        return match select5(
-            status.wait_until_disabled(),
-            fleet.outbound_ready(),
-            advance_handshakes(handshakes, local),
-            backend.next_event(),
-            recv_any(members, inbufs),
+        return match select(
+            status.wait_for_peers_epoch(peers_epoch),
+            select5(
+                status.wait_until_disabled(),
+                fleet.outbound_ready(),
+                advance_handshakes(handshakes, local),
+                backend.next_event(),
+                recv_any(members, inbufs),
+            ),
         )
         .await
         {
-            Either5::First(()) => SupervisorStep::Disabled,
-            Either5::Second(()) => SupervisorStep::Outbound,
-            Either5::Third(step) => SupervisorStep::Handshake(step),
-            Either5::Fourth(event) => SupervisorStep::Backend(event),
-            Either5::Fifth((index, received)) => SupervisorStep::Inbound(index, received),
+            Either::First(epoch) => SupervisorStep::PeersReset(epoch),
+            Either::Second(Either5::First(())) => SupervisorStep::Disabled,
+            Either::Second(Either5::Second(())) => SupervisorStep::Outbound,
+            Either::Second(Either5::Third(step)) => SupervisorStep::Handshake(step),
+            Either::Second(Either5::Fourth(event)) => SupervisorStep::Backend(event),
+            Either::Second(Either5::Fifth((index, received))) => {
+                SupervisorStep::Inbound(index, received)
+            }
         };
     }
-    match select5(
-        status.wait_until_disabled(),
-        advance_handshakes(handshakes, local),
-        backend.next_event(),
-        recv_any(members, inbufs),
-        fleet.outbound_ready(),
+    match select(
+        status.wait_for_peers_epoch(peers_epoch),
+        select5(
+            status.wait_until_disabled(),
+            advance_handshakes(handshakes, local),
+            backend.next_event(),
+            recv_any(members, inbufs),
+            fleet.outbound_ready(),
+        ),
     )
     .await
     {
-        Either5::First(()) => SupervisorStep::Disabled,
-        Either5::Second(step) => SupervisorStep::Handshake(step),
-        Either5::Third(event) => SupervisorStep::Backend(event),
-        Either5::Fourth((index, received)) => SupervisorStep::Inbound(index, received),
-        Either5::Fifth(()) => SupervisorStep::Outbound,
+        Either::First(epoch) => SupervisorStep::PeersReset(epoch),
+        Either::Second(Either5::First(())) => SupervisorStep::Disabled,
+        Either::Second(Either5::Second(step)) => SupervisorStep::Handshake(step),
+        Either::Second(Either5::Third(event)) => SupervisorStep::Backend(event),
+        Either::Second(Either5::Fourth((index, received))) => {
+            SupervisorStep::Inbound(index, received)
+        }
+        Either::Second(Either5::Fifth(())) => SupervisorStep::Outbound,
     }
 }
 
@@ -871,6 +1046,9 @@ async fn prepare_radio<B, const MEMBERS: usize>(
     match backend.local_capabilities(configured_capabilities).await {
         Ok(capabilities) => local.capabilities = capabilities,
         Err(_) => status.mark_failed(RADIO_CONTROL_REASON),
+    }
+    if let Some(group_tag) = backend.local_group_tag() {
+        local.group_tag = group_tag;
     }
 }
 
@@ -1165,6 +1343,43 @@ async fn apply_radio<
     }
 }
 
+async fn evict_settled_peers<
+    B,
+    M: RawMutex + 'static,
+    const FRAME: usize,
+    const NOTIFY: usize,
+    const LIFECYCLE: usize,
+    const MEMBERS: usize,
+>(
+    status: &BluetoothAutoStatus<MEMBERS>,
+    fleet: &mut Fleet<M, FRAME, NOTIFY, LIFECYCLE>,
+    backend: &mut B,
+    members: &mut [Option<Active<B::Link>>; MEMBERS],
+    handshakes: &mut [Option<PendingHandshake<B::Link>>; HANDSHAKE_LANES],
+    pending: &mut PendingActions<ACTION_CAP>,
+) where
+    B: BleBackend<MEMBERS>,
+{
+    backend.drop_all_links();
+    handshakes.fill_with(|| None);
+    pending.clear();
+    let mut changed = false;
+    for (slot, entry) in members.iter_mut().enumerate() {
+        if let Some(id) = entry.as_ref().map(|member| member.id) {
+            fleet.deregister_member(id).await;
+            let Some(member) = entry.take() else {
+                continue;
+            };
+            status.member(slot).retire();
+            backend.on_link_closed(member.address).await;
+            changed = true;
+        }
+    }
+    if changed {
+        status.republish_peer_count();
+    }
+}
+
 async fn disable_members<
     B,
     M: RawMutex + 'static,
@@ -1415,12 +1630,12 @@ async fn apply_settled<
                 slot,
                 address,
                 lane,
+                ..
             } => {
                 if let Some(mut link) = held.take() {
                     if !matches!(lane, L2capPlan::None) {
                         let _ = link.upgrade(&lane).await;
                     }
-                    let (source, sink) = link.into_data();
                     let id = InterfaceId::from_channel_tag(
                         InterfaceKind::BluetoothPeer,
                         identity.as_bytes(),
@@ -1428,7 +1643,14 @@ async fn apply_settled<
                     fleet
                         .register_member(contract::descriptor(id, bitrate))
                         .await;
-                    status.member(slot).assign(id);
+                    status.member(slot).assign(id, address);
+                    match lane {
+                        L2capPlan::None => status.member(slot).set_details(PeerDetails::BleGatt),
+                        L2capPlan::Accept | L2capPlan::Open { .. } => {
+                            status.member(slot).set_details(PeerDetails::Unknown);
+                        }
+                    }
+                    let (source, sink) = link.into_data();
                     status.republish_peer_count();
                     status.note_settled_link();
                     members[slot] = Some(Active {
@@ -1575,6 +1797,7 @@ mod tests {
             identity: BleIdentity::new([identity; 16]),
             endpoint: Endpoint::Nrf52(Nrf52Host::Nrf52),
             capabilities: CAPS,
+            group_tag: contract::default_group_tag(),
         }
     }
 
@@ -1607,6 +1830,7 @@ mod tests {
             endpoint: Endpoint::Nrf52(Nrf52Host::Nrf52),
             capabilities: CAPS,
             peer_rssi: None,
+            group_tag: Some(contract::default_group_tag()),
         };
         let mut handshakes = [
             Some(PendingHandshake::new(
@@ -1702,6 +1926,18 @@ mod tests {
         assert_eq!(status.connection(), ConnectionState::Failed);
     }
 
+    #[test]
+    fn reset_peers_advances_the_epoch_without_disabling_the_radio() {
+        static SHARED: BluetoothAutoShared<1> = BluetoothAutoShared::new(InterfaceId::new([11; 8]));
+        let status = BluetoothAutoStatus::new(&SHARED);
+        status.mark_up();
+        let before = status.peers_epoch();
+        status.reset_peers();
+        assert_ne!(status.peers_epoch(), before);
+        assert!(status.is_enabled());
+        assert!(!status.is_failed());
+    }
+
     fn recovery_view<const MEMBERS: usize>(
         status: &BluetoothAutoStatus<MEMBERS>,
     ) -> (
@@ -1758,7 +1994,10 @@ mod tests {
             )
         );
 
-        status.member(0).assign(InterfaceId::new([11; 8]));
+        status.member(0).assign(
+            InterfaceId::new([11; 8]),
+            BleAddress::new([1, 2, 3, 4, 5, 6]),
+        );
         status.republish_peer_count();
         assert_eq!(status.connection(), ConnectionState::Connected);
         assert_eq!(status.failure_reason(), Some(SETUP_FAILURE_REASON));
@@ -1790,7 +2029,10 @@ mod tests {
         status.republish_peer_count();
         assert_eq!(status.connection(), ConnectionState::Reconnecting);
 
-        status.member(1).assign(InterfaceId::new([12; 8]));
+        status.member(1).assign(
+            InterfaceId::new([12; 8]),
+            BleAddress::new([2, 3, 4, 5, 6, 7]),
+        );
         status.republish_peer_count();
         status.note_settled_link();
         assert_eq!(

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::mpsc::{channel, Receiver};
 
@@ -10,6 +11,7 @@ use prns_core::interfaces::bluetooth_auto::{
     STREAM_FRAME_PREFIX_LEN,
 };
 use prns_core::interfaces::bluetooth_auto::{BleLink, BleSink, BleSource};
+use prns_core::interfaces::{PeerDetails, PeerDetailsNotify};
 
 use super::bridge::{LinkSignal, WorkSignal};
 use super::outbound::{BoundedByteQueue, BoundedMessageQueue, OutboundQueueError};
@@ -19,6 +21,8 @@ const L2CAP_SDU_LEN: usize = STREAM_FRAME_PREFIX_LEN + BLE_HW_MTU;
 const GATT_REASSEMBLY_CAP: usize = 600;
 const GATT_FRAGMENT_PAYLOAD: usize = 180;
 const MERGED_IN_DEPTH: usize = 16;
+/// Match SoftDevice/Trouble: publish GATT if CoC does not come up in this window.
+const L2CAP_DETAILS_WINDOW: Duration = Duration::from_secs(5);
 
 pub struct AndroidBleLink {
     pub(super) conn_id: u32,
@@ -34,6 +38,7 @@ pub struct AndroidBleLink {
     pub(super) l2cap_up: Arc<LinkSignal>,
     pub(super) l2cap_opens: Arc<Mutex<VecDeque<(u32, u16)>>>,
     pub(super) work: Arc<WorkSignal>,
+    pub(super) details_notify: Option<PeerDetailsNotify>,
 }
 
 impl BleLink for AndroidBleLink {
@@ -93,23 +98,43 @@ impl BleLink for AndroidBleLink {
 
     async fn upgrade(&mut self, plan: &L2capPlan) -> Result<(), AndroidBleError> {
         if self.peer_protocol == PeerProtocol::Columba {
+            if let Some(details) = &self.details_notify {
+                details.publish(PeerDetails::BleGatt);
+            }
             return Ok(());
         }
-        if let L2capPlan::Open { psm } = plan {
-            if let Ok(mut opens) = self.l2cap_opens.lock() {
-                if opens.iter().any(|(conn_id, _)| *conn_id == self.conn_id) {
-                    return Ok(());
+        match plan {
+            L2capPlan::None => {
+                if let Some(details) = &self.details_notify {
+                    details.publish(PeerDetails::BleGatt);
                 }
-                if opens.len() >= super::bridge::PEER_CAPACITY {
-                    return Err(AndroidBleError::QueueFull);
-                }
-                opens.push_back((self.conn_id, psm.get()));
-            } else {
-                return Err(AndroidBleError::Closed);
+                return Ok(());
             }
-            self.work.wake();
+            L2capPlan::Open { psm } => {
+                if let Ok(mut opens) = self.l2cap_opens.lock() {
+                    if opens.iter().any(|(conn_id, _)| *conn_id == self.conn_id) {
+                        self.watch_l2cap_details();
+                        return Ok(());
+                    }
+                    if opens.len() >= super::bridge::PEER_CAPACITY {
+                        return Err(AndroidBleError::QueueFull);
+                    }
+                    opens.push_back((self.conn_id, psm.get()));
+                } else {
+                    return Err(AndroidBleError::Closed);
+                }
+                self.work.wake();
+                self.watch_l2cap_details();
+            }
+            L2capPlan::Accept => {
+                self.watch_l2cap_details();
+            }
         }
         Ok(())
+    }
+
+    fn bind_details_notify(&mut self, notify: PeerDetailsNotify) {
+        self.details_notify = Some(notify);
     }
 
     fn into_data(self) -> (AndroidBleSource, AndroidBleSink) {
@@ -209,6 +234,25 @@ impl BleSink for AndroidBleSink {
         }
         self.work.wake();
         Ok(())
+    }
+}
+
+impl AndroidBleLink {
+    fn watch_l2cap_details(&self) {
+        let Some(details) = self.details_notify.clone() else {
+            return;
+        };
+        if self.l2cap_up.is_up.load(Ordering::Acquire) {
+            details.publish(PeerDetails::BleCoc);
+            return;
+        }
+        let up = Arc::clone(&self.l2cap_up);
+        tokio::spawn(async move {
+            match tokio::time::timeout(L2CAP_DETAILS_WINDOW, up.wait_until_up()).await {
+                Ok(()) => details.publish(PeerDetails::BleCoc),
+                Err(_) => details.publish(PeerDetails::BleGatt),
+            }
+        });
     }
 }
 

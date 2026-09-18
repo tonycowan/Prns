@@ -1,3 +1,5 @@
+#[cfg(feature = "alloc")]
+use crate::interfaces::InterfaceMode;
 use crate::interfaces::{InterfaceDescriptor, InterfaceId};
 #[cfg(feature = "alloc")]
 use crate::lemire_index::HeapLemireIndex;
@@ -104,6 +106,17 @@ impl IndexedAttachedInterfaces {
         self.index.insert(self.ids.len() - 1, &self.ids);
     }
 
+    pub fn set_mode(&mut self, id: InterfaceId, mode: InterfaceMode) -> bool {
+        let Some(row) = self.index.get(&id, &self.ids) else {
+            return false;
+        };
+        let Some(descriptor) = self.descriptors.get_mut(row) else {
+            return false;
+        };
+        descriptor.mode = mode;
+        true
+    }
+
     pub fn remove(&mut self, id: InterfaceId) {
         let Some(row) = self.index.get(&id, &self.ids) else {
             return;
@@ -204,5 +217,26 @@ mod tests {
         assert!(roster
             .view()
             .is_egress_eligible(descriptor(2).id, Egress::Transport));
+    }
+
+    #[test]
+    fn set_mode_updates_only_the_named_descriptor() {
+        let mut roster = IndexedAttachedInterfaces::from(std::vec![descriptor(1), descriptor(2)]);
+        assert!(roster.set_mode(descriptor(2).id, InterfaceMode::Gateway));
+        assert!(!roster.set_mode(descriptor(9).id, InterfaceMode::Roaming));
+        assert_eq!(
+            roster
+                .view()
+                .descriptor_for(descriptor(1).id)
+                .map(|found| found.mode),
+            Some(InterfaceMode::Full),
+        );
+        assert_eq!(
+            roster
+                .view()
+                .descriptor_for(descriptor(2).id)
+                .map(|found| found.mode),
+            Some(InterfaceMode::Gateway),
+        );
     }
 }

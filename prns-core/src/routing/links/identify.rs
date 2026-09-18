@@ -16,6 +16,7 @@ use crate::identity::{
     IdentityEncryptionPublicKey, IdentityHash, IdentitySigner, IdentitySigningPublicKey,
     RemoteIdentity, IDENTITY_PUBLIC_KEY_LEN,
 };
+use crate::interfaces::AttachedInterfaces;
 use crate::interfaces::InterfaceId;
 use crate::routing::links::table::{LinkPhase, LinkRole};
 use crate::routing::links::LinkId;
@@ -253,12 +254,18 @@ impl<S: StorageLayout> EngineState<S> {
     }
 
     /// Applies a LINKIDENTIFY verdict only while the same responder-side link is still active.
-    pub fn resume_link_identity_verify(
+    pub fn resume_link_identity_verify<F, Work>(
         &mut self,
         owed: LinkIdentityVerifyOwed,
         verification: LinkIdentityVerification,
-        sink: &mut impl FnMut(EngineReaction<'_>),
-    ) {
+        interfaces: AttachedInterfaces<'_>,
+        now: InstantMillis,
+        fill_random: &mut F,
+        sink: &mut impl FnMut(EngineReaction<'_, Work>),
+    ) -> WakeSchedules
+    where
+        F: FnMut(&mut [u8]),
+    {
         if verification == LinkIdentityVerification::Invalid
             || !matches!(
                 self.links.phase_for(&owed.link_id),
@@ -268,14 +275,24 @@ impl<S: StorageLayout> EngineState<S> {
                 })
             )
         {
-            return;
+            return WakeSchedules::UNCHANGED;
         }
-        self.links.note_identified(&owed.link_id, owed.identity);
-        self.links.note_inbound(&owed.link_id, owed.arrived_at);
+        let link_id = owed.link_id;
+        let identity = owed.identity;
+        self.links.note_identified(&link_id, identity);
+        self.links.note_inbound(&link_id, owed.arrived_at);
         sink(EngineReaction::Journaled(Journaled::PeerIdentified {
-            link_id: owed.link_id,
-            identity: owed.identity,
+            link_id,
+            identity,
         }));
+        self.admit_parked_remote_control_pairing_after_identify(
+            link_id,
+            identity,
+            interfaces,
+            now,
+            fill_random,
+            sink,
+        )
     }
 }
 

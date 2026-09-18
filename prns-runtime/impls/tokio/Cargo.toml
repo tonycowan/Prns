@@ -25,12 +25,14 @@ rnx = ["prns-runtime/rnx", "tokio/process", "dep:shlex", "dep:nix"]
 interface-discovery = ["prns-runtime/interface-discovery"]
 interface-discovery-archive = ["interface-discovery", "prns-runtime/interface-discovery-archive"]
 runtime-metrics = ["prns-core/runtime-metrics", "prns-runtime/runtime-metrics"]
+scheduler-tuning = []
 rns-management = ["prns-runtime/rns-management"]
 parallel-persistence = ["prns-core/parallel-persistence"]
+parallel-resource-hash = ["prns-core/parallel-resource-hash"]
 tracing = ["dep:tracing"]
 
 [dependencies]
-prns-core = { version = "=0.3.7", path = "../../../prns-core", default-features = false, features = ["tokio-host", "ed25519-batch"] }
+prns-core = { version = "=0.3.7", path = "../../../prns-core", default-features = false, features = ["tokio-host", "ed25519-batch", "resource-work-offload"] }
 prns-runtime = { version = "=0.3.7", path = "../../core", default-features = false, features = ["resource-bzip2"] }
 heapless = { version = "0.8", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time", "io-util", "fs"] }

@@ -1,5 +1,6 @@
 use super::advertisement::{
     AD_MANUFACTURER_SPECIFIC, EXPERIMENTAL_ROLE_PERIPHERAL_ONLY, EXPERIMENTAL_ROLE_VERSION,
+    EXPERIMENTAL_ROLE_VERSION_MIN,
 };
 use super::handshake::{CONTROL_CLOSE, CONTROL_HELLO};
 use super::*;
@@ -54,13 +55,15 @@ fn psm_admits_only_the_le_dynamic_range() {
 #[test]
 fn an_advertisement_carries_the_shared_reticulum_ble_service() {
     let mut buf = [0u8; MAX_ADVERTISEMENT_LEN];
-    let len = encode_advertisement(&mut buf, BleRoleCapabilities::DualRole).unwrap();
-    assert!(len <= MAX_ADVERTISEMENT_LEN);
+    let len =
+        encode_advertisement(&mut buf, BleRoleCapabilities::DualRole, default_group_tag()).unwrap();
+    assert_eq!(len, MAX_ADVERTISEMENT_LEN);
     assert!(contains_service(&buf[..len]));
     assert_eq!(
         columba_role_capabilities(&buf[..len]),
         Some(BleRoleCapabilities::DualRole)
     );
+    assert_eq!(advertisement_group_tag(&buf[..len]), default_group_tag());
     assert!(!contains_service(&[]));
     assert!(!contains_service(&[0x02, 0x01, 0x06]));
 }
@@ -68,12 +71,49 @@ fn an_advertisement_carries_the_shared_reticulum_ble_service() {
 #[test]
 fn a_peripheral_only_advertisement_exposes_its_columba_role_constraint() {
     let mut buf = [0u8; MAX_ADVERTISEMENT_LEN];
-    let len = encode_advertisement(&mut buf, BleRoleCapabilities::PeripheralOnly).unwrap();
+    let len = encode_advertisement(
+        &mut buf,
+        BleRoleCapabilities::PeripheralOnly,
+        default_group_tag(),
+    )
+    .unwrap();
 
     assert_eq!(
         columba_role_capabilities(&buf[..len]),
         Some(BleRoleCapabilities::PeripheralOnly)
     );
+}
+
+#[test]
+fn discovery_group_tags_partition_advertisements() {
+    let mut leg_a = [0u8; MAX_ADVERTISEMENT_LEN];
+    let mut leg_b = [0u8; MAX_ADVERTISEMENT_LEN];
+    let tag_a = group_tag(b"mt-leg-a");
+    let tag_b = group_tag(b"mt-leg-b");
+    let len_a = encode_advertisement(&mut leg_a, BleRoleCapabilities::DualRole, tag_a).unwrap();
+    let len_b = encode_advertisement(&mut leg_b, BleRoleCapabilities::DualRole, tag_b).unwrap();
+
+    assert!(discovery_groups_match(tag_a, &leg_a[..len_a]));
+    assert!(!discovery_groups_match(tag_a, &leg_b[..len_b]));
+    assert!(discovery_groups_match(tag_b, &leg_b[..len_b]));
+}
+
+#[test]
+fn legacy_v3_advertisements_map_to_the_default_discovery_group() {
+    let legacy = [
+        2,
+        0x01,
+        0x06,
+        5,
+        AD_MANUFACTURER_SPECIFIC,
+        0xff,
+        0xff,
+        EXPERIMENTAL_ROLE_VERSION_MIN,
+        0,
+    ];
+    assert_eq!(advertisement_group_tag(&legacy), default_group_tag());
+    assert!(discovery_groups_match(default_group_tag(), &legacy));
+    assert!(!discovery_groups_match(group_tag(b"mt-leg-a"), &legacy));
 }
 
 #[test]
@@ -124,6 +164,441 @@ fn lower_dual_role_address_dials_and_higher_address_accepts() {
 }
 
 #[test]
+fn dial_key_from_identity_is_stable_prefix_and_round_trips_manufacturer_v5() {
+    let identity = BleIdentity::new([
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0,
+        0x01,
+    ]);
+    let key = dial_key_from_identity(identity);
+    assert_eq!(key, BleAddress::new([0x10, 0x20, 0x30, 0x40, 0x50, 0x60]));
+    let payload = manufacturer_role_payload_with_dial_key(
+        BleRoleCapabilities::DualRole,
+        default_group_tag(),
+        key,
+    );
+    assert_eq!(payload[0], 0x05);
+    assert_eq!(dial_key_from_manufacturer(0xffff, &payload), Some(key));
+    assert_eq!(
+        dial_key_from_manufacturer(
+            0xffff,
+            &manufacturer_role_payload(BleRoleCapabilities::DualRole, default_group_tag())
+        ),
+        None,
+        "v4 payloads have no dial key"
+    );
+}
+
+#[test]
+fn v6_payload_publishes_type_and_keeps_group_at_the_v4_offset() {
+    let payload = manufacturer_role_payload_with_node_type(mac(), default_group_tag());
+    assert_eq!(payload[0], EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE);
+    assert_eq!(payload[1], mac().advertisement_type_byte());
+    assert_eq!(
+        node_type_from_role_payload(&payload),
+        Some(mac()),
+        "v6 type byte reconstructs MacOs"
+    );
+    assert_eq!(node_type_from_manufacturer(0xffff, &payload), Some(mac()));
+    assert_eq!(
+        group_tag_from_manufacturer(0xffff, &payload),
+        Some(default_group_tag()),
+        "v4 scanners still read the group"
+    );
+    assert_eq!(
+        columba_role_capabilities_from_manufacturer(0xffff, &payload),
+        Some(BleRoleCapabilities::DualRole),
+        "v6 type must not be read as PeripheralOnly flags"
+    );
+    assert_eq!(
+        node_type_from_role_payload(&manufacturer_role_payload(
+            BleRoleCapabilities::DualRole,
+            default_group_tag()
+        )),
+        None,
+        "v4 has no node type"
+    );
+}
+
+#[test]
+fn v6_classic_adv_publishes_esp32_type_and_fills_the_31_byte_budget() {
+    let mut buf = [0u8; MAX_ADVERTISEMENT_LEN];
+    let len = encode_advertisement_with_node_type(&mut buf, esp32(), default_group_tag()).unwrap();
+    assert_eq!(len, MAX_ADVERTISEMENT_LEN);
+    assert!(contains_service(&buf[..len]));
+    assert_eq!(
+        columba_role_capabilities(&buf[..len]),
+        Some(BleRoleCapabilities::DualRole)
+    );
+    assert_eq!(advertisement_group_tag(&buf[..len]), default_group_tag());
+    assert_eq!(
+        node_type_from_advertisement(&buf[..len]),
+        Some(esp32()),
+        "HV4 v6 ADV reconstructs Esp32"
+    );
+    let view = advertised_role_view(&buf[..len]);
+    assert_eq!(view.version, Some(EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE));
+    assert_eq!(view.type_byte, Some(esp32().advertisement_type_byte()));
+    assert_eq!(view.node_type, Some(esp32()));
+    assert_eq!(view.group, default_group_tag());
+    assert_eq!(view.dial_key, None);
+    assert!(view.has_service);
+}
+
+#[test]
+fn mac_accepts_and_android_dials_when_both_advertise_v6_type() {
+    assert_eq!(
+        typed_dial_override(
+            mac(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                android(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Accept)
+    );
+    assert_eq!(
+        typed_dial_override(
+            android(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                mac(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Dial)
+    );
+    assert_eq!(
+        typed_dial_override(mac(), None),
+        None,
+        "v4 peers keep the C′ path"
+    );
+    assert_eq!(
+        typed_dial_override(android(), Some(android())),
+        None,
+        "same-type Android falls back until ties exist"
+    );
+}
+
+#[test]
+fn mac_accepts_and_esp32_dials_when_both_advertise_v6_type() {
+    assert_eq!(
+        typed_dial_override(
+            mac(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                esp32(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Accept)
+    );
+    assert_eq!(
+        typed_dial_override(
+            esp32(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                mac(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Dial)
+    );
+}
+
+#[test]
+fn mac_accepts_and_nrf_dials_when_both_advertise_v6_type() {
+    assert_eq!(
+        typed_dial_override(
+            mac(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                nrf(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Accept)
+    );
+    assert_eq!(
+        typed_dial_override(
+            nrf(),
+            node_type_from_role_payload(&manufacturer_role_payload_with_node_type(
+                mac(),
+                default_group_tag()
+            ))
+        ),
+        Some(DialSightingAction::Dial)
+    );
+}
+
+#[test]
+fn embedded_scan_dials_mac_on_v6_type_even_when_address_sort_would_accept() {
+    let mut adv = [0u8; MAX_ADVERTISEMENT_LEN];
+    let len = encode_advertisement_with_node_type(&mut adv, mac(), default_group_tag()).unwrap();
+    let winning_radio = BleAddress::new([0x00; 6]);
+    let losing_radio = BleAddress::new([0xFF; 6]);
+    assert_eq!(
+        embedded_scan_dial_action(esp32(), losing_radio, winning_radio, &adv[..len]),
+        DialSightingAction::Dial,
+        "Opens(Esp32) must Dial Mac even when the board loses radio-address sort"
+    );
+    assert_eq!(
+        embedded_scan_dial_action(nrf(), losing_radio, winning_radio, &adv[..len]),
+        DialSightingAction::Dial,
+        "Opens(Nrf52) must Dial Mac even when the board loses radio-address sort"
+    );
+}
+
+#[test]
+fn v6_classic_adv_publishes_nrf52_type_and_fills_the_31_byte_budget() {
+    let mut buf = [0u8; MAX_ADVERTISEMENT_LEN];
+    let len = encode_advertisement_with_node_type(&mut buf, nrf(), default_group_tag()).unwrap();
+    assert_eq!(len, MAX_ADVERTISEMENT_LEN);
+    assert!(contains_service(&buf[..len]));
+    assert_eq!(
+        columba_role_capabilities(&buf[..len]),
+        Some(BleRoleCapabilities::DualRole),
+        "v6 Nrf52 type must not be read as PeripheralOnly flags"
+    );
+    assert_eq!(advertisement_group_tag(&buf[..len]), default_group_tag());
+    assert_eq!(
+        node_type_from_advertisement(&buf[..len]),
+        Some(nrf()),
+        "MeshTower v6 ADV reconstructs Nrf52"
+    );
+    let view = advertised_role_view(&buf[..len]);
+    assert_eq!(view.version, Some(EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE));
+    assert_eq!(view.type_byte, Some(nrf().advertisement_type_byte()));
+    assert_eq!(view.node_type, Some(nrf()));
+}
+
+#[test]
+fn embedded_scan_dials_uuid_only_corebluetooth_shape() {
+    let mut uuid_only = [0u8; 31];
+    let uuid_len = {
+        let mut little_endian = BLE_SERVICE_UUID_BYTES;
+        little_endian.reverse();
+        uuid_only[0] = 2;
+        uuid_only[1] = 0x01;
+        uuid_only[2] = 0x06;
+        uuid_only[3] = 17;
+        uuid_only[4] = 0x07;
+        uuid_only[5..21].copy_from_slice(&little_endian);
+        21
+    };
+    let losing_radio = BleAddress::new([0xFF; 6]);
+    let winning_radio = BleAddress::new([0x00; 6]);
+    assert_eq!(
+        embedded_scan_dial_action(esp32(), losing_radio, winning_radio, &uuid_only[..uuid_len]),
+        DialSightingAction::Dial,
+        "UUID-only implies MacOs; Opens(Esp32) Dials"
+    );
+    assert_eq!(
+        embedded_scan_dial_action(nrf(), losing_radio, winning_radio, &uuid_only[..uuid_len]),
+        DialSightingAction::Dial,
+        "UUID-only implies MacOs; Opens(Nrf52) Dials"
+    );
+}
+
+#[test]
+fn uuid_only_implies_macos_for_the_arrangement_table() {
+    let mut uuid_only = [0u8; 31];
+    let uuid_len = {
+        let mut little_endian = BLE_SERVICE_UUID_BYTES;
+        little_endian.reverse();
+        uuid_only[0] = 2;
+        uuid_only[1] = 0x01;
+        uuid_only[2] = 0x06;
+        uuid_only[3] = 17;
+        uuid_only[4] = 0x07;
+        uuid_only[5..21].copy_from_slice(&little_endian);
+        21
+    };
+    assert_eq!(
+        advertised_or_implied_node_type(&uuid_only[..uuid_len]),
+        Some(mac())
+    );
+    assert_eq!(typed_dial_override_code(esp32(), &[]), 1);
+    assert_eq!(typed_dial_override_code(nrf(), &[]), 1);
+    assert_eq!(typed_dial_override_code(android(), &[]), 1);
+    assert_eq!(
+        typed_dial_override_code(mac(), &[]),
+        -1,
+        "Mac vs implied Mac is GattOnly; C′ Accepts"
+    );
+}
+
+#[test]
+fn manufacturer_only_scan_rsp_still_dials_mac() {
+    let payload = manufacturer_role_payload_with_node_type(mac(), default_group_tag());
+    let rsp = [
+        9,
+        AD_MANUFACTURER_SPECIFIC,
+        0xff,
+        0xff,
+        payload[0],
+        payload[1],
+        payload[2],
+        payload[3],
+        payload[4],
+        payload[5],
+    ];
+    let view = advertised_role_view(&rsp);
+    assert!(!view.has_service, "CoreBluetooth puts type in SCAN_RSP");
+    assert_eq!(view.version, Some(EXPERIMENTAL_ROLE_VERSION_WITH_NODE_TYPE));
+    assert_eq!(view.node_type, Some(mac()));
+    let losing_radio = BleAddress::new([0xFF; 6]);
+    let winning_radio = BleAddress::new([0x00; 6]);
+    assert_eq!(
+        embedded_scan_dial_action(esp32(), losing_radio, winning_radio, &rsp),
+        DialSightingAction::Dial
+    );
+}
+
+#[test]
+fn host_legacy_dual_role_fail_opens_dial() {
+    let local = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            local,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial
+    );
+}
+
+#[test]
+fn uuid_only_dual_role_must_accept() {
+    let local = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            local,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Accept
+    );
+    assert_eq!(
+        dial_sighting_action(
+            local,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::AddressSort {
+                local: BleAddress::new([0; 6]),
+                peer: BleAddress::new([1; 6]),
+            },
+        ),
+        DialSightingAction::Accept,
+        "embedded must not dial UUID-only Android primary ADV"
+    );
+}
+
+#[test]
+fn embedded_legacy_dual_role_keeps_radio_address_sort() {
+    let local_key = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    let lower = BleAddress::new([0, 1, 2, 3, 4, 5]);
+    let higher = BleAddress::new([0, 1, 2, 3, 4, 6]);
+    assert_eq!(
+        dial_sighting_action(
+            local_key,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::AddressSort {
+                local: lower,
+                peer: higher,
+            },
+        ),
+        DialSightingAction::Dial
+    );
+    assert_eq!(
+        dial_sighting_action(
+            local_key,
+            None,
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::AddressSort {
+                local: higher,
+                peer: lower,
+            },
+        ),
+        DialSightingAction::Accept
+    );
+}
+
+#[test]
+fn dial_sighting_elects_on_shared_dial_key() {
+    let phone = dial_key_from_identity(BleIdentity::new([0x10; 16]));
+    let mac = dial_key_from_identity(BleIdentity::new([0xF0; 16]));
+    assert_eq!(
+        dial_sighting_action(
+            mac,
+            Some(phone),
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Accept
+    );
+    assert_eq!(
+        dial_sighting_action(
+            phone,
+            Some(mac),
+            BleRoleCapabilities::DualRole,
+            ManufacturerPresence::Present,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial
+    );
+    assert_eq!(
+        dial_sighting_action(
+            mac,
+            None,
+            BleRoleCapabilities::PeripheralOnly,
+            ManufacturerPresence::Absent,
+            LegacyDualRolePolicy::FailOpenDial,
+        ),
+        DialSightingAction::Dial
+    );
+}
+
+#[test]
+fn embedded_sighting_accepts_uuid_only_and_dials_legacy_when_address_wins() {
+    let mut uuid_only = [0u8; 31];
+    let uuid_len = {
+        let mut little_endian = BLE_SERVICE_UUID_BYTES;
+        little_endian.reverse();
+        uuid_only[0] = 2;
+        uuid_only[1] = 0x01;
+        uuid_only[2] = 0x06;
+        uuid_only[3] = 17;
+        uuid_only[4] = 0x07;
+        uuid_only[5..21].copy_from_slice(&little_endian);
+        21
+    };
+    let local_key = dial_key_from_identity(BleIdentity::new([0x10; 16]));
+    let local_radio = BleAddress::new([0; 6]);
+    let peer_radio = BleAddress::new([0xff; 6]);
+    assert_eq!(
+        embedded_dial_sighting_action(local_key, local_radio, peer_radio, &uuid_only[..uuid_len]),
+        DialSightingAction::Accept
+    );
+
+    let mut legacy = [0u8; MAX_ADVERTISEMENT_LEN];
+    let legacy_len = encode_advertisement(
+        &mut legacy,
+        BleRoleCapabilities::DualRole,
+        default_group_tag(),
+    )
+    .expect("v4 ADV fits");
+    assert_eq!(
+        embedded_dial_sighting_action(local_key, local_radio, peer_radio, &legacy[..legacy_len]),
+        DialSightingAction::Dial
+    );
+}
+
+#[test]
 fn hci_addresses_compare_in_display_order() {
     assert_eq!(
         BleAddress::from_hci_bytes([0x17, 0x27, 0x0c, 0x6a, 0x46, 0xfd]),
@@ -162,6 +637,30 @@ fn mac_and_linux_open_when_linux_opens() {
     assert_eq!(
         l2cap_arrangement(linux(), mac()),
         L2capArrangement::Opens(linux())
+    );
+}
+
+#[test]
+fn mac_and_esp32_only_open_when_esp32_opens() {
+    assert_eq!(
+        l2cap_arrangement(mac(), esp32()),
+        L2capArrangement::Opens(esp32())
+    );
+    assert_eq!(
+        l2cap_arrangement(esp32(), mac()),
+        L2capArrangement::Opens(esp32())
+    );
+}
+
+#[test]
+fn mac_and_nrf_only_open_when_nrf_opens() {
+    assert_eq!(
+        l2cap_arrangement(mac(), nrf()),
+        L2capArrangement::Opens(nrf())
+    );
+    assert_eq!(
+        l2cap_arrangement(nrf(), mac()),
+        L2capArrangement::Opens(nrf())
     );
 }
 
@@ -358,13 +857,17 @@ fn the_esp32_either_opens_the_fast_lane_with_its_peers() {
 }
 
 #[test]
-fn the_esp32_stays_on_the_gatt_floor_with_windows_and_apple() {
+fn the_esp32_stays_on_the_gatt_floor_with_windows_and_apple_mobile() {
     assert_eq!(
         l2cap_arrangement(esp32(), Endpoint::WinRt(WinRtHost::Windows)),
         L2capArrangement::GattOnly
     );
     assert_eq!(
-        l2cap_arrangement(esp32(), mac()),
+        l2cap_arrangement(esp32(), ios()),
+        L2capArrangement::GattOnly
+    );
+    assert_eq!(
+        l2cap_arrangement(esp32(), ipad()),
         L2capArrangement::GattOnly
     );
 }
@@ -390,6 +893,7 @@ fn the_arrangement_table_is_order_independent() {
         android(),
         Endpoint::CoreBluetooth(AppleHost::Ios),
         Endpoint::Esp32(Esp32Host::Esp32),
+        nrf(),
         Endpoint::WinRt(WinRtHost::Windows),
     ];
     for &a in &endpoints {
@@ -407,6 +911,7 @@ fn opens_always_names_one_of_the_pair() {
         android(),
         Endpoint::CoreBluetooth(AppleHost::Ios),
         Endpoint::Esp32(Esp32Host::Esp32),
+        nrf(),
         Endpoint::WinRt(WinRtHost::Windows),
     ];
     for &a in &endpoints {
@@ -470,6 +975,18 @@ fn opens_arrangement_rejects_either_wrong_gatt_role() {
     assert!(!needs_redial(opens_android, HandshakeRole::Listener, mac()));
     assert!(needs_redial(opens_android, HandshakeRole::Dialer, mac()));
 
+    let opens_esp32 = l2cap_arrangement(mac(), esp32());
+    assert!(needs_redial(opens_esp32, HandshakeRole::Listener, esp32()));
+    assert!(!needs_redial(opens_esp32, HandshakeRole::Dialer, esp32()));
+    assert!(!needs_redial(opens_esp32, HandshakeRole::Listener, mac()));
+    assert!(needs_redial(opens_esp32, HandshakeRole::Dialer, mac()));
+
+    let opens_nrf = l2cap_arrangement(mac(), nrf());
+    assert!(needs_redial(opens_nrf, HandshakeRole::Listener, nrf()));
+    assert!(!needs_redial(opens_nrf, HandshakeRole::Dialer, nrf()));
+    assert!(!needs_redial(opens_nrf, HandshakeRole::Listener, mac()));
+    assert!(needs_redial(opens_nrf, HandshakeRole::Dialer, mac()));
+
     let either = l2cap_arrangement(linux(), android());
     assert!(!needs_redial(either, HandshakeRole::Listener, linux()));
     assert!(!needs_redial(either, HandshakeRole::Dialer, linux()));
@@ -532,6 +1049,50 @@ fn opens_lets_only_the_named_side_open_and_only_as_central() {
     );
     assert_eq!(
         l2cap_plan(arr, HandshakeRole::Dialer, mac(), &mac_caps, &android_caps),
+        L2capPlan::Accept
+    );
+}
+
+#[test]
+fn opens_lets_esp32_open_mac_only_as_central() {
+    let arr = l2cap_arrangement(mac(), esp32());
+    let esp_caps = caps(Some(0x0080));
+    let mac_caps = caps(Some(0x00c0));
+
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Dialer, esp32(), &esp_caps, &mac_caps),
+        L2capPlan::Open {
+            psm: Psm::new(0x00c0).unwrap()
+        }
+    );
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Listener, esp32(), &esp_caps, &mac_caps),
+        L2capPlan::None
+    );
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Listener, mac(), &mac_caps, &esp_caps),
+        L2capPlan::Accept
+    );
+}
+
+#[test]
+fn opens_lets_nrf_open_mac_only_as_central() {
+    let arr = l2cap_arrangement(mac(), nrf());
+    let nrf_caps = caps(Some(0x0080));
+    let mac_caps = caps(Some(0x00c0));
+
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Dialer, nrf(), &nrf_caps, &mac_caps),
+        L2capPlan::Open {
+            psm: Psm::new(0x00c0).unwrap()
+        }
+    );
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Listener, nrf(), &nrf_caps, &mac_caps),
+        L2capPlan::None
+    );
+    assert_eq!(
+        l2cap_plan(arr, HandshakeRole::Listener, mac(), &mac_caps, &nrf_caps),
         L2capPlan::Accept
     );
 }
@@ -640,11 +1201,13 @@ fn a_dialer_and_listener_settle_exchanging_endpoints_and_caps() {
         identity: identity(1),
         endpoint: mac(),
         capabilities: caps(Some(0x00c0)),
+        group_tag: default_group_tag(),
     };
     let listener_local = LocalPeer {
         identity: identity(2),
         endpoint: android(),
         capabilities: caps(Some(0x0080)),
+        group_tag: default_group_tag(),
     };
     let (mut dialer, opening) = Handshake::begin(HandshakeRole::Dialer, dialer_local, Some(-40));
     let (mut listener, silent) =
@@ -690,6 +1253,7 @@ fn a_self_connection_aborts_and_closes() {
         identity: identity(5),
         endpoint: mac(),
         capabilities: caps(Some(0x0090)),
+        group_tag: default_group_tag(),
     };
     let (mut listener, _) = Handshake::begin(HandshakeRole::Listener, local, None);
     let reaction = listener.absorb(Control::Hello {
@@ -697,6 +1261,7 @@ fn a_self_connection_aborts_and_closes() {
         endpoint: mac(),
         capabilities: caps(Some(0x0090)),
         peer_rssi: None,
+        group_tag: Some(default_group_tag()),
     });
     assert_eq!(
         reaction.outcome,
@@ -743,6 +1308,7 @@ fn a_hello_round_trips_through_the_control_codec() {
         endpoint: android(),
         capabilities: caps(Some(0x0081)),
         peer_rssi: Some(-63),
+        group_tag: Some(default_group_tag()),
     };
     let mut buf = [0u8; CONTROL_MAX_LEN];
     let len = hello.encode(&mut buf).unwrap();
@@ -765,6 +1331,7 @@ fn every_endpoint_round_trips_through_the_greeting() {
             endpoint,
             capabilities: caps(None),
             peer_rssi: None,
+            group_tag: Some(default_group_tag()),
         };
         let mut buf = [0u8; CONTROL_MAX_LEN];
         let len = hello.encode(&mut buf).unwrap();
@@ -779,14 +1346,17 @@ fn every_endpoint_round_trips_through_the_greeting() {
 
 #[test]
 fn a_greeting_without_the_trailing_rssi_byte_still_decodes() {
+    // Legacy wire (no group tag): dropping the final RSSI byte still yields a greeting.
     let hello = Control::Hello {
         identity: identity(7),
         endpoint: mac(),
         capabilities: caps(Some(0x0081)),
         peer_rssi: Some(-63),
+        group_tag: None,
     };
     let mut buf = [0u8; CONTROL_MAX_LEN];
     let len = hello.encode(&mut buf).unwrap();
+    assert_eq!(len, CONTROL_LEGACY_GREETING_LEN);
     let trimmed = Control::decode(&buf[..len - 1]).unwrap();
     assert_eq!(
         trimmed,
@@ -795,7 +1365,70 @@ fn a_greeting_without_the_trailing_rssi_byte_still_decodes() {
             endpoint: mac(),
             capabilities: caps(Some(0x0081)),
             peer_rssi: None,
+            group_tag: None,
         }
+    );
+}
+
+#[test]
+fn a_legacy_hello_matches_the_default_discovery_group() {
+    let dialer_local = LocalPeer {
+        identity: identity(1),
+        endpoint: mac(),
+        capabilities: caps(Some(0x00c0)),
+        group_tag: default_group_tag(),
+    };
+    let listener_local = LocalPeer {
+        identity: identity(2),
+        endpoint: android(),
+        capabilities: caps(Some(0x0080)),
+        group_tag: default_group_tag(),
+    };
+    let (mut dialer, opening) = Handshake::begin(HandshakeRole::Dialer, dialer_local, None);
+    let (mut listener, _) = Handshake::begin(HandshakeRole::Listener, listener_local, None);
+    let legacy = Control::Hello {
+        identity: identity(1),
+        endpoint: mac(),
+        capabilities: caps(Some(0x00c0)),
+        peer_rssi: None,
+        group_tag: None,
+    };
+    let reaction = listener.absorb(legacy);
+    assert!(matches!(reaction.outcome, HandshakeOutcome::Settled(_)));
+    let welcome = reaction.reply.unwrap();
+    assert!(matches!(
+        dialer.absorb(welcome).outcome,
+        HandshakeOutcome::Settled(_)
+    ));
+    let _ = opening;
+}
+
+#[test]
+fn a_discovery_group_mismatch_aborts_handshake() {
+    let dialer_local = LocalPeer {
+        identity: identity(1),
+        endpoint: mac(),
+        capabilities: caps(Some(0x00c0)),
+        group_tag: group_tag(b"mt-leg-a"),
+    };
+    let listener_local = LocalPeer {
+        identity: identity(2),
+        endpoint: android(),
+        capabilities: caps(Some(0x0080)),
+        group_tag: group_tag(b"mt-leg-b"),
+    };
+    let (_, opening) = Handshake::begin(HandshakeRole::Dialer, dialer_local, None);
+    let (mut listener, _) = Handshake::begin(HandshakeRole::Listener, listener_local, None);
+    let reaction = listener.absorb(opening.unwrap());
+    assert_eq!(
+        reaction.outcome,
+        HandshakeOutcome::Aborted(CloseReason::Incompatible)
+    );
+    assert_eq!(
+        reaction.reply,
+        Some(Control::Close {
+            reason: CloseReason::Incompatible
+        })
     );
 }
 
@@ -809,6 +1442,7 @@ fn a_gatt_only_welcome_round_trips_with_no_psm() {
             link_mtu: 23,
         },
         peer_rssi: None,
+        group_tag: Some(default_group_tag()),
     };
     let mut buf = [0u8; CONTROL_MAX_LEN];
     let len = welcome.encode(&mut buf).unwrap();
@@ -848,6 +1482,7 @@ fn control_encode_refuses_a_short_buffer() {
         endpoint: mac(),
         capabilities: caps(Some(0x0090)),
         peer_rssi: None,
+        group_tag: Some(default_group_tag()),
     };
     let mut tiny = [0u8; 4];
     assert_eq!(hello.encode(&mut tiny), None);

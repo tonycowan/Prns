@@ -15,6 +15,39 @@ pub struct DataPacket<'a> {
     pub payload: &'a mut [u8],
 }
 
+impl DataPacket<'_> {
+    #[must_use]
+    pub fn packet_hash(&self) -> PacketHash {
+        PacketHash::of_data_fields(
+            self.header.destination_type,
+            &self.header.address,
+            self.header.context,
+            self.payload,
+        )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DataPacketHash {
+    Deferred,
+    Resolved(PacketHash),
+}
+
+impl DataPacketHash {
+    fn get(&self, data: &DataPacket<'_>) -> PacketHash {
+        match self {
+            Self::Deferred => data.packet_hash(),
+            Self::Resolved(packet_hash) => *packet_hash,
+        }
+    }
+
+    pub(super) fn resolve(&mut self, data: &DataPacket<'_>) -> PacketHash {
+        let packet_hash = self.get(data);
+        *self = Self::Resolved(packet_hash);
+        packet_hash
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Ingress<'a> {
@@ -32,7 +65,7 @@ pub enum Ingress<'a> {
     },
 
     Data {
-        packet_hash: PacketHash,
+        packet_hash: DataPacketHash,
         data: DataPacket<'a>,
         received_hops: u8,
         source_interface: InterfaceId,
@@ -84,8 +117,39 @@ impl<'a> ClassifiedInboundPacket<'a> {
     }
 
     #[must_use]
+    pub fn resolve_packet_hash(&mut self) -> Option<PacketHash> {
+        self.ingress.resolve_packet_hash()
+    }
+
+    #[must_use]
     pub fn is_malformed(&self) -> bool {
         matches!(self.ingress, Ingress::Malformed)
+    }
+
+    #[must_use]
+    pub fn source_interface(&self) -> InterfaceId {
+        self.source_interface
+    }
+
+    #[must_use]
+    pub fn wire_context(&self) -> Option<WireContext> {
+        match &self.ingress {
+            Ingress::Announce { header, .. } => Some(header.context),
+            Ingress::Data { data, .. } => Some(data.header.context),
+            Ingress::LinkRequest { header, .. } => Some(header.context),
+            Ingress::Proof { context, .. } => Some(*context),
+            Ingress::Malformed | Ingress::IfacRefused => None,
+        }
+    }
+
+    #[must_use]
+    pub fn payload_len(&self) -> usize {
+        match &self.ingress {
+            Ingress::Announce { payload, .. } => payload.len(),
+            Ingress::Data { data, .. } => data.payload.len(),
+            Ingress::LinkRequest { payload, .. } | Ingress::Proof { payload, .. } => payload.len(),
+            Ingress::Malformed | Ingress::IfacRefused => 0,
+        }
     }
 
     pub(crate) fn into_parts(self) -> (InterfaceId, Ingress<'a>) {
@@ -106,9 +170,24 @@ impl<'a> Ingress<'a> {
     pub fn packet_hash(&self) -> Option<PacketHash> {
         match self {
             Self::Announce { packet_hash, .. }
-            | Self::Data { packet_hash, .. }
             | Self::LinkRequest { packet_hash, .. }
             | Self::Proof { packet_hash, .. } => Some(*packet_hash),
+            Self::Data {
+                packet_hash, data, ..
+            } => Some(packet_hash.get(data)),
+            Self::Malformed | Self::IfacRefused => None,
+        }
+    }
+
+    #[must_use]
+    pub fn resolve_packet_hash(&mut self) -> Option<PacketHash> {
+        match self {
+            Self::Announce { packet_hash, .. }
+            | Self::LinkRequest { packet_hash, .. }
+            | Self::Proof { packet_hash, .. } => Some(*packet_hash),
+            Self::Data {
+                packet_hash, data, ..
+            } => Some(packet_hash.resolve(data)),
             Self::Malformed | Self::IfacRefused => None,
         }
     }
@@ -130,19 +209,19 @@ impl<'a> Ingress<'a> {
             return Self::Malformed;
         }
         let (_, payload) = bytes.split_at_mut(payload_offset);
-        let packet_hash = PacketHash::of_fields(
-            header.destination_type,
-            header.packet_type,
-            &header.address,
-            header.context,
-            payload,
-        );
 
         let received_hops = local_adjusted_hops(header.hops.saturating_add(1), source_interface);
 
         match header.packet_type {
             PacketType::Announce => {
                 let payload: &'a [u8] = payload;
+                let packet_hash = PacketHash::of_fields(
+                    header.destination_type,
+                    header.packet_type,
+                    &header.address,
+                    header.context,
+                    payload,
+                );
                 let Ok((announce, identity_hash)) =
                     Announce::from_wire_unverified_with_identity(&header, payload)
                 else {
@@ -174,29 +253,47 @@ impl<'a> Ingress<'a> {
                 }
             }
             PacketType::Data => Self::Data {
-                packet_hash,
+                packet_hash: DataPacketHash::Deferred,
                 data: DataPacket { header, payload },
                 received_hops,
                 source_interface,
                 arrived_at,
             },
-            PacketType::LinkRequest => Self::LinkRequest {
-                packet_hash,
-                payload,
-                header,
-                received_hops,
-                source_interface,
-                arrived_at,
-            },
-            PacketType::Proof => Self::Proof {
-                packet_hash,
-                payload,
-                address: header.address,
-                context: header.context,
-                received_hops,
-                source_interface,
-                arrived_at,
-            },
+            PacketType::LinkRequest => {
+                let packet_hash = PacketHash::of_fields(
+                    header.destination_type,
+                    header.packet_type,
+                    &header.address,
+                    header.context,
+                    payload,
+                );
+                Self::LinkRequest {
+                    packet_hash,
+                    payload,
+                    header,
+                    received_hops,
+                    source_interface,
+                    arrived_at,
+                }
+            }
+            PacketType::Proof => {
+                let packet_hash = PacketHash::of_fields(
+                    header.destination_type,
+                    header.packet_type,
+                    &header.address,
+                    header.context,
+                    payload,
+                );
+                Self::Proof {
+                    packet_hash,
+                    payload,
+                    address: header.address,
+                    context: header.context,
+                    received_hops,
+                    source_interface,
+                    arrived_at,
+                }
+            }
         }
     }
 }

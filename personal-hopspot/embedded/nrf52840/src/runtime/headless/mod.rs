@@ -2,7 +2,10 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join4;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+#[cfg(not(feature = "board-mesh-tower-v2"))]
 use embassy_time::Timer;
+#[cfg(feature = "board-mesh-tower-v2")]
+use embassy_time::{with_timeout, Duration};
 use embassy_usb::{Builder, Config as UsbConfig};
 use static_cell::{ConstStaticCell, StaticCell};
 
@@ -59,6 +62,8 @@ use super::entropy::{runtime_entropy, seed_from_hal};
 ))]
 mod bluetooth;
 #[cfg(feature = "board-mesh-tower-v2")]
+mod remote_control;
+#[cfg(feature = "board-mesh-tower-v2")]
 #[path = "mesh_tower_v2.rs"]
 mod selected;
 #[cfg(any(feature = "board-t096", feature = "board-t114"))]
@@ -74,7 +79,8 @@ const WINDOWS_MSOS_VENDOR_CODE: u8 = 0x20;
 const INTERFACE_CAPACITY: usize = selected::INTERFACE_CAPACITY;
 const LANE_COUNT: usize = selected::LANE_COUNT;
 const LANE_DEPTH: usize = 1;
-const LORA_TX_QUEUE_BYTES: usize = 1024;
+// 256 bytes below the T-Echo queue so T096 still clears the 68 KiB stack floor.
+const LORA_TX_QUEUE_BYTES: usize = 768;
 const LORA_OUTBOUND_DEPTH: usize = Storage::MAX_OUTGOING_RESOURCE_REACTION_FRAMES;
 #[cfg(any(
     feature = "board-t096",
@@ -109,10 +115,19 @@ type InterfaceStore = EmbassyInterfaceStore<
     PACKET_PHY_RETENTION_CAPACITY,
     PACKET_PHY_INDEX_BUCKETS,
 >;
+#[cfg(feature = "board-mesh-tower-v2")]
+type AppState = remote_control::HopspotRemoteControlState;
+#[cfg(not(feature = "board-mesh-tower-v2"))]
+type AppState = ();
+#[cfg(feature = "board-mesh-tower-v2")]
+type OnEvent = for<'a> fn(PrnsEvent<'a>, &remote_control::HopspotRemoteControlState);
+#[cfg(not(feature = "board-mesh-tower-v2"))]
+type OnEvent = for<'a> fn(PrnsEvent<'a>, &());
+
 type Node = PrnsNode<
-    (),
+    AppState,
     hopspot::node_pages::NodePageRoutes,
-    for<'a> fn(PrnsEvent<'a>, &()),
+    OnEvent,
     Storage,
     EmbassyHost<Mtx, super::entropy::NrfEntropySource>,
     Mtx,
@@ -199,8 +214,9 @@ pub async fn run(spawner: Spawner) -> ! {
     let identity_startup_notice =
         board::identity_startup_notice(node_bootstrap.persistence(), ble_bootstrap.persistence());
     let node_identity = node_bootstrap.into_identity();
+    let factory_grant = remote_control_bootstrap.factory_grant;
     let (remote_control_identity_secrets, _remote_control_identity_origins) =
-        remote_control_bootstrap.into_parts();
+        remote_control_bootstrap.bootstrap.into_parts();
     #[cfg(any(
         feature = "board-t096",
         feature = "board-t114",
@@ -243,7 +259,9 @@ pub async fn run(spawner: Spawner) -> ! {
         usb: usb_driver,
         vbus,
         radio,
-        mut status_led,
+        battery,
+        pd_sink,
+        status_led,
         button,
     } = hardware;
 
@@ -318,7 +336,10 @@ pub async fn run(spawner: Spawner) -> ! {
     let self_announcement = RemoteControlSelfAnnouncement::Destination(node_page_destination);
     let remote_control = RemoteControlService::new(
         remote_control_identity_secrets,
-        RemoteControlInitialControllerGrants::Nobody,
+        crate::boards::factory_or_fallback_grants(
+            factory_grant,
+            seeded_or_empty_controller_grants(),
+        ),
         self_announcement,
     );
     let mut manifold_lanes = ManifoldLanes::new();
@@ -328,6 +349,22 @@ pub async fn run(spawner: Spawner) -> ! {
     let lora_profile = loaded_lora_profile.profile;
     #[cfg(not(any(feature = "board-t096", feature = "board-t114")))]
     let lora_profile = DEFAULT_915_PROFILE;
+    let mut interface_mode_store =
+        hopspot::InterfaceModeStore::new(shared_flash, board::INTERFACE_MODE_PAGES);
+    let loaded_interface_modes = match interface_mode_store.load().await {
+        Ok(loaded) => loaded,
+        Err(_) => hopspot::LoadedInterfaceModes {
+            table: hopspot::InterfaceModeTable::DEFAULT,
+            follows_default: true,
+            notice: Some(hopspot::InterfaceModeLoadNotice::Reset),
+        },
+    };
+    let working_interface_modes = loaded_interface_modes.table;
+    #[cfg(any(feature = "board-t096", feature = "board-t114"))]
+    let interface_mode_startup_notice = loaded_interface_modes.notice.map(|notice| match notice {
+        hopspot::InterfaceModeLoadNotice::Recovered => hopspot::UiNotice::ProfileRecovered,
+        hopspot::InterfaceModeLoadNotice::Reset => hopspot::UiNotice::ProfileReset,
+    });
     let lora_id = LoraInterface::interface_id(&lora_profile);
     static LORA_STATUS: StaticCell<EmbassyInterfaceStatus> = StaticCell::new();
     let lora_status: &'static EmbassyInterfaceStatus = LORA_STATUS.init(
@@ -363,8 +400,20 @@ pub async fn run(spawner: Spawner) -> ! {
         host_present: || true,
     });
 
+    // Claim-time mode comes from durable flash; display boards can edit and re-persist later.
+    let interface_modes = working_interface_modes;
+    let mut lora_cfg = lora.descriptor();
+    hopspot::apply_selection_to_descriptor(
+        &mut lora_cfg,
+        interface_modes.get(hopspot::InterfaceModeSlot::LoRa),
+    );
+    let mut usb_cfg = usb_device.descriptor();
+    hopspot::apply_selection_to_descriptor(
+        &mut usb_cfg,
+        interface_modes.get(hopspot::InterfaceModeSlot::Usb),
+    );
     let lora_lane = manifold_lanes
-        .claim_accounted_interface(&LORA_MANIFOLD_LANE, lora.descriptor(), lora_status)
+        .claim_accounted_interface(&LORA_MANIFOLD_LANE, lora_cfg, lora_status)
         .expect("LoRa lane is available");
     #[cfg(any(
         feature = "board-t096",
@@ -381,8 +430,10 @@ pub async fn run(spawner: Spawner) -> ! {
             .expect("Bluetooth supervisor lane is available")
     });
     let usb_lane = manifold_lanes
-        .claim_accounted_interface(&USB_MANIFOLD_LANE, usb_device.descriptor(), usb_status)
+        .claim_accounted_interface(&USB_MANIFOLD_LANE, usb_cfg, usb_status)
         .expect("USB lane is available");
+    #[cfg(not(any(feature = "board-t096", feature = "board-t114")))]
+    let _ = interface_mode_store;
     let handle = PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION);
     let manifold_wiring = manifold_lanes.into_manifold_wiring(
         NOTIFY.receiver(),
@@ -402,11 +453,23 @@ pub async fn run(spawner: Spawner) -> ! {
             NODE_ANNOUNCE_APP_DATA,
         )
         .into_preconfigured_destinations(),
+        #[cfg(feature = "board-mesh-tower-v2")]
+        app_state: remote_control::HopspotRemoteControlState {
+            lora: lora_status,
+            usb: usb_status,
+            modes: working_interface_modes,
+            ble_identity,
+        },
+        #[cfg(not(feature = "board-mesh-tower-v2"))]
         app_state: (),
         storage: Storage,
         request_endpoints: hopspot::node_pages::NodePageRoutes,
         interfaces: personal_rns::runtime::ManuallyAttached,
         persistence,
+        #[cfg(feature = "board-mesh-tower-v2")]
+        on_event: remote_control::on_event
+            as for<'a> fn(PrnsEvent<'a>, &remote_control::HopspotRemoteControlState),
+        #[cfg(not(feature = "board-mesh-tower-v2"))]
         on_event: ignore_events as for<'a> fn(PrnsEvent<'a>, &()),
     };
     let (node, persistence) =
@@ -424,6 +487,7 @@ pub async fn run(spawner: Spawner) -> ! {
         feature = "board-mesh-tower-v2"
     ))]
     let bluetooth = bluetooth::prepare(ble_identity, ble_supervisor_lane);
+    #[cfg(not(feature = "board-mesh-tower-v2"))]
     let heartbeat = async move {
         loop {
             status_led.illuminate();
@@ -434,10 +498,48 @@ pub async fn run(spawner: Spawner) -> ! {
             selected::maintain().await;
         }
     };
+    #[cfg(not(feature = "board-mesh-tower-v2"))]
     let io = join4(
         usb.run(),
         usb_device.run(usb_seam),
         heartbeat,
+        super::bootloader_entry::wait(),
+    );
+    #[cfg(feature = "board-mesh-tower-v2")]
+    let io = join4(
+        usb.run(),
+        usb_device.run(usb_seam),
+        async {
+            let mut battery = battery;
+            let mut pd_sink = pd_sink;
+            let mut battery_gauge = hopspot::BatteryGauge::lipo();
+            let mut ticks_to_sample: u16 = 0;
+            loop {
+                selected::maintain().await;
+                if ticks_to_sample == 0 {
+                    // Sense with Meshtastic's MeshTower ADC sequence; fold into our
+                    // PowerSnapshot for DescribePower (BatteryGauge + optional HUSB238).
+                    let millivolts = battery.sample_millivolts().await;
+                    // SoftDevice USBREGSTATUS is MCU 5 V only. HUSB238 reports real USB-PD
+                    // attach / 20 V pack-charge contracts. Bound the I²C wait so a stuck bus
+                    // cannot starve ADC publishes.
+                    let external =
+                        match with_timeout(Duration::from_millis(50), pd_sink.external_power())
+                            .await
+                        {
+                            Ok(state) => state,
+                            Err(_) => hopspot::ExternalPowerState::Unknown,
+                        };
+                    let snapshot = battery_gauge.update(millivolts, external);
+                    hopspot::publish_power_snapshot(snapshot);
+                    // board::maintain waits ~1 ms; sample about every five seconds
+                    // (Meshtastic AnalogBatteryLevel min_read_interval).
+                    ticks_to_sample = 5_000;
+                } else {
+                    ticks_to_sample -= 1;
+                }
+            }
+        },
         super::bootloader_entry::wait(),
     );
     #[cfg(feature = "board-t096")]
@@ -446,9 +548,12 @@ pub async fn run(spawner: Spawner) -> ! {
             display,
             battery,
             profile_store: loaded_lora_profile.store,
+            interface_mode_store,
             identity_startup_notice,
             profile_startup_notice: loaded_lora_profile.startup_notice,
+            interface_mode_startup_notice,
             lora_profile,
+            working_interface_modes,
             lora_status,
             usb_status,
             lora_spectrum,
@@ -470,9 +575,12 @@ pub async fn run(spawner: Spawner) -> ! {
             display,
             battery,
             profile_store: loaded_lora_profile.store,
+            interface_mode_store,
             identity_startup_notice,
             profile_startup_notice: loaded_lora_profile.startup_notice,
+            interface_mode_startup_notice,
             lora_profile,
+            working_interface_modes,
             lora_status,
             usb_status,
             lora_spectrum,
@@ -495,10 +603,22 @@ pub async fn run(spawner: Spawner) -> ! {
         lora.run(lora_seam),
         bluetooth::run(sd, bluetooth),
         button,
+        status_led,
         node_page_destination,
     )
     .await;
     core::future::pending().await
 }
 
+#[cfg(feature = "board-mesh-tower-v2")]
+fn seeded_or_empty_controller_grants() -> RemoteControlInitialControllerGrants<'static> {
+    remote_control::initial_controller_grants()
+}
+
+#[cfg(not(feature = "board-mesh-tower-v2"))]
+fn seeded_or_empty_controller_grants() -> RemoteControlInitialControllerGrants<'static> {
+    RemoteControlInitialControllerGrants::Nobody
+}
+
+#[cfg(not(feature = "board-mesh-tower-v2"))]
 fn ignore_events(_event: PrnsEvent<'_>, _state: &()) {}

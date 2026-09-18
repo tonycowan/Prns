@@ -20,7 +20,19 @@ impl DefaultAutoInterfaces {
 impl AttachIntent for DefaultAutoInterfaces {
     fn attach(self, handle: &PrnsNodeHandle) {
         #[cfg(feature = "wifi-auto")]
-        handle.attach(crate::wifi_auto::AutoWifi::default());
+        {
+            let wifi = crate::wifi_auto::AutoWifi::default();
+            let status = wifi.status();
+            let attached = handle.attach(wifi);
+            if let Some(group) = prns_core::remote_control::RemoteControlInterfaceGroup::parse(
+                prns_core::interfaces::wifi_auto::GROUP_NAME,
+            ) {
+                let _ = handle.set_interface_group(attached.id(), group);
+            }
+            let _ = handle.register_interface_group_apply(attached.id(), move |group| {
+                status.set_group_id(group)
+            });
+        }
         #[cfg(all(
             feature = "usb",
             any(target_os = "linux", target_os = "macos", target_os = "windows")
