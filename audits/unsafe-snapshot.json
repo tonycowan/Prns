@@ -171,21 +171,6 @@
     },
     {
       "graphs": {
-        "nrf52840": []
-      },
-      "name": "ahash",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "unsafe": {
-        "blocks": 7,
-        "externs": 0,
-        "functions": 0,
-        "impls": 0,
-        "tokens": 7
-      },
-      "version": "0.8.12"
-    },
-    {
-      "graphs": {
         "android": [
           "perf-literal",
           "std"
@@ -789,21 +774,6 @@
     },
     {
       "graphs": {
-        "nrf52840": []
-      },
-      "name": "bitfield",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "unsafe": {
-        "blocks": 0,
-        "externs": 0,
-        "functions": 0,
-        "impls": 0,
-        "tokens": 0
-      },
-      "version": "0.14.0"
-    },
-    {
-      "graphs": {
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -820,6 +790,21 @@
         "tokens": 0
       },
       "version": "0.19.4"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "bitfield",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.19.5"
     },
     {
       "graphs": {
@@ -839,6 +824,21 @@
         "tokens": 0
       },
       "version": "0.19.4"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "bitfield-macros",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.19.5"
     },
     {
       "graphs": {
@@ -967,9 +967,6 @@
         ],
         "ios": [
           "std"
-        ],
-        "nrf52840": [
-          "std"
         ]
       },
       "name": "bitflags",
@@ -1005,6 +1002,23 @@
         "tokens": 2
       },
       "version": "2.13.1"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "std"
+        ]
+      },
+      "name": "bitflags",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 2,
+        "tokens": 2
+      },
+      "version": "2.13.2"
     },
     {
       "graphs": {
@@ -1464,8 +1478,7 @@
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
         "esp32-s3-heltec-r8": [],
-        "esp32-s3-tbeam": [],
-        "nrf52840": []
+        "esp32-s3-tbeam": []
       },
       "name": "bytemuck",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -1477,6 +1490,21 @@
         "tokens": 331
       },
       "version": "1.25.0"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "bytemuck",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 102,
+        "externs": 5,
+        "functions": 22,
+        "impls": 203,
+        "tokens": 345
+      },
+      "version": "1.25.2"
     },
     {
       "graphs": {
@@ -1625,10 +1653,6 @@
         "esp32-s3-tbeam": [
           "default",
           "std"
-        ],
-        "nrf52840": [
-          "default",
-          "std"
         ]
       },
       "name": "bytes",
@@ -1653,6 +1677,10 @@
           "std"
         ],
         "host-c-windows": [
+          "default",
+          "std"
+        ],
+        "nrf52840": [
           "default",
           "std"
         ]
@@ -2435,7 +2463,21 @@
         "esp32-s3-tbeam": [
           "default",
           "no-cache-pad"
-        ],
+        ]
+      },
+      "name": "cordyceps",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 94,
+        "externs": 0,
+        "functions": 24,
+        "impls": 15,
+        "tokens": 134
+      },
+      "version": "0.3.4"
+    },
+    {
+      "graphs": {
         "nrf52840": [
           "default",
           "no-cache-pad"
@@ -2450,7 +2492,7 @@
         "impls": 15,
         "tokens": 134
       },
-      "version": "0.3.4"
+      "version": "0.3.5"
     },
     {
       "graphs": {
@@ -2566,13 +2608,28 @@
       "name": "cortex-m",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "unsafe": {
-        "blocks": 134,
+        "blocks": 220,
         "externs": 1,
-        "functions": 77,
-        "impls": 17,
-        "tokens": 230
+        "functions": 40,
+        "impls": 19,
+        "tokens": 282
       },
-      "version": "0.7.7"
+      "version": "0.7.9"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "cortex-m-macros",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.7.8"
     },
     {
       "graphs": {
@@ -2583,13 +2640,13 @@
       "name": "cortex-m-rt",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "unsafe": {
-        "blocks": 4,
-        "externs": 11,
-        "functions": 43,
+        "blocks": 10,
+        "externs": 17,
+        "functions": 42,
         "impls": 0,
-        "tokens": 58
+        "tokens": 87
       },
-      "version": "0.7.5"
+      "version": "0.7.6"
     },
     {
       "graphs": {
@@ -2604,7 +2661,7 @@
         "impls": 0,
         "tokens": 11
       },
-      "version": "0.7.5"
+      "version": "0.7.6"
     },
     {
       "graphs": {
@@ -2728,10 +2785,6 @@
           "default",
           "std"
         ],
-        "nrf52840": [
-          "default",
-          "std"
-        ],
         "wasm": [
           "default",
           "std"
@@ -2747,6 +2800,24 @@
         "tokens": 6
       },
       "version": "1.5.0"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "default",
+          "std"
+        ]
+      },
+      "name": "crc32fast",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 2,
+        "externs": 0,
+        "functions": 13,
+        "impls": 0,
+        "tokens": 15
+      },
+      "version": "1.5.2"
     },
     {
       "graphs": {
@@ -4000,7 +4071,21 @@
           "alloc",
           "oid",
           "zeroize"
-        ],
+        ]
+      },
+      "name": "der",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 4,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 4
+      },
+      "version": "0.8.1"
+    },
+    {
+      "graphs": {
         "nrf52840": [
           "alloc",
           "oid",
@@ -4016,7 +4101,7 @@
         "impls": 0,
         "tokens": 4
       },
-      "version": "0.8.1"
+      "version": "0.8.2"
     },
     {
       "graphs": {
@@ -7931,14 +8016,6 @@
           "executor",
           "futures-executor",
           "std"
-        ],
-        "nrf52840": [
-          "alloc",
-          "async-await",
-          "default",
-          "executor",
-          "futures-executor",
-          "std"
         ]
       },
       "name": "futures",
@@ -7989,6 +8066,28 @@
         "tokens": 0
       },
       "version": "0.3.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "alloc",
+          "async-await",
+          "default",
+          "executor",
+          "futures-executor",
+          "std"
+        ]
+      },
+      "name": "futures",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.3.34"
     },
     {
       "graphs": {
@@ -8082,13 +8181,6 @@
           "futures-sink",
           "sink",
           "std"
-        ],
-        "nrf52840": [
-          "alloc",
-          "default",
-          "futures-sink",
-          "sink",
-          "std"
         ]
       },
       "name": "futures-channel",
@@ -8136,6 +8228,27 @@
         "tokens": 22
       },
       "version": "0.3.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "alloc",
+          "default",
+          "futures-sink",
+          "sink",
+          "std"
+        ]
+      },
+      "name": "futures-channel",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 11,
+        "externs": 0,
+        "functions": 3,
+        "impls": 8,
+        "tokens": 22
+      },
+      "version": "0.3.34"
     },
     {
       "graphs": {
@@ -8205,11 +8318,6 @@
           "std"
         ],
         "ios": [
-          "alloc",
-          "default",
-          "std"
-        ],
-        "nrf52840": [
           "alloc",
           "default",
           "std"
@@ -8261,6 +8369,25 @@
     },
     {
       "graphs": {
+        "nrf52840": [
+          "alloc",
+          "default",
+          "std"
+        ]
+      },
+      "name": "futures-core",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 3,
+        "externs": 0,
+        "functions": 0,
+        "impls": 2,
+        "tokens": 5
+      },
+      "version": "0.3.34"
+    },
+    {
+      "graphs": {
         "android": [
           "std"
         ],
@@ -8300,9 +8427,6 @@
         ],
         "esp32-s3-tbeam": [
           "std"
-        ],
-        "nrf52840": [
-          "std"
         ]
       },
       "name": "futures-executor",
@@ -8338,6 +8462,23 @@
         "tokens": 9
       },
       "version": "0.3.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "std"
+        ]
+      },
+      "name": "futures-executor",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 4,
+        "externs": 0,
+        "functions": 3,
+        "impls": 2,
+        "tokens": 9
+      },
+      "version": "0.3.34"
     },
     {
       "graphs": {
@@ -8415,9 +8556,6 @@
         ],
         "ios": [
           "std"
-        ],
-        "nrf52840": [
-          "std"
         ]
       },
       "name": "futures-io",
@@ -8453,6 +8591,23 @@
         "tokens": 0
       },
       "version": "0.3.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "std"
+        ]
+      },
+      "name": "futures-io",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.3.34"
     },
     {
       "graphs": {
@@ -8497,8 +8652,7 @@
         "esp32-s3-heltec-e290": [],
         "esp32-s3-heltec-r8": [],
         "esp32-s3-tbeam": [],
-        "ios": [],
-        "nrf52840": []
+        "ios": []
       },
       "name": "futures-macro",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -8527,6 +8681,21 @@
         "tokens": 2
       },
       "version": "0.3.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "futures-macro",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 2,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 2
+      },
+      "version": "0.3.34"
     },
     {
       "graphs": {
@@ -8586,10 +8755,6 @@
         "ios": [
           "alloc",
           "std"
-        ],
-        "nrf52840": [
-          "alloc",
-          "std"
         ]
       },
       "name": "futures-sink",
@@ -8631,6 +8796,24 @@
         "tokens": 2
       },
       "version": "0.3.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "alloc",
+          "std"
+        ]
+      },
+      "name": "futures-sink",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 2,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 2
+      },
+      "version": "0.3.34"
     },
     {
       "graphs": {
@@ -8690,10 +8873,6 @@
           "alloc",
           "std"
         ],
-        "nrf52840": [
-          "alloc",
-          "std"
-        ],
         "wasm": [
           "alloc",
           "std"
@@ -8735,6 +8914,24 @@
         "tokens": 64
       },
       "version": "0.3.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "alloc",
+          "std"
+        ]
+      },
+      "name": "futures-task",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 27,
+        "externs": 0,
+        "functions": 24,
+        "impls": 12,
+        "tokens": 64
+      },
+      "version": "0.3.34"
     },
     {
       "graphs": {
@@ -8965,21 +9162,6 @@
           "slab",
           "std"
         ],
-        "nrf52840": [
-          "alloc",
-          "async-await",
-          "async-await-macro",
-          "channel",
-          "futures-channel",
-          "futures-io",
-          "futures-macro",
-          "futures-sink",
-          "io",
-          "memchr",
-          "sink",
-          "slab",
-          "std"
-        ],
         "wasm": [
           "alloc",
           "slab",
@@ -9055,6 +9237,35 @@
         "tokens": 136
       },
       "version": "0.3.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "alloc",
+          "async-await",
+          "async-await-macro",
+          "channel",
+          "futures-channel",
+          "futures-io",
+          "futures-macro",
+          "futures-sink",
+          "io",
+          "memchr",
+          "sink",
+          "slab",
+          "std"
+        ]
+      },
+      "name": "futures-util",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 84,
+        "externs": 0,
+        "functions": 20,
+        "impls": 32,
+        "tokens": 136
+      },
+      "version": "0.3.34"
     },
     {
       "graphs": {
@@ -9325,25 +9536,6 @@
         "tokens": 9
       },
       "version": "0.3.1"
-    },
-    {
-      "graphs": {
-        "nrf52840": [
-          "ahash",
-          "default",
-          "inline-more"
-        ]
-      },
-      "name": "hashbrown",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "unsafe": {
-        "blocks": 129,
-        "externs": 0,
-        "functions": 77,
-        "impls": 24,
-        "tokens": 231
-      },
-      "version": "0.13.2"
     },
     {
       "graphs": {
@@ -9873,9 +10065,6 @@
         ],
         "ios": [
           "zeroize"
-        ],
-        "nrf52840": [
-          "zeroize"
         ]
       },
       "name": "hybrid-array",
@@ -9923,6 +10112,23 @@
         "tokens": 38
       },
       "version": "0.4.13"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "zeroize"
+        ]
+      },
+      "name": "hybrid-array",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 30,
+        "externs": 0,
+        "functions": 2,
+        "impls": 5,
+        "tokens": 38
+      },
+      "version": "0.4.15"
     },
     {
       "graphs": {
@@ -11307,9 +11513,6 @@
         ],
         "daemon-windows": [
           "std"
-        ],
-        "nrf52840": [
-          "std"
         ]
       },
       "name": "log",
@@ -11354,6 +11557,24 @@
         "tokens": 6
       },
       "version": "0.4.33"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "alloc",
+          "std"
+        ]
+      },
+      "name": "log",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 3,
+        "externs": 0,
+        "functions": 2,
+        "impls": 1,
+        "tokens": 6
+      },
+      "version": "0.4.34"
     },
     {
       "graphs": {
@@ -11772,11 +11993,6 @@
           "alloc",
           "default",
           "std"
-        ],
-        "nrf52840": [
-          "alloc",
-          "default",
-          "std"
         ]
       },
       "name": "memchr",
@@ -11837,6 +12053,11 @@
           "std"
         ],
         "host-c-windows": [
+          "alloc",
+          "default",
+          "std"
+        ],
+        "nrf52840": [
           "alloc",
           "default",
           "std"
@@ -11993,11 +12214,6 @@
           "net",
           "os-ext",
           "os-poll"
-        ],
-        "nrf52840": [
-          "net",
-          "os-ext",
-          "os-poll"
         ]
       },
       "name": "mio",
@@ -12039,6 +12255,25 @@
         "tokens": 154
       },
       "version": "1.2.2"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "net",
+          "os-ext",
+          "os-poll"
+        ]
+      },
+      "name": "mio",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 105,
+        "externs": 0,
+        "functions": 28,
+        "impls": 21,
+        "tokens": 154
+      },
+      "version": "1.2.3"
     },
     {
       "graphs": {
@@ -15722,11 +15957,6 @@
           "critical-section",
           "default",
           "fallback"
-        ],
-        "nrf52840": [
-          "critical-section",
-          "default",
-          "fallback"
         ]
       },
       "name": "portable-atomic",
@@ -15768,6 +15998,25 @@
         "tokens": 642
       },
       "version": "1.14.0"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "critical-section",
+          "default",
+          "fallback"
+        ]
+      },
+      "name": "portable-atomic",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 312,
+        "externs": 2,
+        "functions": 298,
+        "impls": 16,
+        "tokens": 628
+      },
+      "version": "1.15.0"
     },
     {
       "graphs": {
@@ -15928,6 +16177,7 @@
           "ed25519-batch",
           "embassy-host",
           "flash",
+          "log",
           "parallel-persistence",
           "parallel-resource-hash",
           "resource-work-offload",
@@ -15943,6 +16193,7 @@
           "i2p",
           "interface-discovery",
           "interface-discovery-archive",
+          "log",
           "parallel-persistence",
           "parallel-resource-hash",
           "resource-work-offload",
@@ -15960,6 +16211,7 @@
           "i2p",
           "interface-discovery",
           "interface-discovery-archive",
+          "log",
           "parallel-persistence",
           "parallel-resource-hash",
           "resource-work-offload",
@@ -15977,6 +16229,7 @@
           "i2p",
           "interface-discovery",
           "interface-discovery-archive",
+          "log",
           "parallel-persistence",
           "parallel-resource-hash",
           "resource-work-offload",
@@ -15991,6 +16244,7 @@
           "ed25519-batch",
           "embassy-host",
           "flash",
+          "log",
           "parallel-persistence",
           "parallel-resource-hash",
           "resource-work-offload",
@@ -16003,6 +16257,7 @@
           "ed25519-batch",
           "embassy-host",
           "flash",
+          "log",
           "parallel-persistence",
           "parallel-resource-hash",
           "resource-work-offload",
@@ -16015,6 +16270,7 @@
           "ed25519-batch",
           "embassy-host",
           "flash",
+          "log",
           "parallel-persistence",
           "parallel-resource-hash",
           "resource-work-offload",
@@ -16037,6 +16293,7 @@
           "embassy-host",
           "external-alloc",
           "flash",
+          "log",
           "resource-work-offload",
           "std",
           "tokio-host"
@@ -16047,6 +16304,7 @@
           "embassy-host",
           "external-alloc",
           "flash",
+          "log",
           "resource-work-offload",
           "std",
           "tokio-host"
@@ -16057,6 +16315,7 @@
           "embassy-host",
           "external-alloc",
           "flash",
+          "log",
           "resource-work-offload",
           "std",
           "tokio-host"
@@ -16067,6 +16326,7 @@
           "embassy-host",
           "external-alloc",
           "flash",
+          "log",
           "resource-work-offload",
           "std",
           "tokio-host"
@@ -16077,6 +16337,7 @@
           "embassy-host",
           "external-alloc",
           "flash",
+          "log",
           "resource-work-offload",
           "std",
           "tokio-host"
@@ -16184,11 +16445,11 @@
       "name": "prns-ffi",
       "source": "prns-ffi",
       "unsafe": {
-        "blocks": 127,
-        "externs": 3,
+        "blocks": 147,
+        "externs": 7,
         "functions": 0,
-        "impls": 22,
-        "tokens": 188
+        "impls": 21,
+        "tokens": 207
       },
       "version": "0.3.7"
     },
@@ -17205,10 +17466,6 @@
           "default",
           "proc-macro"
         ],
-        "nrf52840": [
-          "default",
-          "proc-macro"
-        ],
         "wasm": [
           "default",
           "proc-macro"
@@ -17236,6 +17493,10 @@
           "proc-macro"
         ],
         "host-c-windows": [
+          "default",
+          "proc-macro"
+        ],
+        "nrf52840": [
           "default",
           "proc-macro"
         ]
@@ -17426,10 +17687,6 @@
         "nrf-dfu-browser": [
           "default",
           "proc-macro"
-        ],
-        "nrf52840": [
-          "default",
-          "proc-macro"
         ]
       },
       "name": "quote",
@@ -17484,6 +17741,10 @@
           "proc-macro"
         ],
         "host-c-windows": [
+          "default",
+          "proc-macro"
+        ],
+        "nrf52840": [
           "default",
           "proc-macro"
         ]
@@ -18594,7 +18855,6 @@
         "esp32-s3-tbeam": [],
         "host-c-linux": [],
         "nrf-dfu-browser": [],
-        "nrf52840": [],
         "wasm": []
       },
       "name": "rustversion",
@@ -18607,6 +18867,21 @@
         "tokens": 2
       },
       "version": "1.0.22"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "rustversion",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 1,
+        "externs": 0,
+        "functions": 1,
+        "impls": 0,
+        "tokens": 2
+      },
+      "version": "1.0.23"
     },
     {
       "graphs": {
@@ -19067,13 +19342,6 @@
           "derive",
           "serde_derive",
           "std"
-        ],
-        "nrf52840": [
-          "alloc",
-          "default",
-          "derive",
-          "serde_derive",
-          "std"
         ]
       },
       "name": "serde",
@@ -19104,6 +19372,13 @@
           "std"
         ],
         "host-c-windows": [
+          "alloc",
+          "default",
+          "derive",
+          "serde_derive",
+          "std"
+        ],
+        "nrf52840": [
           "alloc",
           "default",
           "derive",
@@ -19231,11 +19506,6 @@
           "alloc",
           "result",
           "std"
-        ],
-        "nrf52840": [
-          "alloc",
-          "result",
-          "std"
         ]
       },
       "name": "serde_core",
@@ -19262,6 +19532,11 @@
           "std"
         ],
         "host-c-windows": [
+          "alloc",
+          "result",
+          "std"
+        ],
+        "nrf52840": [
           "alloc",
           "result",
           "std"
@@ -19321,9 +19596,6 @@
         ],
         "ios": [
           "default"
-        ],
-        "nrf52840": [
-          "default"
         ]
       },
       "name": "serde_derive",
@@ -19346,6 +19618,9 @@
           "default"
         ],
         "host-c-windows": [
+          "default"
+        ],
+        "nrf52840": [
           "default"
         ]
       },
@@ -19492,8 +19767,7 @@
         "esp32-s3-tbeam": [],
         "host-c-linux": [],
         "host-c-macos": [],
-        "host-c-windows": [],
-        "nrf52840": []
+        "host-c-windows": []
       },
       "name": "serial2",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -19505,6 +19779,21 @@
         "tokens": 49
       },
       "version": "0.2.37"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "serial2",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 47,
+        "externs": 0,
+        "functions": 2,
+        "impls": 0,
+        "tokens": 49
+      },
+      "version": "0.2.38"
     },
     {
       "graphs": {
@@ -19522,8 +19811,7 @@
         "esp32-s3-tbeam": [],
         "host-c-linux": [],
         "host-c-macos": [],
-        "host-c-windows": [],
-        "nrf52840": []
+        "host-c-windows": []
       },
       "name": "serial2-tokio",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -19535,6 +19823,21 @@
         "tokens": 11
       },
       "version": "0.1.24"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "serial2-tokio",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 11,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 11
+      },
+      "version": "0.1.25"
     },
     {
       "graphs": {
@@ -20348,9 +20651,6 @@
         ],
         "ios": [
           "all"
-        ],
-        "nrf52840": [
-          "all"
         ]
       },
       "name": "socket2",
@@ -20373,6 +20673,9 @@
           "all"
         ],
         "host-c-windows": [
+          "all"
+        ],
+        "nrf52840": [
           "all"
         ]
       },
@@ -21223,18 +21526,6 @@
           "proc-macro",
           "visit",
           "visit-mut"
-        ],
-        "nrf52840": [
-          "clone-impls",
-          "default",
-          "derive",
-          "extra-traits",
-          "full",
-          "parsing",
-          "printing",
-          "proc-macro",
-          "visit",
-          "visit-mut"
         ]
       },
       "name": "syn",
@@ -21350,6 +21641,18 @@
           "proc-macro",
           "visit",
           "visit-mut"
+        ],
+        "nrf52840": [
+          "clone-impls",
+          "default",
+          "derive",
+          "extra-traits",
+          "full",
+          "parsing",
+          "printing",
+          "proc-macro",
+          "visit",
+          "visit-mut"
         ]
       },
       "name": "syn",
@@ -21448,6 +21751,32 @@
         "tokens": 78
       },
       "version": "3.0.4"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "clone-impls",
+          "default",
+          "derive",
+          "extra-traits",
+          "full",
+          "parsing",
+          "printing",
+          "proc-macro",
+          "visit",
+          "visit-mut"
+        ]
+      },
+      "name": "syn",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 39,
+        "externs": 0,
+        "functions": 2,
+        "impls": 3,
+        "tokens": 78
+      },
+      "version": "3.0.5"
     },
     {
       "graphs": {
@@ -22154,22 +22483,6 @@
           "time",
           "tokio-macros",
           "windows-sys"
-        ],
-        "nrf52840": [
-          "bytes",
-          "default",
-          "fs",
-          "io-util",
-          "libc",
-          "macros",
-          "mio",
-          "net",
-          "rt",
-          "socket2",
-          "sync",
-          "time",
-          "tokio-macros",
-          "windows-sys"
         ]
       },
       "name": "tokio",
@@ -22241,6 +22554,22 @@
           "time",
           "tokio-macros",
           "windows-sys"
+        ],
+        "nrf52840": [
+          "bytes",
+          "default",
+          "fs",
+          "io-util",
+          "libc",
+          "macros",
+          "mio",
+          "net",
+          "rt",
+          "socket2",
+          "sync",
+          "time",
+          "tokio-macros",
+          "windows-sys"
         ]
       },
       "name": "tokio",
@@ -22269,8 +22598,7 @@
         "esp32-s3-heltec-e290": [],
         "esp32-s3-heltec-r8": [],
         "esp32-s3-tbeam": [],
-        "ios": [],
-        "nrf52840": []
+        "ios": []
       },
       "name": "tokio-macros",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -22299,6 +22627,21 @@
         "tokens": 0
       },
       "version": "2.7.1"
+    },
+    {
+      "graphs": {
+        "nrf52840": []
+      },
+      "name": "tokio-macros",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "2.7.2"
     },
     {
       "graphs": {
@@ -23677,7 +24020,7 @@
         "impls": 0,
         "tokens": 0
       },
-      "version": "0.10.0"
+      "version": "0.10.2"
     },
     {
       "graphs": {
@@ -23692,7 +24035,7 @@
         "impls": 0,
         "tokens": 0
       },
-      "version": "0.10.0"
+      "version": "0.10.2"
     },
     {
       "graphs": {
@@ -23707,7 +24050,7 @@
         "impls": 0,
         "tokens": 0
       },
-      "version": "0.10.0"
+      "version": "0.10.2"
     },
     {
       "graphs": {
@@ -23796,12 +24139,6 @@
           "v4"
         ],
         "esp32-s3-tbeam": [
-          "default",
-          "rng",
-          "std",
-          "v4"
-        ],
-        "nrf52840": [
           "default",
           "rng",
           "std",
@@ -23926,6 +24263,26 @@
         "tokens": 15
       },
       "version": "1.24.0"
+    },
+    {
+      "graphs": {
+        "nrf52840": [
+          "default",
+          "rng",
+          "std",
+          "v4"
+        ]
+      },
+      "name": "uuid",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 13,
+        "externs": 0,
+        "functions": 2,
+        "impls": 0,
+        "tokens": 15
+      },
+      "version": "1.26.1"
     },
     {
       "graphs": {
@@ -25322,11 +25679,6 @@
       "graphs": {
         "engine": [
           "simd"
-        ],
-        "nrf52840": [
-          "derive",
-          "simd",
-          "zerocopy-derive"
         ]
       },
       "name": "zerocopy",
@@ -25413,6 +25765,25 @@
     },
     {
       "graphs": {
+        "nrf52840": [
+          "derive",
+          "simd",
+          "zerocopy-derive"
+        ]
+      },
+      "name": "zerocopy",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 295,
+        "externs": 1,
+        "functions": 58,
+        "impls": 107,
+        "tokens": 560
+      },
+      "version": "0.8.57"
+    },
+    {
+      "graphs": {
         "nrf52840": []
       },
       "name": "zerocopy-derive",
@@ -25421,10 +25792,10 @@
         "blocks": 65,
         "externs": 0,
         "functions": 1,
-        "impls": 230,
-        "tokens": 296
+        "impls": 231,
+        "tokens": 297
       },
-      "version": "0.8.50"
+      "version": "0.8.57"
     },
     {
       "graphs": {
@@ -25533,12 +25904,6 @@
           "default",
           "derive",
           "zeroize_derive"
-        ],
-        "nrf52840": [
-          "alloc",
-          "default",
-          "derive",
-          "zeroize_derive"
         ]
       },
       "name": "zeroize",
@@ -25590,6 +25955,12 @@
           "derive",
           "zeroize_derive"
         ],
+        "nrf52840": [
+          "alloc",
+          "default",
+          "derive",
+          "zeroize_derive"
+        ],
         "wasm": [
           "alloc",
           "derive",
@@ -25619,8 +25990,7 @@
         "esp32-s3-heltec-e290": [],
         "esp32-s3-heltec-r8": [],
         "esp32-s3-tbeam": [],
-        "ios": [],
-        "nrf52840": []
+        "ios": []
       },
       "name": "zeroize_derive",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -25641,6 +26011,7 @@
         "host-c-linux": [],
         "host-c-macos": [],
         "host-c-windows": [],
+        "nrf52840": [],
         "wasm": []
       },
       "name": "zeroize_derive",
