@@ -38,12 +38,10 @@ jobs:
         run: cargo binstall --locked --no-confirm --force dioxus-cli@0.7.5
 
       - name: Package unsigned Controller portable
-        # Call the script directly: ./tools/prns resolves `bash` to WSL on
-        # windows-latest, which has no distro installed.
         shell: bash
         run: |
           dx --version | grep -E '(^| )0\.7\.5($| )'
-          bash tools/release/package-controller-windows.sh \
+          python tools/prns run release.controller.windows.package -- \
             --out-dir target/controller-windows
 
       - name: Confirm embedded hopspot-flash
