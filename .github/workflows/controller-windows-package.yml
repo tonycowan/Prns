@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           dx --version | grep -E '(^| )0\.7\.5($| )'
-          ./tools/prns run release.controller.windows.package -- \
+          python tools/prns run release.controller.windows.package -- \
             --out-dir target/controller-windows
 
       - name: Confirm embedded hopspot-flash
