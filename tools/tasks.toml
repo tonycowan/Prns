@@ -937,6 +937,10 @@ path = "tools/device/developer_flasher_candidate.py"
 reason = "Validated local developer candidate boundary shared by the developer flasher workflow and its focused tests."
 
 [[internal]]
+path = "tools/release/embed-controller-firmware.sh"
+reason = "Shared Flash firmware tree staging helper used by Controller portable packagers."
+
+[[internal]]
 path = "tools/release/flasher_acceptance_contract.py"
 reason = "Shared acceptance schema and scaffold implementation used by release commands and bundled qualification tools."
 
