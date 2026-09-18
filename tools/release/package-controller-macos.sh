@@ -144,6 +144,15 @@ printf '%s\n' "$flash_version" >"$resources/HOPSPOT_FLASH_VERSION.txt"
 
 echo "embedded $flash_version → Contents/Resources/hopspot-flash"
 
+echo "embedding tree firmware for Flash (unsigned / remote-control capable)…"
+bash "$root/tools/release/embed-controller-firmware.sh" \
+    --out-dir "$resources" \
+    --hopspot-flash "$resources/hopspot-flash"
+test -f "$resources/firmware/bundle.json"
+test -f "$resources/firmware/heltec-v4/target.json"
+test -f "$resources/firmware/heltec-v4-r8/target.json"
+test -f "$resources/firmware/mesh-tower-v2/target.json"
+
 # TCC: Finder/`open` aborts without these (SIGABRT / namespace TCC). dx bundle
 # does not emit them from Dioxus.toml today, so inject after bundling.
 plist="$app_path/Contents/Info.plist"
@@ -164,12 +173,34 @@ plist_set_string() {
 plist_set_string NSBluetoothAlwaysUsageDescription "$bt_usage"
 plist_set_string NSBluetoothPeripheralUsageDescription "$bt_usage"
 plist_set_string NSLocalNetworkUsageDescription "$lan_usage"
-if ! plutil -extract NSBonjourServices raw "$plist" >/dev/null 2>&1; then
-    plutil -insert NSBonjourServices -json '["_prns._tcp"]' "$plist"
+plist_set_string CFBundleDisplayName "PRNS Controller"
+plist_set_string CFBundleName "PRNS Controller"
+# Must match Apple DNS-SD browse/publish types in prns-ffi mdns/macos.rs
+# (_reticulum._tcp / _reticulum._udp). Wrong or missing entries prevent Local
+# Network privacy from applying and Bonjour returns NoAuth.
+bonjour_services='["_reticulum._tcp","_reticulum._udp","_prns._tcp"]'
+if plutil -extract NSBonjourServices raw "$plist" >/dev/null 2>&1; then
+    plutil -replace NSBonjourServices -json "$bonjour_services" "$plist"
+else
+    plutil -insert NSBonjourServices -json "$bonjour_services" "$plist"
 fi
-# Ad-hoc re-sign after mutating Info.plist / Resources (linker-signed bundle is stale).
-codesign --force --deep --sign - "$app_path"
-echo "injected TCC usage descriptions + ad-hoc re-sign"
+# Re-sign after mutating Info.plist / Resources. Prefer an Apple-issued identity:
+# ad-hoc GUI apps often get Bonjour NoAuth with no Local Network prompt (TN3179).
+codesign_identity="${CODESIGN_IDENTITY:-}"
+if [[ -z "$codesign_identity" ]]; then
+    codesign_identity="$(
+        security find-identity -v -p codesigning 2>/dev/null \
+            | awk -F'"' '/Developer ID Application|Apple Development|Mac Developer/{print $2; exit}'
+    )"
+fi
+if [[ -n "$codesign_identity" ]]; then
+    codesign --force --deep --options runtime --sign "$codesign_identity" "$app_path"
+    echo "injected TCC + Bonjour + signed with: $codesign_identity"
+else
+    codesign --force --deep --sign - "$app_path"
+    echo "injected TCC + Bonjour + ad-hoc re-sign" >&2
+    echo "warning: no Apple codesigning identity; .app Local Network prompt/list may not work (TN3179). Set CODESIGN_IDENTITY or install a Development/Developer ID cert. For wifi-auto debug, run the MacOS binary from Terminal instead." >&2
+fi
 
 # Dioxus names the .app from the Cargo package; ship the product display name.
 product_app_name="PRNS Controller.app"

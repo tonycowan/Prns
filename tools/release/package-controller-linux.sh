@@ -154,6 +154,15 @@ flash_version="$("$dest_dir/hopspot-flash" --version 2>/dev/null || echo "hopspo
 printf '%s\n' "$flash_version" >"$dest_dir/HOPSPOT_FLASH_VERSION.txt"
 echo "embedded $flash_version → $product_dir_name/hopspot-flash"
 
+echo "embedding tree firmware for Flash (unsigned / remote-control capable)…"
+bash "$root/tools/release/embed-controller-firmware.sh" \
+    --out-dir "$dest_dir" \
+    --hopspot-flash "$dest_dir/hopspot-flash"
+test -f "$dest_dir/firmware/bundle.json"
+test -f "$dest_dir/firmware/heltec-v4/target.json"
+test -f "$dest_dir/firmware/heltec-v4-r8/target.json"
+test -f "$dest_dir/firmware/mesh-tower-v2/target.json"
+
 archive_name="PRNS-Controller-linux-unsigned.tar.gz"
 rm -f "$out_dir/$archive_name"
 (

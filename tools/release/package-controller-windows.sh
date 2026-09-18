@@ -164,17 +164,43 @@ flash_version="$("$dest_dir/$flash_name" --version 2>/dev/null || echo "hopspot-
 printf '%s\n' "$flash_version" >"$dest_dir/HOPSPOT_FLASH_VERSION.txt"
 echo "embedded $flash_version → $product_dir_name/$flash_name"
 
+echo "embedding tree firmware for Flash (unsigned / remote-control capable)…"
+bash "$root/tools/release/embed-controller-firmware.sh" \
+    --out-dir "$dest_dir" \
+    --hopspot-flash "$dest_dir/$flash_name"
+test -f "$dest_dir/firmware/bundle.json"
+test -f "$dest_dir/firmware/heltec-v4/target.json"
+test -f "$dest_dir/firmware/heltec-v4-r8/target.json"
+test -f "$dest_dir/firmware/mesh-tower-v2/target.json"
+
 archive_name="PRNS-Controller-windows-unsigned.zip"
 rm -f "$out_dir/$archive_name"
 (
     cd "$out_dir"
     if command -v zip >/dev/null 2>&1; then
         zip -r "$archive_name" "$product_dir_name"
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        # Git Bash on windows-latest usually lacks zip(1); Compress-Archive
+        # produces a real zip. Prefer that over `tar -a`, which may emit a
+        # GNU tar stream with a .zip name.
+        powershell.exe -NoProfile -Command \
+            "Compress-Archive -Path '$product_dir_name' -DestinationPath '$archive_name' -Force"
+    elif command -v powershell >/dev/null 2>&1; then
+        powershell -NoProfile -Command \
+            "Compress-Archive -Path '$product_dir_name' -DestinationPath '$archive_name' -Force"
     else
-        # Windows runners ship tar that can write zip archives.
-        tar -a -c -f "$archive_name" "$product_dir_name"
+        echo "error: need zip or PowerShell Compress-Archive to build $archive_name" >&2
+        exit 1
     fi
 )
+
+# Sanity-check: reject a mislabeled tar pretending to be zip.
+if ! command -v unzip >/dev/null 2>&1; then
+    :
+elif ! unzip -t "$out_dir/$archive_name" >/dev/null 2>&1; then
+    echo "error: $archive_name is not a readable zip archive" >&2
+    exit 1
+fi
 
 echo "dir:  $dest_dir"
 echo "zip:  $out_dir/$archive_name"

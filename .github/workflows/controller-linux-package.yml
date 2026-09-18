@@ -21,6 +21,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           toolchain: 1.96.0
+          targets: thumbv7em-none-eabihf,riscv32imac-unknown-none-elf
+          components: llvm-tools-preview
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
@@ -36,10 +38,19 @@ jobs:
       - name: Install system deps for Dioxus desktop
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf
 
       - name: Install exact Dioxus CLI
         run: cargo binstall --locked --no-confirm --force dioxus-cli@0.7.5
+
+      - name: Install ESP release toolchain
+        run: ./tools/prns release toolchain esp install -- "${RUNNER_TEMP}/prns-esp-tools"
 
       - name: Package unsigned Controller portable
         run: |
@@ -55,6 +66,10 @@ jobs:
           test -x "$dest/hopspot-flash"
           "$dest/hopspot-flash" --version
           test -f "$dest/HOPSPOT_FLASH_VERSION.txt"
+          test -f "$dest/firmware/bundle.json"
+          test -f "$dest/firmware/heltec-v4/target.json"
+          test -f "$dest/firmware/heltec-v4-r8/target.json"
+          test -f "$dest/firmware/mesh-tower-v2/target.json"
           test -f target/controller-linux/PRNS-Controller-linux-unsigned.tar.gz
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
