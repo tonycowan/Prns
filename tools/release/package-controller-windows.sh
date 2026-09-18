@@ -9,6 +9,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 controller_dir="$root/personal-hopspot/remote-control-desktop"
 hopspot_flash=""
 out_dir="$root/target/controller-windows"
+firmware_from=""
 skip_build_flash=0
 dx_bin="${DX:-dx}"
 product_dir_name="PRNS-Controller"
@@ -24,6 +25,8 @@ next to the Controller binary (what the Flash resolver looks for).
 
 options:
   --hopspot-flash PATH   Reuse an existing hopspot-flash.exe (skip cargo build)
+  --firmware-from DIR    Reuse prebuilt board dirs from DIR/<slug>/ (ESP tools are
+                         Linux-only; CI builds firmware on Ubuntu then passes it here)
   --out-dir DIR          Destination for the folder and zip (default: target/controller-windows)
   -h, --help             Show this help
 
@@ -40,6 +43,14 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             skip_build_flash=1
+            shift 2
+            ;;
+        --firmware-from)
+            firmware_from="${2:-}"
+            if [[ -z "$firmware_from" ]]; then
+                echo "error: --firmware-from requires a path" >&2
+                exit 2
+            fi
             shift 2
             ;;
         --out-dir)
@@ -165,9 +176,14 @@ printf '%s\n' "$flash_version" >"$dest_dir/HOPSPOT_FLASH_VERSION.txt"
 echo "embedded $flash_version → $product_dir_name/$flash_name"
 
 echo "embedding tree firmware for Flash (unsigned / remote-control capable)…"
-bash "$root/tools/release/embed-controller-firmware.sh" \
-    --out-dir "$dest_dir" \
+embed_args=(
+    --out-dir "$dest_dir"
     --hopspot-flash "$dest_dir/$flash_name"
+)
+if [[ -n "$firmware_from" ]]; then
+    embed_args+=(--firmware-from "$firmware_from")
+fi
+bash "$root/tools/release/embed-controller-firmware.sh" "${embed_args[@]}"
 test -f "$dest_dir/firmware/bundle.json"
 test -f "$dest_dir/firmware/heltec-v4/target.json"
 test -f "$dest_dir/firmware/heltec-v4-r8/target.json"

@@ -713,6 +713,16 @@ entrypoint = ["bash", "tools/release/package-controller-macos.sh"]
 requires = ["bash", "cargo", "dx"]
 
 [[task]]
+id = "release.controller.firmware.stage"
+summary = "Stage Controller-bundled board firmware under a firmware/ tree for Flash."
+domain = "release"
+effect = "workspace-write"
+platforms = ["linux", "macos"]
+audience = ["developer", "ci", "release"]
+entrypoint = ["bash", "tools/release/embed-controller-firmware.sh"]
+requires = ["bash", "cargo"]
+
+[[task]]
 id = "release.controller.linux.package"
 summary = "Build an unsigned Linux PRNS Controller portable folder with hopspot-flash beside the exe."
 domain = "release"
@@ -935,10 +945,6 @@ requires = ["python3"]
 [[internal]]
 path = "tools/device/developer_flasher_candidate.py"
 reason = "Validated local developer candidate boundary shared by the developer flasher workflow and its focused tests."
-
-[[internal]]
-path = "tools/release/embed-controller-firmware.sh"
-reason = "Shared Flash firmware tree staging helper used by Controller portable packagers."
 
 [[internal]]
 path = "tools/release/flasher_acceptance_contract.py"
