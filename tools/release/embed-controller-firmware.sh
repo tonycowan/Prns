@@ -85,14 +85,10 @@ version="$(
 )"
 # Prefer hopspot-flash package version when available.
 if [[ -f "$root/personal-hopspot/flasher/Cargo.toml" ]]; then
+    # Avoid embedding MSYS paths into native Windows Python (Path("/d/...") breaks).
     flash_ver="$(
-        python3 - <<PY
-import re
-from pathlib import Path
-text = Path("$root/personal-hopspot/flasher/Cargo.toml").read_text()
-m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
-print(m.group(1) if m else "")
-PY
+        sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$root/personal-hopspot/flasher/Cargo.toml" | head -n 1
     )"
     if [[ -n "$flash_ver" ]]; then
         version="$flash_ver"
@@ -177,21 +173,31 @@ for board in "${boards[@]}"; do
     staged_boards+=("$board")
 done
 
-python3 - <<PY
+bundle_json="$firmware_dir/bundle.json"
+bundle_json_for_python="$bundle_json"
+if command -v cygpath >/dev/null 2>&1; then
+    # Native Windows Python cannot open MSYS paths like /d/a/...
+    bundle_json_for_python="$(cygpath -w "$bundle_json")"
+fi
+
+python3 - "$bundle_json_for_python" "$version" "$git_sha" "$git_sha12" "${staged_boards[@]}" <<'PY'
 import json
+import sys
 from pathlib import Path
-boards = $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${staged_boards[@]}")
+
+out, version, git_sha, git_sha12, *boards = sys.argv[1:]
 payload = {
     "schema": 1,
     "kind": "controller-bundled-firmware",
-    "version": "$version",
-    "git_sha": "$git_sha",
-    "git_sha12": "$git_sha12",
+    "version": version,
+    "git_sha": git_sha,
+    "git_sha12": git_sha12,
     "boards": boards,
     "note": "Unsigned tree builds for Controller Flash until published releases include remote-control support.",
 }
-Path("$firmware_dir/bundle.json").write_text(json.dumps(payload, indent=2) + "\n")
-print(f"wrote {Path('$firmware_dir/bundle.json')} boards={boards}")
+path = Path(out)
+path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+print(f"wrote {path} boards={boards}")
 PY
 
 rm -rf "$build_root"
