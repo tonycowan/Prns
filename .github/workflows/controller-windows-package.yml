@@ -11,7 +11,7 @@ env:
 
 jobs:
   # ESP release toolchain install is Linux-only; build the Flash firmware tree here
-  # and hand it to the Windows packager via --firmware-from.
+  # and hand it to each Windows packager via --firmware-from.
   firmware:
     name: tree firmware (Linux)
     runs-on: ubuntu-latest
@@ -56,9 +56,17 @@ jobs:
           retention-days: 2
 
   package:
-    name: unsigned Windows Controller portable
+    name: unsigned Windows Controller (${{ matrix.arch }})
     needs: firmware
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -70,7 +78,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          shared-key: controller-windows-package
+          shared-key: controller-windows-package-${{ matrix.arch }}
           workspaces: |
             .
             personal-hopspot/remote-control-desktop
@@ -115,12 +123,12 @@ jobs:
           test -f "$dest/firmware/heltec-v4/target.json"
           test -f "$dest/firmware/heltec-v4-r8/target.json"
           test -f "$dest/firmware/mesh-tower-v2/target.json"
-          test -f target/controller-windows/PRNS-Controller-windows-unsigned.zip
-          unzip -t target/controller-windows/PRNS-Controller-windows-unsigned.zip >/dev/null
+          test -f "target/controller-windows/PRNS-Controller-windows-${{ matrix.arch }}-unsigned.zip"
+          unzip -t "target/controller-windows/PRNS-Controller-windows-${{ matrix.arch }}-unsigned.zip" >/dev/null
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: PRNS-Controller-windows-unsigned
-          path: target/controller-windows/PRNS-Controller-windows-unsigned.zip
+          name: PRNS-Controller-windows-${{ matrix.arch }}-unsigned
+          path: target/controller-windows/PRNS-Controller-windows-${{ matrix.arch }}-unsigned.zip
           if-no-files-found: error
           retention-days: 14

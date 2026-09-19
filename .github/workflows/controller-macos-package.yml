@@ -11,7 +11,7 @@ env:
 
 jobs:
   # ESP release toolchain install is Linux-only; build the Flash firmware tree here
-  # and hand it to the macOS packager via --firmware-from.
+  # and hand it to each macOS packager via --firmware-from.
   firmware:
     name: tree firmware (Linux)
     runs-on: ubuntu-latest
@@ -56,9 +56,17 @@ jobs:
           retention-days: 2
 
   package:
-    name: unsigned macOS Controller .app
+    name: unsigned macOS Controller (${{ matrix.arch }})
     needs: firmware
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: aarch64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -70,7 +78,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          shared-key: controller-macos-package
+          shared-key: controller-macos-package-${{ matrix.arch }}
           workspaces: |
             .
             personal-hopspot/remote-control-desktop
@@ -107,11 +115,11 @@ jobs:
           test -f "$app/Contents/Resources/firmware/heltec-v4/target.json"
           test -f "$app/Contents/Resources/firmware/heltec-v4-r8/target.json"
           test -f "$app/Contents/Resources/firmware/mesh-tower-v2/target.json"
-          test -f target/controller-macos/PRNS-Controller-macos-unsigned.zip
+          test -f "target/controller-macos/PRNS-Controller-macos-${{ matrix.arch }}-unsigned.zip"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: PRNS-Controller-macos-unsigned
-          path: target/controller-macos/PRNS-Controller-macos-unsigned.zip
+          name: PRNS-Controller-macos-${{ matrix.arch }}-unsigned
+          path: target/controller-macos/PRNS-Controller-macos-${{ matrix.arch }}-unsigned.zip
           if-no-files-found: error
           retention-days: 14

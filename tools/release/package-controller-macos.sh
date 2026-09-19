@@ -14,12 +14,26 @@ firmware_from=""
 skip_build_flash=0
 dx_bin="${DX:-dx}"
 
+host_arch() {
+    case "$(uname -m)" in
+        arm64|aarch64) printf '%s\n' aarch64 ;;
+        x86_64|amd64) printf '%s\n' x86_64 ;;
+        *)
+            echo "error: unsupported CPU architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+    esac
+}
+
 usage() {
     cat <<'EOF'
 usage: tools/release/package-controller-macos.sh [options]
 
 Build an unsigned macOS PRNS Controller .app and embed hopspot-flash in
 Contents/Resources (the path the Controller flash resolver already looks for).
+
+The zip is named for the host CPU (aarch64 or x86_64). Build on each runner
+natively; do not cross-compile the Dioxus desktop bundle.
 
 options:
   --hopspot-flash PATH   Reuse an existing hopspot-flash binary (skip cargo build)
@@ -235,13 +249,15 @@ rm -rf "$out_dir"/*.app "$out_dir"/*.zip
 dest_app="$out_dir/$app_name"
 ditto "$app_path" "$dest_app"
 
-zip_name="PRNS-Controller-macos-unsigned.zip"
-rm -f "$out_dir/$zip_name"
+arch="$(host_arch)"
+zip_name="PRNS-Controller-macos-${arch}-unsigned.zip"
+rm -f "$out_dir"/PRNS-Controller-macos-*-unsigned.zip
 (
     cd "$out_dir"
     ditto -c -k --sequesterRsrc --keepParent "$app_name" "$zip_name"
 )
 
 echo "app:  $dest_app"
+echo "arch: $arch"
 echo "zip:  $out_dir/$zip_name"
 echo "done (unsigned)."

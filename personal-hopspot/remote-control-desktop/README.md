@@ -5,11 +5,138 @@ remote-control targets. The window is titled **PRNS Controller**. Use the
 nodes icon (left), the lightning **Flash** icon beside it (desktop only),
 and the settings icon (right) in the top bar to switch
 between **Managed Nodes** (the default), **Flash**, and **Settings**.
-Flash presents the Hopspot device catalog. Select a board to slide out
-flash info and options (station SSID/password, optional TCP, LoRa
-region/preset), then flash this checkout’s firmware. UF2 and ESP boards
-are enrolled onto Managed Nodes for this Operator. The T1000-E serial
-DFU path flashes firmware but still needs pairing.
+Flash presents the Hopspot device catalog. Select a board, open **Configure
+and flash**, pick a firmware image from the dropdown (published tips and local
+catalog entries), use **Import** / **Build** / **Export** under the list as
+needed, set options, then **Flash**.
+UF2 and ESP boards are enrolled onto Managed Nodes for this Operator. The
+T1000-E serial DFU path flashes firmware but still needs pairing.
+
+The image dropdown lists the current published **stable** tip, then the
+**preview** tip (same label whether or not already downloaded; selecting either
+fetches via `hopspot-flash fetch --channel …` when needed), plus other images
+already under `~/.reticulum/controller/images`. Flash uses `--candidate` for
+published tip images and `--developer-artifacts` for **Import** / **Build**
+entries.
+**Import** unpacks a shared one-board package (`.zip` with `target.json` +
+firmware at the zip root or in one top-level folder, or an already-unzipped
+folder). **Export** writes the current catalog image as that same zip shape for
+sharing. **Build** (checkout only; otherwise the button is disabled) runs
+`hopspot-flash build`. Catalog badges show
+`Published · {channel} · v{version}`, `Imported · v{version} (unsigned)`, or
+`Local build · {gitsha12} · v{version} (unsigned)`. The Flash tab runs
+`hopspot-flash check` on open and every 30 minutes so the tip version stays
+current.
+Overrides:
+
+- `HOPSPOT_FLASH` — absolute path to a `hopspot-flash` binary (preferred)
+- Sidecar next to the Controller executable (`hopspot-flash` / `hopspot-flash.exe`),
+  or `Contents/Resources/hopspot-flash` inside a packaged macOS `.app`
+- `hopspot-flash` on `PATH`
+- Checkout cargo fallback for fetch/check/build/flash when no binary is found
+- `PRNS_CONTROLLER_IMAGES` — catalog root (default `~/.reticulum/controller/images`)
+- `PRNS_CONTROLLER_HOME` — parent of `images/` when the images override is unset
+- `PRNS_CONTROLLER_FLASH_LOCAL_BUILD=1` — emergency escape hatch; compile and flash
+  from this checkout at Flash time instead of using the catalog
+
+Portable packages also embed tree-built board firmware under `firmware/` (next to
+the exe, or `Contents/Resources/firmware` on macOS). On first catalog access the
+Controller seeds those boards into `~/.reticulum/controller/images` as **Bundled**
+images and selects them when the board has no other current image. Published CDN
+releases are skipped for day-to-day Flash until they include remote-control
+support that matches this app.
+
+Bundled board set today: `heltec-v4` (HV4 R2), `heltec-v4-r8` (HV4 R8),
+`mesh-tower-v2`. (Heltec V3 is not in the flash catalog yet.)
+
+From a checkout, build the flasher once and point the Controller at it:
+
+```console
+cargo build -p hopspot-flash --release
+export HOPSPOT_FLASH="$PWD/target/release/hopspot-flash"
+# or: export PATH="$PWD/target/release:$PATH"
+```
+
+CLI users can inspect the published channel without downloading firmware:
+
+```console
+hopspot-flash check --channel stable --board heltec-v4-r8 --json
+```
+
+## Portable packages (unsigned)
+
+All three platforms produce **unsigned** archives. Flash still works without
+`HOPSPOT_FLASH` when the packager places `hopspot-flash` where the resolver
+looks (see layout below). Install dioxus-cli 0.7.5 first:
+
+```console
+cargo install dioxus-cli --version 0.7.5 --locked
+```
+
+### macOS `.app`
+
+Embeds `hopspot-flash` and `firmware/` at `Contents/Resources/`:
+
+```console
+./tools/prns run release.controller.macos.package
+# → target/controller-macos/PRNS Controller.app
+# → target/controller-macos/PRNS-Controller-macos-<arch>-unsigned.zip
+#    <arch> is aarch64 (Apple Silicon) or x86_64 (Intel), matching the host.
+```
+
+Optional flags (after `--`):
+
+```console
+./tools/prns run release.controller.macos.package -- \
+  --hopspot-flash /path/to/hopspot-flash \
+  --out-dir /tmp/controller-macos
+```
+
+Gatekeeper may block first launch; remove quarantine or right-click → Open when
+testing:
+
+```console
+xattr -dr com.apple.quarantine "target/controller-macos/PRNS Controller.app"
+open "target/controller-macos/PRNS Controller.app"
+```
+
+The packager injects macOS privacy usage strings (`NSBluetoothAlwaysUsageDescription`,
+local-network / Bonjour) into `Info.plist`. Without those, Finder launch aborts
+immediately under TCC with no UI error.
+
+CI: `controller-macos-package` (`workflow_dispatch`) builds **both** `aarch64`
+(`macos-14`) and `x86_64` (`macos-15-intel`). Developer ID codesign + notarization
+happen in the PRNS-Controller release shell.
+
+### Linux portable
+
+Folder layout: `PRNS-Controller/<exe>` with `hopspot-flash` and `firmware/` beside it:
+
+```console
+./tools/prns run release.controller.linux.package
+# → target/controller-linux/PRNS-Controller/
+# → target/controller-linux/PRNS-Controller-linux-<arch>-unsigned.tar.gz
+```
+
+CI: `controller-linux-package` (`workflow_dispatch`) builds **both** `x86_64`
+(`ubuntu-latest`) and `aarch64` (`ubuntu-24.04-arm`). Board firmware is staged once
+on x86_64 and passed in via `--firmware-from`.
+
+### Windows portable
+
+Folder layout: `PRNS-Controller/<exe>.exe` with `hopspot-flash.exe` and `firmware/`
+beside it:
+
+```console
+./tools/prns run release.controller.windows.package
+# → target/controller-windows/PRNS-Controller/
+# → target/controller-windows/PRNS-Controller-windows-<arch>-unsigned.zip
+```
+
+CI: `controller-windows-package` (`workflow_dispatch`) builds **both** `x86_64`
+(`windows-latest`) and `aarch64` (`windows-11-arm`). MSI/NSIS installers are out of
+scope for this slice.
+
 
 ## Prerequisites
 

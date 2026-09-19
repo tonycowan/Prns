@@ -16,12 +16,33 @@ product_dir_name="PRNS-Controller"
 exe_name="personal-hopspot-remote-control-desktop.exe"
 flash_name="hopspot-flash.exe"
 
+host_arch() {
+    case "$(uname -m)" in
+        arm64|aarch64) printf '%s\n' aarch64 ;;
+        x86_64|amd64) printf '%s\n' x86_64 ;;
+        *)
+            # Native Windows env without a Unix uname -m (rare in this script).
+            case "${PROCESSOR_ARCHITECTURE:-}${PROCESSOR_ARCHITEW6432:-}" in
+                *ARM64*|*Arm64*) printf '%s\n' aarch64 ;;
+                *AMD64*|*x86_64*) printf '%s\n' x86_64 ;;
+                *)
+                    echo "error: unsupported CPU architecture: $(uname -m)" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+    esac
+}
+
 usage() {
     cat <<'EOF'
 usage: tools/release/package-controller-windows.sh [options]
 
 Build an unsigned portable Windows PRNS Controller folder with hopspot-flash.exe
 next to the Controller binary (what the Flash resolver looks for).
+
+The zip is named for the host CPU (aarch64 or x86_64). Build on each runner
+natively.
 
 options:
   --hopspot-flash PATH   Reuse an existing hopspot-flash.exe (skip cargo build)
@@ -189,8 +210,9 @@ test -f "$dest_dir/firmware/heltec-v4/target.json"
 test -f "$dest_dir/firmware/heltec-v4-r8/target.json"
 test -f "$dest_dir/firmware/mesh-tower-v2/target.json"
 
-archive_name="PRNS-Controller-windows-unsigned.zip"
-rm -f "$out_dir/$archive_name"
+arch="$(host_arch)"
+archive_name="PRNS-Controller-windows-${arch}-unsigned.zip"
+rm -f "$out_dir"/PRNS-Controller-windows-*-unsigned.zip
 (
     cd "$out_dir"
     if command -v zip >/dev/null 2>&1; then
@@ -219,5 +241,6 @@ elif ! unzip -t "$out_dir/$archive_name" >/dev/null 2>&1; then
 fi
 
 echo "dir:  $dest_dir"
+echo "arch: $arch"
 echo "zip:  $out_dir/$archive_name"
 echo "done (unsigned)."

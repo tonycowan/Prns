@@ -7,10 +7,22 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 controller_dir="$root/personal-hopspot/remote-control-desktop"
 hopspot_flash=""
 out_dir="$root/target/controller-linux"
+firmware_from=""
 skip_build_flash=0
 dx_bin="${DX:-dx}"
 product_dir_name="PRNS-Controller"
 exe_name="personal-hopspot-remote-control-desktop"
+
+host_arch() {
+    case "$(uname -m)" in
+        arm64|aarch64) printf '%s\n' aarch64 ;;
+        x86_64|amd64) printf '%s\n' x86_64 ;;
+        *)
+            echo "error: unsupported CPU architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+    esac
+}
 
 usage() {
     cat <<'EOF'
@@ -19,8 +31,13 @@ usage: tools/release/package-controller-linux.sh [options]
 Build an unsigned portable Linux PRNS Controller folder with hopspot-flash
 next to the Controller binary (what the Flash resolver looks for).
 
+The tarball is named for the host CPU (aarch64 or x86_64). Build on each
+runner natively; WebKit/GTK desktop bundles are not cross-compiled here.
+
 options:
   --hopspot-flash PATH   Reuse an existing hopspot-flash binary (skip cargo build)
+  --firmware-from DIR    Reuse prebuilt board dirs from DIR/<slug>/ (ESP tools are
+                         x86_64-oriented; CI builds firmware on Ubuntu then passes it)
   --out-dir DIR          Destination for the folder and archive (default: target/controller-linux)
   -h, --help             Show this help
 
@@ -37,6 +54,14 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             skip_build_flash=1
+            shift 2
+            ;;
+        --firmware-from)
+            firmware_from="${2:-}"
+            if [[ -z "$firmware_from" ]]; then
+                echo "error: --firmware-from requires a path" >&2
+                exit 2
+            fi
             shift 2
             ;;
         --out-dir)
@@ -155,21 +180,28 @@ printf '%s\n' "$flash_version" >"$dest_dir/HOPSPOT_FLASH_VERSION.txt"
 echo "embedded $flash_version → $product_dir_name/hopspot-flash"
 
 echo "embedding tree firmware for Flash (unsigned / remote-control capable)…"
-bash "$root/tools/release/embed-controller-firmware.sh" \
-    --out-dir "$dest_dir" \
+embed_args=(
+    --out-dir "$dest_dir"
     --hopspot-flash "$dest_dir/hopspot-flash"
+)
+if [[ -n "$firmware_from" ]]; then
+    embed_args+=(--firmware-from "$firmware_from")
+fi
+bash "$root/tools/release/embed-controller-firmware.sh" "${embed_args[@]}"
 test -f "$dest_dir/firmware/bundle.json"
 test -f "$dest_dir/firmware/heltec-v4/target.json"
 test -f "$dest_dir/firmware/heltec-v4-r8/target.json"
 test -f "$dest_dir/firmware/mesh-tower-v2/target.json"
 
-archive_name="PRNS-Controller-linux-unsigned.tar.gz"
-rm -f "$out_dir/$archive_name"
+arch="$(host_arch)"
+archive_name="PRNS-Controller-linux-${arch}-unsigned.tar.gz"
+rm -f "$out_dir"/PRNS-Controller-linux-*-unsigned.tar.gz
 (
     cd "$out_dir"
     tar -czf "$archive_name" "$product_dir_name"
 )
 
 echo "dir:  $dest_dir"
+echo "arch: $arch"
 echo "archive: $out_dir/$archive_name"
 echo "done (unsigned)."
