@@ -16,20 +16,25 @@ product_dir_name="PRNS-Controller"
 exe_name="personal-hopspot-remote-control-desktop.exe"
 flash_name="hopspot-flash.exe"
 
+# Optional override from CI matrix (--arch). Git Bash on windows-11-arm often
+# reports uname -m as x86_64 under emulation, so prefer PROCESSOR_ARCHITECTURE.
+arch_override=""
+
 host_arch() {
+    if [[ -n "$arch_override" ]]; then
+        printf '%s\n' "$arch_override"
+        return
+    fi
+    case "${PROCESSOR_ARCHITECTURE:-}${PROCESSOR_ARCHITEW6432:-}" in
+        *ARM64*|*Arm64*) printf '%s\n' aarch64; return ;;
+        *AMD64*) printf '%s\n' x86_64; return ;;
+    esac
     case "$(uname -m)" in
         arm64|aarch64) printf '%s\n' aarch64 ;;
         x86_64|amd64) printf '%s\n' x86_64 ;;
         *)
-            # Native Windows env without a Unix uname -m (rare in this script).
-            case "${PROCESSOR_ARCHITECTURE:-}${PROCESSOR_ARCHITEW6432:-}" in
-                *ARM64*|*Arm64*) printf '%s\n' aarch64 ;;
-                *AMD64*|*x86_64*) printf '%s\n' x86_64 ;;
-                *)
-                    echo "error: unsupported CPU architecture: $(uname -m)" >&2
-                    exit 1
-                    ;;
-            esac
+            echo "error: unsupported CPU architecture: $(uname -m)" >&2
+            exit 1
             ;;
     esac
 }
@@ -49,6 +54,7 @@ options:
   --firmware-from DIR    Reuse prebuilt board dirs from DIR/<slug>/ (ESP tools are
                          Linux-only; CI builds firmware on Ubuntu then passes it here)
   --out-dir DIR          Destination for the folder and zip (default: target/controller-windows)
+  --arch ARCH            Force archive arch label: aarch64 or x86_64 (CI matrix)
   -h, --help             Show this help
 
 requires: Windows (MINGW/MSYS/CYGWIN or similar), dioxus-cli 0.7.5 (dx), cargo, rustc
@@ -80,6 +86,17 @@ while [[ $# -gt 0 ]]; do
                 echo "error: --out-dir requires a path" >&2
                 exit 2
             fi
+            shift 2
+            ;;
+        --arch)
+            arch_override="${2:-}"
+            case "$arch_override" in
+                aarch64|x86_64) ;;
+                *)
+                    echo "error: --arch must be aarch64 or x86_64" >&2
+                    exit 2
+                    ;;
+            esac
             shift 2
             ;;
         -h|--help)
