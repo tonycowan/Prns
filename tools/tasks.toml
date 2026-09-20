@@ -743,6 +743,16 @@ entrypoint = ["bash", "tools/release/package-controller-windows.sh"]
 requires = ["bash", "cargo", "dx"]
 
 [[task]]
+id = "release.controller.android.package"
+summary = "Build an unsigned Android PRNS Controller APK (remote-control only; no Flash)."
+domain = "release"
+effect = "workspace-write"
+platforms = ["any"]
+audience = ["developer", "ci", "release"]
+entrypoint = ["bash", "tools/release/package-controller-android.sh"]
+requires = ["bash", "cargo", "dx"]
+
+[[task]]
 id = "release.attestation.record"
 summary = "Create release attestation metadata bound to exact subject checksums."
 domain = "release"

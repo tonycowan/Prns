@@ -160,7 +160,7 @@ or:
 cargo run --features desktop
 ```
 
-## Android (arm64)
+## Android portable (unsigned APK, no Flash)
 
 The same crate builds as **PRNS Controller** for Android via Dioxus mobile.
 BLE Auto, USB Auto, TCP, and Auto Wi-Fi attach there the same way they do
@@ -168,17 +168,26 @@ on desktop. BLE starts on; USB, Auto Wi-Fi, and TCP start off. Grant
 Bluetooth permissions when the app asks. USB uses the Hopspot JNI host
 (WebUSB `1209:0001` and Android accessory). Pair over BLE, USB, LAN, or a
 TCP path to `prnsd`. Do not run this app's BLE and Hopspot's BLE on the
-same phone at once.
+same phone at once. **Flash is desktop-only** — these APKs do not embed
+`hopspot-flash` or board firmware.
+
+Supported ABIs: **aarch64** (arm64-v8a) and **armv7** (armeabi-v7a).
 
 ```console
 export JAVA_HOME="/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
 export ANDROID_HOME="/opt/homebrew/share/android-commandlinetools"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 export NDK_HOME="$ANDROID_NDK_HOME"
-dx build --android --release --target aarch64-linux-android \
-  --no-default-features --features mobile
-adb install -r target/dx/personal-hopspot-remote-control-desktop/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+rustup target add aarch64-linux-android armv7-linux-androideabi
+./tools/prns run release.controller.android.package -- --arch aarch64
+# → target/controller-android/PRNS-Controller-android-aarch64-unsigned.apk
+./tools/prns run release.controller.android.package -- --arch armv7
+# → target/controller-android/PRNS-Controller-android-armv7-unsigned.apk
+adb install -r target/controller-android/PRNS-Controller-android-aarch64-unsigned.apk
 ```
+
+CI: `controller-android-package` (`workflow_dispatch`) builds **both** ABIs on
+`ubuntu-latest`.
 
 Application id: `org.personal.prns.controller`. Identities persist under
 the app files directory (`…/files/hopspot-remote-control`).
