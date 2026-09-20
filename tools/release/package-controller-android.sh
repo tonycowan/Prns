@@ -7,19 +7,19 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 controller_dir="$root/personal-hopspot/remote-control-desktop"
 out_dir="$root/target/controller-android"
 dx_bin="${DX:-dx}"
-arch=""
 target=""
 
 usage() {
     cat <<'EOF'
-usage: tools/release/package-controller-android.sh --arch <aarch64|armv7> [options]
+usage: tools/release/package-controller-android.sh [--arch aarch64] [options]
 
-Build an unsigned PRNS Controller APK for one Android ABI.
+Build an unsigned PRNS Controller APK for Android arm64-v8a.
 Flash is not included (desktop-only).
 
+Dioxus 0.7 / manganis only support 64-bit Android; armv7 is not available.
+
 options:
-  --arch aarch64|armv7   Required. Maps to aarch64-linux-android or
-                         armv7-linux-androideabi.
+  --arch aarch64         Android ABI (default: aarch64 → aarch64-linux-android)
   --out-dir DIR          Destination for the APK (default: target/controller-android)
   -h, --help             Show this help
 
@@ -28,12 +28,14 @@ requires: dioxus-cli 0.7.5 (dx), cargo, rustc Android targets, JDK 17,
 EOF
 }
 
+arch="aarch64"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --arch)
             arch="${2:-}"
             if [[ -z "$arch" ]]; then
-                echo "error: --arch requires aarch64 or armv7" >&2
+                echo "error: --arch requires aarch64" >&2
                 exit 2
             fi
             shift 2
@@ -63,15 +65,11 @@ case "$arch" in
         target="aarch64-linux-android"
         ;;
     armv7)
-        target="armv7-linux-androideabi"
-        ;;
-    "")
-        echo "error: --arch is required (aarch64 or armv7)" >&2
-        usage >&2
+        echo "error: armv7 Android is not supported (Dioxus/manganis are 64-bit only)" >&2
         exit 2
         ;;
     *)
-        echo "error: unsupported --arch '$arch' (use aarch64 or armv7)" >&2
+        echo "error: unsupported --arch '$arch' (use aarch64)" >&2
         exit 2
         ;;
 esac

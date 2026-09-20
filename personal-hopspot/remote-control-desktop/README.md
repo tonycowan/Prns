@@ -171,22 +171,21 @@ TCP path to `prnsd`. Do not run this app's BLE and Hopspot's BLE on the
 same phone at once. **Flash is desktop-only** — these APKs do not embed
 `hopspot-flash` or board firmware.
 
-Supported ABIs: **aarch64** (arm64-v8a) and **armv7** (armeabi-v7a).
+Supported ABI: **aarch64** (arm64-v8a). Dioxus 0.7 / manganis are 64-bit only,
+so armeabi-v7a is not available.
 
 ```console
 export JAVA_HOME="/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
 export ANDROID_HOME="/opt/homebrew/share/android-commandlinetools"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 export NDK_HOME="$ANDROID_NDK_HOME"
-rustup target add aarch64-linux-android armv7-linux-androideabi
+rustup target add aarch64-linux-android
 ./tools/prns run release.controller.android.package -- --arch aarch64
 # → target/controller-android/PRNS-Controller-android-aarch64-unsigned.apk
-./tools/prns run release.controller.android.package -- --arch armv7
-# → target/controller-android/PRNS-Controller-android-armv7-unsigned.apk
 adb install -r target/controller-android/PRNS-Controller-android-aarch64-unsigned.apk
 ```
 
-CI: `controller-android-package` (`workflow_dispatch`) builds **both** ABIs on
+CI: `controller-android-package` (`workflow_dispatch`) builds aarch64 on
 `ubuntu-latest`.
 
 Application id: `org.personal.prns.controller`. Identities persist under
