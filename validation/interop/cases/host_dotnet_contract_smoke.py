@@ -1,6 +1,6 @@
 from validation.interop.host_contract import (
     ROOT,
-    HOST_C_TARGET,
+    host_c_debug_target,
     build_host_library,
     environment,
     host_contract_main,
@@ -27,7 +27,7 @@ def run() -> None:
         ".NET host contract smoke failed",
         command_environment=environment(
             {
-                "LD_LIBRARY_PATH": HOST_C_TARGET,
+                "LD_LIBRARY_PATH": host_c_debug_target(),
                 "DOTNET_CLI_HOME": binding / ".dotnet-cli",
                 "NUGET_PACKAGES": binding / ".nuget-packages",
                 "DOTNET_CLI_TELEMETRY_OPTOUT": "1",

@@ -3,9 +3,9 @@ from pathlib import Path
 
 from validation.interop.host_contract import (
     ROOT,
-    HOST_C_TARGET,
     build_host_library,
     environment,
+    host_c_debug_target,
     host_contract_main,
     package_host_native,
     run_command,
@@ -14,6 +14,19 @@ from validation.interop.host_contract import (
 
 
 SUCCESS = "HOST_SWIFT_CONTRACT_SMOKE_OK"
+XCODE_DEVELOPER = Path("/Applications/Xcode.app/Contents/Developer")
+
+
+def swift_environment(values: dict[str, object]) -> dict[str, str]:
+    """Prefer full Xcode when present so `import Testing` resolves.
+
+    Command Line Tools alone ship a Swift driver without the Testing module,
+    which makes this smoke fail even though the host libraries built correctly.
+    """
+    configured = environment(values)
+    if "DEVELOPER_DIR" not in configured and XCODE_DEVELOPER.is_dir():
+        configured["DEVELOPER_DIR"] = str(XCODE_DEVELOPER)
+    return configured
 
 
 def run() -> None:
@@ -25,7 +38,7 @@ def run() -> None:
         package_host_native(
             output=native,
             rust_target=target.rust_target,
-            dynamic_library=HOST_C_TARGET / target.dynamic_library_name,
+            dynamic_library=host_c_debug_target() / target.dynamic_library_name,
         )
         run_command(
             (
@@ -37,7 +50,7 @@ def run() -> None:
                 scratch / "build",
             ),
             "Swift host contract smoke failed",
-            command_environment=environment(
+            command_environment=swift_environment(
                 {
                     "PKG_CONFIG_PATH": native / "lib/pkgconfig",
                     "LD_LIBRARY_PATH": native / "lib",

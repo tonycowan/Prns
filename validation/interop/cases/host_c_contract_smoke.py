@@ -4,7 +4,7 @@ from pathlib import Path
 
 from validation.interop.host_contract import (
     ROOT,
-    HOST_C_TARGET,
+    host_c_debug_target,
     build_host_library,
     dynamic_loader_variable,
     environment,
@@ -67,7 +67,7 @@ def run_journey(journey: CompilerJourney, temporary: Path, version: str) -> None
             version,
         ),
         f"{journey.standard} host contract journey failed",
-        command_environment=environment({dynamic_loader_variable(): HOST_C_TARGET}),
+        command_environment=environment({dynamic_loader_variable(): host_c_debug_target()}),
     )
 
 

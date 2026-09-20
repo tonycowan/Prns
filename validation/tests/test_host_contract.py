@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest import mock
 
 from validation.interop.host_contract import (
-    HOST_C_STATIC_LIBRARY,
     PACKAGE_HOST_NATIVE,
     HostContractFailure,
     HostContractFailureKind,
@@ -96,12 +95,17 @@ class HostContractTests(unittest.TestCase):
     def test_native_package_uses_both_host_libraries(self) -> None:
         output = Path("/temporary/native")
         dynamic_library = Path("/temporary/libprns_host.so")
-        with mock.patch("validation.interop.host_contract.run_command") as run:
-            package_host_native(
-                output=output,
-                rust_target="x86_64-unknown-linux-gnu",
-                dynamic_library=dynamic_library,
-            )
+        static_library = Path("/temporary/libprns_host.a")
+        with mock.patch(
+            "validation.interop.host_contract.host_c_static_library",
+            return_value=static_library,
+        ):
+            with mock.patch("validation.interop.host_contract.run_command") as run:
+                package_host_native(
+                    output=output,
+                    rust_target="x86_64-unknown-linux-gnu",
+                    dynamic_library=dynamic_library,
+                )
         run.assert_called_once_with(
             (
                 sys.executable,
@@ -111,7 +115,7 @@ class HostContractTests(unittest.TestCase):
                 "--library",
                 dynamic_library,
                 "--library",
-                HOST_C_STATIC_LIBRARY,
+                static_library,
                 "--output",
                 output,
             ),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
@@ -12,8 +13,6 @@ from typing import Callable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST_C_MANIFEST = ROOT / "prns-host/abi/c/Cargo.toml"
-HOST_C_TARGET = ROOT / "prns-host/abi/c/target/debug"
-HOST_C_STATIC_LIBRARY = HOST_C_TARGET / "libprns_host.a"
 PACKAGE_HOST_NATIVE = ROOT / "tools/release/package-host-native.py"
 
 
@@ -87,6 +86,39 @@ def run_command(
         )
 
 
+def host_c_debug_target() -> Path:
+    """Resolve prns-host/abi/c's debug target dir, honoring CARGO_TARGET_DIR."""
+    try:
+        result = subprocess.run(
+            (
+                "cargo",
+                "metadata",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                str(HOST_C_MANIFEST),
+            ),
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise HostContractFailure(
+            HostContractFailureKind.COMMAND_FAILED,
+            f"cargo metadata for host C ABI failed: {error}",
+        ) from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or f"status {result.returncode}"
+        raise HostContractFailure(
+            HostContractFailureKind.COMMAND_FAILED,
+            f"cargo metadata for host C ABI failed: {detail}",
+        )
+    target_directory = Path(json.loads(result.stdout)["target_directory"])
+    return target_directory / "debug"
+
+
 def build_host_library() -> None:
     run_command(
         (
@@ -109,7 +141,11 @@ def dynamic_library_name() -> str:
 
 
 def dynamic_library_path() -> Path:
-    return HOST_C_TARGET / dynamic_library_name()
+    return host_c_debug_target() / dynamic_library_name()
+
+
+def host_c_static_library() -> Path:
+    return host_c_debug_target() / "libprns_host.a"
 
 
 def dynamic_loader_variable() -> str:
@@ -143,7 +179,7 @@ def package_host_native(
             "--library",
             dynamic_library,
             "--library",
-            HOST_C_STATIC_LIBRARY,
+            host_c_static_library(),
             "--output",
             output,
         ),

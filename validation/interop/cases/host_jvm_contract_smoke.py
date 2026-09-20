@@ -3,7 +3,7 @@ from pathlib import Path
 
 from validation.interop.host_contract import (
     ROOT,
-    HOST_C_TARGET,
+    host_c_debug_target,
     build_host_library,
     dynamic_library_path,
     environment,
@@ -33,7 +33,7 @@ def run() -> None:
             command_environment=environment(
                 {
                     "GRADLE_USER_HOME": Path(temporary) / "gradle",
-                    "LD_LIBRARY_PATH": HOST_C_TARGET,
+                    "LD_LIBRARY_PATH": host_c_debug_target(),
                 }
             ),
         )
