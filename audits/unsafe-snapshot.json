@@ -18683,21 +18683,7 @@
         "daemon-windows": [
           "ring",
           "std"
-        ]
-      },
-      "name": "rustls",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "unsafe": {
-        "blocks": 0,
-        "externs": 0,
-        "functions": 0,
-        "impls": 0,
-        "tokens": 0
-      },
-      "version": "0.23.42"
-    },
-    {
-      "graphs": {
+        ],
         "host-c-linux": [
           "ring",
           "std"
@@ -18720,7 +18706,7 @@
         "impls": 0,
         "tokens": 0
       },
-      "version": "0.23.43"
+      "version": "0.23.45"
     },
     {
       "graphs": {
@@ -18842,7 +18828,7 @@
         "impls": 0,
         "tokens": 0
       },
-      "version": "0.103.13"
+      "version": "0.103.15"
     },
     {
       "graphs": {
@@ -24933,10 +24919,6 @@
           "Win32_Graphics_Dwm",
           "Win32_Graphics_Gdi",
           "Win32_Media",
-          "Win32_NetworkManagement",
-          "Win32_NetworkManagement_IpHelper",
-          "Win32_Networking",
-          "Win32_Networking_WinSock",
           "Win32_Security",
           "Win32_System",
           "Win32_System_Com",
