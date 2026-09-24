@@ -29,6 +29,13 @@ struct FlashProgress;
 #[cfg(target_os = "android")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct FlashDraft;
+
+#[cfg(not(target_os = "android"))]
+type PublishedTips = crate::flash::PublishedChannelTips;
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PublishedTips;
 use personal_rns::interfaces::lora::{
     CodingRate, LoraBandwidth, ModemPreset, Modulation, RadioProfile, RegulatoryRegion as Region,
     SpreadingFactor, SubGRegion,
@@ -1247,7 +1254,7 @@ fn ManagedTargetConfiguration(
     let building = use_signal(|| false);
     let build_status = use_signal(String::new);
     let catalog_tick = use_signal(|| 0u64);
-    let mut published_tips = use_signal(|| None::<crate::flash::PublishedChannelTips>);
+    let mut published_tips = use_signal(|| None::<PublishedTips>);
     let mut transport_draft = use_signal(|| RemoteControlNetworkTransport::Disabled);
     let mut connect_remaining = use_signal(|| target.monitor_remaining_secs);
     let mut saving = use_signal(|| false);
@@ -1362,28 +1369,7 @@ fn ManagedTargetConfiguration(
                                 },
                                 "Configure"
                             }
-                            if cfg!(not(target_os = "android")) {
-                            button {
-                                class: "button",
-                                r#type: "button",
-                                onclick: move |_| {
-                                    configuring.set(false);
-                                    ota.set(true);
-                                    if published_tips().is_none() {
-                                        spawn(async move {
-                                            let result = tokio::task::spawn_blocking(|| {
-                                                crate::flash::check_published_tips(None)
-                                            })
-                                            .await;
-                                            if let Ok(Ok(tips)) = result {
-                                                published_tips.set(Some(tips));
-                                            }
-                                        });
-                                    }
-                                },
-                                "OTA Flash"
-                            }
-                            }
+                            {ota_entry_button(configuring, ota, published_tips)}
                         }
                         div { class: "toolbar-pane",
                             if ota() {
@@ -1626,7 +1612,7 @@ fn ManagedTargetConfiguration(
                                                 selected: image_draft().is_none(),
                                                 "Unknown"
                                             }
-                                            for board in crate::flash::catalog_boards().unwrap_or_default() {
+                                            for board in image_type_choices() {
                                                 option {
                                                     value: "{board.slug}",
                                                     selected: image_draft().as_deref()
@@ -1647,6 +1633,46 @@ fn ManagedTargetConfiguration(
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn ota_entry_button(
+    mut configuring: Signal<bool>,
+    mut ota: Signal<bool>,
+    mut published_tips: Signal<Option<PublishedTips>>,
+) -> Element {
+    rsx! {
+        button {
+            class: "button",
+            r#type: "button",
+            onclick: move |_| {
+                configuring.set(false);
+                ota.set(true);
+                if published_tips().is_none() {
+                    spawn(async move {
+                        let result = tokio::task::spawn_blocking(|| {
+                            crate::flash::check_published_tips(None)
+                        })
+                        .await;
+                        if let Ok(Ok(tips)) = result {
+                            published_tips.set(Some(tips));
+                        }
+                    });
+                }
+            },
+            "OTA Flash"
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn ota_entry_button(
+    configuring: Signal<bool>,
+    ota: Signal<bool>,
+    published_tips: Signal<Option<PublishedTips>>,
+) -> Element {
+    let _ = (configuring, ota, published_tips);
+    rsx! {}
+}
+
 fn ota_flash_deck(
     ota_board: Signal<Option<String>>,
     flash_forms: Signal<HashMap<String, FlashDraft>>,
@@ -1656,7 +1682,7 @@ fn ota_flash_deck(
     building: Signal<bool>,
     build_status: Signal<String>,
     catalog_tick: Signal<u64>,
-    published_tips: Signal<Option<crate::flash::PublishedChannelTips>>,
+    published_tips: Signal<Option<PublishedTips>>,
     flashing: bool,
     flash_status: Signal<String>,
 ) -> Element {
@@ -1737,38 +1763,55 @@ fn start_ota_flash(
     flashing: Signal<bool>,
     flash_progress: Signal<Option<FlashProgress>>,
 ) {
-    let Some(slug) = board_slug else {
-        return;
-    };
-    let Some(board) = crate::flash::catalog_boards()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|board| board.slug == slug)
-    else {
-        return;
-    };
-    let form = flash_forms().get(&slug).cloned().unwrap_or_default();
-    #[cfg(not(target_os = "android"))]
-    let enroll = board.enrollable && form.enrol_for_management;
     #[cfg(target_os = "android")]
-    let enroll = false;
-    start_flash(
-        board.slug,
-        board.display_name,
-        enroll,
-        board.supports_wifi,
-        board.supports_tcp,
-        form,
-        backend,
-        screen,
-        drafts,
-        interfaces_by_target,
-        unsaved,
-        targets,
-        flash_status,
-        flashing,
-        flash_progress,
-    );
+    {
+        let _ = (
+            board_slug,
+            flash_forms,
+            backend,
+            screen,
+            drafts,
+            interfaces_by_target,
+            unsaved,
+            targets,
+            flash_status,
+            flashing,
+            flash_progress,
+        );
+        return;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let Some(slug) = board_slug else {
+            return;
+        };
+        let Some(board) = crate::flash::catalog_boards()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|board| board.slug == slug)
+        else {
+            return;
+        };
+        let form = flash_forms().get(&slug).cloned().unwrap_or_default();
+        let enroll = board.enrollable && form.enrol_for_management;
+        start_flash(
+            board.slug,
+            board.display_name,
+            enroll,
+            board.supports_wifi,
+            board.supports_tcp,
+            form,
+            backend,
+            screen,
+            drafts,
+            interfaces_by_target,
+            unsaved,
+            targets,
+            flash_status,
+            flashing,
+            flash_progress,
+        );
+    }
 }
 
 #[component]
@@ -5901,18 +5944,34 @@ fn aliases_preserving(
     stored
 }
 
+struct ImageTypeChoice {
+    slug: String,
+    display_name: String,
+}
+
+fn image_type_choices() -> Vec<ImageTypeChoice> {
+    prns_flash_manifest::board_catalog()
+        .map(|catalog| {
+            catalog
+                .boards
+                .into_iter()
+                .map(|board| ImageTypeChoice {
+                    slug: board.slug,
+                    display_name: board.display_name,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn image_type_label(slug: Option<&str>) -> String {
     let Some(slug) = slug.map(str::trim).filter(|slug| !slug.is_empty()) else {
         return "Unknown".to_string();
     };
-    crate::flash::catalog_boards()
-        .ok()
-        .and_then(|boards| {
-            boards
-                .into_iter()
-                .find(|board| board.slug == slug)
-                .map(|board| board.display_name)
-        })
+    image_type_choices()
+        .into_iter()
+        .find(|board| board.slug == slug)
+        .map(|board| board.display_name)
         .unwrap_or_else(|| slug.to_string())
 }
 
