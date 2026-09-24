@@ -1042,6 +1042,9 @@
         "desktop-windows": [
           "alloc"
         ],
+        "engine": [
+          "alloc"
+        ],
         "esp32-c6": [
           "alloc"
         ],
@@ -2163,6 +2166,10 @@
           "default",
           "std"
         ],
+        "engine": [
+          "default",
+          "std"
+        ],
         "ios": [
           "default",
           "std"
@@ -2304,6 +2311,9 @@
           "default"
         ],
         "desktop-windows": [
+          "default"
+        ],
+        "engine": [
           "default"
         ],
         "esp32-c6": [
@@ -2648,7 +2658,8 @@
         "daemon-linux": [],
         "daemon-macos": [],
         "daemon-windows": [],
-        "desktop-linux": []
+        "desktop-linux": [],
+        "engine": []
       },
       "name": "cfg_aliases",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -4306,7 +4317,9 @@
         "desktop-windows": [
           "rand_core"
         ],
-        "engine": [],
+        "engine": [
+          "rand_core"
+        ],
         "esp32-c6": [
           "rand_core"
         ],
@@ -4487,8 +4500,10 @@
           "zeroize"
         ],
         "engine": [
+          "alloc",
           "digest",
           "precomputed-tables",
+          "rand_core",
           "zeroize"
         ],
         "esp32-c6": [
@@ -5300,6 +5315,11 @@
           "oid",
           "zeroize"
         ],
+        "engine": [
+          "alloc",
+          "oid",
+          "zeroize"
+        ],
         "esp32-c6": [
           "alloc",
           "oid",
@@ -5613,6 +5633,7 @@
           "default",
           "mac",
           "oid",
+          "rand_core",
           "zeroize"
         ],
         "esp32-c6": [
@@ -6639,6 +6660,9 @@
         "desktop-windows": [
           "default"
         ],
+        "engine": [
+          "default"
+        ],
         "esp32-c6": [
           "default"
         ],
@@ -6793,7 +6817,9 @@
         "desktop-windows": [
           "alloc"
         ],
-        "engine": [],
+        "engine": [
+          "alloc"
+        ],
         "esp32-c6": [
           "alloc"
         ],
@@ -6933,7 +6959,12 @@
           "zeroize"
         ],
         "engine": [
+          "alloc",
+          "batch",
           "fast",
+          "rand_core",
+          "signature",
+          "strobe-rs",
           "zeroize"
         ],
         "esp32-c6": [
@@ -7656,6 +7687,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -7691,6 +7723,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -7726,6 +7759,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [
           "tick-hz-1_000_000"
         ],
@@ -8057,6 +8091,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [
           "unproven"
         ],
@@ -8106,6 +8141,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -8141,6 +8177,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -8242,6 +8279,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -8311,6 +8349,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -11987,8 +12026,10 @@
         "engine": [
           "alloc",
           "futures-io",
+          "futures-sink",
           "io",
           "memchr",
+          "sink",
           "slab",
           "std"
         ],
@@ -12507,6 +12548,7 @@
         "desktop-windows": [
           "std"
         ],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -13089,6 +13131,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -14965,6 +15008,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -15262,6 +15306,9 @@
           "rust-allocator"
         ],
         "desktop-windows": [
+          "rust-allocator"
+        ],
+        "engine": [
           "rust-allocator"
         ],
         "esp32-c6": [
@@ -15729,6 +15776,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -17273,6 +17321,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [
           "unstable"
         ],
@@ -17322,6 +17371,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -17675,6 +17725,13 @@
         "desktop-linux": [
           "process",
           "sched"
+        ],
+        "engine": [
+          "default",
+          "process",
+          "sched",
+          "signal",
+          "time"
         ],
         "host-c-linux": [
           "process",
@@ -21303,6 +21360,7 @@
           "log",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "shared-instance",
           "std",
           "tokio-host",
@@ -21317,6 +21375,7 @@
           "log",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "serial",
           "shared-instance",
           "std",
@@ -21334,6 +21393,7 @@
           "log",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "serial",
           "shared-instance",
           "std",
@@ -21351,6 +21411,7 @@
           "log",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "serial",
           "shared-instance",
           "std",
@@ -21377,6 +21438,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "pipe",
+          "remote-control-path-table",
           "rnode",
           "rnx",
           "serial",
@@ -21408,6 +21470,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "pipe",
+          "remote-control-path-table",
           "rnode",
           "rnx",
           "serial",
@@ -21439,6 +21502,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "pipe",
+          "remote-control-path-table",
           "rnode",
           "rnx",
           "serial",
@@ -21462,6 +21526,7 @@
           "log",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "serial",
           "shared-instance",
           "std",
@@ -21479,6 +21544,7 @@
           "log",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "serial",
           "shared-instance",
           "std",
@@ -21496,6 +21562,7 @@
           "log",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "serial",
           "shared-instance",
           "std",
@@ -21510,6 +21577,7 @@
           "alloc",
           "default",
           "flash",
+          "remote-control-path-table",
           "resource-work-offload",
           "std",
           "std-sync-host"
@@ -21523,6 +21591,7 @@
           "flash",
           "log",
           "lora",
+          "remote-control-path-table",
           "tcp",
           "tcp-dns",
           "usb",
@@ -21537,6 +21606,7 @@
           "flash",
           "log",
           "lora",
+          "remote-control-path-table",
           "tcp",
           "tcp-dns",
           "usb",
@@ -21551,6 +21621,7 @@
           "flash",
           "log",
           "lora",
+          "remote-control-path-table",
           "tcp",
           "tcp-dns",
           "usb",
@@ -21565,6 +21636,7 @@
           "flash",
           "log",
           "lora",
+          "remote-control-path-table",
           "tcp",
           "tcp-dns",
           "usb",
@@ -21579,6 +21651,7 @@
           "flash",
           "log",
           "lora",
+          "remote-control-path-table",
           "tcp",
           "tcp-dns",
           "usb",
@@ -21593,6 +21666,7 @@
           "flash",
           "log",
           "lora",
+          "remote-control-path-table",
           "tcp",
           "tcp-dns",
           "usb",
@@ -21610,6 +21684,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "pipe",
+          "remote-control-path-table",
           "rnode",
           "serial",
           "std",
@@ -21633,6 +21708,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "pipe",
+          "remote-control-path-table",
           "rnode",
           "serial",
           "std",
@@ -21656,6 +21732,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "pipe",
+          "remote-control-path-table",
           "rnode",
           "serial",
           "std",
@@ -21673,6 +21750,7 @@
           "flash",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "std",
           "tcp",
           "tokio-host",
@@ -21812,6 +21890,9 @@
           "alloc"
         ],
         "desktop-windows": [
+          "alloc"
+        ],
+        "engine": [
           "alloc"
         ],
         "esp32-c6": [
@@ -22022,6 +22103,11 @@
           "fallback"
         ],
         "desktop-windows": [
+          "critical-section",
+          "default",
+          "fallback"
+        ],
+        "engine": [
           "critical-section",
           "default",
           "fallback"
@@ -22352,6 +22438,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22366,6 +22453,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22380,6 +22468,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22394,6 +22483,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22411,6 +22501,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "rnx",
@@ -22430,6 +22521,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "rnx",
@@ -22449,6 +22541,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "rnx",
@@ -22465,6 +22558,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22479,6 +22573,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22493,6 +22588,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22502,13 +22598,17 @@
         "engine": [
           "alloc",
           "default",
+          "ed25519-batch",
           "embassy-host",
           "flash",
+          "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
           "std-sync-host",
-          "test-support"
+          "test-support",
+          "tokio-host"
         ],
         "esp32-c6": [
           "alloc",
@@ -22517,6 +22617,7 @@
           "external-alloc",
           "flash",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22529,6 +22630,7 @@
           "external-alloc",
           "flash",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22541,6 +22643,7 @@
           "external-alloc",
           "flash",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22553,6 +22656,7 @@
           "external-alloc",
           "flash",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22565,6 +22669,7 @@
           "external-alloc",
           "flash",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22577,6 +22682,7 @@
           "external-alloc",
           "flash",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22592,6 +22698,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22607,6 +22714,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22622,6 +22730,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22635,6 +22744,7 @@
           "movable-frame-forwarding",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22646,6 +22756,7 @@
           "embassy-host",
           "flash",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22654,6 +22765,7 @@
         "wasm": [
           "alloc",
           "flash",
+          "remote-control-path-table",
           "resource-work-offload",
           "rns-management-wire",
           "std"
@@ -23340,6 +23452,7 @@
         "android": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23348,6 +23461,7 @@
         "controller-linux": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23356,6 +23470,7 @@
         "controller-macos": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23364,6 +23479,7 @@
         "controller-windows": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23374,6 +23490,7 @@
           "interface-discovery",
           "interface-discovery-archive",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23385,6 +23502,7 @@
           "interface-discovery",
           "interface-discovery-archive",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23396,6 +23514,7 @@
           "interface-discovery",
           "interface-discovery-archive",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23405,6 +23524,7 @@
         "desktop-linux": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23413,6 +23533,7 @@
         "desktop-macos": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23421,6 +23542,7 @@
         "desktop-windows": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23429,12 +23551,16 @@
         "engine": [
           "alloc",
           "default",
+          "movable-frame-forwarding",
+          "remote-control-path-table",
+          "resource-bzip2",
           "std"
         ],
         "esp32-c6": [
           "alloc",
           "external-alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23443,6 +23569,7 @@
           "alloc",
           "external-alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23451,6 +23578,7 @@
           "alloc",
           "external-alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23459,6 +23587,7 @@
           "alloc",
           "external-alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23467,6 +23596,7 @@
           "alloc",
           "external-alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23475,6 +23605,7 @@
           "alloc",
           "external-alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23483,6 +23614,7 @@
           "alloc",
           "interface-discovery",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23491,6 +23623,7 @@
           "alloc",
           "interface-discovery",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23499,6 +23632,7 @@
           "alloc",
           "interface-discovery",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23506,6 +23640,7 @@
         "ios": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23513,11 +23648,13 @@
         "nrf52840": [
           "alloc",
           "movable-frame-forwarding",
+          "remote-control-path-table",
           "resource-bzip2",
           "std"
         ],
         "wasm": [
           "alloc",
+          "remote-control-path-table",
           "resource-bzip2",
           "std"
         ]
@@ -23536,69 +23673,96 @@
     {
       "graphs": {
         "android": [
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "controller-linux": [
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "controller-macos": [
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "controller-windows": [
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "daemon-linux": [
           "alloc",
           "log",
+          "remote-control-path-table",
           "rnx"
         ],
         "daemon-macos": [
           "alloc",
           "log",
+          "remote-control-path-table",
           "rnx"
         ],
         "daemon-windows": [
           "alloc",
           "log",
+          "remote-control-path-table",
           "rnx"
         ],
         "desktop-linux": [
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "desktop-macos": [
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "desktop-windows": [
-          "log"
+          "log",
+          "remote-control-path-table"
+        ],
+        "engine": [
+          "remote-control-path-table"
         ],
         "esp32-c6": [
           "alloc",
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "esp32-s3-heltec": [
           "alloc",
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "esp32-s3-heltec-e290": [
           "alloc",
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "esp32-s3-heltec-r8": [
           "alloc",
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "esp32-s3-heltec-wireless-stick-lite-v3": [
           "alloc",
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
         "esp32-s3-tbeam": [
           "alloc",
-          "log"
+          "log",
+          "remote-control-path-table"
         ],
-        "host-c-linux": [],
-        "host-c-macos": [],
-        "host-c-windows": [],
-        "ios": [],
+        "host-c-linux": [
+          "remote-control-path-table"
+        ],
+        "host-c-macos": [
+          "remote-control-path-table"
+        ],
+        "host-c-windows": [
+          "remote-control-path-table"
+        ],
+        "ios": [
+          "remote-control-path-table"
+        ],
         "nrf52840": []
       },
       "name": "prns-runtime-embassy",
@@ -23617,23 +23781,27 @@
         "android": [
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management"
         ],
         "controller-linux": [
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "tracing"
         ],
         "controller-macos": [
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "tracing"
         ],
         "controller-windows": [
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "tracing"
         ],
@@ -23641,6 +23809,7 @@
           "interface-discovery",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "rnx",
           "tracing"
@@ -23649,6 +23818,7 @@
           "interface-discovery",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "rnx",
           "tracing"
@@ -23657,6 +23827,7 @@
           "interface-discovery",
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "rnx",
           "tracing"
@@ -23664,45 +23835,67 @@
         "desktop-linux": [
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "tracing"
         ],
         "desktop-macos": [
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "tracing"
         ],
         "desktop-windows": [
           "parallel-persistence",
           "parallel-resource-hash",
+          "remote-control-path-table",
           "rns-management",
           "tracing"
         ],
-        "esp32-c6": [],
-        "esp32-s3-heltec": [],
-        "esp32-s3-heltec-e290": [],
-        "esp32-s3-heltec-r8": [],
-        "esp32-s3-heltec-wireless-stick-lite-v3": [],
-        "esp32-s3-tbeam": [],
+        "engine": [
+          "remote-control-path-table"
+        ],
+        "esp32-c6": [
+          "remote-control-path-table"
+        ],
+        "esp32-s3-heltec": [
+          "remote-control-path-table"
+        ],
+        "esp32-s3-heltec-e290": [
+          "remote-control-path-table"
+        ],
+        "esp32-s3-heltec-r8": [
+          "remote-control-path-table"
+        ],
+        "esp32-s3-heltec-wireless-stick-lite-v3": [
+          "remote-control-path-table"
+        ],
+        "esp32-s3-tbeam": [
+          "remote-control-path-table"
+        ],
         "host-c-linux": [
           "interface-discovery",
           "parallel-persistence",
-          "parallel-resource-hash"
+          "parallel-resource-hash",
+          "remote-control-path-table"
         ],
         "host-c-macos": [
           "interface-discovery",
           "parallel-persistence",
-          "parallel-resource-hash"
+          "parallel-resource-hash",
+          "remote-control-path-table"
         ],
         "host-c-windows": [
           "interface-discovery",
           "parallel-persistence",
-          "parallel-resource-hash"
+          "parallel-resource-hash",
+          "remote-control-path-table"
         ],
         "ios": [
           "parallel-persistence",
-          "parallel-resource-hash"
+          "parallel-resource-hash",
+          "remote-control-path-table"
         ],
         "nrf52840": []
       },
@@ -25639,6 +25832,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -27679,7 +27873,10 @@
           "alloc",
           "rand_core"
         ],
-        "engine": [],
+        "engine": [
+          "alloc",
+          "rand_core"
+        ],
         "esp32-c6": [
           "alloc",
           "rand_core"
@@ -28674,6 +28871,9 @@
         "desktop-windows": [
           "alloc"
         ],
+        "engine": [
+          "alloc"
+        ],
         "esp32-c6": [
           "alloc"
         ],
@@ -28861,6 +29061,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -28914,6 +29115,9 @@
           "default"
         ],
         "desktop-windows": [
+          "default"
+        ],
+        "engine": [
           "default"
         ],
         "esp32-c6": [
@@ -30709,6 +30913,9 @@
           "windows-sys"
         ],
         "engine": [
+          "bytes",
+          "fs",
+          "io-util",
           "macros",
           "rt",
           "rt-multi-thread",
@@ -33217,6 +33424,7 @@
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
+        "engine": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
