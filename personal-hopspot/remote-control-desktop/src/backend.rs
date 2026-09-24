@@ -109,6 +109,7 @@ const PATH_TABLE_PAGE_LIMIT: usize = 64;
 const INVENTORY_RECOVERY_GAP: Duration = Duration::from_secs(2);
 const ACTIVITY_CONTROLLER_SCOPE: &str = "controller";
 const DEFAULT_TCP_TARGET: &str = "127.0.0.1:4242";
+#[allow(dead_code)] // automatic sibling sync is paused; Fetch Sibling Node Info pulls on demand
 const ROSTER_ANNOUNCE_GAP: Duration = Duration::from_secs(30);
 const TARGET_MONITOR_TTL: Duration = Duration::from_secs(10 * 60);
 /// After Connect drops a route, prefer a direct BLE path when we already have that peer live.
@@ -1119,6 +1120,12 @@ impl RemoteControlBackend {
             } else {
                 self.target_path(&item.id).await
             };
+            // Path probes can outlast a Connect that already stored the path table.
+            // Read it again so this list does not paint the earlier Loading snapshot.
+            item.build_version = session.cached_build_version(&item.id);
+            item.battery = session.cached_battery(&item.id);
+            item.network_transport = session.cached_network_transport(&item.id);
+            item.path_table = session.cached_path_table(&item.id);
         }
         for announcement in announcements {
             items.push(TargetAccess {
@@ -2939,6 +2946,23 @@ impl RemoteControlBackend {
             }
         }
         self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
+        // Power is often declined, and that reply timeout is about 15s. Fetch the path
+        // table first so the panel does not sit on Loading until power gives up.
+        match self.read_path_table(&remote).await {
+            Ok(rows) => {
+                if let Ok(session) = self.session() {
+                    session.remember_path_table(target_id, PathTableState::Ready(rows));
+                }
+            }
+            Err(error) => {
+                eprintln!("inventory path table {target_id} failed: {error}");
+                if let Ok(session) = self.session() {
+                    session
+                        .remember_path_table(target_id, PathTableState::Failed(error.to_string()));
+                }
+            }
+        }
+        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         if let Ok((snapshot, _)) = remote.describe_power().await {
             self.session()?.mark_battery_fetched(target_id);
             let label = format_managed_node_battery(snapshot).or(Some("unknown".to_string()));
@@ -2981,21 +3005,6 @@ impl RemoteControlBackend {
             }
             self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         }
-        match self.read_path_table(&remote).await {
-            Ok(rows) => {
-                if let Ok(session) = self.session() {
-                    session.remember_path_table(target_id, PathTableState::Ready(rows));
-                }
-            }
-            Err(error) => {
-                eprintln!("inventory path table {target_id} failed: {error}");
-                if let Ok(session) = self.session() {
-                    session
-                        .remember_path_table(target_id, PathTableState::Failed(error.to_string()));
-                }
-            }
-        }
-        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         match remote.describe_network_transport().await {
             Ok((transport, _)) => {
                 self.session()?
@@ -3448,6 +3457,45 @@ impl RemoteControlBackend {
         }
     }
 
+    /// Pull managed-node records from sibling controllers and merge them once.
+    /// An empty engine snapshot is left unused so a failed read cannot publish a blank roster.
+    pub async fn fetch_sibling_node_info(&self) -> Result<(), BackendError> {
+        let session = self.session()?;
+        if let Ok(snapshot) = session
+            .handle
+            .snapshot_remote_control_target_accesses()
+            .await
+        {
+            if let Some(snapshot) = snapshot.filter(|snapshot| !snapshot.is_empty()) {
+                if let Ok(mut roster) = session.roster.lock() {
+                    roster.cached_snapshot = snapshot;
+                }
+            }
+        }
+        self.apply_pending_roster().await;
+        let siblings = session
+            .roster
+            .lock()
+            .ok()
+            .map(|roster| {
+                roster
+                    .replica
+                    .siblings
+                    .iter()
+                    .map(|sibling| sibling.identity_hash())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if siblings.is_empty() {
+            return Ok(());
+        }
+        self.exchange_roster_with_siblings(RosterExchange::Pull, Some(&siblings), false)
+            .await?;
+        self.apply_pending_roster().await;
+        Ok(())
+    }
+
+    #[allow(dead_code)] // automatic sibling sync is paused; Fetch Sibling Node Info pulls on demand
     pub async fn maintain_roster(&self) {
         let Ok(session) = self.session() else {
             return;
@@ -3733,6 +3781,7 @@ struct ControllerSession {
     identities_dir: PathBuf,
     persist_dir: PathBuf,
     data_dir: PathBuf,
+    #[allow(dead_code)] // read by the paused automatic roster sync
     last_roster_sync: Mutex<Option<Instant>>,
     monitor_until: Mutex<HashMap<String, Instant>>,
     /// Targets whose Connect probe has dropped the hop and is waiting for a

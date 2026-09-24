@@ -30,6 +30,8 @@ mod bluetooth_gatt_server;
 ))]
 mod bootloader_entry;
 mod entropy;
+#[cfg(feature = "usb-debug-log")]
+mod usb_debug;
 #[cfg(any(feature = "board-t-echo", feature = "board-mesh-pocket"))]
 mod firmware;
 #[cfg(any(feature = "board-t096", feature = "board-t1000e"))]

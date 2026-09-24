@@ -121,6 +121,25 @@ pub(super) enum DialAdmission {
     CancelStaleSystemConnection,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DialSchedule {
+    Start,
+    Queue,
+    AlreadyPending,
+}
+
+/// One `connectPeripheral` at a time. A second target waits, and a target already in flight or
+/// queued is left alone.
+pub(super) const fn dial_schedule(in_flight: bool, already_pending: bool) -> DialSchedule {
+    if already_pending {
+        DialSchedule::AlreadyPending
+    } else if in_flight {
+        DialSchedule::Queue
+    } else {
+        DialSchedule::Start
+    }
+}
+
 pub(super) const fn dial_admission(
     already_system_connected: bool,
     target_has_inbound_session: bool,
@@ -255,6 +274,8 @@ pub struct MacosBleBackend {
     peripherals: PeripheralTable,
     restored: RestoredPeripherals,
     dials: JoinSet<DialTaskOutcome>,
+    dial_queue: VecDeque<BleAddress>,
+    dialing: Option<BleAddress>,
     queue: DispatchRetained<DispatchQueue>,
     scan_enabled: bool,
     advertise_enabled: bool,
@@ -471,6 +492,8 @@ impl PreparedMacosBleBackend {
             peripherals: self.peripherals,
             restored: self.restored,
             dials: JoinSet::new(),
+            dial_queue: VecDeque::new(),
+            dialing: None,
             queue,
             scan_enabled: false,
             advertise_enabled: false,
@@ -539,6 +562,7 @@ impl BleBackend<{ MacosBleBackend::MAX_PEERS }> for MacosBleBackend {
                     None => core::future::pending().await,
                 },
                 Some(done) = self.dials.join_next(), if pending_dials => {
+                    self.promote_dial();
                     match done {
                         Ok(DialTaskOutcome::Ready { link, peer_rssi }) => {
                             return BleEvent::LinkReady {
@@ -583,6 +607,49 @@ impl BleBackend<{ MacosBleBackend::MAX_PEERS }> for MacosBleBackend {
     }
 
     async fn dial(&mut self, address: BleAddress) -> DialOutcome {
+        let already_pending = self.dialing == Some(address)
+            || self.dial_queue.iter().any(|queued| *queued == address);
+        match dial_schedule(!self.dials.is_empty(), already_pending) {
+            DialSchedule::Start => self.start_dial(address),
+            DialSchedule::Queue => {
+                crate::diagnostic_log::debug!(
+                    "bluetooth: dial to {:02x?} queued behind the in-flight dial",
+                    address.octets()
+                );
+                self.dial_queue.push_back(address);
+            }
+            DialSchedule::AlreadyPending => {}
+        }
+        DialOutcome::Started
+    }
+
+    async fn on_link_closed(&mut self, address: BleAddress) {
+        let token = *address.octets();
+        if let Some((peer_id, peripheral)) = self.peripherals.lock().ok().and_then(|map| {
+            map.iter()
+                .find(|(peer_id, _)| peer_id.address().octets() == &token)
+                .map(|(peer_id, (peripheral, _))| (*peer_id, peripheral.0.clone()))
+        }) {
+            let peripheral = SendPeripheral(peripheral);
+            let central = SendCentralManager(self.central.0.clone());
+            let delegate = SendCentralDelegate(self.central_delegate.0.clone());
+            self.queue.exec_async(move || {
+                let central = central;
+                let delegate = delegate;
+                let peripheral = peripheral;
+                delegate.0.remove_session(peer_id);
+                cancel_system_connection(&central.0, peer_id);
+                cancel_connection(&central, &peripheral);
+                delegate.0.note_stale_cancellation(peer_id);
+            });
+        }
+        self.peripheral_delegate.0.clear_closed_peer(address);
+    }
+}
+
+impl MacosBleBackend {
+    fn start_dial(&mut self, address: BleAddress) {
+        self.dialing = Some(address);
         let token = *address.octets();
         let Some((peer_id, peripheral, peer_rssi)) = self.peripherals.lock().ok().and_then(|map| {
             map.iter()
@@ -594,7 +661,7 @@ impl BleBackend<{ MacosBleBackend::MAX_PEERS }> for MacosBleBackend {
             );
             self.dials
                 .spawn(async move { DialTaskOutcome::Failed { address } });
-            return DialOutcome::Started;
+            return;
         };
         let (control_tx, control_rx) = tokio_mpsc::channel::<Control>(8);
         let (completion_tx, completion_rx) = oneshot::channel::<DialCompletion>();
@@ -658,30 +725,16 @@ impl BleBackend<{ MacosBleBackend::MAX_PEERS }> for MacosBleBackend {
                 peer_rssi,
             }
         });
-        DialOutcome::Started
     }
 
-    async fn on_link_closed(&mut self, address: BleAddress) {
-        let token = *address.octets();
-        if let Some((peer_id, peripheral)) = self.peripherals.lock().ok().and_then(|map| {
-            map.iter()
-                .find(|(peer_id, _)| peer_id.address().octets() == &token)
-                .map(|(peer_id, (peripheral, _))| (*peer_id, peripheral.0.clone()))
-        }) {
-            let peripheral = SendPeripheral(peripheral);
-            let central = SendCentralManager(self.central.0.clone());
-            let delegate = SendCentralDelegate(self.central_delegate.0.clone());
-            self.queue.exec_async(move || {
-                let central = central;
-                let delegate = delegate;
-                let peripheral = peripheral;
-                delegate.0.remove_session(peer_id);
-                cancel_system_connection(&central.0, peer_id);
-                cancel_connection(&central, &peripheral);
-                delegate.0.note_stale_cancellation(peer_id);
-            });
+    fn promote_dial(&mut self) {
+        if !self.dials.is_empty() {
+            return;
         }
-        self.peripheral_delegate.0.clear_closed_peer(address);
+        self.dialing = None;
+        if let Some(address) = self.dial_queue.pop_front() {
+            self.start_dial(address);
+        }
     }
 }
 

@@ -8,7 +8,8 @@ use prns_core::interfaces::bluetooth_auto::{
 use tokio::sync::{mpsc, oneshot};
 
 use super::backend::{
-    dial_admission, scan_lease, scan_op, DialAdmission, ScanLease, ScanOp, StartupReadiness,
+    dial_admission, dial_schedule, scan_lease, scan_op, DialAdmission, DialSchedule, ScanLease,
+    ScanOp, StartupReadiness,
 };
 use super::central::CentralPeerSession;
 use super::discovery::{
@@ -19,7 +20,10 @@ use super::gatt_link::{
     gatt_inbound_channel, gatt_inbound_channel_with_budget, GattInboundSendError,
 };
 use super::gatt_write::{write_admission, GattWriteAdmission, GattWriteMode, GattWritePlan};
-use super::peripheral::{advertising_op, has_session_for_peer, AdvertisingOp};
+use super::peripheral::{
+    advertising_op, has_session_for_peer, notify_admit, AdvertisingOp, NotifyAdmit,
+    NOTIFY_OUTBOX_CAP,
+};
 use super::MacosBleError;
 use super::{CoreBluetoothPeerId, MacosBleBackend};
 
@@ -167,6 +171,22 @@ fn startup_requires_central_gatt_and_l2cap_readiness() {
 
     readiness.note_gatt_service_published();
     assert_eq!(readiness.ready_psm().map(|psm| psm.get()), Some(0x0081));
+}
+
+#[test]
+fn dials_run_one_at_a_time() {
+    assert_eq!(dial_schedule(false, false), DialSchedule::Start);
+    assert_eq!(dial_schedule(true, false), DialSchedule::Queue);
+    assert_eq!(dial_schedule(true, true), DialSchedule::AlreadyPending);
+    assert_eq!(dial_schedule(false, true), DialSchedule::AlreadyPending);
+}
+
+#[test]
+fn a_full_notify_queue_holds_until_corebluetooth_is_ready() {
+    assert_eq!(notify_admit(false, 0), NotifyAdmit::Transmit);
+    assert_eq!(notify_admit(true, 1), NotifyAdmit::Hold);
+    assert_eq!(notify_admit(false, 1), NotifyAdmit::Hold);
+    assert_eq!(notify_admit(true, NOTIFY_OUTBOX_CAP), NotifyAdmit::Full);
 }
 
 #[test]

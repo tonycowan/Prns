@@ -247,9 +247,8 @@ pub enum RemoteControlControllerGrantError {
 
 /// Stored grants keep the request set from pairing. Administrators also receive
 /// the current administrator-only kinds. A controller that already manages the
-/// node can describe and set network transport when those kinds were added
-/// after the grant was stored. The path table is included on the same
-/// managing grants.
+/// node can describe power, describe and set network transport, and read the
+/// path table when those kinds were added after the grant was stored.
 fn grant_effective_requests(
     authority: RemoteControlControllerAuthority,
     permitted_requests: RemoteControlRequestSet,
@@ -266,6 +265,7 @@ fn grant_effective_requests(
         || requests.supports(RemoteControlRequestKind::DescribePower)
         || requests.supports(RemoteControlRequestKind::InventoryInterfaces)
     {
+        let _inserted = requests.insert(RemoteControlRequestKind::DescribePower);
         let _inserted = requests.insert(RemoteControlRequestKind::DescribeNetworkTransport);
         let _inserted = requests.insert(RemoteControlRequestKind::SetNetworkTransport);
         let _inserted = requests.insert(RemoteControlRequestKind::InventoryPathTable);

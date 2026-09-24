@@ -905,6 +905,9 @@ fn managing_grants_include_network_transport_added_after_pairing() {
     assert!(!describe_only
         .effective_requests()
         .supports(RemoteControlRequestKind::InventoryPathTable));
+    assert!(!describe_only
+        .effective_requests()
+        .supports(RemoteControlRequestKind::DescribePower));
 
     let manager = grant(0x22, RemoteControlRequestKind::DescribePower);
     assert!(manager
@@ -938,6 +941,17 @@ fn managing_grants_include_network_transport_added_after_pairing() {
     assert!(administrator
         .effective_requests()
         .supports(RemoteControlRequestKind::AuthorizeController));
+    assert!(administrator
+        .effective_requests()
+        .supports(RemoteControlRequestKind::DescribePower));
+
+    let interfaces = grant(0x24, RemoteControlRequestKind::InventoryInterfaces);
+    assert!(interfaces
+        .effective_requests()
+        .supports(RemoteControlRequestKind::DescribePower));
+    assert!(!interfaces
+        .permitted_requests()
+        .supports(RemoteControlRequestKind::DescribePower));
 }
 
 #[test]

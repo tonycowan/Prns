@@ -229,6 +229,7 @@ impl RosterShared {
         push_unique_hash(&mut self.pull_due, hash);
     }
 
+    #[allow(dead_code)] // read by the paused automatic roster sync
     pub fn take_pull_due(&mut self) -> Vec<IdentityHash> {
         std::mem::take(&mut self.pull_due)
     }

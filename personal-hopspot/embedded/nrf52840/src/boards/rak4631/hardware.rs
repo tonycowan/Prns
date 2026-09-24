@@ -6,6 +6,7 @@ use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::rng::Rng;
+use embassy_nrf::saadc::{self, Config as SaadcConfig, Saadc};
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::usb::Driver;
@@ -23,6 +24,7 @@ use crate::boards::status_led::StatusLed;
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
     TWISPI0 => spim::InterruptHandler<peripherals::TWISPI0>;
+    SAADC => saadc::InterruptHandler;
 });
 
 type Rak4631SpiDevice = ExclusiveDevice<Spim<'static>, Output<'static>, Delay>;
@@ -40,6 +42,7 @@ pub(crate) struct Rak4631Hardware {
     pub(crate) radio: Rak4631Radio,
     pub(crate) status_led: StatusLed,
     pub(crate) button: Input<'static>,
+    pub(crate) battery: crate::boards::rak_vbat::WisblockVbat,
 }
 
 struct HeldIo {
@@ -82,6 +85,7 @@ impl Rak4631Board {
 
         interrupt::USBD.set_priority(Priority::P2);
         interrupt::TWISPI0.set_priority(Priority::P3);
+        interrupt::SAADC.set_priority(Priority::P3);
         static SOFTWARE_VBUS: StaticCell<SoftwareVbusDetect> = StaticCell::new();
         let vbus = crate::runtime::software_vbus::initialize(&SOFTWARE_VBUS);
         let usb = Driver::new(peripherals.USBD, Irqs, vbus);
@@ -140,6 +144,13 @@ impl Rak4631Board {
         ));
         // P0.09 is NFC by default; board-rak4631 enables nfc-pins-as-gpio.
         let button = Input::new(peripherals.P0_09, Pull::Up);
+        // WisBlock AIN0 is nRF P0.05. The RAK19007 divider stays connected; there is no enable pin.
+        let battery = crate::boards::rak_vbat::WisblockVbat::new(Saadc::new(
+            peripherals.SAADC,
+            Irqs,
+            SaadcConfig::default(),
+            [crate::boards::rak_vbat::channel(peripherals.P0_05)],
+        ));
 
         (
             identity,
@@ -149,6 +160,7 @@ impl Rak4631Board {
                 radio,
                 status_led,
                 button,
+                battery,
             },
         )
     }

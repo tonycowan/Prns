@@ -266,6 +266,7 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .identity-kicker { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #52705c; margin: 0 0 4px; }
 .identity-block .note { margin: 0 0 8px; }
 .identity-block .interface-toolbar { margin: 4px 0 12px; }
+.identity-block .toolbar-pane { flex-wrap: wrap; }
 .identity-block .actions { margin-top: 12px; }
 .sibling-list { display: grid; gap: 8px; margin: 0 0 12px; }
 .sibling-row { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid #e3ebe5; border-radius: 7px; background: #fbfdfb; }
@@ -496,6 +497,9 @@ pub fn App() -> Element {
                 push_activity(activity_log, "Controller node failed to start.");
                 return;
             }
+            if let Ok(items) = backend.targets().await {
+                targets.set(items);
+            }
             loop {
                 backend.advance_target_monitors();
                 // Local inventory is synchronous and must not wait on sibling
@@ -540,7 +544,6 @@ pub fn App() -> Element {
                         focused_sibling_alias(),
                     );
                 }
-                backend.maintain_roster().await;
                 let gen = backend.roster_apply_generation();
                 if gen != roster_gen() {
                     roster_gen.set(gen);
@@ -555,34 +558,6 @@ pub fn App() -> Element {
                     if next_siblings != sibling_aliases() {
                         sibling_aliases.set(next_siblings);
                     }
-                }
-                match backend.targets().await {
-                    Ok(items) => {
-                        let pairing_busy = pairing_in_progress(&pairing());
-                        let selected = selected_target();
-                        if !pairing_busy
-                            && (selected.is_empty()
-                                || !items.iter().any(|item| item.id == selected))
-                        {
-                            if let Some(first) = items.first() {
-                                selected_target.set(first.id.clone());
-                            } else {
-                                selected_target.set(String::new());
-                            }
-                        }
-                        let live_ids: HashSet<String> =
-                            items.iter().map(|item| item.id.clone()).collect();
-                        interfaces_by_target
-                            .write()
-                            .retain(|id, _| id == CONTROLLER_SCOPE || live_ids.contains(id));
-                        expanded_targets.write().retain(|id| live_ids.contains(id));
-                        // Build / battery come from Connect or explicit refresh only.
-                        adopt_missing_aliases(target_aliases, backend.target_aliases());
-                        adopt_missing_aliases(peer_aliases, backend.peer_aliases());
-                        adopt_missing_aliases(peer_aliases, backend.peer_aliases());
-                        targets.set(items);
-                    }
-                    Err(_) => {}
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
@@ -807,6 +782,10 @@ pub fn App() -> Element {
                                 backend,
                                 sibling_aliases,
                                 focused_sibling_alias,
+                                targets,
+                                target_aliases,
+                                peer_aliases,
+                                manager_aliases,
                                 activity_log,
                             }
                         }
@@ -4340,7 +4319,16 @@ fn load_interfaces_for_target(
             .interfaces_after_announce_reporting(&target_id, wait, &mut report)
             .await
         {
-            Ok(_) => {}
+            Ok(_) => {
+                let path_table = backend.remembered_target_facts(&target_id).path_table;
+                targets
+                    .write()
+                    .iter_mut()
+                    .filter(|item| item.id == target_id)
+                    .for_each(|item| {
+                        item.path_table = path_table.clone();
+                    });
+            }
             Err(error) => {
                 backend.fail_path_table_if_loading(
                     &target_id,
@@ -6287,6 +6275,10 @@ fn ControllerIdentityCard(
     sibling_aliases: Signal<HashMap<String, String>>,
     focused_sibling_alias: Signal<Option<String>>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
+    targets: Signal<Vec<TargetAccess>>,
+    target_aliases: Signal<HashMap<String, String>>,
+    peer_aliases: Signal<HashMap<String, String>>,
+    manager_aliases: Signal<HashMap<String, String>>,
 ) -> Element {
     let identity_info = use_signal(|| false);
     match identity {
@@ -6342,6 +6334,10 @@ fn ControllerIdentityCard(
                 sibling_aliases,
                 focused_sibling_alias,
                 activity_log,
+                targets,
+                target_aliases,
+                peer_aliases,
+                manager_aliases,
             }
         },
         Err(error) => rsx! {
@@ -6361,18 +6357,23 @@ fn ControllerIdentityCard(
 fn SiblingControllersPanel(
     clone: Option<IdentityCloneView>,
     backend: Signal<RemoteControlBackend>,
-    sibling_aliases: Signal<HashMap<String, String>>,
+    mut sibling_aliases: Signal<HashMap<String, String>>,
     focused_sibling_alias: Signal<Option<String>>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
+    mut targets: Signal<Vec<TargetAccess>>,
+    mut target_aliases: Signal<HashMap<String, String>>,
+    mut peer_aliases: Signal<HashMap<String, String>>,
+    mut manager_aliases: Signal<HashMap<String, String>>,
 ) -> Element {
     let mut configuring = use_signal(|| false);
+    let mut fetching_siblings = use_signal(|| false);
     let adopt_alias = use_signal(String::new);
     let in_progress = clone.as_ref().is_some_and(|clone| clone.in_progress);
     let open = configuring() || in_progress;
     rsx! {
         div { class: "identity-block",
             h3 { "Sibling Controllers" }
-            p { class: "note", "Other PRNS Controller installs that share this Controller identity. Managed node information sync uses their Sibling ids. Configure adopts a new sibling over USB." }
+            p { class: "note", "Other PRNS Controller installs that share this Controller identity. Managed node information sync uses their Sibling ids. Configure adopts a new sibling over USB. Fetch Sibling Node Info pulls that shared list once." }
             if let Some(clone) = clone.as_ref() {
                 if let Some(notice) = clone.notice.as_deref() {
                     p { class: "note", "{notice}" }
@@ -6389,6 +6390,46 @@ fn SiblingControllersPanel(
                             r#type: "button",
                             onclick: move |_| configuring.set(true),
                             "Configure"
+                        }
+                        button {
+                            class: if fetching_siblings() { "button busy" } else { "button" },
+                            r#type: "button",
+                            disabled: fetching_siblings(),
+                            aria_busy: if fetching_siblings() { "true" } else { "false" },
+                            onclick: move |_| {
+                                if fetching_siblings() {
+                                    return;
+                                }
+                                fetching_siblings.set(true);
+                                let backend = backend();
+                                spawn(async move {
+                                    match backend.fetch_sibling_node_info().await {
+                                        Ok(()) => {
+                                            if let Ok(items) = backend.targets().await {
+                                                targets.set(items);
+                                            }
+                                            target_aliases.set(backend.target_aliases());
+                                            peer_aliases.set(backend.peer_aliases());
+                                            manager_aliases.set(backend.manager_aliases());
+                                            sibling_aliases.set(backend.sibling_aliases());
+                                            push_activity(
+                                                activity_log,
+                                                "Fetched sibling node info.",
+                                            );
+                                        }
+                                        Err(error) => push_activity(
+                                            activity_log,
+                                            format!("Fetch sibling node info failed: {error}"),
+                                        ),
+                                    }
+                                    fetching_siblings.set(false);
+                                });
+                            },
+                            if fetching_siblings() {
+                                "Fetching…"
+                            } else {
+                                "Fetch Sibling Node Info"
+                            }
                         }
                     }
                     div { class: "toolbar-pane",
