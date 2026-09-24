@@ -3759,11 +3759,7 @@ fn filtered_announces<'a>(
         .collect()
 }
 
-fn announce_matches(
-    entry: &HeardAnnounce,
-    needle: &str,
-    labels: &HashMap<String, String>,
-) -> bool {
+fn announce_matches(entry: &HeardAnnounce, needle: &str, labels: &HashMap<String, String>) -> bool {
     let title = RemoteControlBackend::announce_title(&entry.destination, labels);
     let contains = |field: &str| field.to_ascii_lowercase().contains(needle);
     contains(&title)
@@ -3865,9 +3861,8 @@ fn refresh_target_path_table(
             .iter_mut()
             .filter(|item| item.id == target_id)
             .for_each(|item| {
-                item.path_table = PathTableState::Failed(
-                    "The controller node is not running.".to_string(),
-                );
+                item.path_table =
+                    PathTableState::Failed("The controller node is not running.".to_string());
             });
         return;
     }

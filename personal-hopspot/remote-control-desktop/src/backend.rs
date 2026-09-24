@@ -38,10 +38,9 @@ use personal_rns::remote_control::{
     RemoteControlModeOutcome, RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome,
     RemoteControlPairingEndpoint, RemoteControlPairingInvitationCode,
     RemoteControlPathContinuation, RemoteControlPathEntry, RemoteControlPathPage,
-    RemoteControlPowerOutcome,
-    RemoteControlRequestKind, RemoteControlRequestSet, RemoteControlRevokeControllerOutcome,
-    RemoteControlSleepOutcome, RemoteControlTargetAccess, RemoteControlWifiStation,
-    RemoteControlWifiStationOutcome, REMOTE_CONTROL_APPLICATION_ASPECTS,
+    RemoteControlPowerOutcome, RemoteControlRequestKind, RemoteControlRequestSet,
+    RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome, RemoteControlTargetAccess,
+    RemoteControlWifiStation, RemoteControlWifiStationOutcome, REMOTE_CONTROL_APPLICATION_ASPECTS,
     REMOTE_CONTROL_APPLICATION_NAME,
 };
 use personal_rns::routing::announce::{derive_destination_hash, expand_name};
