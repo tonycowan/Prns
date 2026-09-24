@@ -1057,6 +1057,16 @@ pub fn App() -> Element {
                                                         activity_log,
                                                         targets,
                                                         target_aliases,
+                                                        screen,
+                                                        drafts,
+                                                        interfaces_by_target,
+                                                        unsaved,
+                                                        selected_target,
+                                                        expanded_targets,
+                                                        flash_forms,
+                                                        flash_status,
+                                                        flashing,
+                                                        flash_progress,
                                                     }
                                                 }
                                             }
@@ -1228,6 +1238,16 @@ fn ManagedTargetConfiguration(
     activity_log: Signal<Vec<ActivityLogEntry>>,
     mut targets: Signal<Vec<TargetAccess>>,
     target_aliases: Signal<HashMap<String, String>>,
+    screen: Signal<Screen>,
+    drafts: Signal<HashMap<String, InterfaceDraft>>,
+    interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    unsaved: Signal<Option<UnsavedPrompt>>,
+    selected_target: Signal<String>,
+    expanded_targets: Signal<HashSet<String>>,
+    mut flash_forms: Signal<HashMap<String, FlashDraft>>,
+    mut flash_status: Signal<String>,
+    mut flashing: Signal<bool>,
+    mut flash_progress: Signal<Option<FlashProgress>>,
 ) -> Element {
     let target_id = target.id.clone();
     let configure_title = target_aliases()
@@ -1237,6 +1257,18 @@ fn ManagedTargetConfiguration(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| target_display_name(&target));
     let mut configuring = use_signal(|| false);
+    let mut ota = use_signal(|| false);
+    let mut ota_board = use_signal(|| target.board_slug.clone().filter(|slug| !slug.is_empty()));
+    let mut image_draft = use_signal(|| target.board_slug.clone().filter(|slug| !slug.is_empty()));
+    let mut applied_board =
+        use_signal(|| target.board_slug.clone().filter(|slug| !slug.is_empty()));
+    let downloading = use_signal(|| false);
+    let importing = use_signal(|| false);
+    let exporting = use_signal(|| false);
+    let building = use_signal(|| false);
+    let build_status = use_signal(String::new);
+    let catalog_tick = use_signal(|| 0u64);
+    let mut published_tips = use_signal(|| None::<crate::flash::PublishedChannelTips>);
     let mut transport_draft = use_signal(|| RemoteControlNetworkTransport::Disabled);
     let mut connect_remaining = use_signal(|| target.monitor_remaining_secs);
     let mut saving = use_signal(|| false);
@@ -1263,8 +1295,9 @@ fn ManagedTargetConfiguration(
                     if connect_remaining() != remaining {
                         connect_remaining.set(remaining);
                     }
-                    if remaining == 0 && configuring() {
+                    if remaining == 0 && (configuring() || ota()) {
                         configuring.set(false);
+                        ota.set(false);
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
@@ -1277,13 +1310,39 @@ fn ManagedTargetConfiguration(
         .find(|item| item.id == target_id)
         .and_then(|item| item.network_transport)
         .or(target.network_transport);
-    let dirty = baseline_transport.is_some_and(|transport| transport != transport_draft());
+    let baseline_board = targets()
+        .iter()
+        .find(|item| item.id == target_id)
+        .and_then(|item| item.board_slug.clone())
+        .or_else(|| target.board_slug.clone())
+        .filter(|slug| !slug.is_empty());
+    let transport_dirty =
+        baseline_transport.is_some_and(|transport| transport != transport_draft());
+    let image_dirty = baseline_board != image_draft();
+    let dirty = transport_dirty || image_dirty;
+    use_effect({
+        let target_id = target_id.clone();
+        move || {
+            let stored = targets()
+                .iter()
+                .find(|item| item.id == target_id)
+                .and_then(|item| item.board_slug.clone())
+                .filter(|slug| !slug.is_empty());
+            if stored != applied_board() {
+                applied_board.set(stored.clone());
+                if let Some(slug) = stored {
+                    ota_board.set(Some(slug.clone()));
+                    image_draft.set(Some(slug));
+                }
+            }
+        }
+    });
 
     rsx! {
         div { class: "target-section",
             h3 { class: "target-section-title", "Configuration" }
             if connect_remaining() > 0 {
-                div { class: if configuring() { "interface-toolbar editing" } else { "interface-toolbar" },
+                div { class: if configuring() || ota() { "interface-toolbar editing" } else { "interface-toolbar" },
                     div { class: "toolbar-track",
                         div { class: "toolbar-pane",
                             button {
@@ -1292,6 +1351,7 @@ fn ManagedTargetConfiguration(
                                 onclick: {
                                     let target_id = target_id.clone();
                                     move |_| {
+                                        ota.set(false);
                                         if let Some(transport) = targets()
                                             .iter()
                                             .find(|item| item.id == target_id)
@@ -1299,6 +1359,13 @@ fn ManagedTargetConfiguration(
                                         {
                                             transport_draft.set(transport);
                                         }
+                                        image_draft.set(
+                                            targets()
+                                                .iter()
+                                                .find(|item| item.id == target_id)
+                                                .and_then(|item| item.board_slug.clone())
+                                                .filter(|slug| !slug.is_empty()),
+                                        );
                                         configuring.set(true);
                                         let target_id = target_id.clone();
                                         let backend = backend();
@@ -1316,8 +1383,44 @@ fn ManagedTargetConfiguration(
                                 },
                                 "Configure"
                             }
+                            if cfg!(not(target_os = "android")) {
+                            button {
+                                class: "button",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    configuring.set(false);
+                                    ota.set(true);
+                                    if published_tips().is_none() {
+                                        spawn(async move {
+                                            let result = tokio::task::spawn_blocking(|| {
+                                                crate::flash::check_published_tips(None)
+                                            })
+                                            .await;
+                                            if let Ok(Ok(tips)) = result {
+                                                published_tips.set(Some(tips));
+                                            }
+                                        });
+                                    }
+                                },
+                                "OTA Flash"
+                            }
+                            }
                         }
                         div { class: "toolbar-pane",
+                            if ota() {
+                                button {
+                                    class: "button",
+                                    r#type: "button",
+                                    onclick: move |_| ota.set(false),
+                                    "Back"
+                                }
+                                button {
+                                    class: "button",
+                                    r#type: "button",
+                                    disabled: true,
+                                    "Flash"
+                                }
+                            } else {
                             button {
                                 class: "button",
                                 disabled: saving(),
@@ -1336,6 +1439,13 @@ fn ManagedTargetConfiguration(
                                                 transport_draft.set(transport);
                                             }
                                         }
+                                        image_draft.set(
+                                            targets()
+                                                .iter()
+                                                .find(|item| item.id == target_id)
+                                                .and_then(|item| item.board_slug.clone())
+                                                .filter(|slug| !slug.is_empty()),
+                                        );
                                         configuring.set(false);
                                     }
                                 },
@@ -1359,35 +1469,66 @@ fn ManagedTargetConfiguration(
                                             .find(|item| item.id == target_id)
                                             .and_then(|item| item.network_transport)
                                             .or(fallback);
-                                        let dirty_now = baseline
+                                        let board_now = targets()
+                                            .iter()
+                                            .find(|item| item.id == target_id)
+                                            .and_then(|item| item.board_slug.clone())
+                                            .filter(|slug| !slug.is_empty());
+                                        let transport_dirty_now = baseline
                                             .is_some_and(|transport| transport != transport_draft());
-                                        if saving() || !dirty_now {
+                                        let image_dirty_now = board_now != image_draft();
+                                        if saving() || (!transport_dirty_now && !image_dirty_now) {
                                             return;
                                         }
                                         let target_id = target_id.clone();
                                         let transport = transport_draft();
+                                        let next_board = image_draft();
                                         let backend = backend();
                                         saving.set(true);
                                         spawn(async move {
-                                            match backend.set_network_transport(&target_id, transport).await {
-                                                Ok(()) => {
-                                                    targets.write().iter_mut().filter(|item| item.id == target_id).for_each(
-                                                        |item| item.network_transport = Some(transport),
-                                                    );
-                                                    configuring.set(false);
-                                                    push_activity(
+                                            if image_dirty_now {
+                                                match backend
+                                                    .set_target_board(&target_id, next_board.as_deref())
+                                                {
+                                                    Ok(()) => {
+                                                        targets.write().iter_mut().filter(|item| item.id == target_id).for_each(
+                                                            |item| item.board_slug = next_board.clone(),
+                                                        );
+                                                        push_activity(
+                                                            activity_log,
+                                                            format!(
+                                                                "Set image type on {target_id} to {}.",
+                                                                image_type_label(next_board.as_deref())
+                                                            ),
+                                                        );
+                                                    }
+                                                    Err(error) => push_activity(
                                                         activity_log,
-                                                        format!(
-                                                            "Set transport on {target_id} to {}.",
-                                                            network_transport_label(transport)
-                                                        ),
-                                                    );
+                                                        format!("Configure image type failed: {error}"),
+                                                    ),
                                                 }
-                                                Err(error) => push_activity(
-                                                    activity_log,
-                                                    format!("Configure transport failed: {error}"),
-                                                ),
                                             }
+                                            if transport_dirty_now {
+                                                match backend.set_network_transport(&target_id, transport).await {
+                                                    Ok(()) => {
+                                                        targets.write().iter_mut().filter(|item| item.id == target_id).for_each(
+                                                            |item| item.network_transport = Some(transport),
+                                                        );
+                                                        push_activity(
+                                                            activity_log,
+                                                            format!(
+                                                                "Set transport on {target_id} to {}.",
+                                                                network_transport_label(transport)
+                                                            ),
+                                                        );
+                                                    }
+                                                    Err(error) => push_activity(
+                                                        activity_log,
+                                                        format!("Configure transport failed: {error}"),
+                                                    ),
+                                                }
+                                            }
+                                            configuring.set(false);
                                             saving.set(false);
                                         });
                                     }
@@ -1399,11 +1540,12 @@ fn ManagedTargetConfiguration(
                                     "Save"
                                 }
                             }
+                            }
                         }
                     }
                 }
             }
-            div { class: if configuring() { "deck editing" } else { "deck" },
+            div { class: if configuring() || ota() { "deck editing" } else { "deck" },
                 div { class: "deck-track",
                     div { class: "deck-pane",
                         dl { class: "facts",
@@ -1432,14 +1574,33 @@ fn ManagedTargetConfiguration(
                                 dt { "Transport" }
                                 dd { "{network_transport_status(target.network_transport)}" }
                             }
+                            div {
+                                dt { "Image type" }
+                                dd { "{image_type_label(target.board_slug.as_deref())}" }
+                            }
                         }
                     }
                     div { class: "deck-pane",
+                        if ota() {
+                            {ota_flash_deck(
+                                ota_board,
+                                flash_forms,
+                                downloading,
+                                importing,
+                                exporting,
+                                building,
+                                build_status,
+                                catalog_tick,
+                                published_tips,
+                                flashing(),
+                                flash_status,
+                            )}
+                        } else {
                         div { class: "edit-card",
                             h3 { "Configure {configure_title}" }
                             dl { class: "facts",
                                 div {
-                                    class: if dirty { "changed" } else { "" },
+                                    class: if transport_dirty { "changed" } else { "" },
                                     dt { "Transport" }
                                     dd {
                                         select {
@@ -1466,13 +1627,169 @@ fn ManagedTargetConfiguration(
                                         }
                                     }
                                 }
+                                div {
+                                    class: if image_dirty { "changed" } else { "" },
+                                    dt { "Image type" }
+                                    dd {
+                                        select {
+                                            value: "{image_draft().unwrap_or_default()}",
+                                            disabled: saving(),
+                                            onchange: move |event| {
+                                                let value = event.value();
+                                                image_draft.set(if value.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(value)
+                                                });
+                                            },
+                                            option {
+                                                value: "",
+                                                selected: image_draft().is_none(),
+                                                "Unknown"
+                                            }
+                                            for board in crate::flash::catalog_boards().unwrap_or_default() {
+                                                option {
+                                                    value: "{board.slug}",
+                                                    selected: image_draft().as_deref()
+                                                        == Some(board.slug.as_str()),
+                                                    "{board.display_name}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                        }
                         }
                     }
                 }
             }
         }
     }
+}
+
+fn ota_flash_deck(
+    ota_board: Signal<Option<String>>,
+    flash_forms: Signal<HashMap<String, FlashDraft>>,
+    downloading: Signal<bool>,
+    importing: Signal<bool>,
+    exporting: Signal<bool>,
+    building: Signal<bool>,
+    build_status: Signal<String>,
+    catalog_tick: Signal<u64>,
+    published_tips: Signal<Option<crate::flash::PublishedChannelTips>>,
+    flashing: bool,
+    flash_status: Signal<String>,
+) -> Element {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (
+            ota_board,
+            flash_forms,
+            downloading,
+            importing,
+            exporting,
+            building,
+            build_status,
+            catalog_tick,
+            published_tips,
+            flashing,
+            flash_status,
+        );
+        return rsx! {};
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let boards = crate::flash::catalog_boards().unwrap_or_default();
+        let selected = ota_board().unwrap_or_default();
+        let board = boards.iter().find(|board| board.slug == selected).cloned();
+        let slug = selected.clone();
+        let form = flash_forms().get(&slug).cloned().unwrap_or_default();
+        let _ = flashing;
+        rsx! {
+            div { class: "stack",
+                label { "Board"
+                    select {
+                        value: "{selected}",
+                        disabled: true,
+                        option { value: "", "Choose a board" }
+                        for board in boards.iter() {
+                            option {
+                                value: "{board.slug}",
+                                selected: board.slug == selected,
+                                "{board.display_name}"
+                            }
+                        }
+                    }
+                }
+                if let Some(board) = board {
+                    {flash_configure_fields(
+                        board,
+                        slug,
+                        form,
+                        true,
+                        build_status,
+                        flash_status,
+                        downloading,
+                        importing,
+                        exporting,
+                        building,
+                        catalog_tick,
+                        published_tips,
+                        flash_forms,
+                    )}
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn start_ota_flash(
+    board_slug: Option<String>,
+    flash_forms: Signal<HashMap<String, FlashDraft>>,
+    backend: Signal<RemoteControlBackend>,
+    screen: Signal<Screen>,
+    drafts: Signal<HashMap<String, InterfaceDraft>>,
+    interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    unsaved: Signal<Option<UnsavedPrompt>>,
+    targets: Signal<Vec<TargetAccess>>,
+    flash_status: Signal<String>,
+    flashing: Signal<bool>,
+    flash_progress: Signal<Option<FlashProgress>>,
+) {
+    let Some(slug) = board_slug else {
+        return;
+    };
+    let Some(board) = crate::flash::catalog_boards()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|board| board.slug == slug)
+    else {
+        return;
+    };
+    let form = flash_forms().get(&slug).cloned().unwrap_or_default();
+    #[cfg(not(target_os = "android"))]
+    let enroll = board.enrollable && form.enrol_for_management;
+    #[cfg(target_os = "android")]
+    let enroll = false;
+    start_flash(
+        board.slug,
+        board.display_name,
+        enroll,
+        board.supports_wifi,
+        board.supports_tcp,
+        form,
+        backend,
+        screen,
+        drafts,
+        interfaces_by_target,
+        unsaved,
+        targets,
+        flash_status,
+        flashing,
+        flash_progress,
+    );
 }
 
 #[component]
@@ -4217,15 +4534,6 @@ fn FlashSection(
                             crate::image_catalog::current_image(&slug).ok().flatten()
                         };
                         let image_badge = crate::flash::catalog_image_badge(catalog_image.as_ref());
-                        let pick_options = crate::flash::image_pick_options(
-                            &slug,
-                            published_tips().as_ref(),
-                        )
-                        .unwrap_or_default();
-                        let pick_value = crate::flash::selected_image_pick_value(
-                            catalog_image.as_ref(),
-                            &pick_options,
-                        );
                         let flash_busy = flashing()
                             || downloading()
                             || importing()
@@ -4439,119 +4747,19 @@ fn FlashSection(
                                                     }
                                                 }
                                                 div { class: "deck-pane",
-                                                    div { class: "flash-image-pick",
-                                                        label { "Firmware image"
-                                                            select {
-                                                                value: "{pick_value}",
-                                                                disabled: flash_busy,
-                                                                onchange: {
-                                                                    let slug = slug.clone();
-                                                                    let pick_options = pick_options.clone();
-                                                                    move |event| {
-                                                                        let value = event.value();
-                                                                        let Some(option) =
-                                                                            crate::flash::image_pick_option_from_value(
-                                                                                &pick_options,
-                                                                                &value,
-                                                                            )
-                                                                            .cloned()
-                                                                        else {
-                                                                            return;
-                                                                        };
-                                                                        build_status.set(String::new());
-                                                                        start_select_image(
-                                                                            slug.clone(),
-                                                                            option,
-                                                                            flash_status,
-                                                                            downloading,
-                                                                            catalog_tick,
-                                                                            published_tips,
-                                                                        );
-                                                                    }
-                                                                },
-                                                                for option in pick_options.iter() {
-                                                                    option {
-                                                                        value: "{option.value()}",
-                                                                        selected: option.value() == pick_value,
-                                                                        "{option.label()}"
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        div { class: "flash-actions",
-                                                            button {
-                                                                class: "button",
-                                                                r#type: "button",
-                                                                disabled: flash_busy,
-                                                                onclick: {
-                                                                    let slug = slug.clone();
-                                                                    move |_| {
-                                                                        build_status.set(String::new());
-                                                                        start_import(
-                                                                            slug.clone(),
-                                                                            flash_status,
-                                                                            importing,
-                                                                            catalog_tick,
-                                                                        );
-                                                                    }
-                                                                },
-                                                                "Import"
-                                                            }
-                                                            button {
-                                                                class: "button",
-                                                                r#type: "button",
-                                                                disabled: flash_busy || !checkout_available,
-                                                                title: if checkout_available {
-                                                                    ""
-                                                                } else {
-                                                                    "Build requires a Personal Reticulum checkout"
-                                                                },
-                                                                onclick: {
-                                                                    let slug = slug.clone();
-                                                                    move |_| {
-                                                                        start_build(
-                                                                            slug.clone(),
-                                                                            build_status,
-                                                                            flash_status,
-                                                                            building,
-                                                                            catalog_tick,
-                                                                        );
-                                                                    }
-                                                                },
-                                                                "Build"
-                                                            }
-                                                            button {
-                                                                class: "button",
-                                                                r#type: "button",
-                                                                disabled: flash_busy || catalog_image.is_none(),
-                                                                onclick: {
-                                                                    let slug = slug.clone();
-                                                                    move |_| {
-                                                                        build_status.set(String::new());
-                                                                        start_export(
-                                                                            slug.clone(),
-                                                                            flash_status,
-                                                                            exporting,
-                                                                        );
-                                                                    }
-                                                                },
-                                                                "Export"
-                                                            }
-                                                        }
-                                                        {
-                                                            let status = build_status();
-                                                            rsx! {
-                                                                if !status.is_empty() {
-                                                                    p { class: "note flash-build-status", "{status}" }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    {flash_options_form(
+                                                    {flash_configure_fields(
                                                         board.clone(),
                                                         slug.clone(),
                                                         form.clone(),
-                                                        flashing(),
+                                                        flash_busy,
+                                                        build_status,
+                                                        flash_status,
+                                                        downloading,
+                                                        importing,
+                                                        exporting,
+                                                        building,
+                                                        catalog_tick,
+                                                        published_tips,
                                                         flash_forms,
                                                     )}
                                                 }
@@ -4566,6 +4774,152 @@ fn FlashSection(
             }
         }
     }
+}
+
+#[cfg(not(target_os = "android"))]
+fn flash_configure_fields(
+    board: crate::flash::CatalogBoard,
+    slug: String,
+    form: FlashDraft,
+    flash_busy: bool,
+    mut build_status: Signal<String>,
+    flash_status: Signal<String>,
+    downloading: Signal<bool>,
+    importing: Signal<bool>,
+    exporting: Signal<bool>,
+    building: Signal<bool>,
+    catalog_tick: Signal<u64>,
+    published_tips: Signal<Option<crate::flash::PublishedChannelTips>>,
+    flash_forms: Signal<HashMap<String, FlashDraft>>,
+) -> Element {
+    let checkout_available = crate::flash::checkout_available();
+    let flashing = flash_busy;
+    let catalog_image = {
+        let _ = catalog_tick();
+        crate::image_catalog::current_image(&slug).ok().flatten()
+    };
+    let pick_options =
+        crate::flash::image_pick_options(&slug, published_tips().as_ref()).unwrap_or_default();
+    let pick_value = crate::flash::selected_image_pick_value(catalog_image.as_ref(), &pick_options);
+    rsx! {
+            div { class: "stack",
+    div { class: "flash-image-pick",
+        label { "Firmware image"
+            select {
+                value: "{pick_value}",
+                disabled: flash_busy,
+                onchange: {
+                    let slug = slug.clone();
+                    let pick_options = pick_options.clone();
+                    move |event| {
+                        let value = event.value();
+                        let Some(option) =
+                            crate::flash::image_pick_option_from_value(
+                                &pick_options,
+                                &value,
+                            )
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        build_status.set(String::new());
+                        start_select_image(
+                            slug.clone(),
+                            option,
+                            flash_status,
+                            downloading,
+                            catalog_tick,
+                            published_tips,
+                        );
+                    }
+                },
+                for option in pick_options.iter() {
+                    option {
+                        value: "{option.value()}",
+                        selected: option.value() == pick_value,
+                        "{option.label()}"
+                    }
+                }
+            }
+        }
+        div { class: "flash-actions",
+            button {
+                class: "button",
+                r#type: "button",
+                disabled: flash_busy,
+                onclick: {
+                    let slug = slug.clone();
+                    move |_| {
+                        build_status.set(String::new());
+                        start_import(
+                            slug.clone(),
+                            flash_status,
+                            importing,
+                            catalog_tick,
+                        );
+                    }
+                },
+                "Import"
+            }
+            button {
+                class: "button",
+                r#type: "button",
+                disabled: flash_busy || !checkout_available,
+                title: if checkout_available {
+                    ""
+                } else {
+                    "Build requires a Personal Reticulum checkout"
+                },
+                onclick: {
+                    let slug = slug.clone();
+                    move |_| {
+                        start_build(
+                            slug.clone(),
+                            build_status,
+                            flash_status,
+                            building,
+                            catalog_tick,
+                        );
+                    }
+                },
+                "Build"
+            }
+            button {
+                class: "button",
+                r#type: "button",
+                disabled: flash_busy || catalog_image.is_none(),
+                onclick: {
+                    let slug = slug.clone();
+                    move |_| {
+                        build_status.set(String::new());
+                        start_export(
+                            slug.clone(),
+                            flash_status,
+                            exporting,
+                        );
+                    }
+                },
+                "Export"
+            }
+        }
+        {
+            let status = build_status();
+            rsx! {
+                if !status.is_empty() {
+                    p { class: "note flash-build-status", "{status}" }
+                }
+            }
+        }
+    }
+    {flash_options_form(
+        board.clone(),
+        slug.clone(),
+        form.clone(),
+        flashing,
+        flash_forms,
+    )}
+            }
+        }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -5018,7 +5372,7 @@ fn start_flash(
             match flash_result {
                 Ok(Ok(Some(enrollment))) => {
                     match backend
-                        .enroll_flashed_target(enrollment.access, &display_name)
+                        .enroll_flashed_target(enrollment.access, &display_name, &slug)
                         .await
                     {
                         Ok(target_id) => {
@@ -5557,6 +5911,21 @@ fn aliases_preserving(
         }
     }
     stored
+}
+
+fn image_type_label(slug: Option<&str>) -> String {
+    let Some(slug) = slug.map(str::trim).filter(|slug| !slug.is_empty()) else {
+        return "Unknown".to_string();
+    };
+    crate::flash::catalog_boards()
+        .ok()
+        .and_then(|boards| {
+            boards
+                .into_iter()
+                .find(|board| board.slug == slug)
+                .map(|board| board.display_name)
+        })
+        .unwrap_or_else(|| slug.to_string())
 }
 
 fn target_display_name(target: &TargetAccess) -> String {

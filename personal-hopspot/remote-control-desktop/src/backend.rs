@@ -87,6 +87,7 @@ const INTERFACE_ID_BYTES: usize = 8;
 #[cfg(not(target_os = "android"))]
 const DEFAULT_DATA_DIRECTORY: &str = ".local/share/hopspot-remote-control";
 const TARGET_NAMES_FILE: &str = "target-names";
+const TARGET_BOARDS_FILE: &str = "target-boards";
 const TARGET_ALIASES_FILE: &str = "target-aliases";
 const PEER_ALIASES_FILE: &str = "peer-aliases";
 const PEER_ALIAS_LINKS_FILE: &str = "peer-alias-links";
@@ -138,6 +139,8 @@ pub struct TargetAccess {
     pub build_version: Option<String>,
     pub battery: Option<String>,
     pub network_transport: Option<RemoteControlNetworkTransport>,
+    /// Catalog board slug recorded when this node was flashed, or set from Configure.
+    pub board_slug: Option<String>,
     pub path_table: PathTableState,
     pub monitor_remaining_secs: u32,
     /// Remaining pairing open-window seconds for awaiting advertisements.
@@ -1050,6 +1053,7 @@ impl RemoteControlBackend {
             item.build_version = session.cached_build_version(&item.id);
             item.battery = session.cached_battery(&item.id);
             item.network_transport = session.cached_network_transport(&item.id);
+            item.board_slug = session.cached_board_slug(&item.id);
             item.monitor_remaining_secs = self.monitor_remaining_secs(&item.id);
             if session.target_attention(&item.id) == TargetAttention::HeldBySibling {
                 item.status = TargetStatus::Offline;
@@ -1091,6 +1095,7 @@ impl RemoteControlBackend {
                 build_version: session.cached_build_version(&id),
                 battery: session.cached_battery(&id),
                 network_transport: session.cached_network_transport(&id),
+                board_slug: session.cached_board_slug(&id),
                 path_table: session.cached_path_table(&id),
                 monitor_remaining_secs: 0,
                 pairing_expires_in_secs: None,
@@ -1123,6 +1128,7 @@ impl RemoteControlBackend {
                 build_version: None,
                 battery: None,
                 network_transport: None,
+                board_slug: None,
                 path_table: PathTableState::Idle,
                 monitor_remaining_secs: 0,
                 pairing_expires_in_secs: Some(announcement.expires_in_secs),
@@ -1650,6 +1656,7 @@ impl RemoteControlBackend {
         &self,
         access: RemoteControlTargetAccess,
         announce_name: &str,
+        board_slug: &str,
     ) -> Result<String, BackendError> {
         let session = self.session()?;
         let target = access.target().identity_hash();
@@ -1678,6 +1685,7 @@ impl RemoteControlBackend {
         persist_session_replica(session);
         self.refresh_cached_snapshot().await;
         let assigned = ensure_missing_target_aliases(session, std::iter::once(id.as_str()));
+        session.set_board_slug(&id, Some(board_slug));
         for (assigned_id, alias) in &assigned {
             let _ = self.propagate_target_alias_to_peers(assigned_id, Some(alias), None);
         }
@@ -1741,6 +1749,20 @@ impl RemoteControlBackend {
             stored_alias(Some(name)).as_deref(),
             stored_alias(previous.as_deref()).as_deref(),
         )?;
+        Ok(())
+    }
+
+    pub fn set_target_board(
+        &self,
+        target_id: &str,
+        slug: Option<&str>,
+    ) -> Result<(), BackendError> {
+        let session = self.session()?;
+        let id = target_id.trim();
+        if id.is_empty() {
+            return Ok(());
+        }
+        session.set_board_slug(id, slug);
         Ok(())
     }
 
@@ -3544,6 +3566,7 @@ impl RemoteControlBackend {
             session.forget_build_version(&id);
             session.forget_battery(&id);
             session.forget_network_transport(&id);
+            session.set_board_slug(&id, None);
             remove_alias_map_key(&session.target_aliases, &session.target_aliases_path, &id);
         }
         apply_roster_labels(session, &plan.labels);
@@ -3690,6 +3713,8 @@ struct ControllerSession {
     manager_aliases_path: PathBuf,
     target_aliases: Mutex<HashMap<String, String>>,
     target_aliases_path: PathBuf,
+    target_boards: Mutex<HashMap<String, String>>,
+    target_boards_path: PathBuf,
     sibling_aliases: Mutex<HashMap<String, String>>,
     sibling_aliases_path: PathBuf,
     /// Sibling instance hash → normalized wifi LL (`fe80::…`, no zone).
@@ -3976,6 +4001,8 @@ impl ControllerSession {
         let manager_aliases_map = load_target_names(&manager_aliases_path);
         let target_aliases_path = data_dir.join(TARGET_ALIASES_FILE);
         let target_aliases_map = load_target_names(&target_aliases_path);
+        let target_boards_path = data_dir.join(TARGET_BOARDS_FILE);
+        let target_boards_map = load_target_names(&target_boards_path);
         let sibling_aliases_path = data_dir.join(SIBLING_ALIASES_FILE);
         let mut sibling_aliases_map = load_target_names(&sibling_aliases_path);
         let sibling_wifi_ll_path = data_dir.join(SIBLING_WIFI_LL_FILE);
@@ -4081,6 +4108,7 @@ impl ControllerSession {
         let target_peer_ids = Mutex::new(target_peer_ids_map);
         let manager_aliases = Mutex::new(manager_aliases_map);
         let target_aliases = Mutex::new(target_aliases_map);
+        let target_boards = Mutex::new(target_boards_map);
         let sibling_aliases = Mutex::new(sibling_aliases_map);
         let sibling_wifi_ll = Mutex::new(sibling_wifi_ll_map);
         let pairing_events = pairing.clone();
@@ -4422,6 +4450,8 @@ impl ControllerSession {
             manager_aliases_path,
             target_aliases,
             target_aliases_path,
+            target_boards,
+            target_boards_path,
             sibling_aliases,
             sibling_aliases_path,
             sibling_wifi_ll,
@@ -4477,6 +4507,31 @@ impl ControllerSession {
 
     fn cached_network_transport(&self, target_id: &str) -> Option<RemoteControlNetworkTransport> {
         self.network_transports.lock().ok()?.get(target_id).copied()
+    }
+
+    fn cached_board_slug(&self, target_id: &str) -> Option<String> {
+        self.target_boards
+            .lock()
+            .ok()?
+            .get(target_id)
+            .cloned()
+            .filter(|slug| !slug.is_empty())
+    }
+
+    fn set_board_slug(&self, target_id: &str, slug: Option<&str>) {
+        let mut boards = self
+            .target_boards
+            .lock()
+            .expect("target boards mutex poisoned");
+        match slug.map(str::trim).filter(|slug| !slug.is_empty()) {
+            Some(slug) => {
+                boards.insert(target_id.to_owned(), slug.to_owned());
+            }
+            None => {
+                boards.remove(target_id);
+            }
+        }
+        persist_target_names(&self.target_boards_path, &boards);
     }
 
     fn cached_path_table(&self, target_id: &str) -> PathTableState {
@@ -5613,6 +5668,7 @@ fn managed_targets_from_disk(
             build_version: None,
             battery: None,
             network_transport: None,
+            board_slug: None,
             path_table: PathTableState::Idle,
             monitor_remaining_secs: 0,
             pairing_expires_in_secs: None,
