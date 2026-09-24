@@ -56,6 +56,23 @@ impl BuildContext<'_> {
             command.env("CARGO_PROFILE_RELEASE_LTO", lto);
         }
         let linker = adapter.configure_cargo(command, self.intent)?;
+        // S140 7.3.0 leaves the T-Echo image about 192 bytes over the
+        // application region after one outliner pass. A second pass fits
+        // that board. Other nRF52840 images stay at one pass: further
+        // passes nest outlined calls and the RAK10724 then fails USB.
+        if target_id.starts_with("t-echo") {
+            let mut rustflags = command
+                .get_envs()
+                .find(|(key, _)| *key == "RUSTFLAGS")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !rustflags.is_empty() {
+                rustflags.push(' ');
+            }
+            rustflags.push_str("-C llvm-args=-machine-outliner-reruns=2");
+            command.env("RUSTFLAGS", rustflags);
+        }
         match self.intent {
             crate::BuildIntent::Firmware => Ok(FirmwareBuildCapture::Firmware),
             crate::BuildIntent::ResourceReport { .. } => {
