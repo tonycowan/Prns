@@ -171,33 +171,33 @@ impl RemoteControlPathInventory {
         }
         #[cfg(feature = "remote-control-path-table")]
         {
-        let encoded_len = self.encoded_body_len();
-        let Some(target) = body.get_mut(..encoded_len) else {
-            return Err(RemoteControlMessageWriteError::BufferTooShort);
-        };
-        let Some((count, rest)) = target.split_first_mut() else {
-            return Err(RemoteControlMessageWriteError::BufferTooShort);
-        };
-        let Ok(count_byte) = u8::try_from(self.entries.len()) else {
-            return Err(RemoteControlMessageWriteError::BufferTooShort);
-        };
-        *count = count_byte;
-        for (index, entry) in self.entries.iter().enumerate() {
-            let start = index.saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
-            let end = start.saturating_add(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
-            let Some(slot) = rest.get_mut(start..end) else {
+            let encoded_len = self.encoded_body_len();
+            let Some(target) = body.get_mut(..encoded_len) else {
                 return Err(RemoteControlMessageWriteError::BufferTooShort);
             };
-            write_entry(entry, slot)?;
-        }
-        let continuation_start = self
-            .entries
-            .len()
-            .saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
-        let Some(continuation) = rest.get_mut(continuation_start..) else {
-            return Err(RemoteControlMessageWriteError::BufferTooShort);
-        };
-        self.continuation.write_into(continuation)
+            let Some((count, rest)) = target.split_first_mut() else {
+                return Err(RemoteControlMessageWriteError::BufferTooShort);
+            };
+            let Ok(count_byte) = u8::try_from(self.entries.len()) else {
+                return Err(RemoteControlMessageWriteError::BufferTooShort);
+            };
+            *count = count_byte;
+            for (index, entry) in self.entries.iter().enumerate() {
+                let start = index.saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
+                let end = start.saturating_add(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
+                let Some(slot) = rest.get_mut(start..end) else {
+                    return Err(RemoteControlMessageWriteError::BufferTooShort);
+                };
+                write_entry(entry, slot)?;
+            }
+            let continuation_start = self
+                .entries
+                .len()
+                .saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
+            let Some(continuation) = rest.get_mut(continuation_start..) else {
+                return Err(RemoteControlMessageWriteError::BufferTooShort);
+            };
+            self.continuation.write_into(continuation)
         }
     }
 
@@ -209,39 +209,40 @@ impl RemoteControlPathInventory {
         }
         #[cfg(feature = "remote-control-path-table")]
         {
-        let Some((count, rest)) = body.split_first() else {
-            return Err(RemoteControlResponseParseError::Truncated);
-        };
-        let count = usize::from(*count);
-        if count > REMOTE_CONTROL_PATH_TABLE_CAP {
-            return Err(RemoteControlResponseParseError::Malformed);
-        }
-        let entries_len = count.saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
-        let Some((entries, continuation_bytes)) = rest.split_at_checked(entries_len) else {
-            return Err(RemoteControlResponseParseError::Truncated);
-        };
-        let mut inventory = Self::empty();
-        let mut unread = entries;
-        for _ in 0..count {
-            let entry = read_entry(&mut unread)?;
-            if inventory.push(entry).is_err() {
+            let Some((count, rest)) = body.split_first() else {
+                return Err(RemoteControlResponseParseError::Truncated);
+            };
+            let count = usize::from(*count);
+            if count > REMOTE_CONTROL_PATH_TABLE_CAP {
                 return Err(RemoteControlResponseParseError::Malformed);
             }
-        }
-        if !unread.is_empty() {
-            return Err(RemoteControlResponseParseError::Malformed);
-        }
-        let Some(continuation) = RemoteControlPathContinuation::parse(continuation_bytes) else {
-            return Err(if continuation_bytes.is_empty() {
-                RemoteControlResponseParseError::Truncated
-            } else {
-                RemoteControlResponseParseError::Malformed
-            });
-        };
-        if inventory.set_continuation(continuation).is_err() {
-            return Err(RemoteControlResponseParseError::Malformed);
-        }
-        Ok(inventory)
+            let entries_len = count.saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
+            let Some((entries, continuation_bytes)) = rest.split_at_checked(entries_len) else {
+                return Err(RemoteControlResponseParseError::Truncated);
+            };
+            let mut inventory = Self::empty();
+            let mut unread = entries;
+            for _ in 0..count {
+                let entry = read_entry(&mut unread)?;
+                if inventory.push(entry).is_err() {
+                    return Err(RemoteControlResponseParseError::Malformed);
+                }
+            }
+            if !unread.is_empty() {
+                return Err(RemoteControlResponseParseError::Malformed);
+            }
+            let Some(continuation) = RemoteControlPathContinuation::parse(continuation_bytes)
+            else {
+                return Err(if continuation_bytes.is_empty() {
+                    RemoteControlResponseParseError::Truncated
+                } else {
+                    RemoteControlResponseParseError::Malformed
+                });
+            };
+            if inventory.set_continuation(continuation).is_err() {
+                return Err(RemoteControlResponseParseError::Malformed);
+            }
+            Ok(inventory)
         }
     }
 }
