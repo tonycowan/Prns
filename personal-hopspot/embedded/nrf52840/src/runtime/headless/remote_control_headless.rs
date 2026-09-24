@@ -106,6 +106,7 @@ pub(super) fn capabilities() -> RemoteControlCapabilities {
         RemoteControlRequestKind::DescribeBuild,
         RemoteControlRequestKind::DescribeNetworkTransport,
         RemoteControlRequestKind::SetNetworkTransport,
+        RemoteControlRequestKind::InventoryPathTable,
         RemoteControlRequestKind::SetSystemPower,
         RemoteControlRequestKind::InventoryControllers,
         RemoteControlRequestKind::AuthorizeController,

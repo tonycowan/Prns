@@ -23,11 +23,9 @@ use prepared::PreparedArtifactError;
 pub(crate) use prepared::{
     PreparedEspTarget, PreparedNrfSerialDfuTarget, PreparedTarget, PreparedUf2Target,
 };
-#[cfg(test)]
-use source::cached_channel_paths;
 use source::{
-    acquire, enforce_https, immutable_manifest_url, resolve_channel, validate_version,
-    MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
+    acquire, cached_channel_paths, enforce_https, immutable_manifest_url, resolve_channel,
+    validate_version, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
 };
 
 pub(crate) struct VerifiedReleaseTarget {
@@ -240,6 +238,384 @@ pub(crate) fn verify_published_target(
             offline,
         },
     })
+}
+
+pub(crate) fn check_published_channel(
+    catalog: &BoardCatalog,
+    channel: ChannelArg,
+    board_filter: Option<&str>,
+    offline: bool,
+    reporter: Reporter,
+) -> Result<PublishedChannelCheck, AppError> {
+    if !pinned_key_is_configured() {
+        return Err(AppError::trust_signing(
+            "release key custody is not configured; release/keys/minisign.pub still contains the fail-closed marker",
+        ));
+    }
+    if let Some(slug) = board_filter {
+        let _ = find_catalog_board(catalog, slug)?;
+    }
+    let cache = cache::root()?;
+    let (version, manifest_url, expected_manifest_hash) =
+        resolve_channel(channel, offline, &cache, reporter)?;
+
+    reporter.phase(
+        Phase::ValidatingManifest,
+        board_filter,
+        &format!("Verifying signed Hopspot release {version}…"),
+    );
+    let manifest_cache = cache
+        .join("releases")
+        .join(version.as_str())
+        .join("flash-manifest.json");
+    let signature_cache = manifest_cache.with_extension("json.minisig");
+    let manifest_bytes = acquire(
+        &manifest_url,
+        &manifest_cache,
+        offline,
+        MAX_MANIFEST_BYTES,
+        &cache,
+    )?;
+    let signature_url = format!("{manifest_url}.minisig");
+    let signature_bytes = acquire(
+        &signature_url,
+        &signature_cache,
+        offline,
+        MAX_SIGNATURE_BYTES,
+        &cache,
+    )?;
+    let signature = String::from_utf8(signature_bytes).map_err(|error| {
+        AppError::trust_signing(format!("manifest signature is not UTF-8: {error}"))
+    })?;
+    verify_minisign(&manifest_bytes, &signature, PINNED_MINISIGN_PUBLIC_KEY)
+        .map_err(|error| AppError::trust_signing(error.to_string()))?;
+    if let Some(expected_hash) = expected_manifest_hash {
+        verify_hash(&manifest_bytes, expected_hash.as_str(), "flash manifest")?;
+    }
+    let manifest = ValidatedFlashManifest::from_json(&manifest_bytes, catalog)
+        .map_err(|error| AppError::trust_manifest(error.to_string()))?;
+    verify_manifest_key_id(&manifest)?;
+    if manifest.release().version() != &version {
+        return Err(AppError::trust_identity(format!(
+            "signed manifest version {:?} does not match selected release {:?}",
+            manifest.release().version().as_str(),
+            version.as_str()
+        )));
+    }
+    let expected_channel = match channel {
+        ChannelArg::Stable => ReleaseChannel::Stable,
+        ChannelArg::Preview => ReleaseChannel::Preview,
+    };
+    if manifest.release().channel() != expected_channel {
+        return Err(AppError::trust_identity(format!(
+            "signed manifest channel {:?} does not match requested channel {:?}",
+            manifest.release().channel(),
+            expected_channel
+        )));
+    }
+    if !offline {
+        cache::store_immutable(&cache, &manifest_cache, &manifest_bytes)?;
+        cache::store_immutable(&cache, &signature_cache, signature.as_bytes())?;
+    }
+
+    let release_boards: std::collections::BTreeSet<String> = manifest
+        .targets()
+        .iter()
+        .map(|target| target.board_id().as_str().to_string())
+        .collect();
+    let requested: Vec<String> = match board_filter {
+        Some(slug) => vec![slug.to_string()],
+        None => catalog
+            .shipping_boards()
+            .map(|board| board.slug.clone())
+            .collect(),
+    };
+    let boards = requested
+        .into_iter()
+        .map(|slug| PublishedBoardAvailability {
+            available: release_boards.contains(&slug),
+            slug,
+        })
+        .collect();
+    Ok(PublishedChannelCheck {
+        channel,
+        version: version.as_str().to_string(),
+        boards,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PublishedChannelCheck {
+    pub(crate) channel: ChannelArg,
+    pub(crate) version: String,
+    pub(crate) boards: Vec<PublishedBoardAvailability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PublishedBoardAvailability {
+    pub(crate) slug: String,
+    pub(crate) available: bool,
+}
+
+fn find_catalog_board<'a>(
+    catalog: &'a BoardCatalog,
+    slug: &str,
+) -> Result<&'a prns_flash_manifest::BoardCatalogEntry, AppError> {
+    catalog.board(slug).ok_or_else(|| {
+        AppError::arguments(format!(
+            "unknown board {slug:?}; run `hopspot-flash list` for supported slugs"
+        ))
+    })
+}
+
+#[cfg(test)]
+mod check_output_tests {
+    use super::{PublishedBoardAvailability, PublishedChannelCheck};
+    use crate::cli::ChannelArg;
+
+    #[test]
+    fn published_channel_check_json_matches_controller_contract() {
+        let payload = PublishedChannelCheck {
+            channel: ChannelArg::Stable,
+            version: "0.3.7".to_string(),
+            boards: vec![PublishedBoardAvailability {
+                slug: "heltec-v4-r8".to_string(),
+                available: true,
+            }],
+        };
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"channel":"stable","version":"0.3.7","boards":[{"slug":"heltec-v4-r8","available":true}]}"#
+        );
+    }
+}
+
+pub(crate) struct ExportedCandidate {
+    pub(crate) version: prns_flash_manifest::ReleaseVersion,
+    pub(crate) channel: ChannelArg,
+    pub(crate) output: PathBuf,
+    pub(crate) artifact_count: usize,
+}
+
+/// Download and verify a published board into a candidate-shaped directory for later `--candidate` flash.
+pub(crate) fn export_published_candidate(
+    catalog: &BoardCatalog,
+    board_slug: &str,
+    channel: ChannelArg,
+    version: Option<&str>,
+    offline: bool,
+    output: &Path,
+    reporter: Reporter,
+) -> Result<ExportedCandidate, AppError> {
+    let verified =
+        verify_published_target(catalog, board_slug, channel, version, offline, reporter)?;
+    let cache = cache::root()?;
+    let (channel_bytes, channel_signature) =
+        load_or_fetch_channel_descriptor(channel, offline, &cache, reporter)?;
+    let VerifiedReleaseTarget {
+        version,
+        target,
+        source,
+    } = verified;
+    let VerifiedArtifactSource::Published {
+        base,
+        cache: published_cache,
+        offline: published_offline,
+    } = source
+    else {
+        return Err(AppError::trust_identity(
+            "published export produced a non-published artifact source",
+        ));
+    };
+
+    if output.exists() {
+        fs::remove_dir_all(output).map_err(|error| {
+            AppError::host_preflight(format!(
+                "could not clear export directory {}: {error}",
+                output.display()
+            ))
+        })?;
+    }
+    fs::create_dir_all(output).map_err(|error| {
+        AppError::host_preflight(format!(
+            "could not create export directory {}: {error}",
+            output.display()
+        ))
+    })?;
+
+    fs::write(
+        output.join("minisign.pub"),
+        PINNED_MINISIGN_PUBLIC_KEY.as_bytes(),
+    )
+    .map_err(|error| AppError::host_preflight(format!("could not write minisign.pub: {error}")))?;
+    fs::write(
+        output.join("VERSION"),
+        format!("{}\n", version.as_str()).as_bytes(),
+    )
+    .map_err(|error| AppError::host_preflight(format!("could not write VERSION: {error}")))?;
+
+    let manifest_cache = published_cache
+        .join("releases")
+        .join(version.as_str())
+        .join("flash-manifest.json");
+    let manifest_bytes = fs::read(&manifest_cache).map_err(|error| {
+        AppError::trust_cache(format!(
+            "could not read cached manifest {}: {error}",
+            manifest_cache.display()
+        ))
+    })?;
+    let signature_cache = PathBuf::from(format!("{}.minisig", manifest_cache.display()));
+    let signature_bytes = fs::read(&signature_cache).map_err(|error| {
+        AppError::trust_cache(format!(
+            "could not read cached manifest signature {}: {error}",
+            signature_cache.display()
+        ))
+    })?;
+    fs::write(output.join("flash-manifest.json"), &manifest_bytes).map_err(|error| {
+        AppError::host_preflight(format!("could not write flash-manifest.json: {error}"))
+    })?;
+    fs::write(output.join("flash-manifest.json.minisig"), &signature_bytes).map_err(|error| {
+        AppError::host_preflight(format!(
+            "could not write flash-manifest.json.minisig: {error}"
+        ))
+    })?;
+
+    let channel_dir = output.join("channels");
+    fs::create_dir_all(&channel_dir).map_err(|error| {
+        AppError::host_preflight(format!("could not create channels directory: {error}"))
+    })?;
+    let channel_name = channel.as_str();
+    fs::write(
+        channel_dir.join(format!("{channel_name}.json")),
+        &channel_bytes,
+    )
+    .map_err(|error| {
+        AppError::host_preflight(format!("could not write channel descriptor: {error}"))
+    })?;
+    fs::write(
+        channel_dir.join(format!("{channel_name}.json.minisig")),
+        &channel_signature,
+    )
+    .map_err(|error| {
+        AppError::host_preflight(format!("could not write channel signature: {error}"))
+    })?;
+
+    let parts = target.parts();
+    let artifact_count = parts.len();
+    for part in parts {
+        let part_path = part.path().as_str();
+        reporter.phase(
+            Phase::Downloading,
+            Some(board_slug),
+            &format!("Acquiring {} ({} bytes)…", part_path, part.size()),
+        );
+        let part_url = base
+            .join(part_path)
+            .map_err(|error| AppError::trust_artifact(format!("invalid artifact URL: {error}")))?;
+        enforce_https(&part_url)?;
+        let file_name = Path::new(part_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                AppError::trust_artifact(format!("invalid artifact path {part_path:?}"))
+            })?;
+        let part_cache = published_cache
+            .join("releases")
+            .join(version.as_str())
+            .join(board_slug)
+            .join(file_name);
+        let limit = part
+            .size()
+            .checked_add(1)
+            .ok_or_else(|| AppError::trust_artifact("artifact size overflows download limit"))?;
+        let bytes = acquire(
+            part_url.as_str(),
+            &part_cache,
+            published_offline,
+            limit,
+            &published_cache,
+        )?;
+        if bytes.len() as u64 != part.size() {
+            return Err(AppError::trust_artifact(format!(
+                "artifact {:?} is {} bytes; signed manifest requires {}",
+                part_path,
+                bytes.len(),
+                part.size()
+            )));
+        }
+        verify_hash(&bytes, part.sha256().as_str(), part_path)?;
+        if !published_offline {
+            cache::store_immutable(&published_cache, &part_cache, &bytes)?;
+        }
+        let destination = output.join(part_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                AppError::host_preflight(format!("could not create {}: {error}", parent.display()))
+            })?;
+        }
+        fs::write(&destination, &bytes).map_err(|error| {
+            AppError::host_preflight(format!(
+                "could not write {}: {error}",
+                destination.display()
+            ))
+        })?;
+    }
+
+    reporter.phase(
+        Phase::ArtifactReady,
+        Some(board_slug),
+        &format!(
+            "Exported {} {} candidate for {board_slug} to {}",
+            channel.as_str(),
+            version.as_str(),
+            output.display()
+        ),
+    );
+
+    Ok(ExportedCandidate {
+        version,
+        channel,
+        output: output.to_path_buf(),
+        artifact_count,
+    })
+}
+
+fn load_or_fetch_channel_descriptor(
+    channel: ChannelArg,
+    offline: bool,
+    cache: &Path,
+    reporter: Reporter,
+) -> Result<(Vec<u8>, Vec<u8>), AppError> {
+    // Prefer the immutable verified channel already published into the hopspot-flash cache.
+    let directory = cache.join("channels").join(channel.as_str());
+    if directory.is_dir() {
+        if let Ok((_id, descriptor_path, signature_path)) = cached_channel_paths(cache, &directory)
+        {
+            if let (Ok(bytes), Ok(signature)) =
+                (fs::read(&descriptor_path), fs::read(&signature_path))
+            {
+                return Ok((bytes, signature));
+            }
+        }
+    }
+    // Ensure the channel is resolved (and cached) even when fetch pinned a version.
+    let _ = resolve_channel(channel, offline, cache, reporter)?;
+    let directory = cache.join("channels").join(channel.as_str());
+    let (_id, descriptor_path, signature_path) = cached_channel_paths(cache, &directory)?;
+    let bytes = fs::read(&descriptor_path).map_err(|error| {
+        AppError::trust_cache(format!(
+            "could not read channel descriptor {}: {error}",
+            descriptor_path.display()
+        ))
+    })?;
+    let signature = fs::read(&signature_path).map_err(|error| {
+        AppError::trust_cache(format!(
+            "could not read channel signature {}: {error}",
+            signature_path.display()
+        ))
+    })?;
+    Ok((bytes, signature))
 }
 
 impl VerifiedReleaseTarget {

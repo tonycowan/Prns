@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -36,12 +36,15 @@ use personal_rns::remote_control::{
     RemoteControlInterfacePeerPage, RemoteControlInterfacePeersOutcome,
     RemoteControlInterfacePower, RemoteControlLoRaOutcome, RemoteControlLoRaProfile,
     RemoteControlModeOutcome, RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome,
-    RemoteControlPairingEndpoint, RemoteControlPairingInvitationCode, RemoteControlPowerOutcome,
+    RemoteControlPairingEndpoint, RemoteControlPairingInvitationCode,
+    RemoteControlPathContinuation, RemoteControlPathEntry, RemoteControlPathPage,
+    RemoteControlPowerOutcome,
     RemoteControlRequestKind, RemoteControlRequestSet, RemoteControlRevokeControllerOutcome,
     RemoteControlSleepOutcome, RemoteControlTargetAccess, RemoteControlWifiStation,
     RemoteControlWifiStationOutcome, REMOTE_CONTROL_APPLICATION_ASPECTS,
     REMOTE_CONTROL_APPLICATION_NAME,
 };
+use personal_rns::routing::announce::{derive_destination_hash, expand_name};
 use personal_rns::routing::NextHop;
 use personal_rns::runtime::RoutingControl;
 use personal_rns::units::InstantMillis;
@@ -102,6 +105,7 @@ const CONTROL_ANNOUNCE_WAIT: Duration = Duration::from_secs(60);
 const CONNECT_AFTER_ANNOUNCE_ATTEMPTS: u8 = 2;
 const CONNECT_AFTER_ANNOUNCE_GAP: Duration = Duration::from_secs(1);
 const INVENTORY_RECOVERY_WAIT: Duration = Duration::from_secs(120);
+const PATH_TABLE_PAGE_LIMIT: usize = 64;
 const INVENTORY_RECOVERY_GAP: Duration = Duration::from_secs(2);
 const ACTIVITY_CONTROLLER_SCOPE: &str = "controller";
 const DEFAULT_TCP_TARGET: &str = "127.0.0.1:4242";
@@ -135,9 +139,18 @@ pub struct TargetAccess {
     pub build_version: Option<String>,
     pub battery: Option<String>,
     pub network_transport: Option<RemoteControlNetworkTransport>,
+    pub path_table: PathTableState,
     pub monitor_remaining_secs: u32,
     /// Remaining pairing open-window seconds for awaiting advertisements.
     pub pairing_expires_in_secs: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RememberedTargetFacts {
+    pub build_version: Option<String>,
+    pub battery: Option<String>,
+    pub network_transport: Option<RemoteControlNetworkTransport>,
+    pub path_table: PathTableState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +159,71 @@ pub struct TargetPath {
     pub via: String,
     pub interface: String,
     pub announced_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathTableRow {
+    pub destination: String,
+    pub destination_full: String,
+    pub hops: String,
+    pub via: String,
+    /// Full via transport hash when the hop is relayed. Empty for a direct hop.
+    pub via_full: String,
+    pub interface: String,
+    pub learned: String,
+    pub expires: String,
+}
+
+/// One announce observed by this controller, newest-first in [`RemoteControlBackend::announce_stream`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeardAnnounce {
+    /// Monotonic id for stable list keys while the ring buffer rotates.
+    pub seq: u64,
+    pub at: String,
+    pub destination: String,
+    pub destination_short: String,
+    pub hops: u8,
+    pub interface: String,
+    pub interface_id: String,
+    /// UTF-8 lossy app data when printable; empty when binary-only.
+    pub app_data_text: String,
+    pub app_data_hex: String,
+}
+
+const ANNOUNCE_STREAM_LIMIT: usize = 400;
+
+#[derive(Default)]
+struct AnnounceStreamState {
+    next_seq: u64,
+    entries: VecDeque<HeardAnnounce>,
+}
+
+impl AnnounceStreamState {
+    fn push(&mut self, mut entry: HeardAnnounce) {
+        self.next_seq = self.next_seq.saturating_add(1);
+        entry.seq = self.next_seq;
+        self.entries.push_front(entry);
+        while self.entries.len() > ANNOUNCE_STREAM_LIMIT {
+            self.entries.pop_back();
+        }
+    }
+
+    fn snapshot(&self) -> Vec<HeardAnnounce> {
+        self.entries.iter().cloned().collect()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum PathTableState {
+    #[default]
+    Idle,
+    Loading,
+    Ready(Vec<PathTableRow>),
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +270,8 @@ pub struct InterfaceEntry {
     pub extras: Vec<InterfaceFact>,
     pub shows_peers: bool,
     pub peers: Vec<InterfacePeer>,
+    /// True while a peer list for this card is still in flight.
+    pub peers_pending: bool,
     pub peers_error: Option<String>,
     pub arrived_at: Option<String>,
 }
@@ -317,6 +397,39 @@ impl RemoteControlBackend {
 
     pub fn is_connected(&self) -> bool {
         self.session.is_ok()
+    }
+
+    /// Newest-first announce observations heard by this controller's node.
+    pub fn announce_stream(&self) -> Vec<HeardAnnounce> {
+        let Ok(session) = self.session() else {
+            return Vec::new();
+        };
+        session
+            .announce_stream
+            .lock()
+            .map(|stream| stream.snapshot())
+            .unwrap_or_default()
+    }
+
+    /// Destination-hash → alias map used to title announces (and path-table hashes).
+    pub fn announce_destination_labels(&self) -> HashMap<String, String> {
+        let Ok(session) = self.session() else {
+            return HashMap::new();
+        };
+        known_path_node_labels(session)
+    }
+
+    /// Short destination title, with `(alias)` when the hash maps to a managed node or sibling.
+    pub fn announce_title(destination_hex: &str, labels: &HashMap<String, String>) -> String {
+        annotate_known_hash(destination_hex, labels)
+    }
+
+    pub fn clear_announce_stream(&self) {
+        if let Ok(session) = self.session() {
+            if let Ok(mut stream) = session.announce_stream.lock() {
+                stream.clear();
+            }
+        }
     }
 
     pub fn controller_identity(&self) -> Result<ControllerIdentity, BackendError> {
@@ -979,6 +1092,7 @@ impl RemoteControlBackend {
                 build_version: session.cached_build_version(&id),
                 battery: session.cached_battery(&id),
                 network_transport: session.cached_network_transport(&id),
+                path_table: session.cached_path_table(&id),
                 monitor_remaining_secs: 0,
                 pairing_expires_in_secs: None,
                 id,
@@ -1010,6 +1124,7 @@ impl RemoteControlBackend {
                 build_version: None,
                 battery: None,
                 network_transport: None,
+                path_table: PathTableState::Idle,
                 monitor_remaining_secs: 0,
                 pairing_expires_in_secs: Some(announcement.expires_in_secs),
                 id: announcement.id,
@@ -1237,6 +1352,21 @@ impl RemoteControlBackend {
         target_id: &str,
         wait: RemoteControlAnnounceWait,
     ) -> Result<Vec<InterfaceEntry>, BackendError> {
+        self.interfaces_after_announce_reporting(target_id, wait, &mut |_| {})
+            .await
+    }
+
+    /// Same inventory as [`Self::interfaces_after_announce`], reporting each piece
+    /// as soon as that call returns so the UI can render it.
+    pub async fn interfaces_after_announce_reporting<F>(
+        &self,
+        target_id: &str,
+        wait: RemoteControlAnnounceWait,
+        report: &mut F,
+    ) -> Result<Vec<InterfaceEntry>, BackendError>
+    where
+        F: FnMut(&[InterfaceEntry]),
+    {
         if !self.is_monitoring_target(target_id) {
             return Err(not_monitoring(target_id));
         }
@@ -1275,7 +1405,7 @@ impl RemoteControlBackend {
             } else {
                 let _ = self.request_control_path(target_id).await;
             }
-            match self.inventory_after_announce(target_id).await {
+            match self.inventory_after_announce(target_id, report).await {
                 Ok(entries) => return Ok(entries),
                 Err(error) => {
                     eprintln!("connect to target {target_id} failed: {error}");
@@ -1828,6 +1958,33 @@ impl RemoteControlBackend {
         });
     }
 
+    pub async fn local_path_table(&self) -> Result<Vec<PathTableRow>, BackendError> {
+        let session = self.session()?;
+        let mut routes = NodeIntrospection::routes(&session.handle).await;
+        routes.sort_by(|left, right| {
+            left.destination
+                .as_bytes()
+                .cmp(right.destination.as_bytes())
+        });
+        let labels = known_path_node_labels(session);
+        Ok(routes
+            .into_iter()
+            .map(|snapshot| {
+                path_table_row(
+                    &RemoteControlPathEntry::new(
+                        snapshot.destination,
+                        snapshot.hops,
+                        snapshot.via,
+                        snapshot.interface,
+                        snapshot.learned_at.0,
+                        snapshot.expires_at.0,
+                    ),
+                    &labels,
+                )
+            })
+            .collect())
+    }
+
     pub fn local_interfaces(&self) -> Result<Vec<InterfaceEntry>, BackendError> {
         let mut items = self.local_interfaces_without_reconcile()?;
         self.reconcile_peer_aliases_from_entries(&items);
@@ -2346,6 +2503,36 @@ impl RemoteControlBackend {
         env!("CARGO_PKG_VERSION").to_owned()
     }
 
+    pub fn remembered_target_facts(&self, target_id: &str) -> RememberedTargetFacts {
+        let Ok(session) = self.session() else {
+            return RememberedTargetFacts::default();
+        };
+        RememberedTargetFacts {
+            build_version: session.cached_build_version(target_id),
+            battery: session.cached_battery(target_id),
+            network_transport: session.cached_network_transport(target_id),
+            path_table: session.cached_path_table(target_id),
+        }
+    }
+
+    pub fn mark_path_table_loading(&self, target_id: &str) {
+        if let Ok(session) = self.session() {
+            session.remember_path_table(target_id, PathTableState::Loading);
+        }
+    }
+
+    pub fn fail_path_table_if_loading(&self, target_id: &str, detail: String) {
+        let Ok(session) = self.session() else {
+            return;
+        };
+        if matches!(
+            session.cached_path_table(target_id),
+            PathTableState::Loading
+        ) {
+            session.remember_path_table(target_id, PathTableState::Failed(detail));
+        }
+    }
+
     pub fn local_network_transport(&self) -> RemoteControlNetworkTransport {
         self.session()
             .map(|session| session.local_network_transport())
@@ -2386,6 +2573,22 @@ impl RemoteControlBackend {
         self.session()?
             .remember_network_transport(target_id, transport);
         Ok(transport)
+    }
+
+    /// Re-read a monitored target's path table without refreshing the full interface inventory.
+    pub async fn refresh_target_path_table(
+        &self,
+        target_id: &str,
+    ) -> Result<Vec<PathTableRow>, BackendError> {
+        let remote = self.connect_target(target_id).await?;
+        eprintln!("inventory path table on {target_id}");
+        let result = self.read_path_table(&remote).await;
+        remote.close();
+        let rows = result?;
+        let session = self.session()?;
+        session.remember_path_table(target_id, PathTableState::Ready(rows.clone()));
+        session.mark_reachable(target_id, TargetStatus::Online);
+        Ok(rows)
     }
 
     pub async fn set_network_transport(
@@ -2538,7 +2741,12 @@ impl RemoteControlBackend {
         baseline: Option<InstantMillis>,
         deadline: Instant,
     ) -> Result<(), BackendError> {
-        let _ = self.request_control_path(target_id).await;
+        // Connect's probe already requested this path. Ask again only when that
+        // route does not yet satisfy the wait.
+        let heard = self.control_announce_learned_at(target_id).await?;
+        if !control_announce_satisfies(heard, wait, baseline) {
+            let _ = self.request_control_path(target_id).await;
+        }
         loop {
             let heard = self.control_announce_learned_at(target_id).await?;
             if control_announce_satisfies(heard, wait, baseline) {
@@ -2651,13 +2859,17 @@ impl RemoteControlBackend {
             .map(|route| route.learned_at))
     }
 
-    async fn inventory_after_announce(
+    async fn inventory_after_announce<F>(
         &self,
         target_id: &str,
-    ) -> Result<Vec<InterfaceEntry>, BackendError> {
+        report: &mut F,
+    ) -> Result<Vec<InterfaceEntry>, BackendError>
+    where
+        F: FnMut(&[InterfaceEntry]),
+    {
         let mut last_error = None;
         for attempt in 0..CONNECT_AFTER_ANNOUNCE_ATTEMPTS {
-            match self.inventory_connected_target(target_id).await {
+            match self.inventory_connected_target(target_id, report).await {
                 Ok(entries) => return Ok(entries),
                 Err(error) => {
                     last_error = Some(error);
@@ -2670,10 +2882,14 @@ impl RemoteControlBackend {
         Err(last_error.unwrap_or_else(|| operation("inventory target interfaces", "unknown error")))
     }
 
-    async fn inventory_connected_target(
+    async fn inventory_connected_target<F>(
         &self,
         target_id: &str,
-    ) -> Result<Vec<InterfaceEntry>, BackendError> {
+        report: &mut F,
+    ) -> Result<Vec<InterfaceEntry>, BackendError>
+    where
+        F: FnMut(&[InterfaceEntry]),
+    {
         let remote = self.connect_target(target_id).await?;
         eprintln!("inventory interfaces request to {target_id}");
         let (inventory, _) = remote
@@ -2689,8 +2905,11 @@ impl RemoteControlBackend {
             .filter(|(_, entry)| operator_interface_kind(entry.kind))
             .map(|(_, entry)| remote_interface_entry(entry, None))
             .collect::<Vec<_>>();
-        for item in items.iter_mut() {
-            fetch_interface_config(&remote, item).await;
+        let ble_prefix = self.remote_bluetooth_auto_prefix(target_id).await;
+        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
+        for index in 0..items.len() {
+            fetch_interface_config(&remote, &mut items[index]).await;
+            self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         }
         if let Ok((version, _)) = remote.describe_build().await {
             if let Some(text) = version.as_str().filter(|text| !text.is_empty()) {
@@ -2698,6 +2917,7 @@ impl RemoteControlBackend {
                     .remember_build_version(target_id, text.to_owned());
             }
         }
+        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         if let Ok((snapshot, _)) = remote.describe_power().await {
             self.session()?.mark_battery_fetched(target_id);
             let label = format_managed_node_battery(snapshot).or(Some("unknown".to_string()));
@@ -2713,6 +2933,48 @@ impl RemoteControlBackend {
         } else {
             eprintln!("inventory describe_power {target_id} failed");
         }
+        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
+        for index in 0..items.len() {
+            if !items[index].shows_peers {
+                continue;
+            }
+            let Ok(id) = parse_hex::<INTERFACE_ID_BYTES>(&items[index].id) else {
+                items[index].peers_pending = false;
+                self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
+                continue;
+            };
+            match fetch_interface_peers(&remote, InterfaceId::new(id)).await {
+                Ok(peers) => {
+                    items[index].peers = peers;
+                    items[index].peers_error = None;
+                    items[index].peers_pending = false;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "inventory peers for {} on {target_id} failed: {error}",
+                        items[index].kind
+                    );
+                    items[index].peers_error = Some(error);
+                    items[index].peers_pending = false;
+                }
+            }
+            self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
+        }
+        match self.read_path_table(&remote).await {
+            Ok(rows) => {
+                if let Ok(session) = self.session() {
+                    session.remember_path_table(target_id, PathTableState::Ready(rows));
+                }
+            }
+            Err(error) => {
+                eprintln!("inventory path table {target_id} failed: {error}");
+                if let Ok(session) = self.session() {
+                    session
+                        .remember_path_table(target_id, PathTableState::Failed(error.to_string()));
+                }
+            }
+        }
+        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         match remote.describe_network_transport().await {
             Ok((transport, _)) => {
                 self.session()?
@@ -2722,56 +2984,80 @@ impl RemoteControlBackend {
                 eprintln!("inventory describe_network_transport {target_id} failed: {error:?}");
             }
         }
-        for item in items.iter_mut() {
-            if !item.shows_peers {
-                continue;
-            }
-            let Ok(id) = parse_hex::<INTERFACE_ID_BYTES>(&item.id) else {
-                continue;
-            };
-            match fetch_interface_peers(&remote, InterfaceId::new(id)).await {
-                Ok(peers) => {
-                    item.peers = peers;
-                    item.peers_error = None;
-                }
-                Err(error) => {
-                    eprintln!(
-                        "inventory peers for {} on {target_id} failed: {error}",
-                        item.kind
-                    );
-                    item.peers_error = Some(error);
-                }
-            }
-        }
         remote.close();
-        let ble_prefix = self.remote_bluetooth_auto_prefix(target_id).await;
-        for item in items.iter_mut() {
-            apply_bluetooth_auto_identity_title(item, ble_prefix.as_deref());
-        }
-        self.note_target_interface_identities(target_id, &items);
-        let aliases = self
-            .session()?
-            .peer_aliases
-            .lock()
-            .expect("peer aliases mutex poisoned")
-            .clone();
-        for item in items.iter_mut() {
-            apply_peer_aliases(&mut item.peers, &aliases);
-        }
-        self.reconcile_peer_aliases_from_entries(&items);
-        // Re-apply after reconcile so newly filled aliases show immediately.
-        let aliases = self
-            .session()?
-            .peer_aliases
-            .lock()
-            .expect("peer aliases mutex poisoned")
-            .clone();
-        for item in items.iter_mut() {
-            apply_peer_aliases(&mut item.peers, &aliases);
-        }
-        self.session()?.stamp_activity(target_id, &mut items);
-        stamp_interface_arrivals(&mut items);
+        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         Ok(items)
+    }
+
+    async fn read_path_table(
+        &self,
+        remote: &RemoteControlTargetHandle<'_>,
+    ) -> Result<Vec<PathTableRow>, BackendError> {
+        let labels = {
+            let session = self.session()?;
+            known_path_node_labels(session)
+        };
+        let mut page = RemoteControlPathPage::First;
+        let mut rows = Vec::new();
+        for _ in 0..PATH_TABLE_PAGE_LIMIT {
+            let (inventory, _) = remote
+                .inventory_path_table_page(page)
+                .await
+                .map_err(|error| operation("read path table", error))?;
+            for entry in inventory.entries() {
+                rows.push(path_table_row(entry, &labels));
+            }
+            match inventory.continuation() {
+                RemoteControlPathContinuation::Complete => return Ok(rows),
+                RemoteControlPathContinuation::More(cursor) => {
+                    if matches!(page, RemoteControlPathPage::After(previous) if previous == cursor)
+                    {
+                        return Ok(rows);
+                    }
+                    page = RemoteControlPathPage::After(cursor);
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    fn present_inventory<F>(
+        &self,
+        target_id: &str,
+        items: &mut [InterfaceEntry],
+        ble_prefix: Option<&str>,
+        report: &mut F,
+    ) where
+        F: FnMut(&[InterfaceEntry]),
+    {
+        for item in items.iter_mut() {
+            apply_bluetooth_auto_identity_title(item, ble_prefix);
+            if item.arrived_at.is_none() {
+                stamp_interface_arrival(item);
+            }
+        }
+        self.note_target_interface_identities(target_id, items);
+        if let Ok(session) = self.session() {
+            let aliases = session
+                .peer_aliases
+                .lock()
+                .expect("peer aliases mutex poisoned")
+                .clone();
+            for item in items.iter_mut() {
+                apply_peer_aliases(&mut item.peers, &aliases);
+            }
+            self.reconcile_peer_aliases_from_entries(items);
+            let aliases = session
+                .peer_aliases
+                .lock()
+                .expect("peer aliases mutex poisoned")
+                .clone();
+            for item in items.iter_mut() {
+                apply_peer_aliases(&mut item.peers, &aliases);
+            }
+            session.stamp_activity(target_id, items);
+        }
+        report(items);
     }
 
     pub fn refresh_local_interface(
@@ -2814,6 +3100,7 @@ impl RemoteControlBackend {
                 Ok(peers) => {
                     item.peers = peers;
                     item.peers_error = None;
+                    item.peers_pending = false;
                 }
                 Err(error) => {
                     eprintln!(
@@ -2821,6 +3108,7 @@ impl RemoteControlBackend {
                         item.kind
                     );
                     item.peers_error = Some(error);
+                    item.peers_pending = false;
                 }
             }
         }
@@ -3412,7 +3700,9 @@ struct ControllerSession {
     batteries: Mutex<HashMap<String, String>>,
     battery_fetched_at: Mutex<HashMap<String, Instant>>,
     network_transports: Mutex<HashMap<String, RemoteControlNetworkTransport>>,
+    path_tables: Mutex<HashMap<String, PathTableState>>,
     local_transport: Mutex<RemoteControlNetworkTransport>,
+    announce_stream: Arc<Mutex<AnnounceStreamState>>,
     clone: Arc<Mutex<IdentityCloneShared>>,
     roster: Arc<Mutex<RosterShared>>,
     ble_identity: BleIdentity,
@@ -3667,6 +3957,8 @@ impl ControllerSession {
             RemoteControlInitialControllerGrants::Nobody,
             RemoteControlSelfAnnouncement::Unavailable,
         );
+        let announce_stream = Arc::new(Mutex::new(AnnounceStreamState::default()));
+        let announce_stream_events = announce_stream.clone();
         let pairing = Arc::new(Mutex::new(PairingEvents::load(
             data_dir.join(TARGET_NAMES_FILE),
         )));
@@ -3793,6 +4085,7 @@ impl ControllerSession {
         let sibling_aliases = Mutex::new(sibling_aliases_map);
         let sibling_wifi_ll = Mutex::new(sibling_wifi_ll_map);
         let pairing_events = pairing.clone();
+        let announce_stream_for_events = announce_stream_events;
         let node = PrnsNode::new(PrnsNodeRecipe {
             transport_identity: None,
             remote_control,
@@ -3844,6 +4137,14 @@ impl ControllerSession {
                     source_interface,
                     app_data,
                 }) => {
+                    if let Ok(mut stream) = announce_stream_for_events.lock() {
+                        stream.push(heard_announce_entry(
+                            destination,
+                            hops,
+                            source_interface,
+                            app_data,
+                        ));
+                    }
                     if let Ok(mut shared) = roster_events.lock() {
                         for sibling in &shared.replica.siblings.clone() {
                             if Some(destination)
@@ -4130,7 +4431,9 @@ impl ControllerSession {
             batteries: Mutex::new(HashMap::new()),
             battery_fetched_at: Mutex::new(HashMap::new()),
             network_transports: Mutex::new(HashMap::new()),
+            path_tables: Mutex::new(HashMap::new()),
             local_transport: Mutex::new(RemoteControlNetworkTransport::Enabled),
+            announce_stream,
             clone,
             roster,
             ble_identity,
@@ -4175,6 +4478,22 @@ impl ControllerSession {
 
     fn cached_network_transport(&self, target_id: &str) -> Option<RemoteControlNetworkTransport> {
         self.network_transports.lock().ok()?.get(target_id).copied()
+    }
+
+    fn cached_path_table(&self, target_id: &str) -> PathTableState {
+        self.path_tables
+            .lock()
+            .expect("path tables mutex poisoned")
+            .get(target_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn remember_path_table(&self, target_id: &str, state: PathTableState) {
+        self.path_tables
+            .lock()
+            .expect("path tables mutex poisoned")
+            .insert(target_id.to_owned(), state);
     }
 
     fn remember_network_transport(
@@ -5295,6 +5614,7 @@ fn managed_targets_from_disk(
             build_version: None,
             battery: None,
             network_transport: None,
+            path_table: PathTableState::Idle,
             monitor_remaining_secs: 0,
             pairing_expires_in_secs: None,
             id,
@@ -5634,6 +5954,7 @@ fn local_interface_entry(
         extras,
         shows_peers: kind.is_some_and(|kind| kind.member_kind().is_some()) || !peers.is_empty(),
         peers,
+        peers_pending: false,
         peers_error: None,
         arrived_at: Some(format_wall_clock_now()),
     }
@@ -5800,6 +6121,7 @@ fn remote_interface_entry(
         extras,
         shows_peers: entry.kind.member_kind().is_some() || !peers.is_empty(),
         peers,
+        peers_pending: entry.kind.member_kind().is_some(),
         peers_error: None,
         arrived_at: Some(format_wall_clock_now()),
     }
@@ -6113,9 +6435,6 @@ fn bluetooth_auto_title(identity: BleIdentity) -> String {
     format!("bluetooth-auto {}", appearance_prefix(id))
 }
 
-/// A managed node's BLE peer id is `BluetoothPeer` keyed by the peer's `BleIdentity`.
-/// That is the same id this Controller uses for its own radio, shown as `P` plus the
-/// first two hash bytes in the peer subtitle.
 fn peer_is_auto_gateway(peer: &InterfacePeer) -> bool {
     peer.role == PeerPath::TcpOutbound.role() && peer.name.starts_with("TCP out : ")
 }
@@ -6136,6 +6455,9 @@ fn peer_is_this_controller_wifi(link_locals: &HashSet<String>, peer_id: &str) ->
     })
 }
 
+/// A managed node's BLE peer id is `BluetoothPeer` keyed by the peer's `BleIdentity`.
+/// That is the same id this Controller uses for its own radio, shown as `P` plus the
+/// first two hash bytes in the peer subtitle.
 fn peer_is_this_controller_bluetooth(identity: BleIdentity, peer_id: &str) -> bool {
     let peer_id = peer_id.trim();
     if peer_id.is_empty() {
@@ -7309,6 +7631,192 @@ fn control_announce_satisfies(
     }
 }
 
+/// Names a path-table hash can be tied to: this controller, a sibling, or a managed node.
+fn known_path_node_labels(session: &ControllerSession) -> HashMap<String, String> {
+    let instance = session.controller_identity.instance_hash.clone();
+    let operator = session.controller_identity.operator_hash.clone();
+    let mut nodes = Vec::new();
+    nodes.push((instance.clone(), THIS_CONTROLLER_PEER_ALIAS.to_string()));
+    if !operator.eq_ignore_ascii_case(&instance) {
+        nodes.push((operator, THIS_CONTROLLER_PEER_ALIAS.to_string()));
+    }
+
+    let sibling_aliases = match session.sibling_aliases.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => HashMap::new(),
+    };
+    let sibling_hashes = session
+        .roster
+        .lock()
+        .ok()
+        .map(|roster| {
+            roster
+                .replica
+                .siblings
+                .iter()
+                .map(|keys| encode_hex(keys.identity_hash().as_bytes()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut sibling_names = sibling_aliases;
+    for hash in &sibling_hashes {
+        if !sibling_alias_is_syncable(hash, &instance) {
+            continue;
+        }
+        if sibling_names
+            .get(hash)
+            .map(|name| name.trim().is_empty())
+            .unwrap_or(true)
+        {
+            let next = next_sibling_alias(&sibling_names);
+            sibling_names.insert(hash.clone(), next);
+        }
+        if let Some(alias) = stored_alias(sibling_names.get(hash).map(String::as_str)) {
+            nodes.push((hash.clone(), alias));
+        }
+    }
+
+    let target_aliases = match session.target_aliases.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => HashMap::new(),
+    };
+    let target_names = session
+        .pairing
+        .lock()
+        .ok()
+        .map(|pairing| pairing.target_names.clone())
+        .unwrap_or_default();
+    let replica_targets = session
+        .roster
+        .lock()
+        .ok()
+        .map(|roster| {
+            replica_known_targets(&roster.replica)
+                .into_iter()
+                .map(|hash| encode_hex(hash.as_bytes()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut target_ids = target_aliases
+        .keys()
+        .cloned()
+        .chain(target_names.keys().cloned())
+        .chain(replica_targets)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    target_ids.sort();
+    for id in target_ids {
+        let alias = stored_alias(target_aliases.get(&id).map(String::as_str))
+            .or_else(|| stored_alias(target_names.get(&id).map(String::as_str)));
+        if let Some(alias) = alias {
+            nodes.push((id, alias));
+        }
+    }
+
+    let manager_aliases = match session.manager_aliases.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => HashMap::new(),
+    };
+    let mut manager_ids = manager_aliases.keys().cloned().collect::<Vec<_>>();
+    manager_ids.sort();
+    for id in manager_ids {
+        if let Some(alias) = stored_alias(manager_aliases.get(&id).map(String::as_str)) {
+            nodes.push((id, alias));
+        }
+    }
+
+    label_known_nodes(nodes)
+}
+
+fn label_known_nodes(nodes: Vec<(String, String)>) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    for (identity_hex, alias) in nodes {
+        remember_known_node(&mut labels, &identity_hex, &alias);
+    }
+    labels
+}
+
+/// Index an identity and the destinations that identity announces, so a path-table
+/// hash can be named without replacing the hash.
+fn remember_known_node(labels: &mut HashMap<String, String>, identity_hex: &str, alias: &str) {
+    let Some(alias) = stored_alias(Some(alias)) else {
+        return;
+    };
+    let Ok(bytes) = parse_hex::<IDENTITY_HASH_BYTES>(identity_hex.trim()) else {
+        return;
+    };
+    let identity = IdentityHash::new(bytes);
+    insert_known_label(labels, identity_hex, &alias);
+    for (app_name, aspects) in KNOWN_NODE_DESTINATIONS {
+        let Ok(name) = expand_name(app_name, aspects) else {
+            continue;
+        };
+        let destination = derive_destination_hash(&identity, &name);
+        insert_known_label(labels, &encode_hex(destination.as_bytes()), &alias);
+    }
+}
+
+fn insert_known_label(labels: &mut HashMap<String, String>, hash: &str, alias: &str) {
+    labels
+        .entry(hash.trim().to_ascii_lowercase())
+        .or_insert_with(|| alias.to_string());
+}
+
+/// App names whose destination hash is derived from a node identity and can show up
+/// in another node's path table. Order does not matter; the first alias wins.
+const KNOWN_NODE_DESTINATIONS: &[(&str, &[&str])] = &[
+    (
+        REMOTE_CONTROL_APPLICATION_NAME,
+        REMOTE_CONTROL_APPLICATION_ASPECTS,
+    ),
+    (ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS),
+    (IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_ASPECTS),
+    ("lxmf", &["delivery"]),
+    ("nomadnetwork", &["node"]),
+    ("rnstransport", &["probe"]),
+    ("rnstransport", &["remote", "management"]),
+];
+
+fn annotate_known_hash(full_hex: &str, labels: &HashMap<String, String>) -> String {
+    let short = short_id(full_hex);
+    match labels.get(&full_hex.trim().to_ascii_lowercase()) {
+        Some(alias) => format!("{short} ({alias})"),
+        None => short.to_string(),
+    }
+}
+
+fn format_path_via(via: NextHop, labels: &HashMap<String, String>) -> (String, String) {
+    match via {
+        NextHop::Direct => ("direct".to_string(), String::new()),
+        NextHop::Via(transport) => {
+            let full = encode_hex(transport.as_bytes());
+            (format!("via {}", annotate_known_hash(&full, labels)), full)
+        }
+    }
+}
+
+fn path_table_row(
+    entry: &RemoteControlPathEntry,
+    labels: &HashMap<String, String>,
+) -> PathTableRow {
+    let destination_full = encode_hex(entry.destination().as_bytes());
+    let (via, via_full) = format_path_via(entry.via(), labels);
+    PathTableRow {
+        destination: annotate_known_hash(&destination_full, labels),
+        destination_full,
+        hops: format_hop_count(entry.hops()),
+        via,
+        via_full,
+        interface: format!(
+            "{} {}",
+            format_interface(entry.interface()),
+            appearance_prefix(entry.interface())
+        ),
+        learned: format_announce_millis(entry.learned_at()),
+        expires: format_announce_millis(entry.expires_at()),
+    }
+}
 fn path_from_route(
     route: &RouteSnapshot,
     peer_aliases: &HashMap<String, String>,
@@ -7393,6 +7901,47 @@ fn via_hop_label(
 
 fn format_interface(interface: InterfaceId) -> String {
     route_interface_kind(interface).name().to_string()
+}
+
+fn heard_announce_entry(
+    destination: DestinationHash,
+    hops: u8,
+    source_interface: InterfaceId,
+    app_data: &[u8],
+) -> HeardAnnounce {
+    let destination_full = encode_hex(destination.as_bytes());
+    let interface_id = encode_hex(source_interface.as_bytes());
+    let (app_data_text, app_data_hex) = format_announce_app_data(app_data);
+    HeardAnnounce {
+        seq: 0,
+        at: format_wall_clock_now(),
+        destination_short: short_id(&destination_full).to_string(),
+        destination: destination_full,
+        hops,
+        interface: format_interface(source_interface),
+        interface_id,
+        app_data_text,
+        app_data_hex,
+    }
+}
+
+fn format_announce_app_data(bytes: &[u8]) -> (String, String) {
+    let hex = encode_hex(bytes);
+    if bytes.is_empty() {
+        return (String::new(), hex);
+    }
+    let lossy = String::from_utf8_lossy(bytes);
+    let trimmed = lossy.trim();
+    let printable = !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'));
+    let text = if printable {
+        trimmed.to_string()
+    } else {
+        String::new()
+    };
+    (text, hex)
 }
 
 /// USB Auto host ids are a `[0xD0; 8]` cookie, not `kind ++ hash`, so
@@ -7553,25 +8102,26 @@ fn utc_date_time(seconds: u64) -> (i32, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        appearance_prefix, apply_bluetooth_auto_identity_title, apply_peer_aliases,
-        apply_remote_card, attach_auto_wifi_local_addresses, attach_our_side_of_the_link,
-        attach_usb_link_peer, auto_wifi_peer_list_note, bluetooth_auto_name_prefix,
-        bluetooth_auto_peer_list_note, bluetooth_auto_prefix_from_direct_peer,
-        bluetooth_auto_title, clone_announce_is_usb_local, control_announce_satisfies,
-        controller_identity_secret_path, encode_hex, endpoint_matches_wifi_ll_keys,
-        format_activity_age, format_announce_millis, format_connect_label, format_hop_count,
-        format_interface, format_managed_node_battery, format_next_hop, format_pairing_open_label,
-        format_target_announce, format_target_route, format_utc_millis,
-        generic_bluetooth_auto_title, instance_identity_secret_path, interface_peer,
-        interface_peer_from_wire, interface_power_from_connection, inventory_recovery_continues,
-        labeled_local_peer, load_persisted_tcp_target, local_interface_config,
-        local_interface_entry, managed_targets_from_disk, monitor_remaining_at,
-        normalize_stored_wifi_ll, operator_interface_kind, operator_local_kind,
-        parse_invitation_code, parse_target_names, parse_tcp_dial_target, path_is_better_than,
-        path_is_direct_ble, peer_is_auto_gateway, peer_is_this_controller_bluetooth,
-        peer_is_this_controller_wifi, peer_label, persist_tcp_target, radio_facts,
-        remote_interface_entry, render_target_names, resolve_controller_tcp_target,
-        resolve_paired_target_hash, route_interface_kind, should_forget_control_route,
+        annotate_known_hash, appearance_prefix, apply_bluetooth_auto_identity_title,
+        apply_peer_aliases, apply_remote_card, attach_auto_wifi_local_addresses,
+        attach_our_side_of_the_link, attach_usb_link_peer, auto_wifi_peer_list_note,
+        bluetooth_auto_name_prefix, bluetooth_auto_peer_list_note,
+        bluetooth_auto_prefix_from_direct_peer, bluetooth_auto_title, clone_announce_is_usb_local,
+        control_announce_satisfies, controller_identity_secret_path, encode_hex,
+        endpoint_matches_wifi_ll_keys, format_activity_age, format_announce_millis,
+        format_connect_label, format_hop_count, format_interface, format_managed_node_battery,
+        format_next_hop, format_pairing_open_label, format_target_announce, format_target_route,
+        format_utc_millis, generic_bluetooth_auto_title, instance_identity_secret_path,
+        interface_peer, interface_peer_from_wire, interface_power_from_connection,
+        inventory_recovery_continues, label_known_nodes, labeled_local_peer,
+        load_persisted_tcp_target, local_interface_config, local_interface_entry,
+        managed_targets_from_disk, monitor_remaining_at, normalize_stored_wifi_ll,
+        operator_interface_kind, operator_local_kind, parse_invitation_code, parse_target_names,
+        parse_tcp_dial_target, path_is_better_than, path_is_direct_ble, path_table_row,
+        peer_is_auto_gateway, peer_is_this_controller_bluetooth, peer_is_this_controller_wifi,
+        peer_label, persist_tcp_target, radio_facts, remember_known_node, remote_interface_entry,
+        render_target_names, resolve_controller_tcp_target, resolve_paired_target_hash,
+        route_interface_kind, short_id, should_forget_control_route,
         should_wait_for_control_announce, stored_alias, target_label, BackendError, InterfaceEntry,
         InterfaceFact, InterfacePower, PeerHealth, RemoteControlAnnounceWait, TargetPath,
         TargetStatus, CONTROLLER_IDENTITY_FILE, DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE,
@@ -7586,9 +8136,11 @@ mod tests {
     };
     use personal_rns::remote_control::{
         RemoteControlInterfaceCard, RemoteControlInterfaceEntry, RemoteControlInterfacePeer,
+        RemoteControlPathEntry,
     };
     use personal_rns::routing::NextHop;
     use personal_rns::units::InstantMillis;
+    use personal_rns::wire::DestinationHash;
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -9049,6 +9601,79 @@ mod tests {
     }
 
     #[test]
+    fn path_table_appends_a_known_node_alias_after_the_hash() {
+        let identity = [
+            0x0c, 0x6a, 0x2a, 0xd8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa,
+            0xbb, 0xcc,
+        ];
+        let identity_hex = encode_hex(&identity);
+        let mut labels = HashMap::new();
+        remember_known_node(&mut labels, &identity_hex, "This controller");
+        assert_eq!(
+            annotate_known_hash(&identity_hex, &labels),
+            "0c6a2ad8 (This controller)"
+        );
+        let remote_control = labels
+            .keys()
+            .find(|hash| hash.as_str() != identity_hex)
+            .expect("derived destinations are indexed");
+        assert_eq!(
+            annotate_known_hash(remote_control, &labels),
+            format!("{} (This controller)", short_id(remote_control))
+        );
+        remember_known_node(&mut labels, &identity_hex, "Sibling 1");
+        assert_eq!(
+            labels.get(&identity_hex).map(String::as_str),
+            Some("This controller")
+        );
+        assert_eq!(
+            annotate_known_hash(&encode_hex(&[0xab; 16]), &labels),
+            "abababab"
+        );
+
+        let ordered = label_known_nodes(vec![
+            (identity_hex.clone(), "This controller".to_string()),
+            (identity_hex.clone(), "Heltec LoRa 32 V4".to_string()),
+        ]);
+        assert_eq!(
+            ordered.get(&identity_hex).map(String::as_str),
+            Some("This controller")
+        );
+
+        let interface = InterfaceId::from_channel_tag(InterfaceKind::LoRa, b"lora");
+        let known = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new(identity),
+                2,
+                NextHop::Via(personal_rns::TransportId::new(identity)),
+                interface,
+                0,
+                0,
+            ),
+            &labels,
+        );
+        assert_eq!(known.destination, "0c6a2ad8 (This controller)");
+        assert_eq!(known.destination_full, identity_hex);
+        assert_eq!(known.via, "via 0c6a2ad8 (This controller)");
+        assert_eq!(known.via_full, identity_hex);
+
+        let direct = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0x38, 0x31, 0x7e, 0x86, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                1,
+                NextHop::Direct,
+                interface,
+                0,
+                0,
+            ),
+            &labels,
+        );
+        assert_eq!(direct.destination, "38317e86");
+        assert_eq!(direct.via, "direct");
+        assert!(direct.via_full.is_empty());
+    }
+
+    #[test]
     fn bluetooth_auto_name_prefix_matches_peer_appearance() {
         let peer = InterfaceId::from_channel_tag(InterfaceKind::BluetoothPeer, b"hv4c-ble-id");
         let prefix = appearance_prefix(peer);
@@ -9166,6 +9791,7 @@ mod tests {
             extras: Vec::new(),
             shows_peers: false,
             peers: Vec::new(),
+            peers_pending: false,
             peers_error: None,
             arrived_at: None,
         }

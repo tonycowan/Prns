@@ -29,7 +29,10 @@ use build::{
 use cli::{CacheCommand, ChannelArg, Cli, CommandMode, WifiMode};
 use error::AppError;
 use events::{Phase, Reporter};
-use release::{verify_candidate_target, verify_published_target, PreparedTarget};
+use release::{
+    check_published_channel, export_published_candidate, verify_candidate_target,
+    verify_published_target, PreparedTarget,
+};
 use wifi::WifiOptions;
 
 fn main() -> ExitCode {
@@ -108,6 +111,76 @@ fn run(cli: Cli, reporter: Reporter) -> Result<(), AppError> {
                 imported.artifact_count,
                 imported.artifact_bytes
             ));
+            Ok(())
+        }
+        Some(CommandMode::Fetch {
+            board,
+            channel,
+            version,
+            output,
+            offline,
+            json: _,
+        }) => {
+            let board = find_board(&catalog, &board)?;
+            esp::begin_cancellable_operation()?;
+            let output = match output {
+                Some(path) => path,
+                None => std::env::temp_dir().join(format!(
+                    "hopspot-fetch-{}-{}",
+                    board.slug,
+                    std::process::id()
+                )),
+            };
+            let exported = export_published_candidate(
+                &catalog,
+                &board.slug,
+                channel,
+                version.as_deref(),
+                offline,
+                &output,
+                reporter,
+            )?;
+            reporter.operation_success(&format!(
+                "Fetched {} {} for {} ({} artifacts) into {}.",
+                exported.channel.as_str(),
+                exported.version.as_str(),
+                board.slug,
+                exported.artifact_count,
+                exported.output.display()
+            ));
+            Ok(())
+        }
+        Some(CommandMode::Check {
+            board,
+            channel,
+            offline,
+            json,
+        }) => {
+            let check_reporter = if json { Reporter::quiet() } else { reporter };
+            let checked = check_published_channel(
+                &catalog,
+                channel,
+                board.as_deref(),
+                offline,
+                check_reporter,
+            )?;
+            if json {
+                println!("{}", json_line(&checked)?);
+            } else {
+                ui::print_section("Published release");
+                ui::print_key_value("channel", checked.channel.as_str());
+                ui::print_key_value("version", &checked.version);
+                for board in &checked.boards {
+                    ui::print_key_value(
+                        &board.slug,
+                        if board.available {
+                            "available"
+                        } else {
+                            "missing from release"
+                        },
+                    );
+                }
+            }
             Ok(())
         }
         Some(CommandMode::Build {

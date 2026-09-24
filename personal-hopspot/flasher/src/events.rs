@@ -101,6 +101,7 @@ struct Event<'a> {
 enum OutputMode {
     Human,
     JsonLines,
+    Quiet,
 }
 
 #[derive(Clone, Copy)]
@@ -121,9 +122,16 @@ impl Reporter {
         }
     }
 
+    /// Suppress phase/progress lines (used by `check --json` for a single summary document).
+    pub(crate) const fn quiet() -> Self {
+        Self {
+            output_mode: OutputMode::Quiet,
+        }
+    }
+
     pub(crate) fn phase(self, phase: Phase, board: Option<&str>, message: &str) {
-        if matches!(self.output_mode, OutputMode::JsonLines) {
-            self.emit(Event {
+        match self.output_mode {
+            OutputMode::JsonLines => self.emit(Event {
                 schema: 1,
                 event: EventKind::Phase,
                 phase,
@@ -132,15 +140,15 @@ impl Reporter {
                 total: None,
                 message: Some(message),
                 error_code: None,
-            });
-        } else {
-            println!("{message}");
+            }),
+            OutputMode::Human => println!("{message}"),
+            OutputMode::Quiet => {}
         }
     }
 
     pub(crate) fn progress(self, phase: Phase, board: Option<&str>, current: u64, total: u64) {
-        if matches!(self.output_mode, OutputMode::JsonLines) {
-            self.emit(Event {
+        match self.output_mode {
+            OutputMode::JsonLines => self.emit(Event {
                 schema: 1,
                 event: EventKind::Progress,
                 phase,
@@ -149,13 +157,17 @@ impl Reporter {
                 total: Some(total),
                 message: None,
                 error_code: None,
-            });
-        } else if let Some(percent) = current.saturating_mul(100).checked_div(total) {
-            print!("\r  {phase:<18} {percent:>3}%");
-            let _ = io::stdout().flush();
-            if current >= total {
-                println!();
+            }),
+            OutputMode::Human => {
+                if let Some(percent) = current.saturating_mul(100).checked_div(total) {
+                    print!("\r  {phase:<18} {percent:>3}%");
+                    let _ = io::stdout().flush();
+                    if current >= total {
+                        println!();
+                    }
+                }
             }
+            OutputMode::Quiet => {}
         }
     }
 
@@ -174,8 +186,8 @@ impl Reporter {
     }
 
     fn emit_success(self, board: Option<&str>, message: &str) {
-        if matches!(self.output_mode, OutputMode::JsonLines) {
-            self.emit(Event {
+        match self.output_mode {
+            OutputMode::JsonLines => self.emit(Event {
                 schema: 1,
                 event: EventKind::Success,
                 phase: Phase::Complete,
@@ -184,15 +196,15 @@ impl Reporter {
                 total: None,
                 message: Some(message),
                 error_code: None,
-            });
-        } else {
-            println!("{message}");
+            }),
+            OutputMode::Human => println!("{message}"),
+            OutputMode::Quiet => {}
         }
     }
 
     pub(crate) fn error(self, error: &AppError) {
-        if matches!(self.output_mode, OutputMode::JsonLines) {
-            self.emit(Event {
+        match self.output_mode {
+            OutputMode::JsonLines => self.emit(Event {
                 schema: 1,
                 event: EventKind::Error,
                 phase: Phase::Failed,
@@ -201,10 +213,11 @@ impl Reporter {
                 total: None,
                 message: Some(&error.to_string()),
                 error_code: Some(error.error_code()),
-            });
-        } else {
-            eprintln!("error: {error}");
-            eprintln!("recovery: {}", error.recovery());
+            }),
+            OutputMode::Human | OutputMode::Quiet => {
+                eprintln!("error: {error}");
+                eprintln!("recovery: {}", error.recovery());
+            }
         }
     }
 

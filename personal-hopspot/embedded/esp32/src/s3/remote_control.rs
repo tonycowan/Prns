@@ -171,6 +171,7 @@ pub(super) fn capabilities<B: Esp32S3Board>() -> RemoteControlCapabilities {
         RemoteControlRequestKind::DescribePower,
         RemoteControlRequestKind::DescribeNetworkTransport,
         RemoteControlRequestKind::SetNetworkTransport,
+        RemoteControlRequestKind::InventoryPathTable,
         RemoteControlRequestKind::SetSystemPower,
         RemoteControlRequestKind::SetStationUplink,
         RemoteControlRequestKind::SetEspRadioMode,

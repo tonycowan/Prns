@@ -118,6 +118,41 @@ pub(crate) enum CommandMode {
         #[arg(long, value_name = "OFFSET", hide = true, requires = "rc_vault")]
         rc_vault_offset: Option<String>,
     },
+    /// Download and verify published firmware into a candidate-shaped directory (no device write).
+    Fetch {
+        /// Stable board slug.
+        board: String,
+        /// Signed release channel.
+        #[arg(long, value_enum, default_value_t = ChannelArg::Stable)]
+        channel: ChannelArg,
+        /// Immutable release version; bypasses channel resolution.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Destination directory for the candidate-shaped tree.
+        #[arg(long, value_name = "DIR")]
+        output: Option<PathBuf>,
+        /// Use only a previously verified local cache.
+        #[arg(long)]
+        offline: bool,
+        /// Emit newline-delimited schema-1 events.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resolve the signed channel and report the published version (no firmware download).
+    Check {
+        /// Optional board slug; when set, report availability for that board only.
+        #[arg(long, value_name = "BOARD")]
+        board: Option<String>,
+        /// Signed release channel.
+        #[arg(long, value_enum, default_value_t = ChannelArg::Stable)]
+        channel: ChannelArg,
+        /// Use only a previously verified local cache.
+        #[arg(long)]
+        offline: bool,
+        /// Emit one JSON document with channel, version, and board availability.
+        #[arg(long)]
+        json: bool,
+    },
     /// Build sparse developer artifacts for one board.
     #[command(hide = true)]
     Build {
@@ -168,6 +203,8 @@ impl Cli {
             Some(CommandMode::List { json })
             | Some(CommandMode::Doctor { json, .. })
             | Some(CommandMode::Flash { json, .. })
+            | Some(CommandMode::Fetch { json, .. })
+            | Some(CommandMode::Check { json, .. })
             | Some(CommandMode::Cache {
                 command: CacheCommand::Import { json, .. },
             }) => *json,
@@ -176,7 +213,8 @@ impl Cli {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ChannelArg {
     #[default]
     Stable,
@@ -281,6 +319,64 @@ mod tests {
             "--json",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn fetch_accepts_channel_output_and_json() {
+        let cli = Cli::try_parse_from([
+            "hopspot-flash",
+            "fetch",
+            "heltec-v4-r8",
+            "--channel",
+            "stable",
+            "--output",
+            "/tmp/fetched-candidate",
+            "--json",
+        ])
+        .expect("fetch parses");
+        let Some(CommandMode::Fetch {
+            board,
+            channel,
+            output,
+            json,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected Fetch");
+        };
+        assert_eq!(board, "heltec-v4-r8");
+        assert_eq!(channel.as_str(), "stable");
+        assert_eq!(
+            output.as_deref(),
+            Some(std::path::Path::new("/tmp/fetched-candidate"))
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn check_accepts_channel_board_and_json() {
+        let cli = Cli::try_parse_from([
+            "hopspot-flash",
+            "check",
+            "--channel",
+            "stable",
+            "--board",
+            "heltec-v4-r8",
+            "--json",
+        ])
+        .expect("check parses");
+        let Some(CommandMode::Check {
+            board,
+            channel,
+            json,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected Check");
+        };
+        assert_eq!(board.as_deref(), Some("heltec-v4-r8"));
+        assert_eq!(channel.as_str(), "stable");
+        assert!(json);
     }
 
     #[test]

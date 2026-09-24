@@ -6,8 +6,8 @@ use crate::backend::{
     auto_wifi_peer_list_note, bluetooth_auto_peer_list_note, format_activity_age,
     format_connect_label, format_pairing_open_label, format_target_route, format_wall_clock_now,
     interface_mode_label, radio_facts, target_label, BackendError, ControllerIdentity,
-    InterfaceEntry, InterfacePower, PairingState, PathProbeReason, RemoteControlAnnounceWait,
-    RemoteControlBackend, TargetAccess, TargetStatus,
+    HeardAnnounce, InterfaceEntry, InterfacePower, PairingState, PathProbeReason, PathTableState,
+    RemoteControlAnnounceWait, RemoteControlBackend, TargetAccess, TargetStatus,
 };
 use crate::edits::{
     apply_draft_to_entry, apply_lora_preset, apply_lora_region, can_edit_group, can_edit_lora,
@@ -38,6 +38,8 @@ use personal_rns::remote_control::RemoteControlNetworkTransport;
 
 const CONTROLLER_SCOPE: &str = "controller";
 const ACTIVITY_LOG_LIMIT: usize = 80;
+const PATH_TABLE_COLLAPSED_ROWS: usize = 5;
+const PATH_TABLE_EXPANDED_ROWS: usize = 10;
 
 const STYLES: &str = r#"
 :root { font-family: Inter, system-ui, sans-serif; color: #17221b; background: #edf2ed; }
@@ -229,6 +231,20 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .activity-log li { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: start; font-size: 13px; }
 .activity-log time { color: #52705c; font-variant-numeric: tabular-nums; }
 .activity-log p { margin: 0; }
+.announce-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 14px; }
+.announce-toolbar label { flex: 1 1 220px; display: grid; gap: 6px; margin: 0; font-size: 13px; font-weight: 600; color: #52705c; }
+.announce-toolbar input { width: 100%; height: 34px; margin: 0; border: 1px solid #bfcac2; border-radius: 7px; padding: 0 10px; background: #fbfdfb; }
+.announce-toolbar .button { flex: 0 0 auto; }
+.announce-meta { margin: 0 0 12px; font-size: 13px; color: #5a6a60; }
+.announce-stream { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.announce-stream li { border: 1px solid #d7e0d9; border-radius: 8px; padding: 12px 14px; background: #fbfdfb; display: grid; gap: 8px; }
+.announce-stream .announce-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; justify-content: space-between; }
+.announce-stream time { color: #52705c; font-variant-numeric: tabular-nums; font-size: 12px; }
+.announce-stream .announce-dest { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; color: #183d2b; overflow-wrap: anywhere; }
+.announce-stream .announce-facts { display: grid; gap: 4px; margin: 0; }
+.announce-stream .announce-facts div { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: 8px; font-size: 13px; }
+.announce-stream .announce-facts dt { color: #52705c; font-weight: 600; }
+.announce-stream .announce-facts dd { margin: 0; overflow-wrap: anywhere; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 .accordion { display: grid; gap: 10px; }
 .accordion-item { background: white; border: 1px solid #d7e0d9; border-radius: 8px; box-shadow: 0 2px 8px rgba(24, 61, 43, .05); }
 .accordion-item.awaiting { border-style: dashed; }
@@ -261,6 +277,25 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .hash-row .twisty-address { flex: 1; min-width: 0; }
 .hash-row .status { margin-left: 0; }
 .whitelist-table { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 10px; align-items: center; width: 100%; min-width: 0; }
+.path-title { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.path-title h2, .path-title h3 { margin: 0; }
+.path-twisty { border: 0; background: transparent; padding: 0; width: 24px; height: 24px; flex: 0 0 auto; display: grid; place-items: center; color: #5a6a60; }
+.path-twisty:hover { color: #183d2b; }
+.path-scroll {
+  --path-line: 22px;
+  --path-gap: 4px;
+  --path-bar: 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+  height: calc(var(--path-line) + (var(--path-rows) * var(--path-line)) + (var(--path-rows) * var(--path-gap)) + var(--path-bar));
+}
+.path-scroll.can-scroll-y { overflow-y: auto; }
+.path-table { display: grid; grid-template-columns: repeat(6, max-content); column-gap: 16px; row-gap: var(--path-gap); width: max-content; padding-right: 8px; }
+.path-table-head, .path-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; height: var(--path-line); line-height: var(--path-line); }
+.path-table-head span, .path-row span { white-space: nowrap; }
+.path-table-head { position: sticky; top: 0; z-index: 1; background: white; font-size: 11px; font-weight: 700; color: #5a6a60; }
+.path-row { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: #17221b; }
 .whitelist-table.can-remove { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
 .whitelist-head { color: #52705c; font-size: 12px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .whitelist-hash { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: transparent; padding: 0; text-align: left; color: #17221b; font: inherit; font-variant-numeric: tabular-nums; }
@@ -337,6 +372,7 @@ enum Screen {
     Nodes,
     Flash,
     Settings,
+    Announces,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -417,6 +453,7 @@ pub fn App() -> Element {
     });
     let mut interfaces_by_target = use_signal(HashMap::<String, LoadedInterfaces>::new);
     let mut expanded_targets = use_signal(HashSet::<String>::new);
+    let expanded_path_tables = use_signal(HashSet::<String>::new);
     let expanded_interfaces = use_signal(HashSet::<String>::new);
     let drafts = use_signal(HashMap::<String, InterfaceDraft>::new);
     let mut editing = use_signal(HashSet::<String>::new);
@@ -446,6 +483,11 @@ pub fn App() -> Element {
     let flashing = use_signal(|| false);
     let flash_progress = use_signal(|| None::<FlashProgress>);
     let mut clone_view = use_signal(|| backend().identity_clone().ok());
+    let mut controller_path_table = use_signal(|| PathTableState::Loading);
+    let mut announce_stream = use_signal(Vec::<HeardAnnounce>::new);
+    let mut announce_labels = use_signal(HashMap::<String, String>::new);
+    let announce_filter = use_signal(String::new);
+    let announces_info = use_signal(|| false);
 
     use_effect(move || {
         let backend = backend();
@@ -470,6 +512,22 @@ pub fn App() -> Element {
                             LoadedInterfaces::Failed(error.to_string()),
                         );
                     }
+                }
+                match backend.local_path_table().await {
+                    Ok(rows) => controller_path_table.set(PathTableState::Ready(rows)),
+                    Err(error) => {
+                        controller_path_table.set(PathTableState::Failed(error.to_string()))
+                    }
+                }
+                let next_announces = backend.announce_stream();
+                if next_announces != announce_stream() {
+                    announce_stream.set(next_announces);
+                }
+                // Labels are refreshed separately so a slow/contended alias map cannot
+                // block or empty the announce ring-buffer poll.
+                let next_labels = backend.announce_destination_labels();
+                if next_labels != announce_labels() {
+                    announce_labels.set(next_labels);
                 }
                 let _ = backend.advance_clone().await;
                 if let Ok(view) = backend.identity_clone() {
@@ -520,6 +578,7 @@ pub fn App() -> Element {
                         expanded_targets.write().retain(|id| live_ids.contains(id));
                         // Build / battery come from Connect or explicit refresh only.
                         adopt_missing_aliases(target_aliases, backend.target_aliases());
+                        adopt_missing_aliases(peer_aliases, backend.peer_aliases());
                         adopt_missing_aliases(peer_aliases, backend.peer_aliases());
                         targets.set(items);
                     }
@@ -595,6 +654,26 @@ pub fn App() -> Element {
                             }
                         }
                     }
+                    button {
+                        class: if screen() == Screen::Announces { "active" } else { "" },
+                        title: "Announces",
+                        aria_label: "Announces",
+                        onclick: move |_| {
+                            request_screen(
+                                Screen::Announces,
+                                screen,
+                                drafts,
+                                interfaces_by_target,
+                                unsaved,
+                            );
+                        },
+                        svg {
+                            view_box: "0 0 24 24",
+                            path { d: "M4 10v4h3l5 4V6L7 10H4z" }
+                            path { d: "M15.5 8.5a4 4 0 0 1 0 7" }
+                            path { d: "M17.5 6a7 7 0 0 1 0 12" }
+                        }
+                    }
                 }
                 h1 { "PRNS Controller" }
                 div { class: "app-bar-spacer", aria_hidden: "true" }
@@ -620,6 +699,15 @@ pub fn App() -> Element {
                             flash_info,
                         }
                     },
+                    Screen::Announces => rsx! {
+                        AnnouncesSection {
+                            backend,
+                            announce_stream,
+                            announce_labels,
+                            announce_filter,
+                            announces_info,
+                        }
+                    },
                     Screen::Settings => rsx! {
                         div { class: "heading-row",
                             h1 { "Settings" }
@@ -629,7 +717,7 @@ pub fn App() -> Element {
                             }
                         }
                         div { class: "section-intro",
-                            p { class: "lead", "This app runs its own Personal Reticulum (PRNS) node. Use the interfaces below to reach targets directly (1 hop) for pairing, or generally (any number of hops) to manage them." }
+                            p { class: "lead", "This app runs its own Personal Reticulum (PRNS) node. The path table lists destinations this controller has a route to. Use the interfaces below to reach targets directly (1 hop) for pairing, or generally (any number of hops) to manage them." }
                             if settings_info() {
                                 p { class: "note info-note", "to come" }
                             }
@@ -638,6 +726,33 @@ pub fn App() -> Element {
                             ControllerConfigurationPanel {
                                 backend,
                                 activity_log,
+                            }
+                        }
+                        section { class: "card",
+                            div { class: "heading-row",
+                                div { class: "path-title",
+                                    if path_table_expands(&controller_path_table()) {
+                                        PathTableTwisty {
+                                            id: CONTROLLER_SCOPE.to_string(),
+                                            expanded_path_tables,
+                                        }
+                                    }
+                                    h2 { "Path table" }
+                                }
+                                RefreshButton {
+                                    label: "Refresh path table".to_string(),
+                                    on_refresh: move |_| {
+                                        refresh_controller_path_table(
+                                            backend(),
+                                            controller_path_table,
+                                        );
+                                    },
+                                }
+                            }
+                            p { class: "note", "Destinations this controller has heard. A managed node that is announcing shows up here." }
+                            PathTableBody {
+                                state: controller_path_table(),
+                                expanded: expanded_path_tables().contains(CONTROLLER_SCOPE),
                             }
                         }
                         section { class: "card",
@@ -678,6 +793,7 @@ pub fn App() -> Element {
                                 expanded_targets,
                                 screen,
                                 interfaces_by_target,
+                                targets,
                                 backend,
                                 activity_log,
                                 peer_aliases,
@@ -925,6 +1041,7 @@ pub fn App() -> Element {
                                                                         InterfaceHost::Target(target_id.clone()),
                                                                         backend(),
                                                                         interfaces_by_target,
+                                                                        targets,
                                                                         pairing(),
                                                                     );
                                                                 }
@@ -996,6 +1113,44 @@ pub fn App() -> Element {
                                                                 }
                                                                 hr { class: "whitelist-rule" }
                                                                 div { class: "target-section",
+                                                                    div { class: "heading-row",
+                                                                        div { class: "path-title",
+                                                                            if path_table_expands(&target.path_table) {
+                                                                                PathTableTwisty {
+                                                                                    id: target.id.clone(),
+                                                                                    expanded_path_tables,
+                                                                                }
+                                                                            }
+                                                                            h3 { class: "target-section-title", "Path table" }
+                                                                        }
+                                                                        RefreshButton {
+                                                                            label: format!(
+                                                                                "Refresh path table on {}",
+                                                                                target_aliases()
+                                                                                    .get(&target.id)
+                                                                                    .cloned()
+                                                                                    .filter(|name| !name.trim().is_empty())
+                                                                                    .unwrap_or_else(|| target_display_name(&target))
+                                                                            ),
+                                                                            on_refresh: {
+                                                                                let target_id = target.id.clone();
+                                                                                move |_| {
+                                                                                    refresh_target_path_table(
+                                                                                        backend(),
+                                                                                        target_id.clone(),
+                                                                                        targets,
+                                                                                    );
+                                                                                }
+                                                                            },
+                                                                        }
+                                                                    }
+                                                                    PathTableBody {
+                                                                        state: target.path_table.clone(),
+                                                                        expanded: expanded_path_tables().contains(&target.id),
+                                                                    }
+                                                                }
+                                                                hr { class: "whitelist-rule" }
+                                                                div { class: "target-section",
                                                                     div { class: "interface-list-head",
                                                                         h3 { class: "target-section-title", "Interfaces" }
                                                                         if let Some(arrived_at) = arrived_at {
@@ -1015,6 +1170,7 @@ pub fn App() -> Element {
                                                                         expanded_targets,
                                                                         screen,
                                                                         interfaces_by_target,
+                                                                        targets,
                                                                         backend,
                                                                         activity_log,
                                                                         peer_aliases,
@@ -1497,12 +1653,13 @@ fn ControllerTargetActions(
                         }
                         connect_remaining.set(backend.monitor_remaining_secs(&target));
                         if !pairing_in_progress(&pairing()) {
-                            // Inventory (build / transport / power / peers) runs only here
-                            // and on explicit refresh — not on the roster UI tick.
+                            // Inventory reports each piece as it arrives. Build, battery,
+                            // interfaces, and peers paint before the transport query finishes.
                             load_interfaces_for_target(
                                 backend,
                                 target,
                                 interfaces_by_target,
+                                targets,
                                 true,
                                 RemoteControlAnnounceWait::UntilRefreshed,
                             );
@@ -2146,6 +2303,7 @@ fn InterfaceAccordion(
     mut expanded_targets: Signal<HashSet<String>>,
     mut screen: Signal<Screen>,
     mut interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    mut targets: Signal<Vec<TargetAccess>>,
     backend: Signal<RemoteControlBackend>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
     peer_aliases: Signal<HashMap<String, String>>,
@@ -2175,6 +2333,7 @@ fn InterfaceAccordion(
                                 backend(),
                                 target,
                                 interfaces_by_target,
+                                targets,
                                 true,
                                 RemoteControlAnnounceWait::UntilHeard,
                             ),
@@ -2202,6 +2361,7 @@ fn InterfaceAccordion(
                                 host.clone(),
                                 backend(),
                                 interfaces_by_target,
+                                targets,
                                 pairing(),
                             );
                         }
@@ -2442,6 +2602,8 @@ fn InterfaceAccordion(
                                                         }
                                                         if let Some(error) = entry.peers_error.as_ref() {
                                                             p { class: "note", "Could not load peers: {error}" }
+                                                        } else if entry.peers_pending {
+                                                            p { class: "note", "Loading peers…" }
                                                         } else if entry.peers.is_empty() {
                                                             p { class: "note", "No peers on this interface." }
                                                         } else {
@@ -3152,6 +3314,7 @@ fn PairingPanel(
                                                             backend.clone(),
                                                             paired.id.clone(),
                                                             interfaces_by_target,
+                                                            targets,
                                                             true,
                                                             RemoteControlAnnounceWait::UntilHeard,
                                                         );
@@ -3419,6 +3582,7 @@ fn refresh_host_interfaces(
     host: InterfaceHost,
     backend: RemoteControlBackend,
     interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    targets: Signal<Vec<TargetAccess>>,
     pairing: PairingState,
 ) {
     match host {
@@ -3433,11 +3597,327 @@ fn refresh_host_interfaces(
                 backend,
                 target,
                 interfaces_by_target,
+                targets,
                 true,
                 RemoteControlAnnounceWait::UntilHeard,
             );
         }
     }
+}
+
+fn path_table_expands(state: &PathTableState) -> bool {
+    match state {
+        PathTableState::Ready(rows) => rows.len() > PATH_TABLE_COLLAPSED_ROWS,
+        PathTableState::Idle | PathTableState::Loading | PathTableState::Failed(_) => false,
+    }
+}
+
+fn path_table_visible_rows(count: usize, expanded: bool) -> usize {
+    let cap = if expanded {
+        PATH_TABLE_EXPANDED_ROWS
+    } else {
+        PATH_TABLE_COLLAPSED_ROWS
+    };
+    count.min(cap)
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn AnnouncesSection(
+    backend: Signal<RemoteControlBackend>,
+    mut announce_stream: Signal<Vec<HeardAnnounce>>,
+    announce_labels: Signal<HashMap<String, String>>,
+    mut announce_filter: Signal<String>,
+    announces_info: Signal<bool>,
+) -> Element {
+    let filter = announce_filter();
+    let entries = announce_stream();
+    let labels = announce_labels();
+    let visible = filtered_announces(&entries, &filter, &labels);
+    let total = entries.len();
+    let shown = visible.len();
+    let summary = if total == 0 {
+        "No announces heard yet.".to_string()
+    } else if filter.trim().is_empty() {
+        format!(
+            "{total} announce{}, newest first.",
+            if total == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("Showing {shown} of {total}.")
+    };
+    rsx! {
+        div { class: "heading-row",
+            h1 { "Announces" }
+            div { class: "heading-actions",
+                InfoHint {
+                    label: "About announces".to_string(),
+                    open: announces_info,
+                }
+            }
+        }
+        div { class: "section-intro",
+            p { class: "lead", "Live stream of announces this controller hears on its interfaces. Newest first." }
+            if announces_info() {
+                p { class: "note info-note",
+                    "Each row is one AnnounceHeard diagnostic: destination hash, hop count, ingress interface, and announce app data (UTF-8 when printable, otherwise hex). The filter matches any of those fields, including managed-node and sibling aliases. Clearing the list only drops this app's ring buffer; the mesh keeps announcing."
+                }
+            }
+        }
+        section { class: "card",
+            div { class: "announce-toolbar",
+                label {
+                    "Filter"
+                    input {
+                        r#type: "search",
+                        placeholder: "destination, alias, interface, hops, app data…",
+                        value: "{filter}",
+                        oninput: move |event| announce_filter.set(event.value()),
+                    }
+                }
+                button {
+                    class: "button",
+                    r#type: "button",
+                    disabled: total == 0,
+                    onclick: move |_| {
+                        backend().clear_announce_stream();
+                        announce_stream.write().clear();
+                    },
+                    "Clear"
+                }
+            }
+            p { class: "announce-meta", "{summary}" }
+            if shown == 0 && total > 0 {
+                p { class: "note", "No announces match this filter." }
+            } else if shown > 0 {
+                ul { class: "announce-stream",
+                    for entry in visible.into_iter() {
+                        {
+                            let title = RemoteControlBackend::announce_title(
+                                &entry.destination,
+                                &labels,
+                            );
+                            rsx! {
+                                li {
+                                    key: "{entry.seq}",
+                                    div { class: "announce-head",
+                                        span {
+                                            class: "announce-dest",
+                                            title: "{entry.destination}",
+                                            "{title}"
+                                        }
+                                        time { "{entry.at}" }
+                                    }
+                                    dl { class: "announce-facts",
+                                        div {
+                                            dt { "Destination" }
+                                            dd { "{entry.destination}" }
+                                        }
+                                        div {
+                                            dt { "Hops" }
+                                            dd { "{entry.hops}" }
+                                        }
+                                        div {
+                                            dt { "Interface" }
+                                            dd { title: "{entry.interface_id}", "{entry.interface}" }
+                                        }
+                                        if !entry.app_data_text.is_empty() {
+                                            div {
+                                                dt { "App data" }
+                                                dd { "{entry.app_data_text}" }
+                                            }
+                                        }
+                                        if !entry.app_data_hex.is_empty() {
+                                            div {
+                                                dt { if entry.app_data_text.is_empty() { "App data" } else { "Hex" } }
+                                                dd { "{entry.app_data_hex}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn filtered_announces<'a>(
+    entries: &'a [HeardAnnounce],
+    filter: &str,
+    labels: &HashMap<String, String>,
+) -> Vec<&'a HeardAnnounce> {
+    let needle = filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return entries.iter().collect();
+    }
+    entries
+        .iter()
+        .filter(|entry| announce_matches(entry, &needle, labels))
+        .collect()
+}
+
+fn announce_matches(
+    entry: &HeardAnnounce,
+    needle: &str,
+    labels: &HashMap<String, String>,
+) -> bool {
+    let title = RemoteControlBackend::announce_title(&entry.destination, labels);
+    let contains = |field: &str| field.to_ascii_lowercase().contains(needle);
+    contains(&title)
+        || contains(&entry.destination)
+        || contains(&entry.destination_short)
+        || contains(&entry.interface)
+        || contains(&entry.interface_id)
+        || contains(&entry.app_data_text)
+        || contains(&entry.app_data_hex)
+        || contains(&entry.at)
+        || contains(&entry.hops.to_string())
+}
+
+#[component]
+fn PathTableTwisty(id: String, mut expanded_path_tables: Signal<HashSet<String>>) -> Element {
+    let open = expanded_path_tables().contains(&id);
+    rsx! {
+        button {
+            class: "path-twisty",
+            r#type: "button",
+            aria_expanded: if open { "true" } else { "false" },
+            aria_label: if open { "Show five paths" } else { "Show ten paths" },
+            onclick: {
+                let id = id.clone();
+                move |_| {
+                    let mut next = expanded_path_tables();
+                    if !next.remove(&id) {
+                        next.insert(id.clone());
+                    }
+                    expanded_path_tables.set(next);
+                }
+            },
+            span { class: if open { "twisty open" } else { "twisty" }, aria_hidden: "true" }
+        }
+    }
+}
+
+#[component]
+fn PathTableBody(state: PathTableState, expanded: bool) -> Element {
+    match state {
+        PathTableState::Idle => rsx! { p { class: "note", "Waiting for a path table." } },
+        PathTableState::Loading => rsx! { p { class: "note", "Loading…" } },
+        PathTableState::Failed(message) => rsx! { p { class: "error", "{message}" } },
+        PathTableState::Ready(rows) if rows.is_empty() => rsx! { p { class: "note", "No paths." } },
+        PathTableState::Ready(rows) => {
+            let visible = path_table_visible_rows(rows.len(), expanded);
+            let scroll_y = expanded && rows.len() > PATH_TABLE_EXPANDED_ROWS;
+            rsx! {
+                div {
+                    class: if scroll_y { "path-scroll can-scroll-y" } else { "path-scroll" },
+                    style: "--path-rows: {visible}",
+                    div { class: "path-table",
+                        div { class: "path-table-head",
+                            span { "Destination" }
+                            span { "Hops" }
+                            span { "Via" }
+                            span { "Interface" }
+                            span { "Learned" }
+                            span { "Expires" }
+                        }
+                        for row in rows.iter() {
+                            div { class: "path-row", key: "{row.destination_full}",
+                                span { title: "{row.destination_full}", "{row.destination}" }
+                                span { "{row.hops}" }
+                                span { title: "{row.via_full}", "{row.via}" }
+                                span { "{row.interface}" }
+                                span { "{row.learned}" }
+                                span { "{row.expires}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn refresh_controller_path_table(
+    backend: RemoteControlBackend,
+    mut path_table: Signal<PathTableState>,
+) {
+    path_table.set(PathTableState::Loading);
+    spawn(async move {
+        match backend.local_path_table().await {
+            Ok(rows) => path_table.set(PathTableState::Ready(rows)),
+            Err(error) => path_table.set(PathTableState::Failed(error.to_string())),
+        }
+    });
+}
+
+fn refresh_target_path_table(
+    backend: RemoteControlBackend,
+    target_id: String,
+    mut targets: Signal<Vec<TargetAccess>>,
+) {
+    if !backend.is_connected() {
+        targets
+            .write()
+            .iter_mut()
+            .filter(|item| item.id == target_id)
+            .for_each(|item| {
+                item.path_table = PathTableState::Failed(
+                    "The controller node is not running.".to_string(),
+                );
+            });
+        return;
+    }
+    if !backend.is_monitoring_target(&target_id) {
+        targets
+            .write()
+            .iter_mut()
+            .filter(|item| item.id == target_id)
+            .for_each(|item| {
+                item.path_table = PathTableState::Failed(
+                    "Connect to this node before refreshing its path table.".to_string(),
+                );
+            });
+        return;
+    }
+    backend.mark_path_table_loading(&target_id);
+    targets
+        .write()
+        .iter_mut()
+        .filter(|item| item.id == target_id)
+        .for_each(|item| {
+            item.path_table = PathTableState::Loading;
+        });
+    spawn(async move {
+        match backend.refresh_target_path_table(&target_id).await {
+            Ok(rows) => {
+                targets
+                    .write()
+                    .iter_mut()
+                    .filter(|item| item.id == target_id)
+                    .for_each(|item| {
+                        item.path_table = PathTableState::Ready(rows.clone());
+                    });
+            }
+            Err(error) => {
+                backend.fail_path_table_if_loading(
+                    &target_id,
+                    format!("Path table refresh failed: {error}"),
+                );
+                let path_table = backend.remembered_target_facts(&target_id).path_table;
+                targets
+                    .write()
+                    .iter_mut()
+                    .filter(|item| item.id == target_id)
+                    .for_each(|item| {
+                        item.path_table = path_table.clone();
+                    });
+            }
+        }
+    });
 }
 
 fn load_controller_interfaces(
@@ -3459,10 +3939,45 @@ fn load_controller_interfaces(
     }
 }
 
+fn publish_target_inventory(
+    backend: &RemoteControlBackend,
+    target_id: &str,
+    entries: &[InterfaceEntry],
+    interfaces_by_target: &mut Signal<HashMap<String, LoadedInterfaces>>,
+    targets: &mut Signal<Vec<TargetAccess>>,
+) {
+    {
+        let mut loaded = interfaces_by_target.write();
+        match loaded.get_mut(target_id) {
+            Some(LoadedInterfaces::Ready { entries: slot, .. }) => {
+                *slot = entries.to_vec();
+            }
+            _ => {
+                loaded.insert(
+                    target_id.to_string(),
+                    LoadedInterfaces::ready(entries.to_vec()),
+                );
+            }
+        }
+    }
+    let facts = backend.remembered_target_facts(target_id);
+    targets
+        .write()
+        .iter_mut()
+        .filter(|item| item.id == target_id)
+        .for_each(|item| {
+            item.build_version = facts.build_version.clone();
+            item.battery = facts.battery.clone();
+            item.network_transport = facts.network_transport;
+            item.path_table = facts.path_table.clone();
+        });
+}
+
 fn load_interfaces_for_target(
     backend: RemoteControlBackend,
     target_id: String,
     mut interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    mut targets: Signal<Vec<TargetAccess>>,
     force: bool,
     wait: RemoteControlAnnounceWait,
 ) {
@@ -3488,18 +4003,54 @@ fn load_interfaces_for_target(
             .write()
             .insert(target_id.clone(), LoadedInterfaces::Loading);
     }
+    backend.mark_path_table_loading(&target_id);
+    {
+        let path_table = backend.remembered_target_facts(&target_id).path_table;
+        targets
+            .write()
+            .iter_mut()
+            .filter(|item| item.id == target_id)
+            .for_each(|item| {
+                item.path_table = path_table.clone();
+            });
+    }
     spawn(async move {
-        match backend.interfaces_after_announce(&target_id, wait).await {
-            Ok(items) => {
-                interfaces_by_target
-                    .write()
-                    .insert(target_id, LoadedInterfaces::ready(items));
-            }
+        let mut report = |entries: &[InterfaceEntry]| {
+            publish_target_inventory(
+                &backend,
+                &target_id,
+                entries,
+                &mut interfaces_by_target,
+                &mut targets,
+            );
+        };
+        match backend
+            .interfaces_after_announce_reporting(&target_id, wait, &mut report)
+            .await
+        {
+            Ok(_) => {}
             Err(error) => {
-                interfaces_by_target.write().insert(
-                    target_id,
-                    LoadedInterfaces::Failed(format!("Interface refresh failed: {error}")),
+                backend.fail_path_table_if_loading(
+                    &target_id,
+                    format!("Path table refresh failed: {error}"),
                 );
+                let path_table = backend.remembered_target_facts(&target_id).path_table;
+                targets
+                    .write()
+                    .iter_mut()
+                    .filter(|item| item.id == target_id)
+                    .for_each(|item| {
+                        item.path_table = path_table.clone();
+                    });
+                let shown = interfaces_by_target()
+                    .get(&target_id)
+                    .is_some_and(|loaded| matches!(loaded, LoadedInterfaces::Ready { .. }));
+                if !shown {
+                    interfaces_by_target.write().insert(
+                        target_id,
+                        LoadedInterfaces::Failed(format!("Interface refresh failed: {error}")),
+                    );
+                }
             }
         }
     });
@@ -3857,6 +4408,7 @@ fn FlashSection(
                                                                         screen,
                                                                         drafts,
                                                                         interfaces_by_target,
+                                                                        targets,
                                                                         unsaved,
                                                                         selected_target,
                                                                         expanded_targets,
@@ -4597,6 +5149,7 @@ fn open_enrolled_flash_target(
     screen: Signal<Screen>,
     drafts: Signal<HashMap<String, InterfaceDraft>>,
     interfaces_by_target: Signal<HashMap<String, LoadedInterfaces>>,
+    targets: Signal<Vec<TargetAccess>>,
     unsaved: Signal<Option<UnsavedPrompt>>,
     mut selected_target: Signal<String>,
     mut expanded_targets: Signal<HashSet<String>>,
@@ -4607,6 +5160,7 @@ fn open_enrolled_flash_target(
         backend,
         enrolled.id,
         interfaces_by_target,
+        targets,
         true,
         RemoteControlAnnounceWait::UntilHeard,
     );

@@ -109,6 +109,7 @@ pub(super) fn capabilities() -> RemoteControlCapabilities {
         RemoteControlRequestKind::DescribePower,
         RemoteControlRequestKind::DescribeNetworkTransport,
         RemoteControlRequestKind::SetNetworkTransport,
+        RemoteControlRequestKind::InventoryPathTable,
         RemoteControlRequestKind::SetSystemPower,
         RemoteControlRequestKind::SetDisplayVisibility,
         RemoteControlRequestKind::SetDisplayAutoOff,

@@ -432,6 +432,7 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlRequestKind::InspectWifiTransaction,
             RemoteControlRequestKind::InventoryInterfaceDiscoveryGroups,
             RemoteControlRequestKind::ReplaceInterfaceDiscoveryGroups,
+            RemoteControlRequestKind::InventoryPathTable,
             RemoteControlRequestKind::DescribeNetworkTransport,
             RemoteControlRequestKind::SetNetworkTransport,
         ],
@@ -469,6 +470,7 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlResponseKind::InspectWifiTransaction,
             RemoteControlResponseKind::InventoryInterfaceDiscoveryGroups,
             RemoteControlResponseKind::ReplaceInterfaceDiscoveryGroups,
+            RemoteControlResponseKind::InventoryPathTable,
             RemoteControlResponseKind::DescribeNetworkTransport,
             RemoteControlResponseKind::SetNetworkTransport,
             RemoteControlResponseKind::ProtocolError,
@@ -590,20 +592,28 @@ fn protocol_discriminants_are_stable_typed_values() {
     );
     assert_eq!(RemoteControlResponseKind::DescribePower.wire_value(), 0x11);
     assert_eq!(
-        RemoteControlRequestKind::DescribeNetworkTransport.wire_value(),
+        RemoteControlRequestKind::InventoryPathTable.wire_value(),
         0x1F
+    );
+    assert_eq!(
+        RemoteControlRequestKind::DescribeNetworkTransport.wire_value(),
+        0x20
     );
     assert_eq!(
         RemoteControlRequestKind::SetNetworkTransport.wire_value(),
-        0x20
+        0x21
     );
     assert_eq!(
-        RemoteControlResponseKind::DescribeNetworkTransport.wire_value(),
+        RemoteControlResponseKind::InventoryPathTable.wire_value(),
         0x1F
     );
     assert_eq!(
-        RemoteControlResponseKind::SetNetworkTransport.wire_value(),
+        RemoteControlResponseKind::DescribeNetworkTransport.wire_value(),
         0x20
+    );
+    assert_eq!(
+        RemoteControlResponseKind::SetNetworkTransport.wire_value(),
+        0x21
     );
     assert_eq!(RemoteControlResponseKind::ProtocolError.wire_value(), 0xFF,);
     assert_eq!(
@@ -881,6 +891,53 @@ fn wifi_station_credentials_reject_empty_ssid_and_omit_password_from_inventory()
         Some("field,lab")
     );
     assert!(crate::remote_control::parse_wifi_station_ssid("LoRa").is_none());
+}
+
+#[test]
+fn managing_grants_include_network_transport_added_after_pairing() {
+    let describe_only = grant(0x21, RemoteControlRequestKind::Describe);
+    assert!(!describe_only
+        .effective_requests()
+        .supports(RemoteControlRequestKind::DescribeNetworkTransport));
+    assert!(!describe_only
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetNetworkTransport));
+    assert!(!describe_only
+        .effective_requests()
+        .supports(RemoteControlRequestKind::InventoryPathTable));
+
+    let manager = grant(0x22, RemoteControlRequestKind::DescribePower);
+    assert!(manager
+        .effective_requests()
+        .supports(RemoteControlRequestKind::DescribeNetworkTransport));
+    assert!(manager
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetNetworkTransport));
+    assert!(manager
+        .effective_requests()
+        .supports(RemoteControlRequestKind::InventoryPathTable));
+    assert!(!manager
+        .permitted_requests()
+        .supports(RemoteControlRequestKind::DescribeNetworkTransport));
+
+    let administrator = RemoteControlControllerGrant::new(
+        controller_identity(0x23),
+        RemoteControlControllerAuthority::Administrator,
+        RemoteControlRequestSet::only(RemoteControlRequestKind::Describe),
+    )
+    .unwrap();
+    assert!(administrator
+        .effective_requests()
+        .supports(RemoteControlRequestKind::DescribeNetworkTransport));
+    assert!(administrator
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetNetworkTransport));
+    assert!(administrator
+        .effective_requests()
+        .supports(RemoteControlRequestKind::InventoryPathTable));
+    assert!(administrator
+        .effective_requests()
+        .supports(RemoteControlRequestKind::AuthorizeController));
 }
 
 #[test]
@@ -1412,6 +1469,9 @@ fn inventory_power_and_sleep_messages_round_trip() {
         RemoteControlRequest::DescribeNetworkTransport,
         RemoteControlRequest::SetNetworkTransport {
             transport: crate::remote_control::RemoteControlNetworkTransport::Disabled,
+        },
+        RemoteControlRequest::InventoryPathTable {
+            page: crate::remote_control::RemoteControlPathPage::First,
         },
     ] {
         let mut bytes = [0u8; RemoteControlRequest::MAX_ENCODED_LEN];

@@ -819,6 +819,7 @@ mod tests {
             failure: None,
             extras: Vec::new(),
             shows_peers: peers > 0,
+            peers_pending: false,
             peers_error: None,
             arrived_at: None,
             peers: (0..peers)

@@ -21,16 +21,17 @@ use super::inventory::{
 use super::{
     RemoteControlApplyOutcome, RemoteControlControllerIdentity, RemoteControlControllerPage,
     RemoteControlDisplayAutoOff, RemoteControlDisplayVisibility, RemoteControlEspRadioMode,
-    RemoteControlGnssPower, RemoteControlInterfacePage, RemoteControlPeerPage,
-    RemoteControlStationUplink, RemoteControlSystemPower, RemoteControlWifiCredentialRevision,
-    RemoteControlWifiStageOutcome, RemoteControlWifiTransactionStatus,
+    RemoteControlGnssPower, RemoteControlInterfacePage, RemoteControlPathInventory,
+    RemoteControlPathPage, RemoteControlPeerPage, RemoteControlStationUplink,
+    RemoteControlSystemPower, RemoteControlWifiCredentialRevision, RemoteControlWifiStageOutcome,
+    RemoteControlWifiTransactionStatus, REMOTE_CONTROL_PATH_INVENTORY_MAX_ENCODED_BODY_LEN,
 };
 
 const MESSAGE_HEADER_ENCODED_LEN: usize = 2;
 const DESCRIPTION_COUNT_ENCODED_LEN: usize = 1;
 const PROTOCOL_ERROR_KIND_ENCODED_LEN: usize = 1;
 const PROTOCOL_ERROR_DETAIL_ENCODED_LEN: usize = 1;
-// V1 request kinds occupy the contiguous wire range 0x01..=0x20. Unknown values are rejected
+// V1 request kinds occupy the contiguous wire range 0x01..=0x21. Unknown values are rejected
 // before a request can enter this typed set, so five bytes represent the complete domain.
 const REQUEST_KIND_BITMAP_LEN: usize = 5;
 
@@ -87,8 +88,9 @@ prns_macros::iterable_enum! {
         InspectWifiTransaction = 0x1C,
         InventoryInterfaceDiscoveryGroups = 0x1D,
         ReplaceInterfaceDiscoveryGroups = 0x1E,
-        DescribeNetworkTransport = 0x1F,
-        SetNetworkTransport = 0x20,
+        InventoryPathTable = 0x1F,
+        DescribeNetworkTransport = 0x20,
+        SetNetworkTransport = 0x21,
     }
 }
 
@@ -223,6 +225,10 @@ impl RemoteControlRequestKind {
                 RemoteControlNetworkTransportOutcome::ENCODED_LEN,
                 RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
             )),
+            Self::InventoryPathTable => MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
+                REMOTE_CONTROL_PATH_INVENTORY_MAX_ENCODED_BODY_LEN,
+                RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
+            )),
         }
     }
 }
@@ -273,8 +279,9 @@ prns_macros::iterable_enum! {
         InspectWifiTransaction = 0x1C,
         InventoryInterfaceDiscoveryGroups = 0x1D,
         ReplaceInterfaceDiscoveryGroups = 0x1E,
-        DescribeNetworkTransport = 0x1F,
-        SetNetworkTransport = 0x20,
+        InventoryPathTable = 0x1F,
+        DescribeNetworkTransport = 0x20,
+        SetNetworkTransport = 0x21,
         ProtocolError = 0xFF,
     }
 }
@@ -437,6 +444,9 @@ pub enum RemoteControlRequest {
     SetNetworkTransport {
         transport: RemoteControlNetworkTransport,
     },
+    InventoryPathTable {
+        page: RemoteControlPathPage,
+    },
 }
 
 impl RemoteControlRequest {
@@ -498,6 +508,7 @@ impl RemoteControlRequest {
             Self::InspectWifiTransaction => RemoteControlRequestKind::InspectWifiTransaction,
             Self::DescribeNetworkTransport => RemoteControlRequestKind::DescribeNetworkTransport,
             Self::SetNetworkTransport { .. } => RemoteControlRequestKind::SetNetworkTransport,
+            Self::InventoryPathTable { .. } => RemoteControlRequestKind::InventoryPathTable,
         }
     }
 
@@ -531,6 +542,9 @@ impl RemoteControlRequest {
                 MESSAGE_HEADER_ENCODED_LEN.saturating_add(page.encoded_len())
             }
             Self::InventoryControllers { page } => {
+                MESSAGE_HEADER_ENCODED_LEN.saturating_add(page.encoded_len())
+            }
+            Self::InventoryPathTable { page } => {
                 MESSAGE_HEADER_ENCODED_LEN.saturating_add(page.encoded_len())
             }
             Self::SetInterfacePower { .. } | Self::SetInterfaceMode { .. } => {
@@ -623,6 +637,9 @@ impl RemoteControlRequest {
                 Ok(Self::DescribeNetworkTransport)
             }
             RemoteControlRequestKind::SetNetworkTransport => parse_set_network_transport(body),
+            RemoteControlRequestKind::InventoryPathTable => {
+                RemoteControlPathPage::parse(body).map(|page| Self::InventoryPathTable { page })
+            }
             RemoteControlRequestKind::SetInterfacePower => parse_set_interface_power(body),
             RemoteControlRequestKind::SetInterfaceMode => parse_set_interface_mode(body),
             RemoteControlRequestKind::SetInterfaceGroup => parse_set_interface_group(body),
@@ -681,6 +698,7 @@ impl RemoteControlRequest {
             | Self::DescribeNetworkTransport => {}
             Self::InventoryInterfaces { page } => page.write_into(body)?,
             Self::InventoryControllers { page } => page.write_into(body)?,
+            Self::InventoryPathTable { page } => page.write_into(body)?,
             Self::SetInterfacePower { id, power } => {
                 write_interface_id_and_byte(body, *id, power.wire_value())?;
             }
@@ -1606,11 +1624,13 @@ pub enum RemoteControlResponse {
     InspectWifiTransaction(RemoteControlWifiTransactionStatus),
     DescribeNetworkTransport(RemoteControlNetworkTransport),
     SetNetworkTransport(RemoteControlNetworkTransportOutcome),
+    InventoryPathTable(RemoteControlPathInventory),
     ProtocolError(RemoteControlProtocolError),
 }
 
 impl RemoteControlResponse {
-    pub const MAX_ENCODED_LEN: usize = MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
+    pub const MAX_ENCODED_LEN: usize = maximum(
+        MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
         RemoteControlDiscoveryGroupsInventoryOutcome::MAX_ENCODED_LEN,
         maximum(
             DESCRIPTION_COUNT_ENCODED_LEN.saturating_add(RemoteControlRequestKind::ALL.len()),
@@ -1651,7 +1671,10 @@ impl RemoteControlResponse {
                 ),
             ),
         ),
-    ));
+    )),
+        MESSAGE_HEADER_ENCODED_LEN
+            .saturating_add(REMOTE_CONTROL_PATH_INVENTORY_MAX_ENCODED_BODY_LEN),
+    );
 
     #[must_use]
     pub const fn kind(&self) -> RemoteControlResponseKind {
@@ -1696,6 +1719,7 @@ impl RemoteControlResponse {
                 RemoteControlResponseKind::DescribeNetworkTransport
             }
             Self::SetNetworkTransport(_) => RemoteControlResponseKind::SetNetworkTransport,
+            Self::InventoryPathTable(_) => RemoteControlResponseKind::InventoryPathTable,
             Self::ProtocolError(_) => RemoteControlResponseKind::ProtocolError,
         }
     }
@@ -1738,6 +1762,7 @@ impl RemoteControlResponse {
             Self::InspectWifiTransaction(status) => status.encoded_len(),
             Self::DescribeNetworkTransport(_) => RemoteControlNetworkTransport::ENCODED_LEN,
             Self::SetNetworkTransport(_) => RemoteControlNetworkTransportOutcome::ENCODED_LEN,
+            Self::InventoryPathTable(inventory) => inventory.encoded_body_len(),
             Self::ProtocolError(error) => error.encoded_body_len(),
         };
         MESSAGE_HEADER_ENCODED_LEN.saturating_add(body_len)
@@ -1861,6 +1886,9 @@ impl RemoteControlResponse {
             RemoteControlResponseKind::SetNetworkTransport => {
                 parse_network_transport_outcome(body).map(Self::SetNetworkTransport)
             }
+            RemoteControlResponseKind::InventoryPathTable => {
+                RemoteControlPathInventory::parse_body(body).map(Self::InventoryPathTable)
+            }
             RemoteControlResponseKind::ProtocolError => {
                 parse_protocol_error(body).map(Self::ProtocolError)
             }
@@ -1920,6 +1948,7 @@ impl RemoteControlResponse {
             Self::InspectWifiTransaction(status) => write_wifi_transaction_status(*status, body),
             Self::DescribeNetworkTransport(transport) => write_network_transport(*transport, body),
             Self::SetNetworkTransport(outcome) => write_network_transport_outcome(*outcome, body),
+            Self::InventoryPathTable(inventory) => inventory.write_body(body)?,
             Self::ProtocolError(error) => write_protocol_error(error, body),
         }
         Ok(encoded_len)

@@ -43,56 +43,66 @@ fn minimum_runtime_stack_is_additional_to_static_ram() {
 
 #[test]
 fn memory_x_layouts_derive_from_each_canonical_profile() {
-    for (profile, application_flash, application_ram) in [
+    for (profile, application_flash, application_ram, minimum_runtime_stack_bytes) in [
         (
             &T_ECHO_S140_V6,
             AddressRange::new(0x26000, 0xBF000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &T_ECHO_S140_V7,
             AddressRange::new(0x27000, 0xBF000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &T096,
             AddressRange::new(0x26000, 0xE1000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &T114,
             AddressRange::new(0x26000, 0xE1000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &MESH_POCKET_5000,
             AddressRange::new(0x26000, 0xE1000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &MESH_POCKET_10000,
             AddressRange::new(0x26000, 0xE1000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &T1000_E,
             AddressRange::new(0x27000, 0xE9000),
             AddressRange::new(0x2001_0000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &MESH_TOWER_V2,
             AddressRange::new(0x26000, 0xE2000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &RAK4631,
             AddressRange::new(0x26000, 0xE2000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &RAK10724,
             AddressRange::new(0x26000, 0xE2000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
     ] {
         assert_eq!(
@@ -100,7 +110,7 @@ fn memory_x_layouts_derive_from_each_canonical_profile() {
             Ok(NrfMemoryXLayout {
                 application_flash,
                 application_ram,
-                minimum_runtime_stack_bytes: 68 * KIB,
+                minimum_runtime_stack_bytes,
             })
         );
     }

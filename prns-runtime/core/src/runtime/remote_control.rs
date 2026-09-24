@@ -17,7 +17,8 @@ use crate::remote_control::{
     RemoteControlInterfaceGroup, RemoteControlInterfaceInventory, RemoteControlInterfacePage,
     RemoteControlInterfacePeersOutcome, RemoteControlInterfacePower, RemoteControlLoRaOutcome,
     RemoteControlLoRaProfile, RemoteControlMessageWriteError, RemoteControlModeOutcome,
-    RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome, RemoteControlPeerPage,
+    RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome,
+    RemoteControlPathInventory, RemoteControlPathPage, RemoteControlPeerPage,
     RemoteControlPowerOutcome, RemoteControlProtocolError, RemoteControlRequest,
     RemoteControlRequestKind, RemoteControlRequestParseError, RemoteControlRequestSet,
     RemoteControlResponse, RemoteControlResponseKind, RemoteControlResponseParseError,
@@ -542,6 +543,37 @@ impl RemoteControlInventoryInterfaces {
             RemoteControlResponse::ProtocolError(error) => Err(RemoteControlError::Remote(error)),
             response => Err(RemoteControlError::UnexpectedResponse {
                 expected: RemoteControlResponseKind::InventoryInterfaces,
+                found: response.kind(),
+            }),
+        }
+    }
+}
+
+pub struct RemoteControlInventoryPathTable;
+
+impl RemoteControlInventoryPathTable {
+    pub const REQUEST: RemoteControlRequest = RemoteControlRequest::InventoryPathTable {
+        page: RemoteControlPathPage::First,
+    };
+    pub const RESPONSE_CAPACITY: usize = Self::REQUEST.maximum_response_encoded_len();
+    pub const MAXIMUM_RESPONSE_BYTES: ByteLimit =
+        ByteLimit::Maximum(Self::RESPONSE_CAPACITY as u64);
+
+    pub fn write_page_request(
+        page: RemoteControlPathPage,
+        out: &mut [u8],
+    ) -> Result<usize, RemoteControlError> {
+        RemoteControlRequest::InventoryPathTable { page }
+            .write_into(out)
+            .map_err(RemoteControlError::Encode)
+    }
+
+    pub fn parse_response(bytes: &[u8]) -> Result<RemoteControlPathInventory, RemoteControlError> {
+        match RemoteControlResponse::parse(bytes).map_err(RemoteControlError::Response)? {
+            RemoteControlResponse::InventoryPathTable(inventory) => Ok(inventory),
+            RemoteControlResponse::ProtocolError(error) => Err(RemoteControlError::Remote(error)),
+            response => Err(RemoteControlError::UnexpectedResponse {
+                expected: RemoteControlResponseKind::InventoryPathTable,
                 found: response.kind(),
             }),
         }
@@ -1466,6 +1498,13 @@ impl RemoteControlRequestEndpoint {
                     RemoteControlHostCommand::SetNetworkTransport { transport },
                 ))
             }
+            Ok(RemoteControlRequest::InventoryPathTable { page }) => {
+                require_available(
+                    available_requests,
+                    RemoteControlRequestKind::InventoryPathTable,
+                )?;
+                Ok(AdmittedRemoteControlOperation::InventoryPathTable { page })
+            }
             Ok(RemoteControlRequest::SleepRadios) => {
                 require_available(available_requests, RemoteControlRequestKind::SleepRadios)?;
                 Ok(AdmittedRemoteControlOperation::Host(
@@ -1685,6 +1724,9 @@ impl RemoteControlRequestEndpoint {
             AdmittedRemoteControlOperation::ProtocolError(error) => {
                 RemoteControlResponse::ProtocolError(error)
             }
+            AdmittedRemoteControlOperation::InventoryPathTable { page } => {
+                RemoteControlResponse::InventoryPathTable(node.inventory_path_table(page).await)
+            }
             #[cfg(feature = "remote-control-wifi-host")]
             _ => return Err(Decline::Ignore),
         };
@@ -1761,6 +1803,9 @@ enum AdmittedRemoteControlOperation {
     #[cfg(feature = "remote-control-wifi-host")]
     InspectWifiTransaction,
     ProtocolError(RemoteControlProtocolError),
+    InventoryPathTable {
+        page: RemoteControlPathPage,
+    },
 }
 
 impl AdmittedRemoteControlOperation {
