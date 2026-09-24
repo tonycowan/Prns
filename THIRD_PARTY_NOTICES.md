@@ -2,7 +2,7 @@
 
 This checked bundle covers the shipped and qualification Rust, JavaScript, and Android product graphs.
 It was generated with `cargo-about 0.9.1` by `./tools/prns repo notices generate`.
-Notice input fingerprint: `sha256:9860904017a61b5142550285da57d5a1517e25a53326429ae30e3ab25ba16f6d`.
+Notice input fingerprint: `sha256:eeb480d887f069ffd6b19109e4d3bc7dd9f47360546c48c31a1d6116089cd603`.
 Each locked Rust manifest closure is fetched into a fresh isolated Cargo home before cargo-about reads its target-filtered packaged license material offline.
 Entries are deduplicated by SPDX identifier and canonical notice text; line endings, trailing space, and repeated blank lines are normalized without changing legal words.
 
@@ -4681,7 +4681,7 @@ License: MIT License
 
 Used by: `bzip2 0.6.1`
 
-Release graphs: Android, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, WASM, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, iOS
+Release graphs: Android, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, WASM, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, iOS
 
 ```text
 Copyright (c) 2014-2025 Alex Crichton and Contributors
@@ -5237,7 +5237,7 @@ License: MIT License
 
 Used by: `strobe-rs 0.13.0`
 
-Release graphs: Android, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, iOS
+Release graphs: Android, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, iOS
 
 ```text
 The MIT License (MIT)
@@ -8064,7 +8064,7 @@ License: MIT License
 
 Used by: `keccak 0.2.2`, `zeroize 1.9.0`
 
-Release graphs: Android, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, WASM, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, iOS
+Release graphs: Android, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, WASM, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, iOS
 
 ```text
 Copyright (c) 2018-2026 The RustCrypto Project Developers
@@ -13594,7 +13594,7 @@ License: bzip2 and libbzip2 License v1.0.6
 
 Used by: `libbz2-rs-sys 0.2.5`
 
-Release graphs: Android, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, WASM, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, iOS
+Release graphs: Android, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, WASM, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, iOS
 
 ```text
 --------------------------------------------------------------------------
