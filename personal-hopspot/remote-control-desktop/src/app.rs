@@ -1254,7 +1254,7 @@ fn ManagedTargetConfiguration(
     let building = use_signal(|| false);
     let build_status = use_signal(String::new);
     let catalog_tick = use_signal(|| 0u64);
-    let mut published_tips = use_signal(|| None::<PublishedTips>);
+    let published_tips = use_signal(|| None::<PublishedTips>);
     let mut transport_draft = use_signal(|| RemoteControlNetworkTransport::Disabled);
     let mut connect_remaining = use_signal(|| target.monitor_remaining_secs);
     let mut saving = use_signal(|| false);
