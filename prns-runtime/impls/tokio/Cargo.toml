@@ -30,10 +30,11 @@ rns-management = ["prns-runtime/rns-management"]
 parallel-persistence = ["prns-core/parallel-persistence"]
 parallel-resource-hash = ["prns-core/parallel-resource-hash"]
 tracing = ["dep:tracing"]
+remote-control-path-table = ["prns-core/remote-control-path-table", "prns-runtime/remote-control-path-table"]
 
 [dependencies]
-prns-core = { version = "=0.3.7", path = "../../../prns-core", default-features = false, features = ["tokio-host", "ed25519-batch", "resource-work-offload", "movable-frame-forwarding"] }
-prns-runtime = { version = "=0.3.7", path = "../../core", default-features = false, features = ["resource-bzip2", "movable-frame-forwarding"] }
+prns-core = { version = "=0.3.7", path = "../../../prns-core", default-features = false, features = ["tokio-host", "ed25519-batch", "resource-work-offload", "movable-frame-forwarding", "remote-control-path-table"] }
+prns-runtime = { version = "=0.3.7", path = "../../core", default-features = false, features = ["resource-bzip2", "movable-frame-forwarding", "remote-control-path-table"] }
 heapless = { version = "0.8", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time", "io-util", "fs"] }
 rtrb = { version = "0.3.5", default-features = false }

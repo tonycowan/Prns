@@ -102,6 +102,7 @@ pub(super) fn capabilities() -> RemoteControlCapabilities {
         RemoteControlRequestKind::DescribePower,
         RemoteControlRequestKind::DescribeNetworkTransport,
         RemoteControlRequestKind::SetNetworkTransport,
+        #[cfg(feature = "remote-control-path-table")]
         RemoteControlRequestKind::InventoryPathTable,
         RemoteControlRequestKind::SetSystemPower,
         RemoteControlRequestKind::SetDisplayVisibility,

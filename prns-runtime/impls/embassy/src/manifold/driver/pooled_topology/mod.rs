@@ -21,9 +21,10 @@ use crate::manifold::interface_seam::{EMBEDDED_MAX_LINK_MTU, EMBEDDED_MAX_WIRE_F
 use crate::manifold::timers::{wait_for_due_reason, wait_for_pacer};
 use crate::manifold::wake_schedule::{fire_due_reason, merge_wake_schedules_delta};
 use crate::manifold::{AppDeciders, Host};
+use crate::remote_control::RemoteControlPathInventory;
+#[cfg(feature = "remote-control-path-table")]
 use crate::remote_control::{
-    RemoteControlPathEntry, RemoteControlPathInventory, RemoteControlPathPage,
-    RemoteControlPathPageBuilder,
+    RemoteControlPathEntry, RemoteControlPathPage, RemoteControlPathPageBuilder,
 };
 use crate::routing::links::request::{response_envelope_prefix, RESPONSE_WIRE_OVERHEAD};
 use crate::routing::links::resources::ResourceOffer;
@@ -138,6 +139,7 @@ fn resource_response_data<S: StorageLayout, const N: usize>(
     }
 }
 
+#[cfg(feature = "remote-control-path-table")]
 #[inline(never)]
 fn remote_control_path_inventory<S: StorageLayout>(
     engine: &EngineState<S>,
@@ -234,6 +236,8 @@ pub(crate) async fn run_pooled<
         path_page_reply,
         lifecycle,
     } = wiring;
+    #[cfg(not(feature = "remote-control-path-table"))]
+    let _ = path_page_reply;
     let mut pacers: HeaplessVec<InterfacePacer, LANE_COUNT> = HeaplessVec::new();
     for descriptor in descriptors.iter_mut() {
         *descriptor = clamp_to_embedded_ceiling(*descriptor);
@@ -392,6 +396,7 @@ pub(crate) async fn run_pooled<
                         },
                     ),
                     Either::Second(response) => {
+                        #[cfg(feature = "remote-control-path-table")]
                         if let ResourceResponsePayload::RemoteControlPathPage(page) =
                             response.payload
                         {

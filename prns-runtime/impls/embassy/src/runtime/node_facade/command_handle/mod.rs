@@ -25,7 +25,9 @@ use crate::routing::links::request::{response_envelope_prefix, RequestId, RESPON
 use crate::routing::links::LinkId;
 use crate::routing::request_handlers::RequestPathHash;
 use crate::units::{ByteLimit, RttMillis};
-use crate::wire::{DestinationHash, TRUNCATED_HASH_BYTE_LEN};
+use crate::wire::DestinationHash;
+#[cfg(feature = "remote-control-path-table")]
+use crate::wire::TRUNCATED_HASH_BYTE_LEN;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
@@ -1508,6 +1510,7 @@ impl<
         self.respond_rns_path_table(responder, request).await
     }
 
+    #[cfg(feature = "remote-control-path-table")]
     async fn inventory_path_table(
         &self,
         page: RemoteControlPathPage,

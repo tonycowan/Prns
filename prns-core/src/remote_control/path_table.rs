@@ -164,6 +164,13 @@ impl RemoteControlPathInventory {
     }
 
     pub fn write_body(&self, body: &mut [u8]) -> Result<(), RemoteControlMessageWriteError> {
+        #[cfg(not(feature = "remote-control-path-table"))]
+        {
+            let _ = (self, body);
+            return Err(RemoteControlMessageWriteError::BufferTooShort);
+        }
+        #[cfg(feature = "remote-control-path-table")]
+        {
         let encoded_len = self.encoded_body_len();
         let Some(target) = body.get_mut(..encoded_len) else {
             return Err(RemoteControlMessageWriteError::BufferTooShort);
@@ -191,9 +198,17 @@ impl RemoteControlPathInventory {
             return Err(RemoteControlMessageWriteError::BufferTooShort);
         };
         self.continuation.write_into(continuation)
+        }
     }
 
     pub fn parse_body(body: &[u8]) -> Result<Self, RemoteControlResponseParseError> {
+        #[cfg(not(feature = "remote-control-path-table"))]
+        {
+            let _ = body;
+            return Err(RemoteControlResponseParseError::Malformed);
+        }
+        #[cfg(feature = "remote-control-path-table")]
+        {
         let Some((count, rest)) = body.split_first() else {
             return Err(RemoteControlResponseParseError::Truncated);
         };
@@ -227,6 +242,7 @@ impl RemoteControlPathInventory {
             return Err(RemoteControlResponseParseError::Malformed);
         }
         Ok(inventory)
+        }
     }
 }
 
