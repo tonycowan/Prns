@@ -2,7 +2,9 @@ use heapless::Vec;
 
 use crate::interfaces::{InterfaceId, INTERFACE_ID_LEN};
 use crate::routing::NextHop;
-use crate::wire::{DestinationHash, TransportId, TRUNCATED_HASH_BYTE_LEN};
+#[cfg(feature = "remote-control-path-table")]
+use crate::wire::TransportId;
+use crate::wire::{DestinationHash, TRUNCATED_HASH_BYTE_LEN};
 
 use super::pagination::{
     RemoteControlPathContinuation, RemoteControlPathCursor, RemoteControlPathPage,
@@ -10,7 +12,9 @@ use super::pagination::{
 use super::{RemoteControlMessageWriteError, RemoteControlResponseParseError};
 
 pub const REMOTE_CONTROL_PATH_TABLE_CAP: usize = 4;
+#[cfg(feature = "remote-control-path-table")]
 const VIA_DIRECT: u8 = 0x00;
+#[cfg(feature = "remote-control-path-table")]
 const VIA_TRANSPORT: u8 = 0x01;
 
 pub const REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN: usize = TRUNCATED_HASH_BYTE_LEN
@@ -321,6 +325,7 @@ impl RemoteControlPathPageBuilder {
     }
 }
 
+#[cfg(feature = "remote-control-path-table")]
 fn write_entry(
     entry: &RemoteControlPathEntry,
     slot: &mut [u8],
@@ -348,6 +353,7 @@ fn write_entry(
     }
 }
 
+#[cfg(feature = "remote-control-path-table")]
 fn write_at(
     slot: &mut [u8],
     offset: &mut usize,
@@ -362,6 +368,7 @@ fn write_at(
     Ok(())
 }
 
+#[cfg(feature = "remote-control-path-table")]
 fn read_entry(
     input: &mut &[u8],
 ) -> Result<RemoteControlPathEntry, RemoteControlResponseParseError> {
@@ -392,6 +399,7 @@ fn read_entry(
     ))
 }
 
+#[cfg(feature = "remote-control-path-table")]
 fn read_array<const N: usize>(
     input: &mut &[u8],
 ) -> Result<[u8; N], RemoteControlResponseParseError> {

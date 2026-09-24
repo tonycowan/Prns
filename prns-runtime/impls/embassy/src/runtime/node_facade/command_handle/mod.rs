@@ -15,11 +15,13 @@ use crate::engine::{
 };
 use crate::identity::IdentityHash;
 use crate::interfaces::rns_management::RnsRemotePathTableRequest;
+#[cfg(feature = "remote-control-path-table")]
+use crate::remote_control::RemoteControlPathPage;
 use crate::remote_control::{
     ForgetRemoteControlTargetOutcome, RemoteControlControllerGrant,
-    RemoteControlControllerIdentity, RemoteControlPathInventory, RemoteControlPathPage,
-    RemoteControlTargetAccess, RevokeRemoteControlControllerOutcome,
-    SetRemoteControlControllerGrantOutcome, SetRemoteControlTargetAccessOutcome,
+    RemoteControlControllerIdentity, RemoteControlPathInventory, RemoteControlTargetAccess,
+    RevokeRemoteControlControllerOutcome, SetRemoteControlControllerGrantOutcome,
+    SetRemoteControlTargetAccessOutcome,
 };
 use crate::routing::links::request::{response_envelope_prefix, RequestId, RESPONSE_WIRE_OVERHEAD};
 use crate::routing::links::LinkId;
@@ -89,6 +91,7 @@ pub struct ResourceResponse<const N: usize> {
 pub(crate) enum ResourceResponsePayload<const N: usize> {
     Ready(heapless::Vec<u8, N>),
     RnsPathTable(RnsRemotePathTableRequest),
+    #[cfg(feature = "remote-control-path-table")]
     RemoteControlPathPage(RemoteControlPathPage),
 }
 

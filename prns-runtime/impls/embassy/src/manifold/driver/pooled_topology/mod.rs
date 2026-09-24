@@ -135,6 +135,7 @@ fn resource_response_data<S: StorageLayout, const N: usize>(
             data.truncate(RESPONSE_WIRE_OVERHEAD + written);
             Some(MaterializedResourceResponse::RnsPathTable(data))
         }
+        #[cfg(feature = "remote-control-path-table")]
         ResourceResponsePayload::RemoteControlPathPage(_) => None,
     }
 }

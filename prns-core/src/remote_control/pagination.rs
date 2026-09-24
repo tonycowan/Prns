@@ -426,6 +426,7 @@ impl RemoteControlPathContinuation {
         }
     }
 
+    #[cfg(feature = "remote-control-path-table")]
     pub(crate) fn write_into(self, out: &mut [u8]) -> Result<(), RemoteControlMessageWriteError> {
         match self {
             Self::Complete => write_complete(out),
@@ -433,6 +434,7 @@ impl RemoteControlPathContinuation {
         }
     }
 
+    #[cfg(feature = "remote-control-path-table")]
     pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
         match bytes {
             [COMPLETE_TAG] => Some(Self::Complete),
