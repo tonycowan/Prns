@@ -103,12 +103,12 @@ pub(crate) fn initial_controller_grants(
 pub(crate) mod mesh_pocket;
 #[cfg(feature = "board-mesh-tower-v2")]
 pub(crate) mod mesh_tower_v2;
-#[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
-pub(crate) mod rak_vbat;
 #[cfg(feature = "board-rak10724")]
 pub(crate) mod rak10724;
 #[cfg(feature = "board-rak4631")]
 pub(crate) mod rak4631;
+#[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+pub(crate) mod rak_vbat;
 #[cfg(feature = "board-t096")]
 pub(crate) mod t096;
 #[cfg(feature = "board-t1000e")]

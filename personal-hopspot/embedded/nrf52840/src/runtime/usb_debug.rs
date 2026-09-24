@@ -52,8 +52,7 @@ impl Ring {
     }
 }
 
-static RING: Mutex<CriticalSectionRawMutex, RefCell<Ring>> =
-    Mutex::new(RefCell::new(Ring::new()));
+static RING: Mutex<CriticalSectionRawMutex, RefCell<Ring>> = Mutex::new(RefCell::new(Ring::new()));
 
 struct CdcLogger;
 
