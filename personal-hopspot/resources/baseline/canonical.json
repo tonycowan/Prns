@@ -2199,17 +2199,17 @@
         "kind": "complete",
         "value": [
           {
-            "path": "firmware/hopspot/heltec-v4-r8/0.3.7/bootloader.bin",
+            "path": "firmware/hopspot/heltec-v4-r8-ab/0.3.7/bootloader.bin",
             "bytes": 21056,
             "fingerprint": "8a516bf82000501f129eb8bf7cd04ec6a33edb09487890beefe90989d806990d"
           },
           {
-            "path": "firmware/hopspot/heltec-v4-r8/0.3.7/partition-table.bin",
+            "path": "firmware/hopspot/heltec-v4-r8-ab/0.3.7/partition-table.bin",
             "bytes": 3072,
             "fingerprint": "3eb78748bd5c07db51c4b747a52fe14dc3be38a7ca1834b94dcf917dc9020d65"
           },
           {
-            "path": "firmware/hopspot/heltec-v4-r8/0.3.7/application.bin",
+            "path": "firmware/hopspot/heltec-v4-r8-ab/0.3.7/application.bin",
             "bytes": 2316864,
             "fingerprint": "765506973d2b210b139a3e316e2a4d607950a0670005d9b2247bbf20f23e9e22"
           }
@@ -2776,7 +2776,7 @@
               "boundary_count": 5128,
               "boundaries_fingerprint": "848be0649a9b2f0b47ed0f858541cc20e6808c992c5208dec420f7f3fa9f5bb0",
               "boundaries_artifact": {
-                "path": "work/heltec-v4-r8/function-boundaries.json",
+                "path": "work/heltec-v4-r8-ab/function-boundaries.json",
                 "bytes": 1367345,
                 "fingerprint": "fc64e649267aa8a71f98f8ebc94ba1f87b15c137b5851297ca7af53834cfa3af"
               },
@@ -3212,7 +3212,7 @@
                   }
                 ],
                 "artifact": {
-                  "path": "work/heltec-v4-r8/stack-evidence.json",
+                  "path": "work/heltec-v4-r8-ab/stack-evidence.json",
                   "bytes": 1605641,
                   "fingerprint": "5bae3df951263bc113146f68e526c30eaf1f8cbf30566ae1fd0abd4fd00b0ed5"
                 }
