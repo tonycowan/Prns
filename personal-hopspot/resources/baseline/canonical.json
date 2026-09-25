@@ -9384,7 +9384,7 @@
         "linker_version": "LLD 22.1.6 (https://github.com/rust-lang/llvm-project.git dcc3606807c989700e0ac1cac18c31741bcd40d9) (compatible with GNU linkers)"
       },
       "memory_contract": {
-        "fingerprint": "7d726b15f5339a3c519d79fe5d9258727bbbbf2d59d9de545fc56872dd1ef966",
+        "fingerprint": "1840ca931e17d8b650d8f45533bc0eb5280cff692d2b7511575b3c1abbe0338a",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -9397,7 +9397,7 @@
             "linker_ranges": [
               {
                 "start": 155648,
-                "end": 782336
+                "end": 786432
               }
             ],
             "backing_store": "internal-flash",
@@ -9436,21 +9436,11 @@
             "id": "firmware",
             "address_space": "internal-flash",
             "start": 155648,
-            "end": 782336,
+            "end": 786432,
             "alignment": 4096,
             "owner": "firmware-image",
             "retention": "replace-with-firmware",
             "role": "firmware-image"
-          },
-          {
-            "id": "remote-control-identity",
-            "address_space": "internal-flash",
-            "start": 782336,
-            "end": 786432,
-            "alignment": 4096,
-            "owner": "device-identity",
-            "retention": "preserve-across-firmware-update",
-            "role": "remote-control-identity"
           },
           {
             "id": "journal",
@@ -9493,9 +9483,19 @@
             "role": "ble-identity"
           },
           {
-            "id": "reserved",
+            "id": "remote-control-identity",
             "address_space": "internal-flash",
             "start": 970752,
+            "end": 974848,
+            "alignment": 4096,
+            "owner": "device-identity",
+            "retention": "preserve-across-firmware-update",
+            "role": "remote-control-identity"
+          },
+          {
+            "id": "reserved",
+            "address_space": "internal-flash",
+            "start": 974848,
             "end": 1048576,
             "alignment": 4096,
             "owner": "factory",
@@ -9508,7 +9508,7 @@
           "address_space": "internal-flash",
           "start": 155648,
           "end": 786432,
-          "compatibility": "legacy-envelope"
+          "compatibility": "exact-firmware-region"
         },
         "runtime_reservations": [
           {
@@ -10512,7 +10512,7 @@
         "linker_version": "LLD 22.1.6 (https://github.com/rust-lang/llvm-project.git dcc3606807c989700e0ac1cac18c31741bcd40d9) (compatible with GNU linkers)"
       },
       "memory_contract": {
-        "fingerprint": "5031137380b84665145c00f57a0d1884a34c9d141b1716c08c846cc06f5764ae",
+        "fingerprint": "61db35ba4f7875c2902003a60b3073b538ba9ac6a0d7a744150209eb6314a7bc",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -10525,7 +10525,7 @@
             "linker_ranges": [
               {
                 "start": 159744,
-                "end": 782336
+                "end": 786432
               }
             ],
             "backing_store": "internal-flash",
@@ -10564,21 +10564,11 @@
             "id": "firmware",
             "address_space": "internal-flash",
             "start": 159744,
-            "end": 782336,
+            "end": 786432,
             "alignment": 4096,
             "owner": "firmware-image",
             "retention": "replace-with-firmware",
             "role": "firmware-image"
-          },
-          {
-            "id": "remote-control-identity",
-            "address_space": "internal-flash",
-            "start": 782336,
-            "end": 786432,
-            "alignment": 4096,
-            "owner": "device-identity",
-            "retention": "preserve-across-firmware-update",
-            "role": "remote-control-identity"
           },
           {
             "id": "journal",
@@ -10621,9 +10611,19 @@
             "role": "ble-identity"
           },
           {
-            "id": "reserved",
+            "id": "remote-control-identity",
             "address_space": "internal-flash",
             "start": 970752,
+            "end": 974848,
+            "alignment": 4096,
+            "owner": "device-identity",
+            "retention": "preserve-across-firmware-update",
+            "role": "remote-control-identity"
+          },
+          {
+            "id": "reserved",
+            "address_space": "internal-flash",
+            "start": 974848,
             "end": 1048576,
             "alignment": 4096,
             "owner": "factory",
@@ -10636,7 +10636,7 @@
           "address_space": "internal-flash",
           "start": 159744,
           "end": 786432,
-          "compatibility": "legacy-envelope"
+          "compatibility": "exact-firmware-region"
         },
         "runtime_reservations": [
           {

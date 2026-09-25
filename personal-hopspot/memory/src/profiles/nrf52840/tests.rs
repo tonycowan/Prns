@@ -6,7 +6,7 @@ use crate::{
 
 #[test]
 fn legacy_transport_envelopes_do_not_expand_firmware_ownership() {
-    for profile in [&T_ECHO_S140_V6, &T_ECHO_S140_V7, &T096, &T114, &T1000_E] {
+    for profile in [&T096, &T114, &T1000_E] {
         assert_eq!(
             profile.firmware.transport_envelope.compatibility,
             crate::TransportCompatibility::LegacyEnvelope
@@ -30,6 +30,21 @@ fn legacy_transport_envelopes_do_not_expand_firmware_ownership() {
 }
 
 #[test]
+fn t_echo_transport_matches_the_firmware_owned_region() {
+    for profile in [&T_ECHO_S140_V6, &T_ECHO_S140_V7] {
+        assert_eq!(
+            profile.firmware.transport_envelope.compatibility,
+            crate::TransportCompatibility::ExactFirmwareRegion
+        );
+        let firmware = profile
+            .region(MemoryRegionId("firmware"))
+            .expect("firmware region")
+            .range;
+        assert_eq!(profile.firmware.transport_envelope.range, firmware);
+    }
+}
+
+#[test]
 fn minimum_runtime_stack_is_additional_to_static_ram() {
     assert_eq!(
         T_ECHO_S140_V6.reservation_totals(RAM),
@@ -46,13 +61,13 @@ fn memory_x_layouts_derive_from_each_canonical_profile() {
     for (profile, application_flash, application_ram, minimum_runtime_stack_bytes) in [
         (
             &T_ECHO_S140_V6,
-            AddressRange::new(0x26000, 0xBF000),
+            AddressRange::new(0x26000, 0xC0000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
             68 * KIB,
         ),
         (
             &T_ECHO_S140_V7,
-            AddressRange::new(0x27000, 0xBF000),
+            AddressRange::new(0x27000, 0xC0000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
             68 * KIB,
         ),
