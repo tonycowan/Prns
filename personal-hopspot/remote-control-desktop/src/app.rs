@@ -1683,8 +1683,7 @@ fn ota_flash_toolbar(
         .ok()
         .flatten()
         .is_some();
-    let image_busy =
-        flashing() || downloading() || importing() || exporting() || building();
+    let image_busy = flashing() || downloading() || importing() || exporting() || building();
     let can_flash = heltec && has_image && !image_busy;
     rsx! {
         button {
@@ -1904,12 +1903,7 @@ fn start_ota_firmware_update(
                 let detail = error.to_string();
                 flash_status.set(detail.clone());
                 let progress = flash_progress().unwrap_or_else(|| {
-                    FlashProgress::running_kind(
-                        FlashKind::Ota,
-                        false,
-                        FlashStage::Prepare,
-                        "",
-                    )
+                    FlashProgress::running_kind(FlashKind::Ota, false, FlashStage::Prepare, "")
                 });
                 flash_progress.set(Some(progress.finish(FlashRunOutcome::Failed, detail)));
                 flashing.set(false);
@@ -1925,17 +1919,13 @@ fn start_ota_firmware_update(
             Ok(Ok(len)) => len,
             _ => 0,
         };
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<(
-            String,
-            Option<u8>,
-            Option<u64>,
-            Option<u64>,
-        )>();
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, Option<u8>, Option<u64>, Option<u64>)>(
+            );
         spawn(async move {
             while let Some((status, percent, written, total)) = progress_rx.recv().await {
                 flash_status.set(status.clone());
-                let mut progress =
-                    ota_progress_from_status(&status, percent, written, total);
+                let mut progress = ota_progress_from_status(&status, percent, written, total);
                 if let Some(previous) = flash_progress() {
                     progress.carry_timing_from(&previous);
                 }
@@ -1944,15 +1934,15 @@ fn start_ota_firmware_update(
         });
         let outcome = backend()
             .stream_firmware_update(&target_id, &image, move |status, percent| {
-                let written = percent.map(|value| image_bytes.saturating_mul(u64::from(value)) / 100);
+                let written =
+                    percent.map(|value| image_bytes.saturating_mul(u64::from(value)) / 100);
                 let total = (image_bytes > 0).then_some(image_bytes);
                 let _ = progress_tx.send((status.to_string(), percent, written, total));
             })
             .await;
         match outcome {
             Ok(()) => {
-                let detail =
-                    "Install accepted. The node reboots onto the new slot.".to_string();
+                let detail = "Install accepted. The node reboots onto the new slot.".to_string();
                 flash_status.set(detail.clone());
                 let mut progress = ota_progress_from_status(
                     &detail,
@@ -1963,9 +1953,7 @@ fn start_ota_firmware_update(
                 if let Some(previous) = flash_progress() {
                     progress.carry_timing_from(&previous);
                 }
-                flash_progress.set(Some(
-                    progress.finish(FlashRunOutcome::Succeeded, detail),
-                ));
+                flash_progress.set(Some(progress.finish(FlashRunOutcome::Succeeded, detail)));
             }
             Err(error) => {
                 let detail = error.to_string();
@@ -5656,15 +5644,15 @@ fn start_flash(
                                 }
                             }
                             flash_status.set(detail.clone());
-                            let mut progress = flash_progress()
-                                .unwrap_or_else(|| FlashProgress::running(enrollable, FlashStage::Complete, ""));
+                            let mut progress = flash_progress().unwrap_or_else(|| {
+                                FlashProgress::running(enrollable, FlashStage::Complete, "")
+                            });
                             progress.enrolled = Some(EnrolledFlashTarget {
                                 id: target_id,
                                 display_name: display_name.clone(),
                             });
-                            flash_progress.set(Some(
-                                progress.finish(FlashRunOutcome::Succeeded, detail),
-                            ));
+                            flash_progress
+                                .set(Some(progress.finish(FlashRunOutcome::Succeeded, detail)));
                             if let Ok(items) = backend.targets().await {
                                 targets.set(items);
                             }
@@ -5690,26 +5678,20 @@ fn start_flash(
                     let progress = flash_progress().unwrap_or_else(|| {
                         FlashProgress::running(enrollable, FlashStage::Complete, "")
                     });
-                    flash_progress.set(Some(
-                        progress.finish(FlashRunOutcome::Succeeded, detail),
-                    ));
+                    flash_progress.set(Some(progress.finish(FlashRunOutcome::Succeeded, detail)));
                 }
                 Ok(Err(error)) => {
                     let detail = format!("Flash failed: {error}");
                     flash_status.set(detail.clone());
                     if let Some(progress) = flash_progress() {
-                        flash_progress.set(Some(
-                            progress.finish(FlashRunOutcome::Failed, detail),
-                        ));
+                        flash_progress.set(Some(progress.finish(FlashRunOutcome::Failed, detail)));
                     }
                 }
                 Err(error) => {
                     let detail = format!("Flash failed: {error}");
                     flash_status.set(detail.clone());
                     if let Some(progress) = flash_progress() {
-                        flash_progress.set(Some(
-                            progress.finish(FlashRunOutcome::Failed, detail),
-                        ));
+                        flash_progress.set(Some(progress.finish(FlashRunOutcome::Failed, detail)));
                     }
                 }
             }

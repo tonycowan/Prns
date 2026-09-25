@@ -17,9 +17,11 @@
 
 use core::cell::RefCell;
 
+use crate::firmware_update_plan as plan;
+use crate::flash::{EspRomFlash, EspRomFlashError};
+use crate::memory::EspFirmwareMemory;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use sha2::{Digest, Sha256};
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
@@ -27,9 +29,7 @@ use embedded_storage::nor_flash::{NorFlash, ReadNorFlash, RmwNorFlashStorage};
 use esp_bootloader_esp_idf::ota::{Ota, OtaImageState};
 use esp_bootloader_esp_idf::partitions::{self, AppPartitionSubType};
 use portable_atomic::{AtomicBool, Ordering};
-use crate::firmware_update_plan as plan;
-use crate::flash::{EspRomFlash, EspRomFlashError};
-use crate::memory::EspFirmwareMemory;
+use sha2::{Digest, Sha256};
 
 const FLASH_SECTOR_LEN: usize = 4096;
 /// First byte of every ESP-IDF application image.
@@ -56,8 +56,10 @@ const RAW_SUBTYPE_OTA_1: u8 = 0x11;
 /// ota_0 and ota_1. Not counting factory or test slots, which this table does not carry.
 const OTA_SLOT_COUNT: usize = 2;
 
-static STAGED_DIGEST: BlockingMutex<CriticalSectionRawMutex, RefCell<Option<[u8; SHA256_DIGEST_LEN]>>> =
-    BlockingMutex::new(RefCell::new(None));
+static STAGED_DIGEST: BlockingMutex<
+    CriticalSectionRawMutex,
+    RefCell<Option<[u8; SHA256_DIGEST_LEN]>>,
+> = BlockingMutex::new(RefCell::new(None));
 static INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Exclusive right to write the inactive slot and move the boot selection.

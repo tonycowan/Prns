@@ -1082,16 +1082,11 @@ fn replica_material(clock: u64, signer: PublicIdentityMaterial, body: &[u8]) -> 
     ])
 }
 
-fn encode_replica_body(
-    replica: &RosterReplica,
-    signer: PublicIdentityMaterial,
-) -> Option<Vec<u8>> {
+fn encode_replica_body(replica: &RosterReplica, signer: PublicIdentityMaterial) -> Option<Vec<u8>> {
     let upserts: Vec<_> = replica
         .upserts
         .iter()
-        .filter(|upsert| {
-            !replica_forgets_target(replica, upsert.access.target().identity_hash())
-        })
+        .filter(|upsert| !replica_forgets_target(replica, upsert.access.target().identity_hash()))
         .cloned()
         .collect();
     let sibling_count = u16::try_from(replica.siblings.len()).ok()?;
@@ -1550,7 +1545,10 @@ mod tests {
         assert_eq!(parsed.siblings, replica.siblings);
         assert_eq!(parsed.labels, replica.labels);
         assert_eq!(tombstone_clock(&parsed, hash), 4);
-        assert_eq!(upsert_clock(&parsed, access(0xcd).target().identity_hash()), 7);
+        assert_eq!(
+            upsert_clock(&parsed, access(0xcd).target().identity_hash()),
+            7
+        );
     }
 
     #[test]

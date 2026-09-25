@@ -271,8 +271,7 @@ impl FlashProgress {
         }
         let started = self.started_at_millis?;
         let finished = self.finished_at_millis.unwrap_or_else(unix_millis_now);
-        let duration =
-            std::time::Duration::from_millis(finished.saturating_sub(started).max(1));
+        let duration = std::time::Duration::from_millis(finished.saturating_sub(started).max(1));
         let status = match self.outcome {
             FlashRunOutcome::Succeeded => "Succeeded",
             FlashRunOutcome::Failed => "Failed",
@@ -3126,7 +3125,9 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
             .expect("enrolled flash offers the node");
         assert_eq!(offer.id, "aabbccddeeff0011");
         assert_eq!(offer.display_name, "Heltec MeshTower V2");
-        let summary = progress.run_summary_lines().expect("finished run has summary");
+        let summary = progress
+            .run_summary_lines()
+            .expect("finished run has summary");
         assert_eq!(summary[3], ("Status".into(), "Succeeded".into()));
     }
 
@@ -3205,15 +3206,15 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
         progress.write_bytes = Some(12_288);
         progress.write_total_bytes = Some(49_152);
         progress.write_started_at_millis = Some(unix_millis_now().saturating_sub(2_000));
-        let caption = progress
-            .write_throughput_caption()
-            .expect("write caption");
+        let caption = progress.write_throughput_caption().expect("write caption");
         assert!(caption.starts_with("12kB/48kB in "), "{caption}");
         assert!(caption.contains("B/s"), "{caption}");
         assert!(caption.contains(" left"), "{caption}");
         assert_eq!(progress.stage_caption(FlashStage::Write), "Writing device");
         assert!(
-            progress.detail_line().starts_with("Writing device : 12kB/48kB in "),
+            progress
+                .detail_line()
+                .starts_with("Writing device : 12kB/48kB in "),
             "{}",
             progress.detail_line()
         );

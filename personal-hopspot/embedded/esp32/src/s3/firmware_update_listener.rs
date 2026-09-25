@@ -69,10 +69,7 @@ fn log_permit(identity: IdentityHash) {
     let mut index = 0u8;
     while index < noted {
         if let Some(grant) = personal_rns::runtime::firmware_update_noted_grant(index) {
-            log::info!(
-                "update: permit grant {index} {}",
-                hex16(grant.as_bytes())
-            );
+            log::info!("update: permit grant {index} {}", hex16(grant.as_bytes()));
         }
         index = index.saturating_add(1);
     }

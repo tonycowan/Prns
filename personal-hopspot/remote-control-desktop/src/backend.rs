@@ -31,18 +31,17 @@ use personal_rns::prelude::*;
 use personal_rns::remote_control::{
     parse_controller_public_keys, parse_wifi_station_rssi_dbm, parse_wifi_station_ssid,
     ReceiveRemoteControlControllerPairingOfferOutcome, RemoteControlAuthorizeControllerOutcome,
-    RemoteControlGroupOutcome,     RemoteControlInterfaceCard, RemoteControlInterfaceConfigOutcome,
+    RemoteControlGroupOutcome, RemoteControlInterfaceCard, RemoteControlInterfaceConfigOutcome,
     RemoteControlInterfaceContinuation, RemoteControlInterfaceEntry, RemoteControlInterfaceGroup,
-    RemoteControlInterfacePage, RemoteControlInterfacePeer,
-    RemoteControlInterfacePeerPage, RemoteControlInterfacePeersOutcome,
-    RemoteControlInterfacePower, RemoteControlLoRaOutcome, RemoteControlLoRaProfile,
-    RemoteControlModeOutcome, RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome,
-    RemoteControlPairingEndpoint, RemoteControlPairingInvitationCode,
-    RemoteControlPathContinuation, RemoteControlPathEntry, RemoteControlPathPage,
-    RemoteControlPowerOutcome, RemoteControlRequestKind, RemoteControlRequestSet,
-    RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome, RemoteControlTargetAccess,
-    RemoteControlWifiStation, RemoteControlWifiStationOutcome, REMOTE_CONTROL_APPLICATION_ASPECTS,
-    REMOTE_CONTROL_APPLICATION_NAME,
+    RemoteControlInterfacePage, RemoteControlInterfacePeer, RemoteControlInterfacePeerPage,
+    RemoteControlInterfacePeersOutcome, RemoteControlInterfacePower, RemoteControlLoRaOutcome,
+    RemoteControlLoRaProfile, RemoteControlModeOutcome, RemoteControlNetworkTransport,
+    RemoteControlNetworkTransportOutcome, RemoteControlPairingEndpoint,
+    RemoteControlPairingInvitationCode, RemoteControlPathContinuation, RemoteControlPathEntry,
+    RemoteControlPathPage, RemoteControlPowerOutcome, RemoteControlRequestKind,
+    RemoteControlRequestSet, RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome,
+    RemoteControlTargetAccess, RemoteControlWifiStation, RemoteControlWifiStationOutcome,
+    REMOTE_CONTROL_APPLICATION_ASPECTS, REMOTE_CONTROL_APPLICATION_NAME,
 };
 use personal_rns::routing::announce::{derive_destination_hash, expand_name};
 use personal_rns::routing::NextHop;
@@ -72,11 +71,11 @@ use crate::identity_clone::{
 };
 use crate::roster_sync::{
     access_for, adopt_sibling, attention_for_target, decode_labels, encode_labels,
-    forget_sibling_locally, forget_target_locally, hydrate_accesses_from_snapshot, import_seed_labels,
-    load_replica, looking_instance, merge_roster, next_sibling_alias, next_target_alias,
-    note_local_label, note_local_upsert, parse_replica_reply, peer_alias_is_syncable,
-    peer_alias_link_is_local_only, peer_alias_value_is_syncable, persist_replica,
-    replica_forgets_target, replica_known_targets, replica_message, replica_path,
+    forget_sibling_locally, forget_target_locally, hydrate_accesses_from_snapshot,
+    import_seed_labels, load_replica, looking_instance, merge_roster, next_sibling_alias,
+    next_target_alias, note_local_label, note_local_upsert, parse_replica_reply,
+    peer_alias_is_syncable, peer_alias_link_is_local_only, peer_alias_value_is_syncable,
+    persist_replica, replica_forgets_target, replica_known_targets, replica_message, replica_path,
     retract_unsyncable_peer_alias_values, roster_sync_destination_hash, sibling_alias_is_syncable,
     strip_local_sibling_alias, write_pull, RosterDelta, RosterLabel, RosterLabelKind, RosterShared,
     RosterSync, TargetAttention, AUTO_GATEWAY_ALIAS_LINK, AUTO_GATEWAY_PEER_ALIAS,
@@ -756,8 +755,7 @@ impl RemoteControlBackend {
                 .roster
                 .lock()
                 .map_err(|_| BackendError::Clone("roster lock was poisoned".to_string()))?;
-            roster_accesses_snapshot(&roster.replica)
-                .map_err(|error| BackendError::Clone(error))?
+            roster_accesses_snapshot(&roster.replica).map_err(|error| BackendError::Clone(error))?
         };
         let mut shared = session
             .clone
@@ -3467,12 +3465,11 @@ impl RemoteControlBackend {
         let path = self.target_path(target_id).await;
         let route = format_target_route(path.as_ref());
         let session = self.session()?;
-        let resolved = resolve_managed_target(session, target).ok_or_else(|| {
-            BackendError::Operation {
+        let resolved =
+            resolve_managed_target(session, target).ok_or_else(|| BackendError::Operation {
                 operation: "connect to target",
                 detail: "managed target authorization is missing from the roster".to_string(),
-            }
-        })?;
+            })?;
         let dest_hex = encode_hex(resolved.endpoint().destination_hash().as_bytes());
         let name = session
             .pairing
@@ -4877,10 +4874,7 @@ impl PairingEvents {
         }
     }
 
-    fn remember_unnamed_targets(
-        &mut self,
-        targets: &[IdentityHash],
-    ) -> Option<(String, String)> {
+    fn remember_unnamed_targets(&mut self, targets: &[IdentityHash]) -> Option<(String, String)> {
         let pending = self.pending_announce_name.clone();
         self.remember_unnamed_targets_with(targets, pending)
     }
@@ -5752,9 +5746,12 @@ fn session_controller_identity(
     parse_controller_public_keys(&bytes)
 }
 
-fn roster_accesses_snapshot(replica: &crate::roster_sync::RosterReplica) -> Result<Vec<u8>, String> {
+fn roster_accesses_snapshot(
+    replica: &crate::roster_sync::RosterReplica,
+) -> Result<Vec<u8>, String> {
     use personal_rns::persistence::{
-        remote_control_target_accesses_snapshot_capacity, write_remote_control_target_accesses_snapshot,
+        remote_control_target_accesses_snapshot_capacity,
+        write_remote_control_target_accesses_snapshot,
     };
     use personal_rns::remote_control::{
         HeapRemoteControlTargetAccessTable, RemoteControlTargetAccessTable,
@@ -5796,7 +5793,8 @@ fn load_persisted_target_access_bytes(persist_dir: &Path) -> Vec<u8> {
 
 fn clear_persisted_target_accesses(persist_dir: &Path) {
     use personal_rns::persistence::{
-        remote_control_target_accesses_snapshot_capacity, write_remote_control_target_accesses_snapshot,
+        remote_control_target_accesses_snapshot_capacity,
+        write_remote_control_target_accesses_snapshot,
     };
     use personal_rns::remote_control::HeapRemoteControlTargetAccessTable;
     let table = HeapRemoteControlTargetAccessTable::default();
@@ -6329,7 +6327,10 @@ fn unconfigured_tcp_client_entry() -> InterfaceEntry {
         kind: InterfaceKind::TcpClient.name().to_string(),
         power: InterfacePower::Off,
         mode: InterfaceMode::Full,
-        connection: connection_label(Some(InterfaceKind::TcpClient), ConnectionState::Disconnected),
+        connection: connection_label(
+            Some(InterfaceKind::TcpClient),
+            ConnectionState::Disconnected,
+        ),
         group: None,
         tx_bytes: 0,
         rx_bytes: 0,
@@ -8400,18 +8401,18 @@ mod tests {
         bluetooth_auto_prefix_from_direct_peer, bluetooth_auto_title, clone_announce_is_usb_local,
         control_announce_satisfies, controller_identity_secret_path, encode_hex,
         endpoint_matches_wifi_ll_keys, ensure_wifi_auto_tcp_client, format_activity_age,
-        format_announce_millis,
-        format_connect_label, format_hop_count, format_interface, format_managed_node_battery,
-        format_next_hop, format_pairing_open_label, format_target_announce, format_target_route,
-        format_utc_millis, generic_bluetooth_auto_title, instance_identity_secret_path,
-        interface_peer, interface_peer_from_wire, interface_power_from_connection,
-        inventory_recovery_continues, label_known_nodes, labeled_local_peer,
-        load_persisted_tcp_target, local_interface_config, local_interface_entry,
-        managed_targets_from_disk, monitor_remaining_at, normalize_stored_wifi_ll,
-        operator_interface_kind, operator_local_kind, parse_invitation_code, parse_target_names,
-        parse_tcp_dial_target, path_is_better_than, path_is_direct_ble, path_table_row,
-        peer_is_auto_gateway, peer_is_this_controller_bluetooth, peer_is_this_controller_wifi,
-        peer_label, persist_tcp_target, radio_facts, remember_known_node, remote_interface_entry,
+        format_announce_millis, format_connect_label, format_hop_count, format_interface,
+        format_managed_node_battery, format_next_hop, format_pairing_open_label,
+        format_target_announce, format_target_route, format_utc_millis,
+        generic_bluetooth_auto_title, instance_identity_secret_path, interface_peer,
+        interface_peer_from_wire, interface_power_from_connection, inventory_recovery_continues,
+        label_known_nodes, labeled_local_peer, load_persisted_tcp_target, local_interface_config,
+        local_interface_entry, managed_targets_from_disk, monitor_remaining_at,
+        normalize_stored_wifi_ll, operator_interface_kind, operator_local_kind,
+        parse_invitation_code, parse_target_names, parse_tcp_dial_target, path_is_better_than,
+        path_is_direct_ble, path_table_row, peer_is_auto_gateway,
+        peer_is_this_controller_bluetooth, peer_is_this_controller_wifi, peer_label,
+        persist_tcp_target, radio_facts, remember_known_node, remote_interface_entry,
         render_target_names, resolve_controller_tcp_target, resolve_paired_target_hash,
         route_interface_kind, short_id, should_forget_control_route,
         should_wait_for_control_announce, stored_alias, target_label, BackendError, InterfaceEntry,
@@ -10071,7 +10072,13 @@ mod tests {
         assert_eq!(items[2].kind, "tcp-client");
         assert_eq!(items[2].power, InterfacePower::Off);
         ensure_wifi_auto_tcp_client(&mut items);
-        assert_eq!(items.iter().filter(|item| item.kind == "tcp-client").count(), 1);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == "tcp-client")
+                .count(),
+            1
+        );
         let mut lora_only = vec![test_local_interface("lora", "Connected")];
         ensure_wifi_auto_tcp_client(&mut lora_only);
         assert!(lora_only.iter().all(|item| item.kind != "tcp-client"));
