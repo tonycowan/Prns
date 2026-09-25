@@ -643,7 +643,9 @@ impl RemoteControlRequest {
                 Ok(Self::DescribeNetworkTransport)
             }
             RemoteControlRequestKind::SetNetworkTransport => parse_set_network_transport(body),
-            RemoteControlRequestKind::FirmwareUpdate => Err(RemoteControlRequestParseError::Malformed),
+            RemoteControlRequestKind::FirmwareUpdate => {
+                Err(RemoteControlRequestParseError::Malformed)
+            }
             RemoteControlRequestKind::InventoryPathTable => {
                 RemoteControlPathPage::parse(body).map(|page| Self::InventoryPathTable { page })
             }

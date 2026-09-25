@@ -245,8 +245,8 @@ const OTA_DATA_LEN: u32 = 0x2000;
 /// `esp-bootloader-esp-idf` checks over the sequence alone. Undefined leaves the running image
 /// to stamp the slot valid after it boots.
 const OTA_0_SELECT_ENTRY: [u8; 32] = [
-    1, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-    255, 255, 255, 255, 255, 255, 255, 154, 152, 67, 71,
+    1, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 154, 152, 67, 71,
 ];
 
 fn otadata_offset(partition_table: &[u8]) -> Option<u32> {

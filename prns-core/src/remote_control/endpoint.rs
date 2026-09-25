@@ -79,7 +79,9 @@ impl RemoteControlTargetIdentity {
 }
 
 #[must_use]
-pub fn firmware_update_destination_hash(identity: &crate::identity::IdentityHash) -> DestinationHash {
+pub fn firmware_update_destination_hash(
+    identity: &crate::identity::IdentityHash,
+) -> DestinationHash {
     derive_destination_hash(identity, &FIRMWARE_UPDATE_DOTTED_NAME_HASH)
 }
 

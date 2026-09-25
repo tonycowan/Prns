@@ -292,9 +292,10 @@ fn app_partition_name_from_csv(text: &str) -> Result<String, BuildError> {
     if names.iter().any(|name| name == "ota_0") {
         return Ok("ota_0".to_string());
     }
-    names.into_iter().next().ok_or_else(|| {
-        BuildError::Build("partition table has no app partition".to_string())
-    })
+    names
+        .into_iter()
+        .next()
+        .ok_or_else(|| BuildError::Build("partition table has no app partition".to_string()))
 }
 
 fn part_identity(

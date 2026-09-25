@@ -289,7 +289,8 @@ impl<S: StorageLayout> EngineState<S> {
         self.request_handlers
             .unregister(&target_endpoint.destination_hash(), &request_endpoint_id);
         if register_firmware_update_destination {
-            let firmware_update = crate::remote_control::firmware_update_destination_hash(&target_identity);
+            let firmware_update =
+                crate::remote_control::firmware_update_destination_hash(&target_identity);
             match self.upstream_app_destinations.unregister(&firmware_update) {
                 UnregisterRegistrationOutcome::Unregistered { .. }
                 | UnregisterRegistrationOutcome::NotRegistered => {}
