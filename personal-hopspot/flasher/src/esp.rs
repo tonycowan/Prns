@@ -258,8 +258,8 @@ fn otadata_offset(partition_table: &[u8]) -> Option<u32> {
         }
         let kind = entry[2];
         let subtype = entry[3];
-        let offset = u32::from_le_bytes(entry[4..8].try_into().expect("4 bytes"));
-        let len = u32::from_le_bytes(entry[8..12].try_into().expect("4 bytes"));
+        let offset = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+        let len = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]);
         if kind == PARTITION_TYPE_DATA && subtype == PARTITION_SUBTYPE_OTA && len == OTA_DATA_LEN {
             return Some(offset);
         }
