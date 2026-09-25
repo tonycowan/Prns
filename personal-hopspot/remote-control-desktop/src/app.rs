@@ -38,9 +38,11 @@ type PublishedTips = crate::flash::PublishedChannelTips;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PublishedTips;
 use personal_rns::interfaces::lora::{
-    CodingRate, LoraBandwidth, ModemPreset, Modulation, RadioProfile, RegulatoryRegion as Region,
-    SpreadingFactor, SubGRegion,
+    CodingRate, LoraBandwidth, ModemPreset, Modulation, RegulatoryRegion as Region, SpreadingFactor,
+    SubGRegion,
 };
+#[cfg(not(target_os = "android"))]
+use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::interfaces::InterfaceMode;
 use personal_rns::remote_control::RemoteControlNetworkTransport;
 
@@ -1522,22 +1524,7 @@ fn ManagedTargetConfiguration(
                 }
             }
             if ota() {
-                if let Some(progress) =
-                    flash_progress().filter(|progress| progress.kind == FlashKind::Ota)
-                {
-                    {flash_run_progress_view(progress)}
-                }
-                {
-                    let status = flash_status();
-                    let repeats_progress = flash_progress().as_ref().is_some_and(|progress| {
-                        progress.kind == FlashKind::Ota && progress.detail == status
-                    });
-                    rsx! {
-                        if !status.is_empty() && !repeats_progress {
-                            p { class: "note flash-stage-detail", "{status}" }
-                        }
-                    }
-                }
+                {ota_run_progress(flash_progress, flash_status)}
             }
             div { class: if configuring() || ota() { "deck editing" } else { "deck" },
                 div { class: "deck-track",
@@ -5718,6 +5705,38 @@ async fn apply_flashed_lora(
     backend
         .set_interface_lora_profile(target_id, &lora.id, profile)
         .await
+}
+
+fn ota_run_progress(
+    flash_progress: Signal<Option<FlashProgress>>,
+    flash_status: Signal<String>,
+) -> Element {
+    #[cfg(not(target_os = "android"))]
+    {
+        let progress = flash_progress().filter(|progress| progress.kind == FlashKind::Ota);
+        let status = flash_status();
+        let repeats_progress = progress
+            .as_ref()
+            .is_some_and(|progress| progress.detail == status);
+        return rsx! {
+            if let Some(progress) = progress {
+                {flash_run_progress_view(progress)}
+            }
+            if !status.is_empty() && !repeats_progress {
+                p { class: "note flash-stage-detail", "{status}" }
+            }
+        };
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = flash_progress;
+        let status = flash_status();
+        rsx! {
+            if !status.is_empty() {
+                p { class: "note flash-stage-detail", "{status}" }
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
