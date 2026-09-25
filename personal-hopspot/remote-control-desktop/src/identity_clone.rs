@@ -2,6 +2,7 @@
 //! (`AcceptDirect`) + one request endpoint. Not a prns-core pairing sibling.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use personal_rns::crypto::{sha256_chunks, Ed25519Signature};
 use personal_rns::identity::{
@@ -586,6 +587,7 @@ pub struct SourceCloneSession {
     pub transcript: Option<IdentityCloneTranscript>,
     pub accepted: bool,
     pub payload: Option<IdentityClonePayload>,
+    pub last_announce: Instant,
 }
 
 pub struct IdentityClonePayload {

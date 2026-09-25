@@ -600,10 +600,30 @@ impl RemoteControlBackend {
         let instance_material =
             personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
         let source_hash = instance_material.identity_hash();
+        let destination = identity_clone_destination_hash(source_hash)
+            .ok_or_else(|| BackendError::Clone("clone destination name is invalid".to_string()))?;
         let mut source_nonce = [0u8; IDENTITY_CLONE_NONCE_LEN];
         let mut entropy = OsRuntimeEntropy::try_new()
             .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         entropy.fill_random(&mut source_nonce);
+        let announce = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
+        let mut app_data = [0u8; 128];
+        let app_data_len = announce
+            .write(&mut app_data)
+            .ok_or_else(|| BackendError::Clone("clone announce is too large".to_string()))?;
+        let bytes = personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(
+            &app_data[..app_data_len],
+        )
+        .map_err(|_| BackendError::Clone("clone announce app data is too large".to_string()))?;
+        session
+            .handle
+            .announce_now(AnnounceNow {
+                destination,
+                target: AnnounceTarget::AllInterfaces,
+                app_data: AnnounceAppData::Data(bytes),
+            })
+            .await
+            .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         let mut shared = session
             .clone
             .lock()
@@ -615,9 +635,10 @@ impl RemoteControlBackend {
             transcript: None,
             accepted: false,
             payload: None,
+            last_announce: Instant::now(),
         });
         shared.notice = Some(
-            "Adoption started on USB. The other app must already have pressed I am up for adoption."
+            "Adoption announce sent on USB. The other app must already have pressed I am up for adoption."
                 .to_string(),
         );
         shared.error = None;
@@ -625,6 +646,15 @@ impl RemoteControlBackend {
     }
 
     pub async fn advance_clone(&self) -> Result<(), BackendError> {
+        if let Err(error) = self.refresh_clone_source_announce().await {
+            let Ok(session) = self.session() else {
+                return Err(error);
+            };
+            if let Ok(mut shared) = session.clone.lock() {
+                shared.error = Some(error.to_string());
+            }
+            return Err(error);
+        }
         if let Err(error) = self.send_pending_clone_hello().await {
             let Ok(session) = self.session() else {
                 return Err(error);
@@ -634,6 +664,52 @@ impl RemoteControlBackend {
             }
             return Err(error);
         }
+        Ok(())
+    }
+
+    async fn refresh_clone_source_announce(&self) -> Result<(), BackendError> {
+        let session = self.session()?;
+        let (destination, source_nonce) = {
+            let mut shared = session
+                .clone
+                .lock()
+                .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
+            let Some(source) = shared.source.as_mut() else {
+                return Ok(());
+            };
+            if source.peer_keys.is_some() || source.last_announce.elapsed() < Duration::from_secs(3)
+            {
+                return Ok(());
+            }
+            source.last_announce = Instant::now();
+            (
+                identity_clone_destination_hash(source.source_hash).ok_or_else(|| {
+                    BackendError::Clone("clone destination name is invalid".to_string())
+                })?,
+                source.source_nonce,
+            )
+        };
+        let instance = load_instance_secret(&session.identities_dir)?;
+        let instance_material =
+            personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
+        let announce = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
+        let mut app_data = [0u8; 128];
+        let app_data_len = announce
+            .write(&mut app_data)
+            .ok_or_else(|| BackendError::Clone("clone announce is too large".to_string()))?;
+        let bytes = personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(
+            &app_data[..app_data_len],
+        )
+        .map_err(|_| BackendError::Clone("clone announce app data is too large".to_string()))?;
+        session
+            .handle
+            .announce_now(AnnounceNow {
+                destination,
+                target: AnnounceTarget::AllInterfaces,
+                app_data: AnnounceAppData::Data(bytes),
+            })
+            .await
+            .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         Ok(())
     }
 
