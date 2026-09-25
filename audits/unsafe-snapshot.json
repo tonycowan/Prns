@@ -13418,7 +13418,8 @@
     {
       "graphs": {
         "esp32-s3-heltec-r8": [
-          "default"
+          "default",
+          "firmware-update"
         ]
       },
       "name": "hopspot-heltec-v4-r8",
@@ -21200,6 +21201,7 @@
           "display",
           "esp-now",
           "esp32s3fn8",
+          "firmware-update",
           "jtag-logging",
           "lora",
           "silent-logging",
@@ -21213,6 +21215,7 @@
           "display",
           "esp-now",
           "esp32s3fn8",
+          "firmware-update",
           "jtag-logging",
           "lora",
           "silent-logging",
@@ -21226,6 +21229,7 @@
           "display",
           "esp-now",
           "esp32s3fn8",
+          "firmware-update",
           "jtag-logging",
           "lora",
           "silent-logging",
@@ -21239,6 +21243,7 @@
           "display",
           "esp-now",
           "esp32s3fn8",
+          "firmware-update",
           "jtag-logging",
           "lora",
           "silent-logging",
@@ -21252,6 +21257,7 @@
           "display",
           "esp-now",
           "esp32s3fn8",
+          "firmware-update",
           "jtag-logging",
           "lora",
           "silent-logging",
@@ -21265,6 +21271,7 @@
           "display",
           "esp-now",
           "esp32s3fn8",
+          "firmware-update",
           "jtag-logging",
           "lora",
           "silent-logging",
@@ -21343,11 +21350,11 @@
       "name": "personal-hopspot-remote-control-desktop",
       "source": "personal-hopspot/remote-control-desktop",
       "unsafe": {
-        "blocks": 18,
+        "blocks": 20,
         "externs": 0,
         "functions": 0,
         "impls": 0,
-        "tokens": 18
+        "tokens": 20
       },
       "version": "0.1.0"
     },
