@@ -147,7 +147,7 @@
           },
           "report_fingerprint": "8f459a2cb99135598d6025427d4e0cbbd87dee503342cf8afdf9e191c8066482",
           "build_fingerprint": "9cfbdbdef5697e571ce627dfa04d4b0879e19a61709a81cc74035039ba79bb70",
-          "toolchain_fingerprint": "75a6259eaebb5273ab6bf620ea36e19f31bda7caff1a56a239816a600f70e5f2",
+          "toolchain_fingerprint": "f6d166599bbe6ed8f74dc8ab7de015e40542e7f8cbbcdb3be335db344811a117",
           "memory_contract_fingerprint": "1840ca931e17d8b650d8f45533bc0eb5280cff692d2b7511575b3c1abbe0338a"
         }
       }
@@ -168,7 +168,7 @@
           },
           "report_fingerprint": "f71ad8017d263ad5691e7bc7e6b935e75fbd19c112097729e8754580cf9f5d70",
           "build_fingerprint": "a664c84f8ae355a06014302cdeee84948079f5afa250ae6b65482722c270cdf2",
-          "toolchain_fingerprint": "75a6259eaebb5273ab6bf620ea36e19f31bda7caff1a56a239816a600f70e5f2",
+          "toolchain_fingerprint": "f6d166599bbe6ed8f74dc8ab7de015e40542e7f8cbbcdb3be335db344811a117",
           "memory_contract_fingerprint": "61db35ba4f7875c2902003a60b3073b538ba9ac6a0d7a744150209eb6314a7bc"
         }
       }
