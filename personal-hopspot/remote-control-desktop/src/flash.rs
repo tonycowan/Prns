@@ -54,6 +54,14 @@ pub enum FlashStage {
     Complete,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashKind {
+    /// USB / hopspot-flash enroll-and-write flow.
+    Usb,
+    /// Managed-node OTA image stream.
+    Ota,
+}
+
 impl FlashStage {
     pub fn label(self) -> &'static str {
         match self {
@@ -61,6 +69,18 @@ impl FlashStage {
             Self::Prepare => "Preparing firmware",
             Self::Write => "Writing device",
             Self::Complete => "Complete",
+        }
+    }
+
+    pub fn label_for(self, kind: FlashKind) -> &'static str {
+        match kind {
+            FlashKind::Usb => self.label(),
+            FlashKind::Ota => match self {
+                Self::Enroll => "Connecting",
+                Self::Prepare => "Connecting",
+                Self::Write => "Sending image",
+                Self::Complete => "Complete",
+            },
         }
     }
 
@@ -97,24 +117,53 @@ pub struct EnrolledFlashTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlashProgress {
+    pub kind: FlashKind,
     pub enrollable: bool,
     pub stage: FlashStage,
     pub detail: String,
     pub write_percent: Option<u8>,
+    /// Bytes written or sent so far during the transfer stage.
+    pub write_bytes: Option<u64>,
+    pub write_total_bytes: Option<u64>,
+    /// Unix epoch millis when the overall flash run started.
+    pub started_at_millis: Option<u64>,
+    /// Unix epoch millis when the write/transfer stage began.
+    pub write_started_at_millis: Option<u64>,
+    /// Unix epoch millis when the run finished (success or failure).
+    pub finished_at_millis: Option<u64>,
     pub outcome: FlashRunOutcome,
     pub enrolled: Option<EnrolledFlashTarget>,
 }
 
 impl FlashProgress {
     pub fn running(enrollable: bool, stage: FlashStage, detail: impl Into<String>) -> Self {
+        Self::running_kind(FlashKind::Usb, enrollable, stage, detail)
+    }
+
+    pub fn running_kind(
+        kind: FlashKind,
+        enrollable: bool,
+        stage: FlashStage,
+        detail: impl Into<String>,
+    ) -> Self {
         Self {
-            enrollable,
+            kind,
+            enrollable: enrollable && kind == FlashKind::Usb,
             stage,
             detail: detail.into(),
             write_percent: None,
+            write_bytes: None,
+            write_total_bytes: None,
+            started_at_millis: Some(unix_millis_now()),
+            write_started_at_millis: None,
+            finished_at_millis: None,
             outcome: FlashRunOutcome::Running,
             enrolled: None,
         }
+    }
+
+    pub fn stages(&self) -> &'static [FlashStage] {
+        FlashStage::stages(self.enrollable)
     }
 
     pub fn manage_offer(&self) -> Option<&EnrolledFlashTarget> {
@@ -140,6 +189,183 @@ impl FlashProgress {
             FlashRunOutcome::Running => FlashStageState::Pending,
         }
     }
+
+    /// Label shown under a stage dot (no live throughput; that belongs in the detail line).
+    pub fn stage_caption(&self, stage: FlashStage) -> String {
+        stage.label_for(self.kind).to_string()
+    }
+
+    /// Status line under the stage diagram; adds write throughput while transferring.
+    pub fn detail_line(&self) -> String {
+        if self.stage == FlashStage::Write && matches!(self.outcome, FlashRunOutcome::Running) {
+            if let Some(throughput) = self.write_throughput_caption() {
+                return format!(
+                    "{} : {}",
+                    FlashStage::Write.label_for(self.kind),
+                    throughput
+                );
+            }
+        }
+        self.detail.clone()
+    }
+
+    pub fn write_throughput_caption(&self) -> Option<String> {
+        let bytes = self.write_bytes?;
+        let total = self.write_total_bytes?;
+        let started = self.write_started_at_millis?;
+        let elapsed_ms = unix_millis_now().saturating_sub(started).max(1);
+        let elapsed = std::time::Duration::from_millis(elapsed_ms);
+        let bytes_per_sec = bytes.saturating_mul(1000) / elapsed_ms;
+        let mut caption = format!(
+            "{}/{} in {} ({}B/s)",
+            format_flash_kb(bytes),
+            format_flash_kb(total),
+            format_flash_elapsed(elapsed),
+            bytes_per_sec
+        );
+        if let Some(remaining) = flash_eta_remaining(bytes, total, bytes_per_sec) {
+            caption.push_str(", ");
+            caption.push_str(&format_flash_eta(remaining));
+        }
+        Some(caption)
+    }
+
+    pub fn carry_timing_from(&mut self, previous: &Self) {
+        if self.started_at_millis.is_none() {
+            self.started_at_millis = previous.started_at_millis;
+        }
+        if self.write_started_at_millis.is_none() {
+            self.write_started_at_millis = previous.write_started_at_millis;
+        }
+        if self.stage == FlashStage::Write && self.write_started_at_millis.is_none() {
+            self.write_started_at_millis = Some(unix_millis_now());
+        }
+        if self.write_bytes.is_none() {
+            self.write_bytes = previous.write_bytes;
+        }
+        if self.write_total_bytes.is_none() {
+            self.write_total_bytes = previous.write_total_bytes;
+        }
+        if self.write_percent.is_none() {
+            self.write_percent = previous.write_percent;
+        }
+    }
+
+    pub fn finish(mut self, outcome: FlashRunOutcome, detail: impl Into<String>) -> Self {
+        self.outcome = outcome;
+        self.detail = detail.into();
+        self.stage = FlashStage::Complete;
+        self.finished_at_millis = Some(unix_millis_now());
+        if self.started_at_millis.is_none() {
+            self.started_at_millis = self.finished_at_millis;
+        }
+        self
+    }
+
+    pub fn run_summary_lines(&self) -> Option<Vec<(String, String)>> {
+        if !matches!(
+            self.outcome,
+            FlashRunOutcome::Succeeded | FlashRunOutcome::Failed
+        ) {
+            return None;
+        }
+        let started = self.started_at_millis?;
+        let finished = self.finished_at_millis.unwrap_or_else(unix_millis_now);
+        let duration =
+            std::time::Duration::from_millis(finished.saturating_sub(started).max(1));
+        let status = match self.outcome {
+            FlashRunOutcome::Succeeded => "Succeeded",
+            FlashRunOutcome::Failed => "Failed",
+            FlashRunOutcome::Running => "Running",
+        };
+        Some(vec![
+            ("Started".into(), format_flash_wall_clock(started)),
+            ("Finished".into(), format_flash_wall_clock(finished)),
+            ("Duration".into(), format_flash_elapsed(duration)),
+            ("Status".into(), status.into()),
+        ])
+    }
+}
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn format_flash_kb(bytes: u64) -> String {
+    format!("{}kB", bytes.saturating_add(512) / 1024)
+}
+
+fn format_flash_elapsed(elapsed: std::time::Duration) -> String {
+    let total = elapsed.as_secs();
+    let minutes = total / 60;
+    let seconds = total % 60;
+    if minutes == 0 {
+        let millis = elapsed.as_millis();
+        if total == 0 && millis > 0 {
+            format!("{:.1}s", millis as f64 / 1000.0)
+        } else {
+            format!("{seconds}s")
+        }
+    } else {
+        format!("{minutes}m {seconds}s")
+    }
+}
+
+fn flash_eta_remaining(bytes: u64, total: u64, bytes_per_sec: u64) -> Option<std::time::Duration> {
+    if bytes == 0 || bytes_per_sec == 0 || bytes >= total {
+        return None;
+    }
+    let remaining_bytes = total.saturating_sub(bytes);
+    let secs = remaining_bytes.div_ceil(bytes_per_sec);
+    Some(std::time::Duration::from_secs(secs))
+}
+
+fn format_flash_eta(remaining: std::time::Duration) -> String {
+    format!("~{} left", format_flash_elapsed(remaining))
+}
+
+fn format_flash_wall_clock(millis: u64) -> String {
+    let unix_secs = i64::try_from(millis / 1_000).unwrap_or(0);
+    match flash_local_civil(unix_secs) {
+        Some((year, month, day, hour, minute, second)) => {
+            format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+        }
+        None => {
+            let hours = (millis / 3_600_000) % 24;
+            let minutes = (millis / 60_000) % 60;
+            let seconds = (millis / 1_000) % 60;
+            format!("UTC {hours:02}:{minutes:02}:{seconds:02}")
+        }
+    }
+}
+
+#[cfg(unix)]
+fn flash_local_civil(unix_secs: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+    let time = libc::time_t::try_from(unix_secs).ok()?;
+    let ptr = unsafe { libc::localtime_r(&time, tm.as_mut_ptr()) };
+    if ptr.is_null() {
+        return None;
+    }
+    let tm = unsafe { tm.assume_init() };
+    Some((
+        tm.tm_year + 1900,
+        u32::try_from(tm.tm_mon + 1).ok()?,
+        u32::try_from(tm.tm_mday).ok()?,
+        u32::try_from(tm.tm_hour).ok()?,
+        u32::try_from(tm.tm_min).ok()?,
+        u32::try_from(tm.tm_sec).ok()?,
+    ))
+}
+
+#[cfg(not(unix))]
+fn flash_local_civil(_unix_secs: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
+    None
 }
 
 fn stage_index(stage: FlashStage, enrollable: bool) -> usize {
@@ -159,13 +385,52 @@ fn progress_from_hopspot_event(enrollable: bool, event: &HopspotEvent) -> FlashP
             .clone()
             .unwrap_or_else(|| stage.label().to_string()),
     );
+    // `running` stamps started_at; hopspot updates replace the whole progress and timing
+    // is restored by the flash runner / UI merge.
+    progress.started_at_millis = None;
     if event.event == "error" || event.phase == "failed" {
         progress.outcome = FlashRunOutcome::Failed;
     }
     if let (Some(current), Some(total)) = (event.current, event.total) {
         if total > 0 {
             progress.write_percent = Some(current.saturating_mul(100).saturating_div(total) as u8);
+            progress.write_bytes = Some(current);
+            progress.write_total_bytes = Some(total);
         }
+    }
+    progress
+}
+
+/// Map a managed-node OTA status line into the shared stage strip.
+pub fn ota_progress_from_status(
+    status: &str,
+    percent: Option<u8>,
+    written_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+) -> FlashProgress {
+    let stage = if status.starts_with("Sending image")
+        || status.starts_with("Image sent")
+        || status.starts_with("Sending the image digest")
+    {
+        FlashStage::Write
+    } else if status.starts_with("Install accepted") {
+        FlashStage::Complete
+    } else {
+        FlashStage::Prepare
+    };
+    let mut progress =
+        FlashProgress::running_kind(FlashKind::Ota, false, stage, status.to_string());
+    progress.started_at_millis = None;
+    progress.write_percent = percent.filter(|_| stage == FlashStage::Write);
+    progress.write_bytes = written_bytes.filter(|_| stage == FlashStage::Write);
+    progress.write_total_bytes = total_bytes.filter(|_| stage == FlashStage::Write);
+    if status.starts_with("Install accepted") {
+        progress.outcome = FlashRunOutcome::Succeeded;
+        progress.write_percent = Some(100);
+        progress.write_bytes = total_bytes.or(written_bytes);
+        progress.write_total_bytes = total_bytes;
+        progress.finished_at_millis = Some(unix_millis_now());
+        progress.stage = FlashStage::Complete;
     }
     progress
 }
@@ -801,11 +1066,20 @@ pub fn flash_enrolled_board(
     }
     apply_wifi_plan(&mut command, wifi);
     eprintln!("controller flash: {}", command_argv(&command));
-    on_progress(FlashProgress::running(
-        enrollable,
-        FlashStage::Prepare,
-        format!("Starting hopspot-flash for {slug}…"),
-    ));
+    let run_started = unix_millis_now();
+    let mut write_started = None;
+    let mut last_write_bytes = None;
+    let mut last_write_total = None;
+    let mut last_write_percent = None;
+    on_progress({
+        let mut progress = FlashProgress::running(
+            enrollable,
+            FlashStage::Prepare,
+            format!("Starting hopspot-flash for {slug}…"),
+        );
+        progress.started_at_millis = Some(run_started);
+        progress
+    });
     let mut child = command
         .spawn()
         .map_err(|error| FlashError::Message(format!("could not start hopspot-flash: {error}")))?;
@@ -819,7 +1093,29 @@ pub fn flash_enrolled_board(
             if event.event == "error" || event.phase == "failed" {
                 last_json_error = event.message.clone().or(last_json_error);
             }
-            on_progress(progress_from_hopspot_event(enrollable, &event));
+            let mut progress = progress_from_hopspot_event(enrollable, &event);
+            progress.started_at_millis = Some(run_started);
+            if progress.stage == FlashStage::Write {
+                if write_started.is_none() {
+                    write_started = Some(unix_millis_now());
+                }
+                progress.write_started_at_millis = write_started;
+                if progress.write_bytes.is_some() {
+                    last_write_bytes = progress.write_bytes;
+                    last_write_total = progress.write_total_bytes;
+                    last_write_percent = progress.write_percent;
+                } else {
+                    progress.write_bytes = last_write_bytes;
+                    progress.write_total_bytes = last_write_total;
+                    progress.write_percent = last_write_percent;
+                }
+            } else {
+                progress.write_started_at_millis = write_started;
+                progress.write_bytes = last_write_bytes;
+                progress.write_total_bytes = last_write_total;
+                progress.write_percent = last_write_percent;
+            }
+            on_progress(progress);
         }
     }
     let status = child
@@ -1526,6 +1822,40 @@ pub fn image_pick_options(
         options.push(ImagePickOption::Catalog { image });
     }
     Ok(options)
+}
+
+/// Application image inside the catalog entry currently selected for `slug`.
+pub fn current_application_image(slug: &str) -> Result<PathBuf, FlashError> {
+    let image_dir = crate::image_catalog::current_image_dir(slug)
+        .map_err(|error| FlashError::Message(format!("image catalog error: {error}")))?
+        .ok_or_else(|| {
+            FlashError::Message(format!(
+                "no catalog image for {slug} — Import, Build, or select a tip first"
+            ))
+        })?;
+    find_named_file(&image_dir, "application.bin").ok_or_else(|| {
+        FlashError::Message(format!(
+            "the selected image for {slug} has no application image"
+        ))
+    })
+}
+
+fn find_named_file(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|file| file.to_str()) == Some(name) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// Value to bind on the `<select>` from the current catalog image.
@@ -2775,10 +3105,16 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
     #[test]
     fn successful_enrollment_offers_the_new_node() {
         let progress = FlashProgress {
+            kind: FlashKind::Usb,
             enrollable: true,
             stage: FlashStage::Complete,
             detail: "Heltec MeshTower V2 is flashed and listed under Managed Nodes.".to_string(),
             write_percent: None,
+            write_bytes: None,
+            write_total_bytes: None,
+            started_at_millis: Some(1_000),
+            write_started_at_millis: Some(1_500),
+            finished_at_millis: Some(2_000),
             outcome: FlashRunOutcome::Succeeded,
             enrolled: Some(EnrolledFlashTarget {
                 id: "aabbccddeeff0011".to_string(),
@@ -2790,15 +3126,23 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
             .expect("enrolled flash offers the node");
         assert_eq!(offer.id, "aabbccddeeff0011");
         assert_eq!(offer.display_name, "Heltec MeshTower V2");
+        let summary = progress.run_summary_lines().expect("finished run has summary");
+        assert_eq!(summary[3], ("Status".into(), "Succeeded".into()));
     }
 
     #[test]
     fn flash_without_enrollment_does_not_offer_a_node() {
         let progress = FlashProgress {
+            kind: FlashKind::Usb,
             enrollable: false,
             stage: FlashStage::Complete,
             detail: "firmware flashed".to_string(),
             write_percent: None,
+            write_bytes: None,
+            write_total_bytes: None,
+            started_at_millis: None,
+            write_started_at_millis: None,
+            finished_at_millis: None,
             outcome: FlashRunOutcome::Succeeded,
             enrolled: None,
         };
@@ -2808,10 +3152,16 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
     #[test]
     fn failed_complete_does_not_offer_a_node() {
         let progress = FlashProgress {
+            kind: FlashKind::Usb,
             enrollable: true,
             stage: FlashStage::Complete,
             detail: "listing failed".to_string(),
             write_percent: None,
+            write_bytes: None,
+            write_total_bytes: None,
+            started_at_millis: None,
+            write_started_at_millis: None,
+            finished_at_millis: None,
             outcome: FlashRunOutcome::Failed,
             enrolled: Some(EnrolledFlashTarget {
                 id: "aabbccddeeff0011".to_string(),
@@ -2819,5 +3169,58 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
             }),
         };
         assert!(progress.manage_offer().is_none());
+    }
+
+    #[test]
+    fn ota_status_lines_drive_the_shared_stage_strip() {
+        let connecting =
+            ota_progress_from_status("Requesting a path to the install address", None, None, None);
+        assert_eq!(connecting.kind, FlashKind::Ota);
+        assert_eq!(connecting.stage, FlashStage::Prepare);
+        assert!(connecting.write_percent.is_none());
+
+        let sending = ota_progress_from_status(
+            "Sending image, 40% (1.0 MiB of 2.5 MiB) in 12s",
+            Some(40),
+            Some(1_048_576),
+            Some(2_621_440),
+        );
+        assert_eq!(sending.stage, FlashStage::Write);
+        assert_eq!(sending.write_percent, Some(40));
+        assert_eq!(sending.write_bytes, Some(1_048_576));
+
+        let done = ota_progress_from_status(
+            "Install accepted. The node reboots onto the new slot.",
+            Some(100),
+            Some(2_621_440),
+            Some(2_621_440),
+        );
+        assert_eq!(done.stage, FlashStage::Complete);
+        assert_eq!(done.outcome, FlashRunOutcome::Succeeded);
+    }
+
+    #[test]
+    fn write_throughput_caption_uses_kb_and_bytes_per_second() {
+        let mut progress = FlashProgress::running(false, FlashStage::Write, "writing");
+        progress.write_bytes = Some(12_288);
+        progress.write_total_bytes = Some(49_152);
+        progress.write_started_at_millis = Some(unix_millis_now().saturating_sub(2_000));
+        let caption = progress
+            .write_throughput_caption()
+            .expect("write caption");
+        assert!(caption.starts_with("12kB/48kB in "), "{caption}");
+        assert!(caption.contains("B/s"), "{caption}");
+        assert!(caption.contains(" left"), "{caption}");
+        assert_eq!(progress.stage_caption(FlashStage::Write), "Writing device");
+        assert!(
+            progress.detail_line().starts_with("Writing device : 12kB/48kB in "),
+            "{}",
+            progress.detail_line()
+        );
+        assert!(
+            progress.detail_line().contains(" left"),
+            "{}",
+            progress.detail_line()
+        );
     }
 }

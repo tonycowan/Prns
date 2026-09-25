@@ -18,7 +18,8 @@ use crate::edits::{
 };
 #[cfg(not(target_os = "android"))]
 use crate::flash::{
-    EnrolledFlashTarget, FlashDraft, FlashProgress, FlashRunOutcome, FlashStage, FlashStageState,
+    ota_progress_from_status, EnrolledFlashTarget, FlashDraft, FlashKind, FlashProgress,
+    FlashRunOutcome, FlashStage, FlashStageState,
 };
 use crate::identity_clone::{IdentityCloneView, SiblingControllerView};
 
@@ -128,6 +129,14 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
 .flash-stages { list-style: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 10px 0 0; padding: 0; }
 .flash-stages[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .flash-stage { position: relative; display: grid; justify-items: center; gap: 8px; text-align: center; }
+.ota-meter-block { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 10px 0 0; }
+.ota-meter { height: 8px; border-radius: 4px; background: #e4ebe6; overflow: hidden; }
+.ota-meter-fill { height: 100%; background: #1f6b45; transition: width 120ms linear; }
+.ota-meter-percent { font-size: 12px; font-weight: 600; color: #183d2b; font-variant-numeric: tabular-nums; min-width: 2.75em; text-align: right; }
+.flash-run-summary { display: grid; gap: 4px; margin: 10px 0 0; }
+.flash-run-summary > div { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.flash-run-summary dt { margin: 0; font-size: 12px; font-weight: 600; color: #5a6a60; }
+.flash-run-summary dd { margin: 0; font-size: 12px; color: #183d2b; font-variant-numeric: tabular-nums; }
 .flash-stage::before { content: ""; position: absolute; top: 11px; right: calc(50% + 16px); left: calc(-50% + 16px); height: 2px; background: #d7e0d9; }
 .flash-stage:first-child::before { content: none; }
 .flash-stage.done::before, .flash-stage.current::before { background: #2d6046; }
@@ -1373,18 +1382,20 @@ fn ManagedTargetConfiguration(
                         }
                         div { class: "toolbar-pane",
                             if ota() {
-                                button {
-                                    class: "button",
-                                    r#type: "button",
-                                    onclick: move |_| ota.set(false),
-                                    "Back"
-                                }
-                                button {
-                                    class: "button",
-                                    r#type: "button",
-                                    disabled: true,
-                                    "Flash"
-                                }
+                                {ota_flash_toolbar(
+                                    target_id.clone(),
+                                    ota_board,
+                                    ota,
+                                    backend,
+                                    flash_status,
+                                    flashing,
+                                    flash_progress,
+                                    downloading,
+                                    importing,
+                                    exporting,
+                                    building,
+                                    catalog_tick,
+                                )}
                             } else {
                             button {
                                 class: "button",
@@ -1510,6 +1521,24 @@ fn ManagedTargetConfiguration(
                     }
                 }
             }
+            if ota() {
+                if let Some(progress) =
+                    flash_progress().filter(|progress| progress.kind == FlashKind::Ota)
+                {
+                    {flash_run_progress_view(progress)}
+                }
+                {
+                    let status = flash_status();
+                    let repeats_progress = flash_progress().as_ref().is_some_and(|progress| {
+                        progress.kind == FlashKind::Ota && progress.detail == status
+                    });
+                    rsx! {
+                        if !status.is_empty() && !repeats_progress {
+                            p { class: "note flash-stage-detail", "{status}" }
+                        }
+                    }
+                }
+            }
             div { class: if configuring() || ota() { "deck editing" } else { "deck" },
                 div { class: "deck-track",
                     div { class: "deck-pane",
@@ -1549,16 +1578,15 @@ fn ManagedTargetConfiguration(
                         if ota() {
                             {ota_flash_deck(
                                 ota_board,
-                                flash_forms,
+                                flash_status,
+                                flashing(),
+                                build_status,
                                 downloading,
                                 importing,
                                 exporting,
                                 building,
-                                build_status,
                                 catalog_tick,
                                 published_tips,
-                                flashing(),
-                                flash_status,
                             )}
                         } else {
                         div { class: "edit-card",
@@ -1634,6 +1662,115 @@ fn ManagedTargetConfiguration(
 }
 
 #[cfg(not(target_os = "android"))]
+fn ota_flash_toolbar(
+    target_id: String,
+    ota_board: Signal<Option<String>>,
+    mut ota: Signal<bool>,
+    backend: Signal<RemoteControlBackend>,
+    flash_status: Signal<String>,
+    flashing: Signal<bool>,
+    flash_progress: Signal<Option<FlashProgress>>,
+    downloading: Signal<bool>,
+    importing: Signal<bool>,
+    exporting: Signal<bool>,
+    building: Signal<bool>,
+    catalog_tick: Signal<u64>,
+) -> Element {
+    let selected = ota_board().unwrap_or_default();
+    let heltec = selected == "heltec-v4-r8";
+    let _ = catalog_tick();
+    let has_image = crate::image_catalog::current_image(&selected)
+        .ok()
+        .flatten()
+        .is_some();
+    let image_busy =
+        flashing() || downloading() || importing() || exporting() || building();
+    let can_flash = heltec && has_image && !image_busy;
+    rsx! {
+        button {
+            class: "button",
+            r#type: "button",
+            disabled: flashing(),
+            onclick: move |_| {
+                ota.set(false);
+                clear_flash_progress(flash_progress, flash_status);
+            },
+            "Back"
+        }
+        button {
+            class: if flashing() { "button busy" } else { "button" },
+            r#type: "button",
+            disabled: !can_flash,
+            aria_busy: if flashing() { "true" } else { "false" },
+            onclick: {
+                let target_id = target_id.clone();
+                let selected = selected.clone();
+                move |_| {
+                    start_ota_firmware_update(
+                        target_id.clone(),
+                        selected.clone(),
+                        backend,
+                        flash_status,
+                        flashing,
+                        flash_progress,
+                    );
+                }
+            },
+            if flashing() {
+                span { class: "spinner", aria_hidden: "true" }
+                "Flashing"
+            } else {
+                "Flash"
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn ota_flash_toolbar(
+    target_id: String,
+    ota_board: Signal<Option<String>>,
+    mut ota: Signal<bool>,
+    backend: Signal<RemoteControlBackend>,
+    flash_status: Signal<String>,
+    flashing: Signal<bool>,
+    flash_progress: Signal<Option<FlashProgress>>,
+    downloading: Signal<bool>,
+    importing: Signal<bool>,
+    exporting: Signal<bool>,
+    building: Signal<bool>,
+    catalog_tick: Signal<u64>,
+) -> Element {
+    let _ = (
+        target_id,
+        ota_board,
+        backend,
+        flash_status,
+        flashing,
+        flash_progress,
+        downloading,
+        importing,
+        exporting,
+        building,
+        catalog_tick,
+    );
+    rsx! {
+        button {
+            class: "button",
+            r#type: "button",
+            onclick: move |_| ota.set(false),
+            "Back"
+        }
+        button {
+            class: "button",
+            r#type: "button",
+            disabled: true,
+            "Flash"
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn ota_entry_button(
     mut configuring: Signal<bool>,
     mut ota: Signal<bool>,
@@ -1675,31 +1812,29 @@ fn ota_entry_button(
 
 fn ota_flash_deck(
     ota_board: Signal<Option<String>>,
-    flash_forms: Signal<HashMap<String, FlashDraft>>,
+    flash_status: Signal<String>,
+    flashing: bool,
+    build_status: Signal<String>,
     downloading: Signal<bool>,
     importing: Signal<bool>,
     exporting: Signal<bool>,
     building: Signal<bool>,
-    build_status: Signal<String>,
     catalog_tick: Signal<u64>,
     published_tips: Signal<Option<PublishedTips>>,
-    flashing: bool,
-    flash_status: Signal<String>,
 ) -> Element {
     #[cfg(target_os = "android")]
     {
         let _ = (
             ota_board,
-            flash_forms,
+            flash_status,
+            flashing,
+            build_status,
             downloading,
             importing,
             exporting,
             building,
-            build_status,
             catalog_tick,
             published_tips,
-            flashing,
-            flash_status,
         );
         return rsx! {};
     }
@@ -1707,10 +1842,8 @@ fn ota_flash_deck(
     {
         let boards = crate::flash::catalog_boards().unwrap_or_default();
         let selected = ota_board().unwrap_or_default();
-        let board = boards.iter().find(|board| board.slug == selected).cloned();
-        let slug = selected.clone();
-        let form = flash_forms().get(&slug).cloned().unwrap_or_default();
-        let _ = flashing;
+        let image_busy = flashing || downloading() || importing() || exporting() || building();
+        let _ = catalog_tick();
         rsx! {
             div { class: "stack",
                 label { "Board"
@@ -1727,26 +1860,124 @@ fn ota_flash_deck(
                         }
                     }
                 }
-                if let Some(board) = board {
-                    {flash_configure_fields(
-                        board,
-                        slug,
-                        form,
-                        true,
-                        build_status,
-                        flash_status,
-                        downloading,
-                        importing,
-                        exporting,
-                        building,
-                        catalog_tick,
-                        published_tips,
-                        flash_forms,
-                    )}
-                }
+                {flash_image_picker(
+                    selected.clone(),
+                    image_busy,
+                    build_status,
+                    flash_status,
+                    downloading,
+                    importing,
+                    exporting,
+                    building,
+                    catalog_tick,
+                    published_tips,
+                )}
             }
         }
     }
+}
+
+#[cfg(not(target_os = "android"))]
+fn start_ota_firmware_update(
+    target_id: String,
+    board_slug: String,
+    backend: Signal<RemoteControlBackend>,
+    mut flash_status: Signal<String>,
+    mut flashing: Signal<bool>,
+    mut flash_progress: Signal<Option<FlashProgress>>,
+) {
+    if flashing() {
+        return;
+    }
+    flashing.set(true);
+    flash_status.set(String::new());
+    flash_progress.set(Some(FlashProgress::running_kind(
+        FlashKind::Ota,
+        false,
+        FlashStage::Prepare,
+        FlashStage::Prepare.label_for(FlashKind::Ota),
+    )));
+    spawn(async move {
+        let image = match crate::flash::current_application_image(&board_slug) {
+            Ok(image) => image,
+            Err(error) => {
+                let detail = error.to_string();
+                flash_status.set(detail.clone());
+                let progress = flash_progress().unwrap_or_else(|| {
+                    FlashProgress::running_kind(
+                        FlashKind::Ota,
+                        false,
+                        FlashStage::Prepare,
+                        "",
+                    )
+                });
+                flash_progress.set(Some(progress.finish(FlashRunOutcome::Failed, detail)));
+                flashing.set(false);
+                return;
+            }
+        };
+        let image_bytes = match tokio::task::spawn_blocking({
+            let image = image.clone();
+            move || std::fs::metadata(&image).map(|meta| meta.len())
+        })
+        .await
+        {
+            Ok(Ok(len)) => len,
+            _ => 0,
+        };
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<(
+            String,
+            Option<u8>,
+            Option<u64>,
+            Option<u64>,
+        )>();
+        spawn(async move {
+            while let Some((status, percent, written, total)) = progress_rx.recv().await {
+                flash_status.set(status.clone());
+                let mut progress =
+                    ota_progress_from_status(&status, percent, written, total);
+                if let Some(previous) = flash_progress() {
+                    progress.carry_timing_from(&previous);
+                }
+                flash_progress.set(Some(progress));
+            }
+        });
+        let outcome = backend()
+            .stream_firmware_update(&target_id, &image, move |status, percent| {
+                let written = percent.map(|value| image_bytes.saturating_mul(u64::from(value)) / 100);
+                let total = (image_bytes > 0).then_some(image_bytes);
+                let _ = progress_tx.send((status.to_string(), percent, written, total));
+            })
+            .await;
+        match outcome {
+            Ok(()) => {
+                let detail =
+                    "Install accepted. The node reboots onto the new slot.".to_string();
+                flash_status.set(detail.clone());
+                let mut progress = ota_progress_from_status(
+                    &detail,
+                    Some(100),
+                    (image_bytes > 0).then_some(image_bytes),
+                    (image_bytes > 0).then_some(image_bytes),
+                );
+                if let Some(previous) = flash_progress() {
+                    progress.carry_timing_from(&previous);
+                }
+                flash_progress.set(Some(
+                    progress.finish(FlashRunOutcome::Succeeded, detail),
+                ));
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                flash_status.set(detail.clone());
+                let progress = flash_progress().unwrap_or_else(|| {
+                    FlashProgress::running_kind(FlashKind::Ota, false, FlashStage::Write, "")
+                });
+                flash_progress.set(Some(progress.finish(FlashRunOutcome::Failed, detail)));
+            }
+        }
+        flashing.set(false);
+    });
 }
 
 #[allow(dead_code)]
@@ -3091,7 +3322,7 @@ fn InterfaceAccordion(
                                                                     }
                                                                 }
                                                             }
-                                                            if can_edit_tcp_target(&entry) && scope == CONTROLLER_SCOPE {
+                                                            if can_edit_tcp_target(&entry) {
                                                                 div {
                                                                     class: if draft.field_changed(&entry, InterfaceField::TcpTarget) { "changed" } else { "" },
                                                                     dt { "Target" }
@@ -4673,40 +4904,7 @@ fn FlashSection(
                                         }
                                         if configuring {
                                             if let Some(progress) = flash_progress() {
-                                                {
-                                                    let stages = FlashStage::stages(progress.enrollable);
-                                                    rsx! {
-                                                        ol {
-                                                            class: "flash-stages",
-                                                            "data-count": "{stages.len()}",
-                                                            for stage in stages {
-                                                                {
-                                                                    let state = progress.stage_state(*stage);
-                                                                    let class = match state {
-                                                                        FlashStageState::Pending => "flash-stage pending",
-                                                                        FlashStageState::Current => "flash-stage current",
-                                                                        FlashStageState::Done => "flash-stage done",
-                                                                        FlashStageState::Failed => "flash-stage failed",
-                                                                        FlashStageState::Skipped => "flash-stage skipped",
-                                                                    };
-                                                                    rsx! {
-                                                                        li { class,
-                                                                            span { class: "dot" }
-                                                                            span { class: "label", "{stage.label()}" }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        p { class: "note flash-stage-detail",
-                                                            if let Some(percent) = progress.write_percent {
-                                                                "{progress.detail} ({percent}%)"
-                                                            } else {
-                                                                "{progress.detail}"
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                                {flash_run_progress_view(progress)}
                                             }
                                             {
                                                 let status = flash_status();
@@ -4813,7 +5011,7 @@ fn flash_configure_fields(
     slug: String,
     form: FlashDraft,
     flash_busy: bool,
-    mut build_status: Signal<String>,
+    build_status: Signal<String>,
     flash_status: Signal<String>,
     downloading: Signal<bool>,
     importing: Signal<bool>,
@@ -4823,125 +5021,21 @@ fn flash_configure_fields(
     published_tips: Signal<Option<crate::flash::PublishedChannelTips>>,
     flash_forms: Signal<HashMap<String, FlashDraft>>,
 ) -> Element {
-    let checkout_available = crate::flash::checkout_available();
     let flashing = flash_busy;
-    let catalog_image = {
-        let _ = catalog_tick();
-        crate::image_catalog::current_image(&slug).ok().flatten()
-    };
-    let pick_options =
-        crate::flash::image_pick_options(&slug, published_tips().as_ref()).unwrap_or_default();
-    let pick_value = crate::flash::selected_image_pick_value(catalog_image.as_ref(), &pick_options);
     rsx! {
             div { class: "stack",
-    div { class: "flash-image-pick",
-        label { "Firmware image"
-            select {
-                value: "{pick_value}",
-                disabled: flash_busy,
-                onchange: {
-                    let slug = slug.clone();
-                    let pick_options = pick_options.clone();
-                    move |event| {
-                        let value = event.value();
-                        let Some(option) =
-                            crate::flash::image_pick_option_from_value(
-                                &pick_options,
-                                &value,
-                            )
-                            .cloned()
-                        else {
-                            return;
-                        };
-                        build_status.set(String::new());
-                        start_select_image(
-                            slug.clone(),
-                            option,
-                            flash_status,
-                            downloading,
-                            catalog_tick,
-                            published_tips,
-                        );
-                    }
-                },
-                for option in pick_options.iter() {
-                    option {
-                        value: "{option.value()}",
-                        selected: option.value() == pick_value,
-                        "{option.label()}"
-                    }
-                }
-            }
-        }
-        div { class: "flash-actions",
-            button {
-                class: "button",
-                r#type: "button",
-                disabled: flash_busy,
-                onclick: {
-                    let slug = slug.clone();
-                    move |_| {
-                        build_status.set(String::new());
-                        start_import(
-                            slug.clone(),
-                            flash_status,
-                            importing,
-                            catalog_tick,
-                        );
-                    }
-                },
-                "Import"
-            }
-            button {
-                class: "button",
-                r#type: "button",
-                disabled: flash_busy || !checkout_available,
-                title: if checkout_available {
-                    ""
-                } else {
-                    "Build requires a Personal Reticulum checkout"
-                },
-                onclick: {
-                    let slug = slug.clone();
-                    move |_| {
-                        start_build(
-                            slug.clone(),
-                            build_status,
-                            flash_status,
-                            building,
-                            catalog_tick,
-                        );
-                    }
-                },
-                "Build"
-            }
-            button {
-                class: "button",
-                r#type: "button",
-                disabled: flash_busy || catalog_image.is_none(),
-                onclick: {
-                    let slug = slug.clone();
-                    move |_| {
-                        build_status.set(String::new());
-                        start_export(
-                            slug.clone(),
-                            flash_status,
-                            exporting,
-                        );
-                    }
-                },
-                "Export"
-            }
-        }
-        {
-            let status = build_status();
-            rsx! {
-                if !status.is_empty() {
-                    p { class: "note flash-build-status", "{status}" }
-                }
-            }
-        }
-    }
+    {flash_image_picker(
+        slug.clone(),
+        flash_busy,
+        build_status,
+        flash_status,
+        downloading,
+        importing,
+        exporting,
+        building,
+        catalog_tick,
+        published_tips,
+    )}
     {flash_options_form(
         board.clone(),
         slug.clone(),
@@ -4951,6 +5045,139 @@ fn flash_configure_fields(
     )}
             }
         }
+}
+
+#[cfg(not(target_os = "android"))]
+fn flash_image_picker(
+    slug: String,
+    flash_busy: bool,
+    mut build_status: Signal<String>,
+    flash_status: Signal<String>,
+    downloading: Signal<bool>,
+    importing: Signal<bool>,
+    exporting: Signal<bool>,
+    building: Signal<bool>,
+    catalog_tick: Signal<u64>,
+    published_tips: Signal<Option<crate::flash::PublishedChannelTips>>,
+) -> Element {
+    let checkout_available = crate::flash::checkout_available();
+    let catalog_image = {
+        let _ = catalog_tick();
+        crate::image_catalog::current_image(&slug).ok().flatten()
+    };
+    let pick_options =
+        crate::flash::image_pick_options(&slug, published_tips().as_ref()).unwrap_or_default();
+    let pick_value = crate::flash::selected_image_pick_value(catalog_image.as_ref(), &pick_options);
+    rsx! {
+        div { class: "flash-image-pick",
+            label { "Firmware image"
+                select {
+                    value: "{pick_value}",
+                    disabled: flash_busy,
+                    onchange: {
+                        let slug = slug.clone();
+                        let pick_options = pick_options.clone();
+                        move |event| {
+                            let value = event.value();
+                            let Some(option) =
+                                crate::flash::image_pick_option_from_value(
+                                    &pick_options,
+                                    &value,
+                                )
+                                .cloned()
+                            else {
+                                return;
+                            };
+                            build_status.set(String::new());
+                            start_select_image(
+                                slug.clone(),
+                                option,
+                                flash_status,
+                                downloading,
+                                catalog_tick,
+                                published_tips,
+                            );
+                        }
+                    },
+                    for option in pick_options.iter() {
+                        option {
+                            value: "{option.value()}",
+                            selected: option.value() == pick_value,
+                            "{option.label()}"
+                        }
+                    }
+                }
+            }
+            div { class: "flash-actions",
+                button {
+                    class: "button",
+                    r#type: "button",
+                    disabled: flash_busy,
+                    onclick: {
+                        let slug = slug.clone();
+                        move |_| {
+                            build_status.set(String::new());
+                            start_import(
+                                slug.clone(),
+                                flash_status,
+                                importing,
+                                catalog_tick,
+                            );
+                        }
+                    },
+                    "Import"
+                }
+                button {
+                    class: "button",
+                    r#type: "button",
+                    disabled: flash_busy || !checkout_available,
+                    title: if checkout_available {
+                        ""
+                    } else {
+                        "Build requires a Personal Reticulum checkout"
+                    },
+                    onclick: {
+                        let slug = slug.clone();
+                        move |_| {
+                            start_build(
+                                slug.clone(),
+                                build_status,
+                                flash_status,
+                                building,
+                                catalog_tick,
+                            );
+                        }
+                    },
+                    "Build"
+                }
+                button {
+                    class: "button",
+                    r#type: "button",
+                    disabled: flash_busy || catalog_image.is_none(),
+                    onclick: {
+                        let slug = slug.clone();
+                        move |_| {
+                            build_status.set(String::new());
+                            start_export(
+                                slug.clone(),
+                                flash_status,
+                                exporting,
+                            );
+                        }
+                    },
+                    "Export"
+                }
+            }
+            {
+                let status = build_status();
+                rsx! {
+                    if !status.is_empty() {
+                        p { class: "note flash-build-status", "{status}" }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -5359,9 +5586,13 @@ fn start_flash(
                 return;
             }
         };
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<FlashProgress>();
         spawn(async move {
-            while let Some(progress) = progress_rx.recv().await {
+            while let Some(mut progress) = progress_rx.recv().await {
+                if let Some(previous) = flash_progress() {
+                    progress.carry_timing_from(&previous);
+                }
                 flash_progress.set(Some(progress));
             }
         });
@@ -5425,17 +5656,15 @@ fn start_flash(
                                 }
                             }
                             flash_status.set(detail.clone());
-                            flash_progress.set(Some(FlashProgress {
-                                enrollable,
-                                stage: FlashStage::Complete,
-                                detail,
-                                write_percent: None,
-                                outcome: FlashRunOutcome::Succeeded,
-                                enrolled: Some(EnrolledFlashTarget {
-                                    id: target_id,
-                                    display_name: display_name.clone(),
-                                }),
-                            }));
+                            let mut progress = flash_progress()
+                                .unwrap_or_else(|| FlashProgress::running(enrollable, FlashStage::Complete, ""));
+                            progress.enrolled = Some(EnrolledFlashTarget {
+                                id: target_id,
+                                display_name: display_name.clone(),
+                            });
+                            flash_progress.set(Some(
+                                progress.finish(FlashRunOutcome::Succeeded, detail),
+                            ));
                             if let Ok(items) = backend.targets().await {
                                 targets.set(items);
                             }
@@ -5444,14 +5673,12 @@ fn start_flash(
                             flash_status.set(format!(
                                 "Flashed {display_name}, but listing it under Managed Nodes failed: {error}"
                             ));
-                            flash_progress.set(Some(FlashProgress {
-                                enrollable,
-                                stage: FlashStage::Complete,
-                                detail: error.to_string(),
-                                write_percent: None,
-                                outcome: FlashRunOutcome::Failed,
-                                enrolled: None,
-                            }));
+                            let progress = flash_progress().unwrap_or_else(|| {
+                                FlashProgress::running(enrollable, FlashStage::Complete, "")
+                            });
+                            flash_progress.set(Some(
+                                progress.finish(FlashRunOutcome::Failed, error.to_string()),
+                            ));
                         }
                     }
                 }
@@ -5460,31 +5687,29 @@ fn start_flash(
                         "{display_name} firmware flashed. Pair it from Managed Nodes to manage it."
                     );
                     flash_status.set(detail.clone());
-                    flash_progress.set(Some(FlashProgress {
-                        enrollable,
-                        stage: FlashStage::Complete,
-                        detail,
-                        write_percent: None,
-                        outcome: FlashRunOutcome::Succeeded,
-                        enrolled: None,
-                    }));
+                    let progress = flash_progress().unwrap_or_else(|| {
+                        FlashProgress::running(enrollable, FlashStage::Complete, "")
+                    });
+                    flash_progress.set(Some(
+                        progress.finish(FlashRunOutcome::Succeeded, detail),
+                    ));
                 }
                 Ok(Err(error)) => {
                     let detail = format!("Flash failed: {error}");
                     flash_status.set(detail.clone());
-                    if let Some(mut progress) = flash_progress() {
-                        progress.outcome = FlashRunOutcome::Failed;
-                        progress.detail = detail;
-                        flash_progress.set(Some(progress));
+                    if let Some(progress) = flash_progress() {
+                        flash_progress.set(Some(
+                            progress.finish(FlashRunOutcome::Failed, detail),
+                        ));
                     }
                 }
                 Err(error) => {
                     let detail = format!("Flash failed: {error}");
                     flash_status.set(detail.clone());
-                    if let Some(mut progress) = flash_progress() {
-                        progress.outcome = FlashRunOutcome::Failed;
-                        progress.detail = detail;
-                        flash_progress.set(Some(progress));
+                    if let Some(progress) = flash_progress() {
+                        flash_progress.set(Some(
+                            progress.finish(FlashRunOutcome::Failed, detail),
+                        ));
                     }
                 }
             }
@@ -5511,6 +5736,62 @@ async fn apply_flashed_lora(
     backend
         .set_interface_lora_profile(target_id, &lora.id, profile)
         .await
+}
+
+#[cfg(not(target_os = "android"))]
+fn flash_run_progress_view(progress: FlashProgress) -> Element {
+    let stages = progress.stages();
+    let summary = progress.run_summary_lines();
+    rsx! {
+        ol {
+            class: "flash-stages",
+            "data-count": "{stages.len()}",
+            for stage in stages {
+                {
+                    let state = progress.stage_state(*stage);
+                    let class = match state {
+                        FlashStageState::Pending => "flash-stage pending",
+                        FlashStageState::Current => "flash-stage current",
+                        FlashStageState::Done => "flash-stage done",
+                        FlashStageState::Failed => "flash-stage failed",
+                        FlashStageState::Skipped => "flash-stage skipped",
+                    };
+                    let caption = progress.stage_caption(*stage);
+                    rsx! {
+                        li { class,
+                            span { class: "dot" }
+                            span { class: "label", "{caption}" }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(percent) = progress.write_percent {
+            if matches!(progress.outcome, FlashRunOutcome::Running)
+                && progress.stage == FlashStage::Write
+            {
+                div { class: "ota-meter-block",
+                    div { class: "ota-meter",
+                        div { class: "ota-meter-fill", style: "width: {percent}%;" }
+                    }
+                    span { class: "ota-meter-percent", "{percent}%" }
+                }
+            }
+        }
+        if let Some(lines) = summary {
+            dl { class: "flash-run-summary",
+                for (label, value) in lines {
+                    div {
+                        dt { "{label}" }
+                        dd { "{value}" }
+                    }
+                }
+            }
+        }
+        p { class: "note flash-stage-detail",
+            "{progress.detail_line()}"
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -6850,7 +7131,7 @@ fn clone_identity_controls(
                     onclick: move |_| {
                         spawn(async move {
                             match backend().start_clone_source().await {
-                                Ok(()) => push_activity(activity_log, "Adoption announce sent on USB."),
+                                Ok(()) => push_activity(activity_log, "Adoption started on USB."),
                                 Err(error) => push_activity(activity_log, error.to_string()),
                             }
                         });

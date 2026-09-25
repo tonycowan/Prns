@@ -742,11 +742,13 @@ impl<S: StorageLayout> EngineState<S> {
             IngestPacketOutcome::LinkActivated {
                 link_id,
                 rtt_millis,
+                destination,
             } => {
                 sink(EngineReaction::Journaled(Journaled::LinkEstablished(
                     LinkEstablished {
                         link_id,
                         rtt_millis,
+                        destination,
                     },
                 )));
             }

@@ -31,7 +31,7 @@ const MESSAGE_HEADER_ENCODED_LEN: usize = 2;
 const DESCRIPTION_COUNT_ENCODED_LEN: usize = 1;
 const PROTOCOL_ERROR_KIND_ENCODED_LEN: usize = 1;
 const PROTOCOL_ERROR_DETAIL_ENCODED_LEN: usize = 1;
-// V1 request kinds occupy the contiguous wire range 0x01..=0x21. Unknown values are rejected
+// V1 request kinds occupy the contiguous wire range 0x01..=0x22. Unknown values are rejected
 // before a request can enter this typed set, so five bytes represent the complete domain.
 const REQUEST_KIND_BITMAP_LEN: usize = 5;
 
@@ -91,6 +91,10 @@ prns_macros::iterable_enum! {
         InventoryPathTable = 0x1F,
         DescribeNetworkTransport = 0x20,
         SetNetworkTransport = 0x21,
+        /// Permission to stream an image to the install destination. It is not a
+        /// remote-control request the node answers. Managing grants receive it through
+        /// `effective_requests` when it was added after the grant was stored.
+        FirmwareUpdate = 0x22,
     }
 }
 
@@ -225,6 +229,8 @@ impl RemoteControlRequestKind {
                 RemoteControlNetworkTransportOutcome::ENCODED_LEN,
                 RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
             )),
+            Self::FirmwareUpdate => MESSAGE_HEADER_ENCODED_LEN
+                .saturating_add(RemoteControlProtocolError::MAX_ENCODED_BODY_LEN),
             Self::InventoryPathTable => MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
                 REMOTE_CONTROL_PATH_INVENTORY_MAX_ENCODED_BODY_LEN,
                 RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
@@ -637,6 +643,7 @@ impl RemoteControlRequest {
                 Ok(Self::DescribeNetworkTransport)
             }
             RemoteControlRequestKind::SetNetworkTransport => parse_set_network_transport(body),
+            RemoteControlRequestKind::FirmwareUpdate => Err(RemoteControlRequestParseError::Malformed),
             RemoteControlRequestKind::InventoryPathTable => {
                 RemoteControlPathPage::parse(body).map(|page| Self::InventoryPathTable { page })
             }

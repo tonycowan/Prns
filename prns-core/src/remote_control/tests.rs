@@ -435,6 +435,7 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlRequestKind::InventoryPathTable,
             RemoteControlRequestKind::DescribeNetworkTransport,
             RemoteControlRequestKind::SetNetworkTransport,
+            RemoteControlRequestKind::FirmwareUpdate,
         ],
     );
     assert_eq!(
@@ -603,6 +604,7 @@ fn protocol_discriminants_are_stable_typed_values() {
         RemoteControlRequestKind::SetNetworkTransport.wire_value(),
         0x21
     );
+    assert_eq!(RemoteControlRequestKind::FirmwareUpdate.wire_value(), 0x22);
     assert_eq!(
         RemoteControlResponseKind::InventoryPathTable.wire_value(),
         0x1F
@@ -908,6 +910,9 @@ fn managing_grants_include_network_transport_added_after_pairing() {
     assert!(!describe_only
         .effective_requests()
         .supports(RemoteControlRequestKind::DescribePower));
+    assert!(!describe_only
+        .effective_requests()
+        .supports(RemoteControlRequestKind::FirmwareUpdate));
 
     let manager = grant(0x22, RemoteControlRequestKind::DescribePower);
     assert!(manager
@@ -919,9 +924,15 @@ fn managing_grants_include_network_transport_added_after_pairing() {
     assert!(manager
         .effective_requests()
         .supports(RemoteControlRequestKind::InventoryPathTable));
+    assert!(manager
+        .effective_requests()
+        .supports(RemoteControlRequestKind::FirmwareUpdate));
     assert!(!manager
         .permitted_requests()
         .supports(RemoteControlRequestKind::DescribeNetworkTransport));
+    assert!(!manager
+        .permitted_requests()
+        .supports(RemoteControlRequestKind::FirmwareUpdate));
 
     let administrator = RemoteControlControllerGrant::new(
         controller_identity(0x23),
@@ -944,14 +955,26 @@ fn managing_grants_include_network_transport_added_after_pairing() {
     assert!(administrator
         .effective_requests()
         .supports(RemoteControlRequestKind::DescribePower));
+    assert!(administrator
+        .effective_requests()
+        .supports(RemoteControlRequestKind::FirmwareUpdate));
+    assert!(!administrator
+        .permitted_requests()
+        .supports(RemoteControlRequestKind::FirmwareUpdate));
 
     let interfaces = grant(0x24, RemoteControlRequestKind::InventoryInterfaces);
     assert!(interfaces
         .effective_requests()
         .supports(RemoteControlRequestKind::DescribePower));
+    assert!(interfaces
+        .effective_requests()
+        .supports(RemoteControlRequestKind::FirmwareUpdate));
     assert!(!interfaces
         .permitted_requests()
         .supports(RemoteControlRequestKind::DescribePower));
+    assert!(!interfaces
+        .permitted_requests()
+        .supports(RemoteControlRequestKind::FirmwareUpdate));
 }
 
 #[test]

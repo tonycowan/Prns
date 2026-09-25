@@ -9,8 +9,8 @@ use crate::engine::{
     PacketReceiptDelivered, PrnsCommand, RejectRemoteControlControllerPairing,
     RejectRemoteControlTargetPairing, RemoteControlPairingOpened, RequestResponseTimeout, Respond,
     RespondData, RespondPayload, SendGroup, SendGroupFailure, SendGroupPayload, SendPlainPacket,
-    SendPlainPacketFailure, SendPlainPacketPayload, SendRequest, SendRequestData,
-    SendRequestFailure, SendSinglePacket, SendSinglePacketFailure, SendSinglePacketPayload,
+    SendPlainPacketFailure, SendPlainPacketPayload,     SendRequest, SendRequestData, SendRequestFailure, SendSinglePacket, SendSinglePacketFailure,
+    SendSinglePacketPayload, SendToChannel, SendToChannelBody, SendToChannelFailure,
     SetRegisteredAnnounceAppData, Settleable, Settlement,
 };
 use crate::identity::IdentityHash;
@@ -23,6 +23,7 @@ use crate::remote_control::{
     RevokeRemoteControlControllerOutcome, SetRemoteControlControllerGrantOutcome,
     SetRemoteControlTargetAccessOutcome,
 };
+use crate::routing::links::channel::MessageType;
 use crate::routing::links::request::{response_envelope_prefix, RequestId, RESPONSE_WIRE_OVERHEAD};
 use crate::routing::links::LinkId;
 use crate::routing::request_handlers::RequestPathHash;
@@ -515,6 +516,36 @@ impl<
         identity: IdentityHash,
     ) -> Result<(), SendError<IdentifyFailure>> {
         self.settle_command(Identify { link_id, identity }).await
+    }
+
+    pub async fn send_channel_message(
+        &self,
+        link_id: LinkId,
+        message_type: MessageType,
+        data: &[u8],
+    ) -> Result<PacketReceiptDelivered, SendError<SendToChannelFailure>> {
+        let body = SendToChannelBody::from_slice(data).map_err(|()| SendError::PayloadTooLarge)?;
+        let id = self.pool.mint();
+        let slot = self.pool.claim_settlement(id).ok_or(SendError::Busy)?;
+        let _guard = SlotGuard {
+            pool: self.pool,
+            slot,
+            id,
+        };
+        self.commands
+            .try_send(IssuedCommand {
+                id,
+                command: PrnsCommand::SendToChannel(SendToChannel {
+                    link_id,
+                    message_type,
+                    body,
+                }),
+            })
+            .map_err(|_| SendError::NodeStopped)?;
+        match self.pool.parked(slot).await {
+            Settlement::SendToChannel(result) => result.map_err(SendError::Failed),
+            _ => Err(SendError::NodeStopped),
+        }
     }
 
     pub async fn send_single_packet(

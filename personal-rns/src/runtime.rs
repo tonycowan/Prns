@@ -31,6 +31,8 @@ pub use prns_runtime::runtime::{
     ResolvedRemoteControlTarget, RevokeRemoteControlControllerControlError,
     RevokeRemoteControlControllerServiceError, RoutingControl, RoutingControlError, RuntimeHealth,
     SendError, ServeMyRequestEndpoints, SetRegisteredAnnounceAppDataError,
+    firmware_update_noted_grant, firmware_update_noted_grant_count, firmware_update_permitted,
+    note_firmware_update_grants,
     SetRemoteControlControllerGrantControlError, SetRemoteControlControllerGrantServiceError,
     SetRemoteControlTargetAccessControlError, SetRemoteControlTargetAccessServiceError,
 };

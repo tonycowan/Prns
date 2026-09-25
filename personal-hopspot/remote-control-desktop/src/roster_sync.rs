@@ -167,10 +167,25 @@ pub struct RosterLabel {
     pub clock: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct RosterUpsert {
+    pub access: RemoteControlTargetAccess,
+    pub clock: u64,
+}
+
+impl Clone for RosterUpsert {
+    fn clone(&self) -> Self {
+        Self {
+            access: clone_access(&self.access),
+            clock: self.clock,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct RosterReplica {
     pub clock: u64,
-    pub upserts: Vec<(IdentityHash, u64)>,
+    pub upserts: Vec<RosterUpsert>,
     pub tombstones: Vec<(IdentityHash, u64)>,
     pub siblings: Vec<PublicIdentityMaterial>,
     pub labels: Vec<RosterLabel>,
@@ -188,10 +203,16 @@ impl Default for RosterReplica {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct RosterUpsert {
-    pub access: RemoteControlTargetAccess,
-    pub clock: u64,
+impl Clone for RosterReplica {
+    fn clone(&self) -> Self {
+        Self {
+            clock: self.clock,
+            upserts: self.upserts.clone(),
+            tombstones: self.tombstones.clone(),
+            siblings: self.siblings.clone(),
+            labels: self.labels.clone(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -216,7 +237,6 @@ pub struct MergePlan {
 pub struct RosterShared {
     pub replica: RosterReplica,
     pub pending: Option<RosterDelta>,
-    pub cached_snapshot: Vec<u8>,
     pub instance_secret: Option<Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>>,
     pub heard_siblings: Vec<IdentityHash>,
     pub pull_due: Vec<IdentityHash>,
@@ -347,29 +367,73 @@ pub fn replica_known_targets(replica: &RosterReplica) -> Vec<IdentityHash> {
     replica
         .upserts
         .iter()
-        .filter(|(hash, _)| !replica_forgets_target(replica, *hash))
-        .map(|(hash, _)| *hash)
+        .map(|upsert| upsert.access.target().identity_hash())
+        .filter(|hash| !replica_forgets_target(replica, *hash))
         .collect()
 }
 
-pub fn note_local_upsert(replica: &mut RosterReplica, target: IdentityHash) {
+/// Record or refresh managed-target authorization on the roster (source of truth).
+pub fn note_local_upsert(replica: &mut RosterReplica, access: RemoteControlTargetAccess) {
     replica.clock = replica.clock.saturating_add(1);
-    remove_tombstone(replica, target);
-    record_upsert(replica, target, replica.clock);
+    let hash = access.target().identity_hash();
+    remove_tombstone(replica, hash);
+    record_upsert(replica, access, replica.clock);
 }
 
+#[must_use]
+pub fn access_for(
+    replica: &RosterReplica,
+    hash: IdentityHash,
+) -> Option<&RemoteControlTargetAccess> {
+    if replica_forgets_target(replica, hash) {
+        return None;
+    }
+    replica
+        .upserts
+        .iter()
+        .find(|upsert| upsert.access.target().identity_hash() == hash)
+        .map(|upsert| &upsert.access)
+}
+
+/// Import engine snapshot rows into the roster (migration from AssembledRemoteControl storage).
+pub fn hydrate_accesses_from_snapshot(replica: &mut RosterReplica, snapshot: &[u8]) -> bool {
+    if snapshot.is_empty() {
+        return false;
+    }
+    let Ok(persisted) =
+        personal_rns::persistence::read_remote_control_target_accesses_snapshot(snapshot)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for access in persisted {
+        let hash = access.target().identity_hash();
+        if replica_forgets_target(replica, hash) {
+            continue;
+        }
+        let clock = match upsert_clock(replica, hash) {
+            0 => replica.clock.max(1),
+            clock => clock,
+        };
+        record_upsert(replica, access, clock);
+        changed = true;
+    }
+    changed
+}
+
+/// Returns whether the replica changed. An unchanged fact does not bump the clock.
 pub fn note_local_label(
     replica: &mut RosterReplica,
     kind: RosterLabelKind,
     key: &str,
     value: Option<&str>,
-) {
+) -> bool {
     let key = key.trim();
     if key.is_empty() {
-        return;
+        return false;
     }
     if kind == RosterLabelKind::PeerAlias && !peer_alias_is_syncable(key) {
-        return;
+        return false;
     }
     let next_value = value
         .map(str::trim)
@@ -378,7 +442,7 @@ pub fn note_local_label(
     // Refuse to *publish* the local-only "This Controller" string. Clears (None) stay allowed
     // so a prior mistaken seed can be retracted to siblings.
     if kind == RosterLabelKind::PeerAlias && !peer_alias_value_is_syncable(next_value.as_deref()) {
-        return;
+        return false;
     }
     if replica
         .labels
@@ -386,7 +450,7 @@ pub fn note_local_label(
         .any(|label| label.kind == kind && label.key == key && label.value == next_value)
     {
         // Same fact already published — do not bump the clock or re-push siblings.
-        return;
+        return false;
     }
     replica.clock = replica.clock.saturating_add(1);
     upsert_label(
@@ -398,6 +462,7 @@ pub fn note_local_label(
             clock: replica.clock,
         },
     );
+    true
 }
 
 pub fn import_seed_labels(
@@ -557,25 +622,29 @@ fn upsert_clock(replica: &RosterReplica, hash: IdentityHash) -> u64 {
     replica
         .upserts
         .iter()
-        .find(|(candidate, _)| *candidate == hash)
-        .map(|(_, clock)| *clock)
+        .find(|upsert| upsert.access.target().identity_hash() == hash)
+        .map(|upsert| upsert.clock)
         .unwrap_or(0)
 }
 
-fn record_upsert(replica: &mut RosterReplica, hash: IdentityHash, clock: u64) {
-    if let Some((_, current)) = replica
+fn record_upsert(replica: &mut RosterReplica, access: RemoteControlTargetAccess, clock: u64) {
+    let hash = access.target().identity_hash();
+    if let Some(existing) = replica
         .upserts
         .iter_mut()
-        .find(|(candidate, _)| *candidate == hash)
+        .find(|upsert| upsert.access.target().identity_hash() == hash)
     {
-        *current = (*current).max(clock);
+        existing.access = access;
+        existing.clock = existing.clock.max(clock);
         return;
     }
-    replica.upserts.push((hash, clock));
+    replica.upserts.push(RosterUpsert { access, clock });
 }
 
 fn remove_upsert(replica: &mut RosterReplica, hash: IdentityHash) {
-    replica.upserts.retain(|(candidate, _)| *candidate != hash);
+    replica
+        .upserts
+        .retain(|upsert| upsert.access.target().identity_hash() != hash);
 }
 
 fn tombstone_clock(replica: &RosterReplica, hash: IdentityHash) -> u64 {
@@ -629,7 +698,7 @@ pub fn merge_roster(local: &RosterReplica, delta: &RosterDelta) -> (RosterReplic
             continue;
         }
         remove_tombstone(&mut merged, hash);
-        record_upsert(&mut merged, hash, upsert.clock);
+        record_upsert(&mut merged, clone_access(&upsert.access), upsert.clock);
         upserts.push(clone_access(&upsert.access));
     }
     for &(hash, clock) in &delta.tombstones {
@@ -730,13 +799,27 @@ fn authority_for(requests: &RemoteControlRequestSet) -> RemoteControlControllerA
     }
 }
 
-fn clone_access(access: &RemoteControlTargetAccess) -> RemoteControlTargetAccess {
+pub(crate) fn clone_access(access: &RemoteControlTargetAccess) -> RemoteControlTargetAccess {
     RemoteControlTargetAccess::new(
         RemoteControlTargetIdentity::new(*access.target().public_keys()),
         access.authority(),
         *access.permitted_requests(),
     )
     .expect("persisted access already has a request")
+}
+
+#[cfg(test)]
+pub(crate) fn tests_access(fill: u8) -> RemoteControlTargetAccess {
+    use personal_rns::identity::{PrivateIdentityMaterial, IDENTITY_SECRET_KEY_LEN};
+    let keys = PrivateIdentityMaterial::from_bytes([fill; IDENTITY_SECRET_KEY_LEN])
+        .public()
+        .public_keys();
+    RemoteControlTargetAccess::new(
+        RemoteControlTargetIdentity::new(keys),
+        RemoteControlControllerAuthority::Operator,
+        RemoteControlRequestSet::only(RemoteControlRequestKind::Describe),
+    )
+    .unwrap()
 }
 
 pub fn load_replica(path: &Path) -> RosterReplica {
@@ -765,12 +848,28 @@ fn format_replica(replica: &RosterReplica) -> String {
         out.push('\n');
     }
     let mut upserts: Vec<_> = replica.upserts.iter().collect();
-    upserts.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-    for (hash, clock) in upserts {
+    upserts.sort_by(|left, right| {
+        left.access
+            .target()
+            .identity_hash()
+            .as_bytes()
+            .cmp(right.access.target().identity_hash().as_bytes())
+    });
+    for upsert in upserts {
         out.push_str("upsert ");
-        out.push_str(&encode_hex(hash.as_bytes()));
+        out.push_str(&encode_hex(
+            &upsert.access.target().public_keys().public_key_bytes(),
+        ));
         out.push(' ');
-        out.push_str(&clock.to_string());
+        out.push_str(&upsert.clock.to_string());
+        out.push(' ');
+        let requests: Vec<_> = upsert
+            .access
+            .permitted_requests()
+            .iter()
+            .map(|kind| kind.wire_value().to_string())
+            .collect();
+        out.push_str(&requests.join(","));
         out.push('\n');
     }
     let mut tombstones: Vec<_> = replica.tombstones.iter().collect();
@@ -832,15 +931,42 @@ fn parse_replica(text: &str) -> RosterReplica {
             }
         } else if let Some(rest) = line.strip_prefix("upsert ") {
             let mut parts = rest.split_whitespace();
-            let Some(hash_hex) = parts.next() else {
+            let Some(keys_hex) = parts.next() else {
                 continue;
             };
             let Some(clock) = parts.next().and_then(|value| value.parse().ok()) else {
                 continue;
             };
-            if let Ok(bytes) = parse_hex::<HASH_LEN>(hash_hex) {
-                record_upsert(&mut replica, IdentityHash::new(bytes), clock);
+            let Ok(bytes) = parse_hex::<IDENTITY_PUBLIC_KEY_LEN>(keys_hex) else {
+                continue;
+            };
+            let Ok(keys) = PublicIdentityMaterial::from_slice(&bytes) else {
+                continue;
+            };
+            let mut requests = RemoteControlRequestSet::empty();
+            if let Some(request_list) = parts.next() {
+                for token in request_list.split(',') {
+                    let Ok(value) = token.parse::<u8>() else {
+                        continue;
+                    };
+                    let Some(kind) = request_kind_from_wire(value) else {
+                        continue;
+                    };
+                    let _ = requests.insert(kind);
+                }
             }
+            if requests.is_empty() {
+                // Legacy rows without request bits cannot authorize; skip until hydrated.
+                continue;
+            }
+            let Ok(access) = RemoteControlTargetAccess::new(
+                RemoteControlTargetIdentity::new(keys.public_keys()),
+                authority_for(&requests),
+                requests,
+            ) else {
+                continue;
+            };
+            record_upsert(&mut replica, access, clock);
         } else if let Some(rest) = line.strip_prefix("label ") {
             let Some((kind_token, rest)) = rest.split_once(' ') else {
                 continue;
@@ -918,10 +1044,9 @@ pub fn write_pull(signer: &PrivateIdentityMaterial, out: &mut [u8]) -> Option<us
 pub fn write_replica_message(
     signer: &PrivateIdentityMaterial,
     replica: &RosterReplica,
-    snapshot: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
-    let body = encode_replica_body(replica, snapshot, signer.public())?;
+    let body = encode_replica_body(replica, signer.public())?;
     let required = 1 + 8 + IDENTITY_PUBLIC_KEY_LEN + SIGNATURE_LEN + body.len();
     if out.len() < required {
         return None;
@@ -940,12 +1065,11 @@ pub fn write_replica_message(
 pub fn replica_message(
     signer: &PrivateIdentityMaterial,
     replica: &RosterReplica,
-    snapshot: &[u8],
 ) -> Option<Vec<u8>> {
-    let body = encode_replica_body(replica, snapshot, signer.public())?;
+    let body = encode_replica_body(replica, signer.public())?;
     let required = 1 + 8 + IDENTITY_PUBLIC_KEY_LEN + SIGNATURE_LEN + body.len();
     let mut out = vec![0u8; required];
-    write_replica_message(signer, replica, snapshot, &mut out)?;
+    write_replica_message(signer, replica, &mut out)?;
     Some(out)
 }
 
@@ -960,10 +1084,16 @@ fn replica_material(clock: u64, signer: PublicIdentityMaterial, body: &[u8]) -> 
 
 fn encode_replica_body(
     replica: &RosterReplica,
-    snapshot: &[u8],
     signer: PublicIdentityMaterial,
 ) -> Option<Vec<u8>> {
-    let upserts = decode_snapshot_upserts(snapshot, replica)?;
+    let upserts: Vec<_> = replica
+        .upserts
+        .iter()
+        .filter(|upsert| {
+            !replica_forgets_target(replica, upsert.access.target().identity_hash())
+        })
+        .cloned()
+        .collect();
     let sibling_count = u16::try_from(replica.siblings.len()).ok()?;
     let tombstone_count = u16::try_from(replica.tombstones.len()).ok()?;
     let upsert_count = u16::try_from(upserts.len()).ok()?;
@@ -1030,26 +1160,6 @@ fn encode_upsert(body: &mut Vec<u8>, upsert: &RosterUpsert) -> Option<()> {
         body.push(kind.wire_value());
     }
     Some(())
-}
-
-fn decode_snapshot_upserts(snapshot: &[u8], replica: &RosterReplica) -> Option<Vec<RosterUpsert>> {
-    if snapshot.is_empty() {
-        return Some(Vec::new());
-    }
-    let persisted =
-        personal_rns::persistence::read_remote_control_target_accesses_snapshot(snapshot).ok()?;
-    Some(
-        persisted
-            .map(|access| {
-                let hash = access.target().identity_hash();
-                let clock = match upsert_clock(replica, hash) {
-                    0 => replica.clock.max(1),
-                    clock => clock,
-                };
-                RosterUpsert { access, clock }
-            })
-            .collect(),
-    )
 }
 
 fn parse_roster_message(bytes: &[u8]) -> Option<RosterInbound<'_>> {
@@ -1263,7 +1373,7 @@ impl RequestEndpoint<ControllerAppState> for RosterSync {
                         RosterErrorCode::NotSibling as u8,
                     ]);
                 }
-                let reply = replica_message(&instance, &shared.replica, &shared.cached_snapshot);
+                let reply = replica_message(&instance, &shared.replica);
                 drop(shared);
                 let Some(reply) = reply else {
                     return context.respond([
@@ -1282,7 +1392,7 @@ impl RequestEndpoint<ControllerAppState> for RosterSync {
                     ]);
                 }
                 shared.pending = Some(delta);
-                let reply = replica_message(&instance, &shared.replica, &shared.cached_snapshot);
+                let reply = replica_message(&instance, &shared.replica);
                 drop(shared);
                 let Some(reply) = reply else {
                     return context.respond([
@@ -1379,7 +1489,7 @@ mod tests {
         let hash = access(0x21).target().identity_hash();
         let mut local = RosterReplica::default();
         forget_target_locally(&mut local, hash);
-        note_local_upsert(&mut local, hash);
+        note_local_upsert(&mut local, access(0x21));
         assert_eq!(upsert_clock(&local, hash), 2);
         let delta = RosterDelta {
             clock: 4,
@@ -1434,13 +1544,13 @@ mod tests {
             }],
         };
         set_tombstone(&mut replica, hash, 4);
-        record_upsert(&mut replica, IdentityHash::new([0xcd; 16]), 7);
+        record_upsert(&mut replica, access(0xcd), 7);
         let parsed = parse_replica(&format_replica(&replica));
         assert_eq!(parsed.clock, 9);
         assert_eq!(parsed.siblings, replica.siblings);
         assert_eq!(parsed.labels, replica.labels);
         assert_eq!(tombstone_clock(&parsed, hash), 4);
-        assert_eq!(upsert_clock(&parsed, IdentityHash::new([0xcd; 16])), 7);
+        assert_eq!(upsert_clock(&parsed, access(0xcd).target().identity_hash()), 7);
     }
 
     #[test]
@@ -1458,7 +1568,7 @@ mod tests {
             _ => panic!("pull"),
         }
         let mut message = vec![0u8; 512];
-        let len = write_replica_message(&signer, &replica, &[], &mut message).unwrap();
+        let len = write_replica_message(&signer, &replica, &mut message).unwrap();
         let delta = parse_replica_reply(&message[..len]).unwrap();
         assert_eq!(delta.clock, 1);
         assert_eq!(delta.siblings.len(), 1);
@@ -1561,7 +1671,7 @@ mod tests {
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             Some("dad"),
         );
-        let message = replica_message(&signer, &replica, &[]).unwrap();
+        let message = replica_message(&signer, &replica).unwrap();
         let delta = parse_replica_reply(&message).unwrap();
         assert_eq!(
             delta.labels,
@@ -1625,7 +1735,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             Some("Phone"),
         );
-        let message = replica_message(&signer, &replica, &[]).unwrap();
+        let message = replica_message(&signer, &replica).unwrap();
         let delta = parse_replica_reply(&message).unwrap();
         assert_eq!(delta.labels.len(), 1);
         assert_eq!(delta.labels[0].key, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -1859,7 +1969,7 @@ mod tests {
     fn replica_known_targets_omit_tombstoned_hashes() {
         let hash = access(0x21).target().identity_hash();
         let mut replica = RosterReplica::default();
-        note_local_upsert(&mut replica, hash);
+        note_local_upsert(&mut replica, access(0x21));
         assert_eq!(replica_known_targets(&replica), vec![hash]);
         forget_target_locally(&mut replica, hash);
         assert!(replica_forgets_target(&replica, hash));
@@ -1965,7 +2075,7 @@ mod tests {
             &self_hex,
             Some("fe80::494:446c:eb84:e48b"),
         );
-        let message = replica_message(&signer, &replica, &[]).unwrap();
+        let message = replica_message(&signer, &replica).unwrap();
         let delta = parse_replica_reply(&message).unwrap();
         assert_eq!(delta.labels.len(), 1);
         assert_eq!(delta.labels[0].kind, RosterLabelKind::SiblingWifiLl);

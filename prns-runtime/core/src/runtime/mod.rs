@@ -1,5 +1,6 @@
 mod command;
 mod event;
+mod firmware_update_grants;
 mod health;
 mod identity_blackhole;
 pub mod node;
@@ -34,6 +35,10 @@ cfg_if::cfg_if! {
 }
 
 pub use crate::engine::BlackholeSeedReport;
+pub use firmware_update_grants::{
+    firmware_update_noted_grant, firmware_update_noted_grant_count, firmware_update_permitted,
+    note_firmware_update_grants,
+};
 pub use command::{
     AnnounceNowError, ClearAnnounceQueuesOutcome, CloseRemoteControlPairingControlError,
     DestinationIdentityRetentionControl, DestinationIdentityRetentionControlError,

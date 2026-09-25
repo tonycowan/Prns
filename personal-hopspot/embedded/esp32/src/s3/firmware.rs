@@ -2,9 +2,7 @@ use super::*;
 use personal_hopspot_core::display::{
     DisplayDuration, DisplayVisibility, MonotonicMillis, PresentationUrgency,
 };
-use personal_rns::remote_control::{
-    RemoteControlInitialControllerGrants, RemoteControlSelfAnnouncement, RemoteControlService,
-};
+use personal_rns::remote_control::{RemoteControlSelfAnnouncement, RemoteControlService};
 
 use crate::memory::EspFirmwareMemory;
 
@@ -112,8 +110,9 @@ pub(super) async fn run_core<B: Esp32S3Board>(
     let shared_flash = SharedNorFlash::new(flash, memory.flash_capacity());
     let remote_control_bootstrap =
         remote_control_bootstrap.expect("RemoteControl identity bootstrap failed");
+    let factory_grant = remote_control_bootstrap.factory_grant;
     let (remote_control_identity_secrets, _remote_control_identity_origins) =
-        remote_control_bootstrap.into_parts();
+        remote_control_bootstrap.bootstrap.into_parts();
     let wifi_configuration_key = remote_control_identity_secrets
         .target_sealing_key(screen::WIFI_CONFIGURATION_SEALING_DOMAIN);
     let mut wifi_configuration_store =
@@ -249,12 +248,23 @@ pub(super) async fn run_core<B: Esp32S3Board>(
     let node_identity = node_bootstrap.into_identity();
     let transport_secret = node_identity.transport_secret();
     let destination_secret = node_identity.into_destination_secret();
-    let remote_control = RemoteControlService::with_capabilities(
+    #[cfg(feature = "firmware-update")]
+    let ota_destination = remote_control_identity_secrets
+        .identities()
+        .target()
+        .firmware_update_destination();
+    #[cfg(feature = "firmware-update")]
+    super::firmware_update_listener::set_destination(ota_destination);
+    let mut remote_control = RemoteControlService::with_capabilities(
         remote_control_identity_secrets,
-        RemoteControlInitialControllerGrants::Nobody,
+        crate::identity::factory_or_fallback_grants(factory_grant),
         RemoteControlSelfAnnouncement::Destination(destination_hashes.node_page),
         remote_control::capabilities::<B>(),
     );
+    #[cfg(feature = "firmware-update")]
+    {
+        remote_control = remote_control.with_firmware_update_destination();
+    }
     let destinations = personal_hopspot_core::HopspotDestinationSet::new(
         destination_secret,
         B::ANNOUNCE_APP_DATA,
@@ -1093,6 +1103,17 @@ pub(super) async fn run_core<B: Esp32S3Board>(
 
     spawner.spawn(watchdog_task(rtc.rwdt).expect("watchdog task fits"));
 
+    #[cfg(feature = "firmware-update")]
+    spawner.spawn(ota_health_task(B::MEMORY_PROFILE).expect("ota health task fits"));
+    #[cfg(feature = "firmware-update")]
+    spawner.spawn(
+        super::firmware_update_listener::firmware_update_listener_task(
+            handle.clone(),
+            B::MEMORY_PROFILE,
+        )
+        .expect("firmware update listener fits"),
+    );
+
     if B::Gnss::AVAILABILITY == screen::GnssAvailability::Available {
         let run = crate::storage::allocate_psram(gnss.drive());
         let run: core::pin::Pin<&'static mut dyn core::future::Future<Output = ()>> =
@@ -1192,6 +1213,40 @@ async fn manifold_run(
     boot_stage(BootPhase::PersistenceRestoreComplete);
     node.run_manifold_with_persistence_and_interface_store(&INTERFACE_STORE, persistence)
         .await
+}
+
+/// Confirm the running image once core 1 has proven it is alive. A single-slot board has nothing
+/// to confirm. A boot selection that names a slot the node is not executing is repaired onto the
+/// running slot here.
+#[cfg(feature = "firmware-update")]
+#[embassy_executor::task]
+async fn ota_health_task(profile: &'static personal_hopspot_memory::MemoryProfile) {
+    use crate::firmware_update::{self, SlotHealth};
+
+    loop {
+        Timer::after(Duration::from_secs(1)).await;
+        if CORE_ONE_HEARTBEAT.load(Ordering::Relaxed) < firmware_update::VALIDATE_HEARTBEATS {
+            continue;
+        }
+        if firmware_update::install_in_progress() {
+            continue;
+        }
+        break;
+    }
+    let memory = EspFirmwareMemory::new(profile);
+    match firmware_update::mark_running_slot_valid(&memory) {
+        Ok(SlotHealth::NoOtaSlots) => {
+            log::debug!("update: no ota slots on this partition table");
+        }
+        Ok(SlotHealth::AlreadyValid) => {}
+        Ok(SlotHealth::MarkedValid) => log::info!("update: running image marked valid"),
+        Ok(SlotHealth::SelectionRepaired { selected, booted }) => {
+            log::warn!(
+                "update: ota selection named {selected} while running {booted}, repaired to {booted}"
+            );
+        }
+        Err(error) => log::warn!("update: could not mark the running image valid: {error}"),
+    }
 }
 
 #[embassy_executor::task]

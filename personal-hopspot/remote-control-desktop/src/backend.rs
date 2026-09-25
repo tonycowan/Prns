@@ -31,8 +31,9 @@ use personal_rns::prelude::*;
 use personal_rns::remote_control::{
     parse_controller_public_keys, parse_wifi_station_rssi_dbm, parse_wifi_station_ssid,
     ReceiveRemoteControlControllerPairingOfferOutcome, RemoteControlAuthorizeControllerOutcome,
-    RemoteControlGroupOutcome, RemoteControlInterfaceCard, RemoteControlInterfaceConfigOutcome,
-    RemoteControlInterfaceEntry, RemoteControlInterfaceGroup, RemoteControlInterfacePeer,
+    RemoteControlGroupOutcome,     RemoteControlInterfaceCard, RemoteControlInterfaceConfigOutcome,
+    RemoteControlInterfaceContinuation, RemoteControlInterfaceEntry, RemoteControlInterfaceGroup,
+    RemoteControlInterfacePage, RemoteControlInterfacePeer,
     RemoteControlInterfacePeerPage, RemoteControlInterfacePeersOutcome,
     RemoteControlInterfacePower, RemoteControlLoRaOutcome, RemoteControlLoRaProfile,
     RemoteControlModeOutcome, RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome,
@@ -70,16 +71,17 @@ use crate::identity_clone::{
     IDENTITY_CLONE_NONCE_LEN, IDENTITY_CLONE_REQUEST_ENDPOINT_ID,
 };
 use crate::roster_sync::{
-    adopt_sibling, attention_for_target, decode_labels, encode_labels, forget_sibling_locally,
-    forget_target_locally, import_seed_labels, load_replica, looking_instance, merge_roster,
-    next_sibling_alias, next_target_alias, note_local_label, note_local_upsert,
-    parse_replica_reply, peer_alias_is_syncable, peer_alias_link_is_local_only,
-    peer_alias_value_is_syncable, persist_replica, replica_forgets_target, replica_known_targets,
-    replica_message, replica_path, retract_unsyncable_peer_alias_values,
-    roster_sync_destination_hash, sibling_alias_is_syncable, strip_local_sibling_alias, write_pull,
-    RosterDelta, RosterLabel, RosterLabelKind, RosterShared, RosterSync, TargetAttention,
-    AUTO_GATEWAY_ALIAS_LINK, AUTO_GATEWAY_PEER_ALIAS, ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS,
-    ROSTER_SYNC_REQUEST_ENDPOINT_ID, THIS_CONTROLLER_ALIAS_LINK, THIS_CONTROLLER_PEER_ALIAS,
+    access_for, adopt_sibling, attention_for_target, decode_labels, encode_labels,
+    forget_sibling_locally, forget_target_locally, hydrate_accesses_from_snapshot, import_seed_labels,
+    load_replica, looking_instance, merge_roster, next_sibling_alias, next_target_alias,
+    note_local_label, note_local_upsert, parse_replica_reply, peer_alias_is_syncable,
+    peer_alias_link_is_local_only, peer_alias_value_is_syncable, persist_replica,
+    replica_forgets_target, replica_known_targets, replica_message, replica_path,
+    retract_unsyncable_peer_alias_values, roster_sync_destination_hash, sibling_alias_is_syncable,
+    strip_local_sibling_alias, write_pull, RosterDelta, RosterLabel, RosterLabelKind, RosterShared,
+    RosterSync, TargetAttention, AUTO_GATEWAY_ALIAS_LINK, AUTO_GATEWAY_PEER_ALIAS,
+    ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS, ROSTER_SYNC_REQUEST_ENDPOINT_ID,
+    THIS_CONTROLLER_ALIAS_LINK, THIS_CONTROLLER_PEER_ALIAS,
 };
 
 const IDENTITY_HASH_BYTES: usize = 16;
@@ -106,6 +108,7 @@ const CONNECT_AFTER_ANNOUNCE_ATTEMPTS: u8 = 2;
 const CONNECT_AFTER_ANNOUNCE_GAP: Duration = Duration::from_secs(1);
 const INVENTORY_RECOVERY_WAIT: Duration = Duration::from_secs(120);
 const PATH_TABLE_PAGE_LIMIT: usize = 64;
+const INTERFACE_PAGE_LIMIT: usize = 16;
 const INVENTORY_RECOVERY_GAP: Duration = Duration::from_secs(2);
 const ACTIVITY_CONTROLLER_SCOPE: &str = "controller";
 const DEFAULT_TCP_TARGET: &str = "127.0.0.1:4242";
@@ -381,6 +384,29 @@ pub struct RemoteControlBackend {
     session: Result<Arc<ControllerSession>, BackendError>,
 }
 
+async fn send_update_frame(
+    handle: &PrnsNodeHandle,
+    link_id: personal_rns::routing::links::LinkId,
+    payload: &[u8],
+    eof: bool,
+) -> Result<(), BackendError> {
+    use personal_rns::routing::links::channel::byte_stream::{
+        StreamDataHeader, StreamId, STREAM_DATA_TYPE,
+    };
+    let header = StreamDataHeader {
+        stream_id: StreamId::new(1).expect("stream id 1 fits"),
+        eof,
+        compressed: false,
+    };
+    let mut body = header.to_bytes().to_vec();
+    body.extend_from_slice(payload);
+    handle
+        .send_channel_message(link_id, STREAM_DATA_TYPE, &body)
+        .await
+        .map(|_| ())
+        .map_err(|error| operation("firmware update", error))
+}
+
 impl RemoteControlBackend {
     pub fn new() -> Self {
         Self {
@@ -575,30 +601,10 @@ impl RemoteControlBackend {
         let instance_material =
             personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
         let source_hash = instance_material.identity_hash();
-        let destination = identity_clone_destination_hash(source_hash)
-            .ok_or_else(|| BackendError::Clone("clone destination name is invalid".to_string()))?;
         let mut source_nonce = [0u8; IDENTITY_CLONE_NONCE_LEN];
         let mut entropy = OsRuntimeEntropy::try_new()
             .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         entropy.fill_random(&mut source_nonce);
-        let announce = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
-        let mut app_data = [0u8; 128];
-        let app_data_len = announce
-            .write(&mut app_data)
-            .ok_or_else(|| BackendError::Clone("clone announce is too large".to_string()))?;
-        let bytes = personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(
-            &app_data[..app_data_len],
-        )
-        .map_err(|_| BackendError::Clone("clone announce app data is too large".to_string()))?;
-        session
-            .handle
-            .announce_now(AnnounceNow {
-                destination,
-                target: AnnounceTarget::AllInterfaces,
-                app_data: AnnounceAppData::Data(bytes),
-            })
-            .await
-            .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         let mut shared = session
             .clone
             .lock()
@@ -610,10 +616,9 @@ impl RemoteControlBackend {
             transcript: None,
             accepted: false,
             payload: None,
-            last_announce: Instant::now(),
         });
         shared.notice = Some(
-            "Adoption announce sent on USB. The other app must already have pressed I am up for adoption."
+            "Adoption started on USB. The other app must already have pressed I am up for adoption."
                 .to_string(),
         );
         shared.error = None;
@@ -621,15 +626,6 @@ impl RemoteControlBackend {
     }
 
     pub async fn advance_clone(&self) -> Result<(), BackendError> {
-        if let Err(error) = self.refresh_clone_source_announce().await {
-            let Ok(session) = self.session() else {
-                return Err(error);
-            };
-            if let Ok(mut shared) = session.clone.lock() {
-                shared.error = Some(error.to_string());
-            }
-            return Err(error);
-        }
         if let Err(error) = self.send_pending_clone_hello().await {
             let Ok(session) = self.session() else {
                 return Err(error);
@@ -639,52 +635,6 @@ impl RemoteControlBackend {
             }
             return Err(error);
         }
-        Ok(())
-    }
-
-    async fn refresh_clone_source_announce(&self) -> Result<(), BackendError> {
-        let session = self.session()?;
-        let (destination, source_nonce) = {
-            let mut shared = session
-                .clone
-                .lock()
-                .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
-            let Some(source) = shared.source.as_mut() else {
-                return Ok(());
-            };
-            if source.peer_keys.is_some() || source.last_announce.elapsed() < Duration::from_secs(3)
-            {
-                return Ok(());
-            }
-            source.last_announce = Instant::now();
-            (
-                identity_clone_destination_hash(source.source_hash).ok_or_else(|| {
-                    BackendError::Clone("clone destination name is invalid".to_string())
-                })?,
-                source.source_nonce,
-            )
-        };
-        let instance = load_instance_secret(&session.identities_dir)?;
-        let instance_material =
-            personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
-        let announce = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
-        let mut app_data = [0u8; 128];
-        let app_data_len = announce
-            .write(&mut app_data)
-            .ok_or_else(|| BackendError::Clone("clone announce is too large".to_string()))?;
-        let bytes = personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(
-            &app_data[..app_data_len],
-        )
-        .map_err(|_| BackendError::Clone("clone announce app data is too large".to_string()))?;
-        session
-            .handle
-            .announce_now(AnnounceNow {
-                destination,
-                target: AnnounceTarget::AllInterfaces,
-                app_data: AnnounceAppData::Data(bytes),
-            })
-            .await
-            .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         Ok(())
     }
 
@@ -801,12 +751,14 @@ impl RemoteControlBackend {
         }
         let session = self.session()?;
         let secret = load_controller_secret(&session.identities_dir)?;
-        let accesses = session
-            .handle
-            .snapshot_remote_control_target_accesses()
-            .await
-            .map_err(|error| BackendError::Clone(format!("{error:?}")))?
-            .unwrap_or_default();
+        let accesses = {
+            let roster = session
+                .roster
+                .lock()
+                .map_err(|_| BackendError::Clone("roster lock was poisoned".to_string()))?;
+            roster_accesses_snapshot(&roster.replica)
+                .map_err(|error| BackendError::Clone(error))?
+        };
         let mut shared = session
             .clone
             .lock()
@@ -948,7 +900,7 @@ impl RemoteControlBackend {
                     let clone_labels = decode_labels(labels).unwrap_or_default();
                     adopt_cloned_identity(
                         &session.identities_dir,
-                        &session.persist_dir,
+                        &session.data_dir,
                         secret,
                         accesses,
                     )?;
@@ -1065,16 +1017,17 @@ impl RemoteControlBackend {
 
     pub async fn targets(&self) -> Result<Vec<TargetAccess>, BackendError> {
         let session = self.session()?;
-        let inventory = session
-            .handle
-            .remote_control_target_inventory()
-            .await
-            .map_err(|error| operation("read target inventory", error))?;
+        let roster_targets = session
+            .roster
+            .lock()
+            .ok()
+            .map(|roster| replica_known_targets(&roster.replica))
+            .unwrap_or_default();
         let mut pairing = session
             .pairing
             .lock()
             .expect("pairing state mutex poisoned");
-        if let Some((id, name)) = pairing.remember_unnamed_targets(inventory.targets()) {
+        if let Some((id, name)) = pairing.remember_unnamed_targets(&roster_targets) {
             drop(pairing);
             self.record_local_label(RosterLabelKind::TargetName, &id, Some(&name));
             pairing = session
@@ -1083,8 +1036,8 @@ impl RemoteControlBackend {
                 .expect("pairing state mutex poisoned");
         }
         let mut items = Vec::new();
-        for target in inventory.targets() {
-            let id = encode_hex(target.identity_hash().as_bytes());
+        for hash in &roster_targets {
+            let id = encode_hex(hash.as_bytes());
             items.push(TargetAccess {
                 name: pairing.paired_announce_name(&id).unwrap_or_default(),
                 status: if session.target_attention(&id) == TargetAttention::HeldBySibling {
@@ -1212,11 +1165,7 @@ impl RemoteControlBackend {
                 .map_err(|_| BackendError::InvalidTargetId(target_id.to_string()))?,
         );
         let session = self.session()?;
-        let outcome = session
-            .handle
-            .forget_remote_control_target(target)
-            .await
-            .map_err(|error| operation("forget target", error))?;
+        let _ = session.handle.forget_remote_control_target(target).await;
         session
             .pairing
             .lock()
@@ -1234,22 +1183,17 @@ impl RemoteControlBackend {
             persist_target_names(&session.target_aliases_path, &aliases);
         }
         clear_target_peer_identity(session, target_id);
-        match outcome {
-            ForgetRemoteControlTargetOutcome::Forgotten { .. }
-            | ForgetRemoteControlTargetOutcome::NotFound => {
-                if let Ok(mut roster) = session.roster.lock() {
-                    forget_target_locally(&mut roster.replica, target);
-                }
-                persist_session_replica(session);
-                spawn({
-                    let backend = self.clone();
-                    async move {
-                        let _ = backend.push_roster_to_siblings().await;
-                    }
-                });
-                Ok(())
-            }
+        if let Ok(mut roster) = session.roster.lock() {
+            forget_target_locally(&mut roster.replica, target);
         }
+        persist_session_replica(session);
+        spawn({
+            let backend = self.clone();
+            async move {
+                let _ = backend.push_roster_to_siblings().await;
+            }
+        });
+        Ok(())
     }
 
     pub fn is_monitoring_target(&self, target_id: &str) -> bool {
@@ -1564,19 +1508,25 @@ impl RemoteControlBackend {
                 }
                 pairing.finish_pairing_announcement();
             }
-            if let Ok(mut roster) = session.roster.lock() {
-                note_local_upsert(&mut roster.replica, target);
-                if let Some(name) = pending_name.as_deref() {
-                    note_local_label(
-                        &mut roster.replica,
-                        RosterLabelKind::TargetName,
-                        &id,
-                        Some(name),
-                    );
+            if let Ok(Some(snapshot)) = session
+                .handle
+                .snapshot_remote_control_target_accesses()
+                .await
+            {
+                if let Ok(mut roster) = session.roster.lock() {
+                    let _ = hydrate_accesses_from_snapshot(&mut roster.replica, &snapshot);
+                    if let Some(name) = pending_name.as_deref() {
+                        note_local_label(
+                            &mut roster.replica,
+                            RosterLabelKind::TargetName,
+                            &id,
+                            Some(name),
+                        );
+                    }
                 }
             }
+            let _ = session.handle.forget_remote_control_target(target).await;
             persist_session_replica(session);
-            self.refresh_cached_snapshot().await;
         }
         spawn({
             let backend = self.clone();
@@ -1618,21 +1568,6 @@ impl RemoteControlBackend {
         resolve_paired_target_hash(&hashes, pending_id)
     }
 
-    async fn refresh_cached_snapshot(&self) {
-        let Ok(session) = self.session() else {
-            return;
-        };
-        if let Ok(snapshot) = session
-            .handle
-            .snapshot_remote_control_target_accesses()
-            .await
-        {
-            if let Ok(mut roster) = session.roster.lock() {
-                roster.cached_snapshot = snapshot.unwrap_or_default();
-            }
-        }
-    }
-
     pub async fn reject_pairing(&self) -> Result<PairingState, BackendError> {
         let session = self.session()?;
         let rejection = session
@@ -1668,11 +1603,6 @@ impl RemoteControlBackend {
         let session = self.session()?;
         let target = access.target().identity_hash();
         let id = encode_hex(target.as_bytes());
-        session
-            .handle
-            .set_remote_control_target_access(access)
-            .await
-            .map_err(|error| operation("enroll flashed target", error))?;
         {
             let mut pairing = session
                 .pairing
@@ -1681,7 +1611,7 @@ impl RemoteControlBackend {
             pairing.set_announce_name(&id, announce_name);
         }
         if let Ok(mut roster) = session.roster.lock() {
-            note_local_upsert(&mut roster.replica, target);
+            note_local_upsert(&mut roster.replica, access);
             note_local_label(
                 &mut roster.replica,
                 RosterLabelKind::TargetName,
@@ -1690,7 +1620,6 @@ impl RemoteControlBackend {
             );
         }
         persist_session_replica(session);
-        self.refresh_cached_snapshot().await;
         let assigned = ensure_missing_target_aliases(session, std::iter::once(id.as_str()));
         session.set_board_slug(&id, Some(board_slug));
         for (assigned_id, alias) in &assigned {
@@ -1976,8 +1905,13 @@ impl RemoteControlBackend {
         let Ok(session) = self.session() else {
             return;
         };
-        if let Ok(mut roster) = session.roster.lock() {
-            note_local_label(&mut roster.replica, kind, key, value);
+        let changed = session
+            .roster
+            .lock()
+            .ok()
+            .is_some_and(|mut roster| note_local_label(&mut roster.replica, kind, key, value));
+        if !changed {
+            return;
         }
         persist_session_replica(session);
         let backend = self.clone();
@@ -2657,11 +2591,7 @@ impl RemoteControlBackend {
     async fn target_path(&self, target_id: &str) -> Option<TargetPath> {
         let session = self.session().ok()?;
         let target = IdentityHash::new(parse_hex::<IDENTITY_HASH_BYTES>(target_id).ok()?);
-        let resolved = session
-            .handle
-            .resolve_remote_control_target(target)
-            .await
-            .ok()?;
+        let resolved = resolve_managed_target(session, target)?;
         let route = session
             .handle
             .route(resolved.endpoint().destination_hash())
@@ -2747,14 +2677,15 @@ impl RemoteControlBackend {
         &self,
     ) -> Result<HashMap<String, InstantMillis>, BackendError> {
         let session = self.session()?;
-        let inventory = session
-            .handle
-            .remote_control_target_inventory()
-            .await
-            .map_err(|error| operation("read target inventory", error))?;
+        let targets = session
+            .roster
+            .lock()
+            .ok()
+            .map(|roster| replica_known_targets(&roster.replica))
+            .unwrap_or_default();
         let mut baselines = HashMap::new();
-        for target in inventory.targets() {
-            let id = encode_hex(target.identity_hash().as_bytes());
+        for target in targets {
+            let id = encode_hex(target.as_bytes());
             if let Some(learned_at) = self.control_announce_learned_at(&id).await? {
                 baselines.insert(id, learned_at);
             }
@@ -2800,7 +2731,7 @@ impl RemoteControlBackend {
             parse_hex::<IDENTITY_HASH_BYTES>(target_id)
                 .map_err(|_| BackendError::InvalidTargetId(target_id.to_string()))?,
         );
-        let Ok(resolved) = session.handle.resolve_remote_control_target(target).await else {
+        let Some(resolved) = resolve_managed_target(session, target) else {
             return Ok(None);
         };
         Ok(Some(resolved.endpoint().destination_hash()))
@@ -2838,6 +2769,133 @@ impl RemoteControlBackend {
             .await
             .map(|_| ())
             .map_err(|error| operation("connect to target", error))
+    }
+
+    /// Stream an image to the node's always-on install destination.
+    /// The first frame is the SHA-256 of the image bytes.
+    pub async fn stream_firmware_update(
+        &self,
+        target_id: &str,
+        image_path: &std::path::Path,
+        mut report: impl FnMut(&str, Option<u8>),
+    ) -> Result<(), BackendError> {
+        let image = std::fs::read(image_path).map_err(|error| BackendError::Operation {
+            operation: "firmware update",
+            detail: format!("could not read the image: {error}"),
+        })?;
+        if image.is_empty() {
+            return Err(BackendError::Operation {
+                operation: "firmware update",
+                detail: "the image must be non-empty".to_string(),
+            });
+        }
+        let session = self.session()?;
+        let target =
+            IdentityHash::new(parse_hex::<IDENTITY_HASH_BYTES>(target_id).map_err(|()| {
+                BackendError::Operation {
+                    operation: "firmware update",
+                    detail: "the target id is not an identity hash".to_string(),
+                }
+            })?);
+        let controller = IdentityHash::new(
+            parse_hex::<IDENTITY_HASH_BYTES>(&session.controller_identity.operator_hash).map_err(
+                |()| BackendError::Operation {
+                    operation: "firmware update",
+                    detail: "the operator identity is not available".to_string(),
+                },
+            )?,
+        );
+        let destination = personal_rns::remote_control::firmware_update_destination_hash(&target);
+        eprintln!(
+            "firmware update: image {} bytes path {} dest {}",
+            image.len(),
+            image_path.display(),
+            encode_hex(destination.as_bytes())
+        );
+        report("Requesting a path to the install address", None);
+        match session.handle.request_path(destination).await {
+            Ok(found) => {
+                eprintln!("firmware update: path found hops={}", found.hops.0);
+                report(
+                    &format!(
+                        "Path found ({} hop). Opening the install link",
+                        found.hops.0
+                    ),
+                    None,
+                );
+            }
+            Err(error) => {
+                eprintln!("firmware update: path failed {error:?}");
+                return Err(operation("firmware update", error));
+            }
+        }
+        eprintln!("firmware update: establishing link");
+        let link_id = match session.handle.establish_link(destination).await {
+            Ok(link_id) => link_id,
+            Err(error) => {
+                eprintln!("firmware update: link failed {error:?}");
+                return Err(operation("firmware update", error));
+            }
+        };
+        eprintln!(
+            "firmware update: link open id {}",
+            encode_hex(link_id.as_bytes())
+        );
+        report("Identifying to the node", None);
+        eprintln!(
+            "firmware update: identifying as operator {}",
+            encode_hex(controller.as_bytes())
+        );
+        if let Err(error) = session.handle.identify(link_id, controller).await {
+            eprintln!("firmware update: identify failed {error:?}");
+            return Err(operation("firmware update", error));
+        }
+        eprintln!("firmware update: identified, sending digest and length");
+        report("Sending the image digest", Some(0));
+        let digest = prns_core::crypto::sha256(&image);
+        send_update_frame(&session.handle, link_id, &digest, false).await?;
+        let length = (image.len() as u32).to_be_bytes();
+        send_update_frame(&session.handle, link_id, &length, false).await?;
+        let chunk = personal_rns::routing::links::channel::byte_stream::max_stream_payload(
+            personal_rns::wire::BROADCAST_MTU,
+        );
+        let mut offset = 0usize;
+        let mut last_percent = 0u8;
+        let transfer_started = std::time::Instant::now();
+        while offset < image.len() {
+            let end = (offset + chunk).min(image.len());
+            let eof = end == image.len();
+            send_update_frame(&session.handle, link_id, &image[offset..end], eof).await?;
+            offset = end;
+            let percent = ((offset as u64 * 100) / image.len() as u64) as u8;
+            if percent != last_percent {
+                last_percent = percent;
+                report(
+                    &format!(
+                        "Sending image, {percent}% ({} of {}) in {}",
+                        format_transfer_bytes(offset),
+                        format_transfer_bytes(image.len()),
+                        format_elapsed(transfer_started.elapsed())
+                    ),
+                    Some(percent),
+                );
+                if percent % 10 == 0 {
+                    eprintln!(
+                        "firmware update: sent {percent}% in {}",
+                        format_elapsed(transfer_started.elapsed())
+                    );
+                }
+            }
+        }
+        let elapsed = format_elapsed(transfer_started.elapsed());
+        report(
+            &format!("Image sent in {elapsed}. Waiting for the node to install it"),
+            Some(100),
+        );
+        eprintln!("firmware update: image sent in {elapsed}, waiting for install");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let _ = session.handle.request_path(destination).await;
+        Ok(())
     }
 
     async fn request_control_path(&self, target_id: &str) -> Result<(), BackendError> {
@@ -2920,19 +2978,15 @@ impl RemoteControlBackend {
     {
         let remote = self.connect_target(target_id).await?;
         eprintln!("inventory interfaces request to {target_id}");
-        let (inventory, _) = remote
-            .inventory_interfaces()
-            .await
-            .map_err(|error| operation("inventory target interfaces", error))?;
+        let entries = Self::read_interface_inventory(&remote).await?;
         self.session()?
             .mark_reachable(target_id, TargetStatus::Online);
-        let mut items = inventory
-            .entries()
+        let mut items = entries
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| operator_interface_kind(entry.kind))
-            .map(|(_, entry)| remote_interface_entry(entry, None))
+            .filter(|entry| operator_interface_kind(entry.kind))
+            .map(|entry| remote_interface_entry(entry, None))
             .collect::<Vec<_>>();
+        ensure_wifi_auto_tcp_client(&mut items);
         let ble_prefix = self.remote_bluetooth_auto_prefix(target_id).await;
         self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         for index in 0..items.len() {
@@ -3017,6 +3071,31 @@ impl RemoteControlBackend {
         remote.close();
         self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         Ok(items)
+    }
+
+    async fn read_interface_inventory(
+        remote: &RemoteControlTargetHandle<'_>,
+    ) -> Result<Vec<RemoteControlInterfaceEntry>, BackendError> {
+        let mut page = RemoteControlInterfacePage::First;
+        let mut entries = Vec::new();
+        for _ in 0..INTERFACE_PAGE_LIMIT {
+            let (inventory, _) = remote
+                .inventory_interfaces_page(page)
+                .await
+                .map_err(|error| operation("inventory target interfaces", error))?;
+            entries.extend(inventory.entries().iter().copied());
+            match inventory.continuation() {
+                RemoteControlInterfaceContinuation::Complete => return Ok(entries),
+                RemoteControlInterfaceContinuation::More(cursor) => {
+                    if matches!(page, RemoteControlInterfacePage::After(previous) if previous == cursor)
+                    {
+                        return Ok(entries);
+                    }
+                    page = RemoteControlInterfacePage::After(cursor);
+                }
+            }
+        }
+        Ok(entries)
     }
 
     async fn read_path_table(
@@ -3107,13 +3186,10 @@ impl RemoteControlBackend {
     ) -> Result<InterfaceEntry, BackendError> {
         let remote = self.connect_target(target_id).await?;
         eprintln!("inventory interface {interface_id} on {target_id}");
-        let (inventory, _) = remote
-            .inventory_interfaces()
-            .await
-            .map_err(|error| operation("inventory target interface", error))?;
+        let entries = Self::read_interface_inventory(&remote).await?;
         self.session()?
             .mark_reachable(target_id, TargetStatus::Online);
-        let Some((_, entry)) = inventory.entries().iter().enumerate().find(|(_, entry)| {
+        let Some(entry) = entries.iter().find(|entry| {
             operator_interface_kind(entry.kind) && encode_hex(entry.id.as_bytes()) == interface_id
         }) else {
             remote.close();
@@ -3369,11 +3445,7 @@ impl RemoteControlBackend {
     async fn remote_bluetooth_auto_prefix(&self, target_id: &str) -> Option<String> {
         let session = self.session().ok()?;
         let target = IdentityHash::new(parse_hex::<IDENTITY_HASH_BYTES>(target_id).ok()?);
-        let resolved = session
-            .handle
-            .resolve_remote_control_target(target)
-            .await
-            .ok()?;
+        let resolved = resolve_managed_target(session, target)?;
         let route = session
             .handle
             .route(resolved.endpoint().destination_hash())
@@ -3395,10 +3467,13 @@ impl RemoteControlBackend {
         let path = self.target_path(target_id).await;
         let route = format_target_route(path.as_ref());
         let session = self.session()?;
-        let dest_hex = match session.handle.resolve_remote_control_target(target).await {
-            Ok(resolved) => encode_hex(resolved.endpoint().destination_hash().as_bytes()),
-            Err(_) => "unresolved".to_string(),
-        };
+        let resolved = resolve_managed_target(session, target).ok_or_else(|| {
+            BackendError::Operation {
+                operation: "connect to target",
+                detail: "managed target authorization is missing from the roster".to_string(),
+            }
+        })?;
+        let dest_hex = encode_hex(resolved.endpoint().destination_hash().as_bytes());
         let name = session
             .pairing
             .lock()
@@ -3408,7 +3483,11 @@ impl RemoteControlBackend {
         eprintln!(
             "connect to target {target_id} ({name}) dest={dest_hex} via {route} — establishing link"
         );
-        match session.handle.connect_remote_control_target(target).await {
+        match session
+            .handle
+            .connect_remote_control_target_resolved(resolved)
+            .await
+        {
             Ok(remote) => {
                 eprintln!("connect to target {target_id} ({name}) dest={dest_hex} ok via {route}");
                 Ok(remote)
@@ -3458,20 +3537,8 @@ impl RemoteControlBackend {
     }
 
     /// Pull managed-node records from sibling controllers and merge them once.
-    /// An empty engine snapshot is left unused so a failed read cannot publish a blank roster.
     pub async fn fetch_sibling_node_info(&self) -> Result<(), BackendError> {
         let session = self.session()?;
-        if let Ok(snapshot) = session
-            .handle
-            .snapshot_remote_control_target_accesses()
-            .await
-        {
-            if let Some(snapshot) = snapshot.filter(|snapshot| !snapshot.is_empty()) {
-                if let Ok(mut roster) = session.roster.lock() {
-                    roster.cached_snapshot = snapshot;
-                }
-            }
-        }
         self.apply_pending_roster().await;
         let siblings = session
             .roster
@@ -3500,15 +3567,6 @@ impl RemoteControlBackend {
         let Ok(session) = self.session() else {
             return;
         };
-        if let Ok(snapshot) = session
-            .handle
-            .snapshot_remote_control_target_accesses()
-            .await
-        {
-            if let Ok(mut roster) = session.roster.lock() {
-                roster.cached_snapshot = snapshot.unwrap_or_default();
-            }
-        }
         self.apply_pending_roster().await;
         let cloning = session
             .clone
@@ -3535,7 +3593,6 @@ impl RemoteControlBackend {
             if let Ok(mut last) = session.last_roster_sync.lock() {
                 *last = Some(Instant::now());
             }
-            let _ = self.announce_roster_destination().await;
         }
         let pull_due = session
             .roster
@@ -3597,15 +3654,8 @@ impl RemoteControlBackend {
             plan
         };
         persist_session_replica(session);
-        for access in plan.upserts {
-            let _ = session
-                .handle
-                .set_remote_control_target_access(access)
-                .await;
-        }
         for hash in plan.forgets {
             let id = encode_hex(hash.as_bytes());
-            let _ = session.handle.forget_remote_control_target(hash).await;
             session
                 .pairing
                 .lock()
@@ -3630,7 +3680,6 @@ impl RemoteControlBackend {
         if cloning {
             return Ok(());
         }
-        let _ = self.announce_roster_destination().await;
         self.exchange_roster_with_siblings(RosterExchange::Push, None, true)
             .await
     }
@@ -3663,7 +3712,7 @@ impl RemoteControlBackend {
         require_heard: bool,
     ) -> Result<(), BackendError> {
         let session = self.session()?;
-        let (siblings, instance, replica, snapshot) = {
+        let (siblings, instance, replica) = {
             let roster = session
                 .roster
                 .lock()
@@ -3683,12 +3732,7 @@ impl RemoteControlBackend {
                     only.is_none_or(|wanted| wanted.contains(&sibling.identity_hash()))
                 })
                 .collect::<Vec<_>>();
-            (
-                siblings,
-                instance,
-                roster.replica.clone(),
-                roster.cached_snapshot.clone(),
-            )
+            (siblings, instance, roster.replica.clone())
         };
         if siblings.is_empty() {
             return Ok(());
@@ -3702,7 +3746,7 @@ impl RemoteControlBackend {
                 request.truncate(written);
                 request
             }
-            RosterExchange::Push => replica_message(&instance, &replica, &snapshot)
+            RosterExchange::Push => replica_message(&instance, &replica)
                 .ok_or_else(|| BackendError::Clone("roster message is too large".to_string()))?,
         };
         for sibling in siblings {
@@ -4144,6 +4188,12 @@ impl ControllerSession {
             RosterLabelKind::SiblingWifiLl,
             &sibling_wifi_ll_map,
         );
+        // Migrate managed-target auth out of the Prns engine snapshot onto the roster.
+        let engine_snapshot = load_persisted_target_access_bytes(&data_dir.join("node"));
+        if hydrate_accesses_from_snapshot(&mut roster_state.replica, &engine_snapshot) {
+            // Clear the engine region so CapacityExhausted cannot return on old installs.
+            clear_persisted_target_accesses(&data_dir.join("node"));
+        }
         persist_replica(&replica_path(&data_dir), &roster_state.replica);
         let roster = Arc::new(Mutex::new(roster_state));
         let roster_events = roster.clone();
@@ -4829,7 +4879,7 @@ impl PairingEvents {
 
     fn remember_unnamed_targets(
         &mut self,
-        targets: &[AuthorizedRemoteControlTarget],
+        targets: &[IdentityHash],
     ) -> Option<(String, String)> {
         let pending = self.pending_announce_name.clone();
         self.remember_unnamed_targets_with(targets, pending)
@@ -4837,12 +4887,12 @@ impl PairingEvents {
 
     fn remember_unnamed_targets_with(
         &mut self,
-        targets: &[AuthorizedRemoteControlTarget],
+        targets: &[IdentityHash],
         name: Option<String>,
     ) -> Option<(String, String)> {
         let unnamed = targets
             .iter()
-            .map(|target| encode_hex(target.identity_hash().as_bytes()))
+            .map(|target| encode_hex(target.as_bytes()))
             .filter(|id| !self.target_names.contains_key(id))
             .collect::<Vec<_>>();
         let name = name.filter(|name| !name.is_empty())?;
@@ -5098,7 +5148,7 @@ fn load_controller_secret(
 
 fn adopt_cloned_identity(
     identities_dir: &Path,
-    persist_dir: &Path,
+    data_dir: &Path,
     secret: &[u8; personal_rns::IDENTITY_SECRET_KEY_LEN],
     accesses: &[u8],
 ) -> Result<(), BackendError> {
@@ -5109,13 +5159,9 @@ fn adopt_cloned_identity(
     personal_rns::identity::vault::IdentityVault::store(&mut vault, &label, &stored)
         .map_err(|error| BackendError::Clone(error.to_string()))?;
     if !accesses.is_empty() {
-        let mut store = personal_rns::persistence::FileStore::new(persist_dir.to_path_buf());
-        personal_rns::persistence::PersistedStore::store(
-            &mut store,
-            personal_rns::persistence::SnapshotRegion::RemoteControlTargetAccesses,
-            accesses,
-        )
-        .map_err(|error| BackendError::Clone(error.to_string()))?;
+        let mut replica = load_replica(&replica_path(data_dir));
+        let _ = hydrate_accesses_from_snapshot(&mut replica, accesses);
+        persist_replica(&replica_path(data_dir), &replica);
     }
     Ok(())
 }
@@ -5618,6 +5664,38 @@ fn parse_hex<const N: usize>(input: &str) -> Result<[u8; N], ()> {
     Ok(output)
 }
 
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let total = elapsed.as_secs();
+    let minutes = total / 60;
+    let seconds = total % 60;
+    if minutes == 0 {
+        format!("{seconds}s")
+    } else {
+        format!("{minutes}m {seconds}s")
+    }
+}
+
+#[cfg(test)]
+mod elapsed_format {
+    use super::format_elapsed;
+
+    #[test]
+    fn formats_seconds_and_minutes() {
+        assert_eq!(format_elapsed(std::time::Duration::from_secs(45)), "45s");
+        assert_eq!(format_elapsed(std::time::Duration::from_secs(125)), "2m 5s");
+    }
+}
+
+fn format_transfer_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -5656,7 +5734,48 @@ pub fn format_pairing_open_label(remaining_secs: u32) -> String {
     format!("Open {:02}:{:02}", remaining_secs / 60, remaining_secs % 60)
 }
 
-fn load_persisted_target_hashes(persist_dir: &Path) -> Vec<IdentityHash> {
+fn resolve_managed_target(
+    session: &ControllerSession,
+    target: IdentityHash,
+) -> Option<ResolvedRemoteControlTarget> {
+    let controller = session_controller_identity(session)?;
+    let roster = session.roster.lock().ok()?;
+    let access = access_for(&roster.replica, target)?;
+    Some(ResolvedRemoteControlTarget::from((&controller, access)))
+}
+
+fn session_controller_identity(
+    session: &ControllerSession,
+) -> Option<personal_rns::remote_control::RemoteControlControllerIdentity> {
+    let bytes =
+        parse_hex::<IDENTITY_PUBLIC_KEY_LEN>(&session.controller_identity.allow_list_key).ok()?;
+    parse_controller_public_keys(&bytes)
+}
+
+fn roster_accesses_snapshot(replica: &crate::roster_sync::RosterReplica) -> Result<Vec<u8>, String> {
+    use personal_rns::persistence::{
+        remote_control_target_accesses_snapshot_capacity, write_remote_control_target_accesses_snapshot,
+    };
+    use personal_rns::remote_control::{
+        HeapRemoteControlTargetAccessTable, RemoteControlTargetAccessTable,
+    };
+    let mut table = HeapRemoteControlTargetAccessTable::default();
+    for upsert in &replica.upserts {
+        if replica_forgets_target(replica, upsert.access.target().identity_hash()) {
+            continue;
+        }
+        table
+            .set_target_access(crate::roster_sync::clone_access(&upsert.access))
+            .map_err(|_| "roster access table rejected a managed target".to_string())?;
+    }
+    let mut out = vec![0; remote_control_target_accesses_snapshot_capacity(table.len())];
+    let written = write_remote_control_target_accesses_snapshot(&table, &mut out)
+        .map_err(|error| format!("{error:?}"))?;
+    out.truncate(written);
+    Ok(out)
+}
+
+fn load_persisted_target_access_bytes(persist_dir: &Path) -> Vec<u8> {
     let store = personal_rns::persistence::FileStore::new(persist_dir.to_path_buf());
     let Ok(Some(len)) = personal_rns::persistence::PersistedStore::stored_len(
         &store,
@@ -5672,8 +5791,32 @@ fn load_persisted_target_hashes(persist_dir: &Path) -> Vec<IdentityHash> {
     ) else {
         return Vec::new();
     };
+    bytes.to_vec()
+}
+
+fn clear_persisted_target_accesses(persist_dir: &Path) {
+    use personal_rns::persistence::{
+        remote_control_target_accesses_snapshot_capacity, write_remote_control_target_accesses_snapshot,
+    };
+    use personal_rns::remote_control::HeapRemoteControlTargetAccessTable;
+    let table = HeapRemoteControlTargetAccessTable::default();
+    let mut empty = vec![0; remote_control_target_accesses_snapshot_capacity(0)];
+    let Ok(written) = write_remote_control_target_accesses_snapshot(&table, &mut empty) else {
+        return;
+    };
+    empty.truncate(written);
+    let mut store = personal_rns::persistence::FileStore::new(persist_dir.to_path_buf());
+    let _ = personal_rns::persistence::PersistedStore::store(
+        &mut store,
+        personal_rns::persistence::SnapshotRegion::RemoteControlTargetAccesses,
+        &empty,
+    );
+}
+
+fn load_persisted_target_hashes(persist_dir: &Path) -> Vec<IdentityHash> {
+    let bytes = load_persisted_target_access_bytes(persist_dir);
     let Ok(persisted) =
-        personal_rns::persistence::read_remote_control_target_accesses_snapshot(bytes)
+        personal_rns::persistence::read_remote_control_target_accesses_snapshot(&bytes)
     else {
         return Vec::new();
     };
@@ -6164,6 +6307,50 @@ fn interface_peer_from_wire(peer: &RemoteControlInterfacePeer) -> InterfacePeer 
         peer.radio,
         peer.details,
     )
+}
+
+fn ensure_wifi_auto_tcp_client(items: &mut Vec<InterfaceEntry>) {
+    let has_wifi = items.iter().any(|item| item.kind == "auto-wifi");
+    let has_tcp = items.iter().any(|item| item.kind == "tcp-client");
+    if !has_wifi || has_tcp {
+        return;
+    }
+    let Some(index) = items.iter().position(|item| item.kind == "auto-wifi") else {
+        return;
+    };
+    items.insert(index.saturating_add(1), unconfigured_tcp_client_entry());
+}
+
+fn unconfigured_tcp_client_entry() -> InterfaceEntry {
+    let id = InterfaceId::from_channel_tag(InterfaceKind::TcpClient, b"unconfigured");
+    InterfaceEntry {
+        name: "tcp-client".to_string(),
+        id: encode_hex(id.as_bytes()),
+        kind: InterfaceKind::TcpClient.name().to_string(),
+        power: InterfacePower::Off,
+        mode: InterfaceMode::Full,
+        connection: connection_label(Some(InterfaceKind::TcpClient), ConnectionState::Disconnected),
+        group: None,
+        tx_bytes: 0,
+        rx_bytes: 0,
+        tx_bps: None,
+        rx_bps: None,
+        links: 0,
+        transported_links: 0,
+        destinations: 0,
+        rate_bytes_per_sec: 0,
+        gravity: None,
+        ifac_bytes: None,
+        last_activity_secs: None,
+        detail: None,
+        failure: None,
+        extras: Vec::new(),
+        shows_peers: false,
+        peers: Vec::new(),
+        peers_pending: false,
+        peers_error: None,
+        arrived_at: Some(format_wall_clock_now()),
+    }
 }
 
 fn remote_interface_entry(
@@ -8212,7 +8399,8 @@ mod tests {
         bluetooth_auto_name_prefix, bluetooth_auto_peer_list_note,
         bluetooth_auto_prefix_from_direct_peer, bluetooth_auto_title, clone_announce_is_usb_local,
         control_announce_satisfies, controller_identity_secret_path, encode_hex,
-        endpoint_matches_wifi_ll_keys, format_activity_age, format_announce_millis,
+        endpoint_matches_wifi_ll_keys, ensure_wifi_auto_tcp_client, format_activity_age,
+        format_announce_millis,
         format_connect_label, format_hop_count, format_interface, format_managed_node_battery,
         format_next_hop, format_pairing_open_label, format_target_announce, format_target_route,
         format_utc_millis, generic_bluetooth_auto_title, instance_identity_secret_path,
@@ -8381,12 +8569,14 @@ mod tests {
     #[test]
     fn managed_targets_from_disk_union_persist_replica_and_names() {
         let persist = IdentityHash::new([0x11; 16]);
-        let replica_only = IdentityHash::new([0x22; 16]);
+        let replica_only_access = crate::roster_sync::tests_access(0x22);
+        let replica_only = replica_only_access.target().identity_hash();
         let named = IdentityHash::new([0x33; 16]);
-        let forgotten = IdentityHash::new([0x44; 16]);
+        let forgotten_access = crate::roster_sync::tests_access(0x44);
+        let forgotten = forgotten_access.target().identity_hash();
         let mut replica = crate::roster_sync::RosterReplica::default();
-        crate::roster_sync::note_local_upsert(&mut replica, replica_only);
-        crate::roster_sync::note_local_upsert(&mut replica, forgotten);
+        crate::roster_sync::note_local_upsert(&mut replica, replica_only_access);
+        crate::roster_sync::note_local_upsert(&mut replica, forgotten_access);
         crate::roster_sync::forget_target_locally(&mut replica, forgotten);
         let persist_hex = encode_hex(persist.as_bytes());
         let replica_hex = encode_hex(replica_only.as_bytes());
@@ -9868,6 +10058,23 @@ mod tests {
         );
         assert!(!should_forget_control_route(Some(&ble_path), &ble_up));
         assert!(!should_forget_control_route(None, &usb_up));
+    }
+
+    #[test]
+    fn wifi_auto_without_tcp_gains_a_tcp_client_row() {
+        let mut items = vec![
+            test_local_interface("lora", "Connected"),
+            test_local_interface("auto-wifi", "Connected"),
+            test_local_interface("bluetooth-auto", "No Peers"),
+        ];
+        ensure_wifi_auto_tcp_client(&mut items);
+        assert_eq!(items[2].kind, "tcp-client");
+        assert_eq!(items[2].power, InterfacePower::Off);
+        ensure_wifi_auto_tcp_client(&mut items);
+        assert_eq!(items.iter().filter(|item| item.kind == "tcp-client").count(), 1);
+        let mut lora_only = vec![test_local_interface("lora", "Connected")];
+        ensure_wifi_auto_tcp_client(&mut lora_only);
+        assert!(lora_only.iter().all(|item| item.kind != "tcp-client"));
     }
 
     fn test_local_interface(kind: &str, connection: &str) -> InterfaceEntry {

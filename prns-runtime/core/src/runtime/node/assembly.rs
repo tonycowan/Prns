@@ -443,7 +443,7 @@ where
         return Ok(AssembledRemoteControl { available: None });
     };
     let available_requests = configuration.available_requests();
-    let (identity_secrets, initial_controller_grants, self_announcement) =
+    let (identity_secrets, initial_controller_grants, self_announcement, firmware_update) =
         configuration.into_parts();
     let mut controller_grants = FixedRemoteControlControllerGrantTable::default();
     for grant in initial_controller_grants.grants() {
@@ -455,6 +455,7 @@ where
         .configure_remote_control_service(RemoteControlServiceConfiguration {
             identity_secrets,
             maximum_request_bytes: ByteLimit::Maximum(REMOTE_CONTROL_REQUEST_PLAINTEXT_MAX as u64),
+            register_firmware_update_destination: firmware_update,
         })
         .map_err(ConfigureRemoteControlServiceError::ConfigureService)?;
     let (identities, target_endpoint, request_endpoint_id, pairing_availability_destination) =

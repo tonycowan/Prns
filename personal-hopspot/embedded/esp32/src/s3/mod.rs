@@ -332,7 +332,13 @@ static REMOTE_CONTROL_COMMANDS: screen::HopspotCommandMailbox<
 > = screen::HopspotCommandMailbox::new();
 static CORE_ONE_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(not(feature = "firmware-update"))]
 fn ignore_events(_event: PrnsEvent<'_>, _state: &RemoteControlHandle) {}
+
+#[cfg(feature = "firmware-update")]
+fn ignore_events(event: PrnsEvent<'_>, _state: &RemoteControlHandle) {
+    firmware_update_listener::observe(event);
+}
 
 const BOOT_PHASE_MAGIC: u32 = 0x5052_0000;
 
@@ -599,6 +605,11 @@ macro_rules! boot_rtos_tail {
             ::esp_hal::system::reset_reason(),
             $crate::s3::previous_boot_phase()
         );
+        ::esp_println::println!("update: boot slot marker");
+        ::esp_println::println!(
+            "update: booted {}",
+            $crate::s3::booted_slot_label($crate::s3::boot_slot_profile())
+        );
         (sw_int.software_interrupt1, timebase, rtc)
     }};
 }
@@ -643,4 +654,32 @@ fn request_radio_mode(mode: RadioMode) -> ! {
 }
 
 mod firmware;
+#[cfg(feature = "firmware-update")]
+mod firmware_update_listener;
+
+fn boot_slot_profile() -> &'static personal_hopspot_memory::MemoryProfile {
+    #[cfg(feature = "firmware-update")]
+    {
+        &personal_hopspot_memory::HELTEC_V4_R8_AB
+    }
+    #[cfg(not(feature = "firmware-update"))]
+    {
+        &personal_hopspot_memory::HELTEC_V4_R8
+    }
+}
+
+pub(crate) fn booted_slot_label(
+    profile: &'static personal_hopspot_memory::MemoryProfile,
+) -> &'static str {
+    #[cfg(all(target_arch = "xtensa", feature = "firmware-update"))]
+    {
+        let memory = crate::memory::EspFirmwareMemory::new(profile);
+        crate::firmware_update::booted_slot_name(&memory)
+    }
+    #[cfg(not(all(target_arch = "xtensa", feature = "firmware-update")))]
+    {
+        let _ = profile;
+        "unavailable"
+    }
+}
 pub(super) use firmware::run;
