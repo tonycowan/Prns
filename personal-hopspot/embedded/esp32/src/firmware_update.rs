@@ -97,7 +97,7 @@ pub(crate) fn stage_digest(digest: [u8; SHA256_DIGEST_LEN]) -> Result<(), Instal
     Ok(())
 }
 
-fn staged_digest() -> Option<[u8; SHA256_DIGEST_LEN]> {
+pub(crate) fn staged_digest() -> Option<[u8; SHA256_DIGEST_LEN]> {
     STAGED_DIGEST.lock(|staged| *staged.borrow())
 }
 
@@ -111,12 +111,25 @@ pub(crate) struct InstalledImage {
     pub(crate) image_len: usize,
 }
 
-pub(crate) struct InstallStatus {
-    pub(crate) busy: bool,
-    pub(crate) selected: &'static str,
-    pub(crate) state: &'static str,
-    pub(crate) booted: &'static str,
-    pub(crate) digest_staged: bool,
+/// Bytes already erased and written into the inactive slot. A dropped link loses the in-memory
+/// hasher and any partial sector still in RAM; this is the part that is still on flash and worth
+/// continuing. It lives only until the next boot.
+#[derive(Clone, Copy)]
+pub(crate) struct StashedInstall {
+    pub(crate) digest: [u8; SHA256_DIGEST_LEN],
+    pub(crate) declared: usize,
+    pub(crate) committed: usize,
+    flash_capacity: usize,
+    boot_selection: [u32; 2],
+    target: AppPartitionSubType,
+    slot_offset: u32,
+    slot_len: usize,
+}
+
+impl StashedInstall {
+    pub(crate) fn matches_digest(self, digest: [u8; SHA256_DIGEST_LEN]) -> bool {
+        self.digest == digest && self.committed > 0 && self.committed <= self.declared
+    }
 }
 
 /// An install in flight: the target slot, the sector buffer it fills, and the digest of everything
@@ -136,6 +149,59 @@ pub(crate) struct FirmwareInstall {
     sector: Vec<u8>,
     streamed: Sha256,
     expected: [u8; SHA256_DIGEST_LEN],
+}
+
+/// Continue an install whose prefix is already in the inactive slot. The hasher is rebuilt by
+/// reading that prefix back, so a later [`FirmwareInstall::finish`] still covers every byte.
+pub(crate) async fn resume(
+    guard: InstallGuard,
+    stashed: StashedInstall,
+) -> Result<FirmwareInstall, InstallError> {
+    let Some(expected) = staged_digest() else {
+        return Err(InstallError::DigestNotStaged);
+    };
+    if expected != stashed.digest
+        || stashed.committed == 0
+        || stashed.committed > stashed.declared
+        || !stashed.committed.is_multiple_of(FLASH_SECTOR_LEN)
+        || stashed.committed > stashed.slot_len
+    {
+        return Err(InstallError::DigestMismatch);
+    }
+    let mut flash = EspRomFlash::new(stashed.flash_capacity);
+    let mut sector = alloc::vec![0u8; FLASH_SECTOR_LEN];
+    let mut streamed = Sha256::new();
+    let mut verified = 0usize;
+    while verified < stashed.committed {
+        let offset = stashed.slot_offset + verified as u32;
+        ReadNorFlash::read(&mut flash, offset, &mut sector).map_err(InstallError::Flash)?;
+        streamed.update(&sector);
+        verified += FLASH_SECTOR_LEN;
+        if verified.is_multiple_of(READBACK_YIELD_SECTORS * FLASH_SECTOR_LEN) {
+            yield_now().await;
+        }
+    }
+    log::info!(
+        "update: resuming at {} of {} bytes into {}",
+        stashed.committed,
+        stashed.declared,
+        slot_name(stashed.target)
+    );
+    Ok(FirmwareInstall {
+        _guard: guard,
+        flash,
+        flash_capacity: stashed.flash_capacity,
+        boot_selection: stashed.boot_selection,
+        target: stashed.target,
+        slot_offset: stashed.slot_offset,
+        slot_len: stashed.slot_len,
+        declared_len: stashed.declared,
+        received: stashed.committed,
+        buffered: 0,
+        sector,
+        streamed,
+        expected,
+    })
 }
 
 /// Locate the inactive slot and prove the flashed table is the one this firmware was compiled
@@ -232,8 +298,25 @@ pub(crate) fn begin(
 }
 
 impl FirmwareInstall {
-    pub(crate) fn target_slot(&self) -> AppPartitionSubType {
-        self.target
+    /// The flash-resident prefix, when one exists. A partial sector still sitting in `buffered`
+    /// is not included: it was never erased into the slot, so the sender must transmit it again.
+    pub(crate) fn checkpoint(&self) -> Option<StashedInstall> {
+        if self.received == 0
+            || self.received > self.declared_len
+            || !self.received.is_multiple_of(FLASH_SECTOR_LEN)
+        {
+            return None;
+        }
+        Some(StashedInstall {
+            digest: self.expected,
+            declared: self.declared_len,
+            committed: self.received,
+            flash_capacity: self.flash_capacity,
+            boot_selection: self.boot_selection,
+            target: self.target,
+            slot_offset: self.slot_offset,
+            slot_len: self.slot_len,
+        })
     }
 
     /// Take the next stretch of the image. Chunk boundaries are the caller's business; flash only
@@ -439,55 +522,6 @@ pub(crate) fn booted_slot_name(memory: &EspFirmwareMemory) -> &'static str {
     booted_slot(&table).map_or("unknown", slot_name)
 }
 
-/// What a transport reports when someone asks before uploading anything.
-pub(crate) fn status(memory: &EspFirmwareMemory) -> InstallStatus {
-    let digest_staged = staged_digest().is_some();
-    if install_in_progress() {
-        return InstallStatus {
-            busy: true,
-            selected: "unknown",
-            state: "unknown",
-            booted: "unknown",
-            digest_staged,
-        };
-    }
-    let (selected, state, booted) =
-        read_slot_status(memory).unwrap_or(("unknown", "unknown", "unknown"));
-    InstallStatus {
-        busy: false,
-        selected,
-        state,
-        booted,
-        digest_staged,
-    }
-}
-
-fn read_slot_status(
-    memory: &EspFirmwareMemory,
-) -> Result<(&'static str, &'static str, &'static str), InstallError> {
-    let flash_capacity = memory.flash_capacity();
-    let mut merge = alloc::vec![0u8; FLASH_SECTOR_LEN];
-    let mut storage =
-        RmwNorFlashStorage::new(EspRomFlash::new(flash_capacity), merge.as_mut_slice());
-    let mut scratch = Box::new([0u8; partitions::PARTITION_TABLE_MAX_LEN]);
-    let table = partitions::read_partition_table(&mut storage, &mut scratch[..])
-        .map_err(InstallError::Partitions)?;
-    let booted = booted_slot(&table).map_or("unknown", slot_name);
-    let ota_data = find_raw(&table, RAW_TYPE_DATA, RAW_SUBTYPE_DATA_OTA)
-        .ok_or(InstallError::BootSelectionMissing)?;
-    let mut ota = Ota::new(ota_data.as_embedded_storage(&mut storage), OTA_SLOT_COUNT)
-        .map_err(InstallError::Partitions)?;
-    let selected = slot_name(
-        ota.current_app_partition()
-            .map_err(InstallError::Partitions)?,
-    );
-    let state = ota
-        .current_ota_state()
-        .map(state_name)
-        .unwrap_or("undefined");
-    Ok((selected, state, booted))
-}
-
 fn select_slot(
     flash_capacity: usize,
     boot_selection: [u32; 2],
@@ -634,17 +668,6 @@ pub(crate) fn slot_name(slot: AppPartitionSubType) -> &'static str {
     }
 }
 
-fn state_name(state: OtaImageState) -> &'static str {
-    match state {
-        OtaImageState::New => "new",
-        OtaImageState::PendingVerify => "pending-verify",
-        OtaImageState::Valid => "valid",
-        OtaImageState::Invalid => "invalid",
-        OtaImageState::Aborted => "aborted",
-        OtaImageState::Undefined => "undefined",
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum InstallError {
     InstallInProgress,
@@ -695,35 +718,6 @@ pub(crate) enum InstallError {
     ReadbackMismatch,
     Flash(EspRomFlashError),
     Partitions(partitions::Error),
-}
-
-impl InstallError {
-    pub(crate) fn code(&self) -> &'static str {
-        match self {
-            Self::InstallInProgress => "install-in-progress",
-            Self::NoUpdateSlot => "no-update-slot",
-            Self::NoBootSelection => "no-boot-selection",
-            Self::DigestNotStaged => "digest-not-staged",
-            Self::DigestMalformed => "digest-malformed",
-            Self::DigestMismatch => "digest-mismatch",
-            Self::ImageTooSmall { .. } => "image-too-small",
-            Self::ImageMagic { .. } => "image-magic",
-            Self::ImageTooLarge { .. } => "image-too-large",
-            Self::BodyOverrun { .. } => "body-overrun",
-            Self::BodyTruncated { .. } => "body-truncated",
-            Self::SlotMissing { .. } => "slot-missing",
-            Self::SlotOutsideProfile { .. } => "slot-outside-profile",
-            Self::BootSelectionMissing => "boot-selection-missing",
-            Self::BootSelectionNotConfirmed => "boot-selection-not-confirmed",
-            Self::BootSelectionOutsideProfile { .. } => "boot-selection-outside-profile",
-            Self::RunningSlotUnknown => "running-slot-unknown",
-            Self::BootedSlotUnknown => "booted-slot-unknown",
-            Self::BootedSlotDisagrees { .. } => "booted-slot-disagrees",
-            Self::ReadbackMismatch => "readback-mismatch",
-            Self::Flash(_) => "flash-access",
-            Self::Partitions(_) => "partition-access",
-        }
-    }
 }
 
 impl core::fmt::Display for InstallError {

@@ -133,6 +133,8 @@ pub struct FlashProgress {
     pub finished_at_millis: Option<u64>,
     pub outcome: FlashRunOutcome,
     pub enrolled: Option<EnrolledFlashTarget>,
+    /// Local interface the OTA image is leaving on, once a path exists.
+    pub interface: Option<String>,
 }
 
 impl FlashProgress {
@@ -159,6 +161,7 @@ impl FlashProgress {
             finished_at_millis: None,
             outcome: FlashRunOutcome::Running,
             enrolled: None,
+            interface: None,
         }
     }
 
@@ -249,6 +252,9 @@ impl FlashProgress {
         if self.write_percent.is_none() {
             self.write_percent = previous.write_percent;
         }
+        if self.interface.is_none() {
+            self.interface.clone_from(&previous.interface);
+        }
     }
 
     pub fn finish(mut self, outcome: FlashRunOutcome, detail: impl Into<String>) -> Self {
@@ -277,12 +283,19 @@ impl FlashProgress {
             FlashRunOutcome::Failed => "Failed",
             FlashRunOutcome::Running => "Running",
         };
-        Some(vec![
+        let mut lines = vec![
             ("Started".into(), format_flash_wall_clock(started)),
             ("Finished".into(), format_flash_wall_clock(finished)),
             ("Duration".into(), format_flash_elapsed(duration)),
-            ("Status".into(), status.into()),
-        ])
+        ];
+        if let Some(interface) = self.interface.as_deref() {
+            lines.push(("Interface".into(), interface.to_string()));
+        }
+        if let Some(total) = self.write_total_bytes {
+            lines.push(("File size".into(), format_flash_kb(total)));
+        }
+        lines.push(("Status".into(), status.into()));
+        Some(lines)
     }
 }
 
@@ -3119,6 +3132,7 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
                 id: "aabbccddeeff0011".to_string(),
                 display_name: "Heltec MeshTower V2".to_string(),
             }),
+            interface: None,
         };
         let offer = progress
             .manage_offer()
@@ -3129,6 +3143,31 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
             .run_summary_lines()
             .expect("finished run has summary");
         assert_eq!(summary[3], ("Status".into(), "Succeeded".into()));
+    }
+
+    #[test]
+    fn finished_ota_summary_includes_interface_and_file_size() {
+        let progress = FlashProgress {
+            kind: FlashKind::Ota,
+            enrollable: false,
+            stage: FlashStage::Complete,
+            detail: "Install accepted.".to_string(),
+            write_percent: Some(100),
+            write_bytes: Some(49_152),
+            write_total_bytes: Some(49_152),
+            started_at_millis: Some(1_000),
+            write_started_at_millis: Some(1_500),
+            finished_at_millis: Some(2_000),
+            outcome: FlashRunOutcome::Succeeded,
+            enrolled: None,
+            interface: Some("auto-wifi".to_string()),
+        };
+        let summary = progress
+            .run_summary_lines()
+            .expect("finished run has summary");
+        assert_eq!(summary[3], ("Interface".into(), "auto-wifi".into()));
+        assert_eq!(summary[4], ("File size".into(), format_flash_kb(49_152)));
+        assert_eq!(summary[5], ("Status".into(), "Succeeded".into()));
     }
 
     #[test]
@@ -3146,6 +3185,7 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
             finished_at_millis: None,
             outcome: FlashRunOutcome::Succeeded,
             enrolled: None,
+            interface: None,
         };
         assert!(progress.manage_offer().is_none());
     }
@@ -3168,6 +3208,7 @@ error: could not compile `personal-hopspot-esp32` (lib) due to 1 previous error
                 id: "aabbccddeeff0011".to_string(),
                 display_name: "Heltec MeshTower V2".to_string(),
             }),
+            interface: None,
         };
         assert!(progress.manage_offer().is_none());
     }

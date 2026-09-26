@@ -1863,6 +1863,17 @@ fn ota_flash_deck(
     }
 }
 
+/// Statuses after a path exists may carry the route interface on a second line.
+#[cfg(not(target_os = "android"))]
+fn split_ota_interface_line(status: &str) -> (String, Option<String>) {
+    match status.split_once('\n') {
+        Some((detail, interface)) if !interface.is_empty() => {
+            (detail.to_string(), Some(interface.to_string()))
+        }
+        _ => (status.to_string(), None),
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 fn start_ota_firmware_update(
     target_id: String,
@@ -1911,8 +1922,10 @@ fn start_ota_firmware_update(
             );
         spawn(async move {
             while let Some((status, percent, written, total)) = progress_rx.recv().await {
+                let (status, interface_name) = split_ota_interface_line(&status);
                 flash_status.set(status.clone());
                 let mut progress = ota_progress_from_status(&status, percent, written, total);
+                progress.interface = interface_name;
                 if let Some(previous) = flash_progress() {
                     progress.carry_timing_from(&previous);
                 }
@@ -5791,6 +5804,13 @@ fn flash_run_progress_view(progress: FlashProgress) -> Element {
         }
         p { class: "note flash-stage-detail",
             "{progress.detail_line()}"
+        }
+        if progress.stage == FlashStage::Write {
+            if let Some(interface) = progress.interface.as_deref() {
+                p { class: "note flash-stage-detail",
+                    "Interface {interface}"
+                }
+            }
         }
     }
 }

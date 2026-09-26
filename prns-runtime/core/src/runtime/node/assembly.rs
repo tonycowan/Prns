@@ -451,6 +451,9 @@ where
             .set_controller_grant(*grant)
             .map_err(ConfigureRemoteControlServiceError::BuildControllerGrants)?;
     }
+    if firmware_update {
+        crate::runtime::note_firmware_update_grants(&controller_grants);
+    }
     let configured_service = engine
         .configure_remote_control_service(RemoteControlServiceConfiguration {
             identity_secrets,

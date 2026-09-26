@@ -41,7 +41,8 @@ use personal_rns::remote_control::{
     RemoteControlPathPage, RemoteControlPowerOutcome, RemoteControlRequestKind,
     RemoteControlRequestSet, RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome,
     RemoteControlTargetAccess, RemoteControlWifiStation, RemoteControlWifiStationOutcome,
-    REMOTE_CONTROL_APPLICATION_ASPECTS, REMOTE_CONTROL_APPLICATION_NAME,
+    FIRMWARE_UPDATE_APPLICATION_ASPECTS, REMOTE_CONTROL_APPLICATION_ASPECTS,
+    REMOTE_CONTROL_APPLICATION_NAME,
 };
 use personal_rns::routing::announce::{derive_destination_hash, expand_name};
 use personal_rns::routing::NextHop;
@@ -404,6 +405,88 @@ async fn send_update_frame(
         .await
         .map(|_| ())
         .map_err(|error| operation("firmware update", error))
+}
+
+/// How many times a stalled install link is opened again. Each attempt asks the
+/// node where the inactive slot actually ends and continues from there.
+const FIRMWARE_RESUME_ATTEMPTS: u32 = 32;
+const FIRMWARE_RESUME_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn parse_resume_offset(data: &[u8]) -> Option<u64> {
+    let text = std::str::from_utf8(data).ok()?.trim();
+    let offset = text.strip_prefix("resume ")?;
+    offset.parse().ok()
+}
+
+fn hop_label(hops: u8) -> String {
+    if hops == 1 {
+        "1 hop".to_string()
+    } else {
+        format!("{hops} hops")
+    }
+}
+
+async fn request_install_path(
+    handle: &PrnsNodeHandle,
+    destination: DestinationHash,
+    status: &str,
+    report: &mut impl FnMut(&str, Option<u8>),
+) -> Result<(), BackendError> {
+    report(status, None);
+    match handle.request_path(destination).await {
+        Ok(found) => {
+            eprintln!("firmware update: path found hops={}", found.hops.0);
+            report(
+                &format!(
+                    "Path found ({}). Opening the install link",
+                    hop_label(found.hops.0)
+                ),
+                None,
+            );
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("firmware update: path failed {error:?}");
+            Err(operation("firmware update", error))
+        }
+    }
+}
+
+async fn wait_for_resume_offset(
+    session: &ControllerSession,
+    link_id: personal_rns::routing::links::LinkId,
+) -> Result<usize, BackendError> {
+    let deadline = std::time::Instant::now() + FIRMWARE_RESUME_WAIT;
+    loop {
+        let offered = *session
+            .firmware_resume
+            .lock()
+            .expect("firmware resume mutex poisoned");
+        let offered = offered
+            .filter(|(offered_link, _)| *offered_link == link_id)
+            .map(|(_, offset)| offset);
+        if let Some(offset) = offered {
+            return usize::try_from(offset).map_err(|_| BackendError::Operation {
+                operation: "firmware update",
+                detail: format!("the node asked to resume at {offset}, which does not fit"),
+            });
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(BackendError::Operation {
+                operation: "firmware update",
+                detail: "the node did not say where to resume".to_string(),
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+async fn abandon_firmware_link(
+    session: &ControllerSession,
+    link_id: personal_rns::routing::links::LinkId,
+) {
+    session.handle.close_link(link_id);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 }
 
 impl RemoteControlBackend {
@@ -2886,90 +2969,199 @@ impl RemoteControlBackend {
             image_path.display(),
             encode_hex(destination.as_bytes())
         );
-        report("Requesting a path to the install address", None);
-        match session.handle.request_path(destination).await {
-            Ok(found) => {
-                eprintln!("firmware update: path found hops={}", found.hops.0);
-                report(
-                    &format!(
-                        "Path found ({} hop). Opening the install link",
-                        found.hops.0
-                    ),
-                    None,
-                );
-            }
-            Err(error) => {
-                eprintln!("firmware update: path failed {error:?}");
-                return Err(operation("firmware update", error));
-            }
+        // A known route is used as-is. Requesting a path while one is held is answered
+        // with the announce that built it, and that replay does not count as a new path.
+        if let Some(route) = session.handle.route(destination).await {
+            eprintln!("firmware update: using known path hops={}", route.hops);
+            report(
+                &format!(
+                    "Using the known path ({}). Opening the install link",
+                    hop_label(route.hops)
+                ),
+                None,
+            );
+        } else if let Err(error) = request_install_path(
+            &session.handle,
+            destination,
+            "Requesting a path to the install address",
+            &mut report,
+        )
+        .await
+        {
+            return Err(error);
         }
-        eprintln!("firmware update: establishing link");
-        let link_id = match session.handle.establish_link(destination).await {
-            Ok(link_id) => link_id,
-            Err(error) => {
-                eprintln!("firmware update: link failed {error:?}");
-                return Err(operation("firmware update", error));
+        let mut rediscovered_after_link_failure = false;
+        let interface = session
+            .handle
+            .route(destination)
+            .await
+            .map(|route| format_interface(route.interface));
+        let mut report = |status: &str, percent: Option<u8>| {
+            if let Some(name) = interface.as_deref() {
+                report(&format!("{status}\n{name}"), percent);
+            } else {
+                report(status, percent);
             }
         };
-        eprintln!(
-            "firmware update: link open id {}",
-            encode_hex(link_id.as_bytes())
-        );
-        report("Identifying to the node", None);
-        eprintln!(
-            "firmware update: identifying as operator {}",
-            encode_hex(controller.as_bytes())
-        );
-        if let Err(error) = session.handle.identify(link_id, controller).await {
-            eprintln!("firmware update: identify failed {error:?}");
-            return Err(operation("firmware update", error));
-        }
-        eprintln!("firmware update: identified, sending digest and length");
-        report("Sending the image digest", Some(0));
         let digest = prns_core::crypto::sha256(&image);
-        send_update_frame(&session.handle, link_id, &digest, false).await?;
-        let length = (image.len() as u32).to_be_bytes();
-        send_update_frame(&session.handle, link_id, &length, false).await?;
         let chunk = personal_rns::routing::links::channel::byte_stream::max_stream_payload(
             personal_rns::wire::BROADCAST_MTU,
         );
-        let mut offset = 0usize;
-        let mut last_percent = 0u8;
         let transfer_started = std::time::Instant::now();
-        while offset < image.len() {
-            let end = (offset + chunk).min(image.len());
-            let eof = end == image.len();
-            send_update_frame(&session.handle, link_id, &image[offset..end], eof).await?;
-            offset = end;
-            let percent = ((offset as u64 * 100) / image.len() as u64) as u8;
-            if percent != last_percent {
-                last_percent = percent;
+        let mut last_error = None;
+        for attempt in 1..=FIRMWARE_RESUME_ATTEMPTS {
+            eprintln!("firmware update: establishing link (attempt {attempt})");
+            let link_id = match session.handle.establish_link(destination).await {
+                Ok(link_id) => link_id,
+                Err(error) => {
+                    eprintln!("firmware update: link failed {error:?}");
+                    last_error = Some(operation("firmware update", error));
+                    // The controller marks its route unresponsive and does not path-request.
+                    // One request after the first failed open collects a route the relay
+                    // discovered while proving that link. Later opens retry the link itself.
+                    if !rediscovered_after_link_failure {
+                        rediscovered_after_link_failure = true;
+                        if let Err(error) = request_install_path(
+                            &session.handle,
+                            destination,
+                            "Install link failed. Requesting a path",
+                            &mut report,
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "firmware update: path request after link failure failed: {error}"
+                            );
+                            report("Path request failed. Retrying the install link", None);
+                        }
+                    }
+                    continue;
+                }
+            };
+            eprintln!(
+                "firmware update: link open id {}",
+                encode_hex(link_id.as_bytes())
+            );
+            report("Identifying to the node", None);
+            if let Err(error) = session.handle.identify(link_id, controller).await {
+                eprintln!("firmware update: identify failed {error:?}");
+                last_error = Some(operation("firmware update", error));
+                abandon_firmware_link(session, link_id).await;
+                continue;
+            }
+            *session
+                .firmware_resume
+                .lock()
+                .expect("firmware resume mutex poisoned") = None;
+            report("Sending the image digest", Some(0));
+            if let Err(error) = send_update_frame(&session.handle, link_id, &digest, false).await {
+                eprintln!("firmware update: digest failed {error:?}");
+                last_error = Some(error);
+                abandon_firmware_link(session, link_id).await;
+                continue;
+            }
+            let resume_at = match wait_for_resume_offset(session, link_id).await {
+                Ok(offset) => offset,
+                Err(error) => {
+                    eprintln!("firmware update: resume offer missing: {error}");
+                    last_error = Some(error);
+                    abandon_firmware_link(session, link_id).await;
+                    continue;
+                }
+            };
+            if resume_at > image.len() {
+                session.handle.close_link(link_id);
+                return Err(BackendError::Operation {
+                    operation: "firmware update",
+                    detail: format!(
+                        "the node asked to resume at {resume_at} bytes, past the {} byte image",
+                        image.len()
+                    ),
+                });
+            }
+            if resume_at > 0 {
                 report(
                     &format!(
-                        "Sending image, {percent}% ({} of {}) in {}",
-                        format_transfer_bytes(offset),
-                        format_transfer_bytes(image.len()),
-                        format_elapsed(transfer_started.elapsed())
+                        "Resuming at {} of {}",
+                        format_transfer_bytes(resume_at),
+                        format_transfer_bytes(image.len())
                     ),
-                    Some(percent),
+                    Some(((resume_at as u64 * 100) / image.len() as u64) as u8),
                 );
-                if percent % 10 == 0 {
+                eprintln!("firmware update: resuming at {resume_at}");
+            }
+            let length = (image.len() as u32).to_be_bytes();
+            if let Err(error) = send_update_frame(&session.handle, link_id, &length, false).await {
+                last_error = Some(error);
+                abandon_firmware_link(session, link_id).await;
+                continue;
+            }
+            let mut offset = resume_at;
+            let mut last_percent = ((offset as u64 * 100) / image.len() as u64) as u8;
+            let mut stalled = false;
+            while offset < image.len() {
+                let end = (offset + chunk).min(image.len());
+                let eof = end == image.len();
+                if let Err(error) =
+                    send_update_frame(&session.handle, link_id, &image[offset..end], eof).await
+                {
                     eprintln!(
-                        "firmware update: sent {percent}% in {}",
-                        format_elapsed(transfer_started.elapsed())
+                        "firmware update: stalled at {offset} of {} ({error})",
+                        image.len()
+                    );
+                    report(
+                        &format!(
+                            "Link stalled at {} of {}. Reconnecting",
+                            format_transfer_bytes(offset),
+                            format_transfer_bytes(image.len())
+                        ),
+                        Some(last_percent),
+                    );
+                    last_error = Some(error);
+                    stalled = true;
+                    break;
+                }
+                offset = end;
+                let percent = ((offset as u64 * 100) / image.len() as u64) as u8;
+                if percent != last_percent {
+                    last_percent = percent;
+                    report(
+                        &format!(
+                            "Sending image, {percent}% ({} of {}) in {}",
+                            format_transfer_bytes(offset),
+                            format_transfer_bytes(image.len()),
+                            format_elapsed(transfer_started.elapsed())
+                        ),
+                        Some(percent),
                     );
                 }
             }
+            if stalled {
+                abandon_firmware_link(session, link_id).await;
+                continue;
+            }
+            if resume_at == image.len() {
+                if let Err(error) = send_update_frame(&session.handle, link_id, &[], true).await {
+                    eprintln!("firmware update: closing frame failed {error}");
+                    last_error = Some(error);
+                    abandon_firmware_link(session, link_id).await;
+                    continue;
+                }
+            }
+            let elapsed = format_elapsed(transfer_started.elapsed());
+            report(
+                &format!("Image sent in {elapsed}. Waiting for the node to install it"),
+                Some(100),
+            );
+            eprintln!("firmware update: image sent in {elapsed}, waiting for install");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let _ = session.handle.request_path(destination).await;
+            return Ok(());
         }
-        let elapsed = format_elapsed(transfer_started.elapsed());
-        report(
-            &format!("Image sent in {elapsed}. Waiting for the node to install it"),
-            Some(100),
-        );
-        eprintln!("firmware update: image sent in {elapsed}, waiting for install");
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let _ = session.handle.request_path(destination).await;
-        Ok(())
+        Err(last_error.unwrap_or_else(|| BackendError::Operation {
+            operation: "firmware update",
+            detail: "the install link stalled before the image was sent".to_string(),
+        }))
     }
 
     async fn request_control_path(&self, target_id: &str) -> Result<(), BackendError> {
@@ -3904,6 +4096,8 @@ struct ControllerSession {
     /// Targets whose Connect probe has dropped the hop and is waiting for a
     /// fresh path — hide stale announce/route in the Managed Nodes header.
     path_probe_pending: Mutex<HashSet<String>>,
+    /// Latest `resume <offset>` offered by a firmware-update link.
+    firmware_resume: Arc<Mutex<Option<(personal_rns::routing::links::LinkId, u64)>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4284,6 +4478,8 @@ impl ControllerSession {
         let sibling_aliases = Mutex::new(sibling_aliases_map);
         let sibling_wifi_ll = Mutex::new(sibling_wifi_ll_map);
         let pairing_events = pairing.clone();
+        let firmware_resume = Arc::new(Mutex::new(None));
+        let firmware_resume_events = firmware_resume.clone();
         let announce_stream_for_events = announce_stream_events;
         let node = PrnsNode::new(PrnsNodeRecipe {
             transport_identity: None,
@@ -4434,6 +4630,19 @@ impl ControllerSession {
                     pairing.pending_target_id = Some(target_id.clone());
                     pairing.remember_active_name(&target_id);
                     pairing.set_pending(pending);
+                }
+                PrnsEvent::Message(Message::ChannelMessage {
+                    link_id,
+                    message_type,
+                    data,
+                }) if message_type
+                    == personal_rns::routing::links::channel::MessageType(0xff00) =>
+                {
+                    if let Some(offset) = parse_resume_offset(data) {
+                        *firmware_resume_events
+                            .lock()
+                            .expect("firmware resume mutex poisoned") = Some((link_id, offset));
+                    }
                 }
                 PrnsEvent::Message(_) | PrnsEvent::Diagnostic(_) => {}
             },
@@ -4644,6 +4853,7 @@ impl ControllerSession {
             last_roster_sync: Mutex::new(None),
             monitor_until: Mutex::new(HashMap::new()),
             path_probe_pending: Mutex::new(HashSet::new()),
+            firmware_resume,
         })
     }
 
@@ -5742,6 +5952,18 @@ fn format_elapsed(elapsed: std::time::Duration) -> String {
         format!("{seconds}s")
     } else {
         format!("{minutes}m {seconds}s")
+    }
+}
+
+#[cfg(test)]
+mod resume_offer {
+    use super::parse_resume_offset;
+
+    #[test]
+    fn reads_the_byte_offset() {
+        assert_eq!(parse_resume_offset(b"resume 4096\n"), Some(4096));
+        assert_eq!(parse_resume_offset(b"resume 0\n"), Some(0));
+        assert_eq!(parse_resume_offset(b"ok slot=ota_1\n"), None);
     }
 }
 
@@ -8105,8 +8327,9 @@ fn label_known_nodes(nodes: Vec<(String, String)>) -> HashMap<String, String> {
     labels
 }
 
-/// Index an identity and the destinations that identity announces, so a path-table
-/// hash can be named without replacing the hash.
+/// Index an identity and the destinations derived from it, so a path-table hash can
+/// be named without replacing the hash. That covers the identity itself, the
+/// remote-control address, and the install address.
 fn remember_known_node(labels: &mut HashMap<String, String>, identity_hex: &str, alias: &str) {
     let Some(alias) = stored_alias(Some(alias)) else {
         return;
@@ -8116,12 +8339,17 @@ fn remember_known_node(labels: &mut HashMap<String, String>, identity_hex: &str,
     };
     let identity = IdentityHash::new(bytes);
     insert_known_label(labels, identity_hex, &alias);
-    for (app_name, aspects) in KNOWN_NODE_DESTINATIONS {
+    for (app_name, aspects, suffix) in KNOWN_NODE_DESTINATIONS {
         let Ok(name) = expand_name(app_name, aspects) else {
             continue;
         };
         let destination = derive_destination_hash(&identity, &name);
-        insert_known_label(labels, &encode_hex(destination.as_bytes()), &alias);
+        let labeled = if suffix.is_empty() {
+            alias.clone()
+        } else {
+            format!("{alias}{suffix}")
+        };
+        insert_known_label(labels, &encode_hex(destination.as_bytes()), &labeled);
     }
 }
 
@@ -8132,18 +8360,25 @@ fn insert_known_label(labels: &mut HashMap<String, String>, hash: &str, alias: &
 }
 
 /// App names whose destination hash is derived from a node identity and can show up
-/// in another node's path table. Order does not matter; the first alias wins.
-const KNOWN_NODE_DESTINATIONS: &[(&str, &[&str])] = &[
+/// in another node's path table. The suffix distinguishes the remote-control and
+/// install addresses from the identity. Order does not matter; the first alias wins.
+const KNOWN_NODE_DESTINATIONS: &[(&str, &[&str], &str)] = &[
     (
         REMOTE_CONTROL_APPLICATION_NAME,
         REMOTE_CONTROL_APPLICATION_ASPECTS,
+        "/RC",
     ),
-    (ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS),
-    (IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_ASPECTS),
-    ("lxmf", &["delivery"]),
-    ("nomadnetwork", &["node"]),
-    ("rnstransport", &["probe"]),
-    ("rnstransport", &["remote", "management"]),
+    (
+        REMOTE_CONTROL_APPLICATION_NAME,
+        FIRMWARE_UPDATE_APPLICATION_ASPECTS,
+        "/OTA",
+    ),
+    (ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS, ""),
+    (IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_ASPECTS, ""),
+    ("lxmf", &["delivery"], ""),
+    ("nomadnetwork", &["node"], ""),
+    ("rnstransport", &["probe"], ""),
+    ("rnstransport", &["remote", "management"], ""),
 ];
 
 fn annotate_known_hash(full_hex: &str, labels: &HashMap<String, String>) -> String {
@@ -9984,13 +10219,25 @@ mod tests {
             annotate_known_hash(&identity_hex, &labels),
             "0c6a2ad8 (This controller)"
         );
-        let remote_control = labels
-            .keys()
-            .find(|hash| hash.as_str() != identity_hex)
-            .expect("derived destinations are indexed");
+        let identity_hash = personal_rns::identity::IdentityHash::new(identity);
+        let control_name = personal_rns::routing::announce::expand_name(
+            super::REMOTE_CONTROL_APPLICATION_NAME,
+            super::REMOTE_CONTROL_APPLICATION_ASPECTS,
+        )
+        .expect("remote-control name expands");
+        let control =
+            personal_rns::routing::announce::derive_destination_hash(&identity_hash, &control_name);
+        let control_hex = encode_hex(control.as_bytes());
         assert_eq!(
-            annotate_known_hash(remote_control, &labels),
-            format!("{} (This controller)", short_id(remote_control))
+            annotate_known_hash(&control_hex, &labels),
+            format!("{} (This controller/RC)", short_id(&control_hex))
+        );
+        let install =
+            personal_rns::remote_control::firmware_update_destination_hash(&identity_hash);
+        let install_hex = encode_hex(install.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&install_hex, &labels),
+            format!("{} (This controller/OTA)", short_id(&install_hex))
         );
         remember_known_node(&mut labels, &identity_hex, "Sibling 1");
         assert_eq!(

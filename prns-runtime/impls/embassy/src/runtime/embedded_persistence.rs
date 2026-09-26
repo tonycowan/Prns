@@ -1938,6 +1938,9 @@ fn apply_record<S: StorageLayout>(
                     for grant in preexisting {
                         let _ = remote_control.set_controller_grant(grant);
                     }
+                    if let Some(table) = remote_control.controller_grants() {
+                        crate::runtime::note_firmware_update_grants(table);
+                    }
                     *controller_grants_snapshot = Some(snapshot);
                     report.remote_control_controller_grants_restored_count =
                         outcome.restored_count as u32;

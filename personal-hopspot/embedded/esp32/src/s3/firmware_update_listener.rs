@@ -124,6 +124,7 @@ pub(super) async fn firmware_update_listener_task(
     let mut link: Option<LinkId> = None;
     let mut peer: Option<IdentityHash> = None;
     let mut install: Option<firmware_update::FirmwareInstall> = None;
+    let mut saved: Option<firmware_update::StashedInstall> = None;
     let mut digest_staged = false;
     loop {
         match EVENTS.receive().await {
@@ -151,10 +152,19 @@ pub(super) async fn firmware_update_listener_task(
             }
             OtaEvent::Closed { link_id } => {
                 if link == Some(link_id) {
-                    log::info!("update: link closed");
+                    if let Some(progress) = install.take().and_then(|session| session.checkpoint())
+                    {
+                        log::info!(
+                            "update: link closed, keeping {} of {} bytes",
+                            progress.committed,
+                            progress.declared
+                        );
+                        saved = Some(progress);
+                    } else {
+                        log::info!("update: link closed");
+                    }
                     link = None;
                     peer = None;
-                    install = None;
                     digest_staged = false;
                 }
             }
@@ -177,6 +187,7 @@ pub(super) async fn firmware_update_listener_task(
                     &memory,
                     link_id,
                     &mut install,
+                    &mut saved,
                     &mut digest_staged,
                     &bytes,
                     eof,
@@ -184,9 +195,13 @@ pub(super) async fn firmware_update_listener_task(
                 .await
                 {
                     log::warn!("update: stream dropped: {error:?}");
-                    install = None;
+                    if let Some(progress) = install.take().and_then(|session| session.checkpoint())
+                    {
+                        saved = Some(progress);
+                    }
                     digest_staged = false;
                     link = None;
+                    peer = None;
                 }
             }
         }
@@ -198,6 +213,7 @@ async fn feed(
     memory: &EspFirmwareMemory,
     link_id: LinkId,
     install: &mut Option<firmware_update::FirmwareInstall>,
+    saved: &mut Option<firmware_update::StashedInstall>,
     digest_staged: &mut bool,
     bytes: &[u8],
     eof: bool,
@@ -208,7 +224,13 @@ async fn feed(
             .map_err(|_| InstallError::DigestMalformed)?;
         firmware_update::stage_digest(digest)?;
         *digest_staged = true;
-        log::info!("update: digest staged");
+        let offset = saved
+            .as_ref()
+            .filter(|progress| progress.matches_digest(digest))
+            .map(|progress| progress.committed)
+            .unwrap_or(0);
+        log::info!("update: digest staged, resume at {offset}");
+        let _ = reply_resume(handle, link_id, offset).await;
         return Ok(());
     }
     if install.is_none() {
@@ -216,6 +238,24 @@ async fn feed(
             return Err(InstallError::ImageTooSmall { image_len: 0 });
         }
         let declared = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let digest = firmware_update::staged_digest();
+        if let Some(progress) = saved.take() {
+            if digest.is_some_and(|digest| progress.digest == digest)
+                && progress.declared == declared
+                && progress.matches_digest(progress.digest)
+            {
+                let guard = InstallGuard::acquire()?;
+                match firmware_update::resume(guard, progress).await {
+                    Ok(session) => {
+                        *install = Some(session);
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        log::warn!("update: resume refused ({error:?}), starting over");
+                    }
+                }
+            }
+        }
         let guard = InstallGuard::acquire()?;
         *install = Some(firmware_update::begin(memory, guard, declared)?);
         return Ok(());
@@ -247,6 +287,20 @@ async fn feed(
         esp_hal::system::software_reset();
     }
     Ok(())
+}
+
+async fn reply_resume(handle: &crate::s3::Handle, link_id: LinkId, offset: usize) {
+    let mut reply = heapless::Vec::<u8, 64>::new();
+    let _ = reply.extend_from_slice(b"resume ");
+    push_usize(&mut reply, offset);
+    let _ = reply.push(b'\n');
+    if handle
+        .send_channel_message(link_id, MessageType(0xff00), &reply)
+        .await
+        .is_err()
+    {
+        log::warn!("update: resume offer was not acknowledged");
+    }
 }
 
 fn push_usize(buf: &mut heapless::Vec<u8, 64>, mut value: usize) {
