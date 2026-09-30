@@ -9,6 +9,7 @@ use personal_rns::storage::StorageLayout;
 mod blackhole_exchange;
 mod management_announcements;
 mod node_page;
+pub(crate) mod object;
 mod probe_responder;
 mod remote_management;
 mod request_routes;

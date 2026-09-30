@@ -40,6 +40,7 @@ exclude = [
     "prns-interfaces/impls/tokio",
     "prns-interfaces/impls/embassy",
     "validation/integration",
+    "obstore",
 ]
 resolver = "3"
 

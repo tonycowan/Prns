@@ -122,6 +122,7 @@ dbus = { version = "0.9", optional = true, features = ["vendored"] }
 ksni = { version = "0.3.6", optional = true, default-features = false, features = ["tokio"] }
 
 [target.'cfg(unix)'.dependencies]
+obstore = { path = "../obstore" }
 rustix = { version = "1.1.4", features = ["fs"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
