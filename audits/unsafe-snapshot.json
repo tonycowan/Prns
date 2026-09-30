@@ -125,6 +125,7 @@
     },
     {
       "graphs": {
+        "daemon-linux": [],
         "daemon-macos": [],
         "desktop-linux": [],
         "desktop-macos": [],
@@ -670,6 +671,28 @@
         "tokens": 0
       },
       "version": "0.22.1"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
+          "alloc",
+          "std"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "std"
+        ]
+      },
+      "name": "base64",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 10,
+        "externs": 0,
+        "functions": 10,
+        "impls": 0,
+        "tokens": 20
+      },
+      "version": "0.23.1"
     },
     {
       "graphs": {
@@ -1451,6 +1474,12 @@
     },
     {
       "graphs": {
+        "daemon-linux": [
+          "default"
+        ],
+        "daemon-macos": [
+          "default"
+        ],
         "nrf-dfu-browser": [
           "default"
         ],
@@ -2460,6 +2489,22 @@
     },
     {
       "graphs": {
+        "daemon-linux": [],
+        "daemon-macos": []
+      },
+      "name": "const-oid",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.9.6"
+    },
+    {
+      "graphs": {
         "android": [],
         "daemon-linux": [],
         "daemon-macos": [],
@@ -3291,6 +3336,32 @@
     },
     {
       "graphs": {
+        "daemon-linux": [
+          "alloc",
+          "digest",
+          "precomputed-tables",
+          "zeroize"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "digest",
+          "precomputed-tables",
+          "zeroize"
+        ]
+      },
+      "name": "curve25519-dalek",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 33,
+        "externs": 0,
+        "functions": 2,
+        "impls": 0,
+        "tokens": 35
+      },
+      "version": "4.1.3"
+    },
+    {
+      "graphs": {
         "android": [
           "alloc",
           "digest",
@@ -4045,6 +4116,32 @@
     },
     {
       "graphs": {
+        "daemon-linux": [
+          "alloc",
+          "oid",
+          "std",
+          "zeroize"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "oid",
+          "std",
+          "zeroize"
+        ]
+      },
+      "name": "der",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.7.10"
+    },
+    {
+      "graphs": {
         "android": [
           "alloc",
           "oid",
@@ -4733,6 +4830,28 @@
     },
     {
       "graphs": {
+        "daemon-linux": [
+          "alloc",
+          "std"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "std"
+        ]
+      },
+      "name": "ed25519",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "2.2.3"
+    },
+    {
+      "graphs": {
         "android": [
           "alloc"
         ],
@@ -4802,6 +4921,34 @@
         "tokens": 0
       },
       "version": "3.0.0"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
+          "alloc",
+          "default",
+          "fast",
+          "std",
+          "zeroize"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "default",
+          "fast",
+          "std",
+          "zeroize"
+        ]
+      },
+      "name": "ed25519-dalek",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "2.2.0"
     },
     {
       "graphs": {
@@ -7894,6 +8041,12 @@
     },
     {
       "graphs": {
+        "daemon-linux": [
+          "any_impl",
+          "default",
+          "miniz_oxide",
+          "rust_backend"
+        ],
         "daemon-macos": [
           "any_impl",
           "default",
@@ -12435,6 +12588,28 @@
     },
     {
       "graphs": {
+        "daemon-linux": [],
+        "daemon-macos": []
+      },
+      "name": "minisign-verify",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 5,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 5
+      },
+      "version": "0.2.5"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
+          "default",
+          "simd",
+          "simd-adler32",
+          "with-alloc"
+        ],
         "daemon-macos": [
           "default",
           "simd",
@@ -15207,6 +15382,22 @@
     },
     {
       "graphs": {
+        "daemon-linux": [],
+        "daemon-macos": []
+      },
+      "name": "obstore",
+      "source": "obstore",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.1.0"
+    },
+    {
+      "graphs": {
         "android": [
           "alloc",
           "default",
@@ -15491,14 +15682,17 @@
       "graphs": {
         "daemon-linux": [
           "alloc",
+          "default",
           "std"
         ],
         "daemon-macos": [
           "alloc",
+          "default",
           "std"
         ],
         "daemon-windows": [
           "alloc",
+          "default",
           "std"
         ]
       },
@@ -15745,6 +15939,8 @@
     },
     {
       "graphs": {
+        "daemon-linux": [],
+        "daemon-macos": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -16192,6 +16388,28 @@
         "tokens": 46
       },
       "version": "0.2.17"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
+          "alloc",
+          "std"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "std"
+        ]
+      },
+      "name": "pkcs8",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.10.2"
     },
     {
       "graphs": {
@@ -16936,6 +17154,22 @@
         "tokens": 213
       },
       "version": "0.3.7"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [],
+        "daemon-macos": []
+      },
+      "name": "prns-flash-manifest",
+      "source": "prns-flash-manifest",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.1.0"
     },
     {
       "graphs": {
@@ -18553,9 +18787,21 @@
           "getrandom",
           "std"
         ],
-        "daemon-linux": [],
-        "daemon-macos": [],
-        "daemon-windows": [],
+        "daemon-linux": [
+          "alloc",
+          "getrandom",
+          "std"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "getrandom",
+          "std"
+        ],
+        "daemon-windows": [
+          "alloc",
+          "getrandom",
+          "std"
+        ],
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": [],
@@ -19294,16 +19540,25 @@
     {
       "graphs": {
         "daemon-linux": [
+          "log",
+          "logging",
           "ring",
-          "std"
+          "std",
+          "tls12"
         ],
         "daemon-macos": [
+          "log",
+          "logging",
           "ring",
-          "std"
+          "std",
+          "tls12"
         ],
         "daemon-windows": [
+          "log",
+          "logging",
           "ring",
-          "std"
+          "std",
+          "tls12"
         ],
         "host-c-linux": [
           "ring",
@@ -20704,6 +20959,28 @@
     },
     {
       "graphs": {
+        "daemon-linux": [
+          "alloc",
+          "std"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "std"
+        ]
+      },
+      "name": "signature",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "2.2.0"
+    },
+    {
+      "graphs": {
         "android": [
           "alloc",
           "rand_core"
@@ -20795,6 +21072,11 @@
     },
     {
       "graphs": {
+        "daemon-linux": [
+          "const-generics",
+          "default",
+          "std"
+        ],
         "daemon-macos": [
           "const-generics",
           "default",
@@ -21403,6 +21685,28 @@
         "tokens": 117
       },
       "version": "0.9.9"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
+          "alloc",
+          "std"
+        ],
+        "daemon-macos": [
+          "alloc",
+          "std"
+        ]
+      },
+      "name": "spki",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.7.3"
     },
     {
       "graphs": {
@@ -24669,6 +24973,58 @@
     {
       "graphs": {
         "daemon-linux": [
+          "_ring",
+          "_rustls",
+          "_tls",
+          "gzip",
+          "rustls",
+          "rustls-no-provider",
+          "rustls-webpki-roots"
+        ],
+        "daemon-macos": [
+          "_ring",
+          "_rustls",
+          "_tls",
+          "gzip",
+          "rustls",
+          "rustls-no-provider",
+          "rustls-webpki-roots"
+        ]
+      },
+      "name": "ureq",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "3.3.0"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
+          "client"
+        ],
+        "daemon-macos": [
+          "client"
+        ]
+      },
+      "name": "ureq-proto",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "0.6.4"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
           "default",
           "std"
         ],
@@ -24777,6 +25133,28 @@
         "tokens": 3
       },
       "version": "0.7.6"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
+          "default",
+          "std"
+        ],
+        "daemon-macos": [
+          "default",
+          "std"
+        ]
+      },
+      "name": "utf8-zero",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 3,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 3
+      },
+      "version": "0.8.1"
     },
     {
       "graphs": {
@@ -25200,6 +25578,22 @@
         "tokens": 0
       },
       "version": "0.2.126"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [],
+        "daemon-macos": []
+      },
+      "name": "webpki-roots",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 0,
+        "externs": 0,
+        "functions": 0,
+        "impls": 0,
+        "tokens": 0
+      },
+      "version": "1.0.8"
     },
     {
       "graphs": {
@@ -26814,6 +27208,36 @@
     },
     {
       "graphs": {
+        "daemon-linux": [
+          "_deflate-any",
+          "deflate",
+          "deflate-flate2",
+          "deflate-zopfli",
+          "flate2",
+          "zopfli"
+        ],
+        "daemon-macos": [
+          "_deflate-any",
+          "deflate",
+          "deflate-flate2",
+          "deflate-zopfli",
+          "flate2",
+          "zopfli"
+        ]
+      },
+      "name": "zip",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 9,
+        "externs": 0,
+        "functions": 2,
+        "impls": 6,
+        "tokens": 18
+      },
+      "version": "2.4.2"
+    },
+    {
+      "graphs": {
         "desktop-linux": [],
         "engine": []
       },
@@ -26845,6 +27269,32 @@
         "tokens": 70
       },
       "version": "1.0.23"
+    },
+    {
+      "graphs": {
+        "daemon-linux": [
+          "default",
+          "gzip",
+          "std",
+          "zlib"
+        ],
+        "daemon-macos": [
+          "default",
+          "gzip",
+          "std",
+          "zlib"
+        ]
+      },
+      "name": "zopfli",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 3,
+        "externs": 0,
+        "functions": 1,
+        "impls": 0,
+        "tokens": 4
+      },
+      "version": "0.8.3"
     },
     {
       "graphs": {
