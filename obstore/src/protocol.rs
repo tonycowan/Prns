@@ -1,8 +1,8 @@
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+
+pub use crate::ipc::LocalListener;
 
 use sha2::{Digest, Sha256};
 
@@ -18,6 +18,7 @@ const OP_ADMIT: u8 = 5;
 const OP_WHO_HAS: u8 = 6;
 const OP_CATALOG: u8 = 7;
 const OP_PREVIEW: u8 = 8;
+const OP_CREATE_LOAD: u8 = 9;
 const ADMIT_PLAIN: u8 = 0;
 const ADMIT_OWNER: u8 = 1;
 const ADMIT_ENVELOPE: u8 = 2;
@@ -32,26 +33,8 @@ pub fn socket_path(config_dir: &Path) -> std::path::PathBuf {
     config_dir.join("obstore.sock")
 }
 
-pub fn bind_socket(socket: &Path) -> io::Result<UnixListener> {
-    match std::os::unix::net::UnixStream::connect(socket) {
-        Ok(_) => {
-            return Err(io::Error::new(
-                ErrorKind::AddrInUse,
-                format!(
-                    "object store service is already listening on {}",
-                    socket.display()
-                ),
-            ));
-        }
-        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
-            fs::remove_file(socket)?;
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let listener = UnixListener::bind(socket)?;
-    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
+pub fn bind_socket(socket: &Path) -> io::Result<LocalListener> {
+    LocalListener::bind(socket)
 }
 
 #[cfg(test)]
@@ -193,7 +176,7 @@ pub fn fetch_object(socket: &Path, object_id: &str, destination: &Path) -> Resul
     Ok(())
 }
 
-fn bound_remote_wait(stream: &std::os::unix::net::UnixStream) -> io::Result<()> {
+fn bound_remote_wait(stream: &crate::ipc::LocalStream) -> io::Result<()> {
     let timeout = std::time::Duration::from_secs(70);
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -211,8 +194,8 @@ fn clarify_remote_timeout(error: io::Error) -> io::Error {
     }
 }
 
-fn connect(socket: &Path) -> io::Result<std::os::unix::net::UnixStream> {
-    std::os::unix::net::UnixStream::connect(socket).map_err(|error| {
+fn connect(socket: &Path) -> io::Result<crate::ipc::LocalStream> {
+    crate::ipc::LocalStream::connect(socket).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound
             || error.kind() == io::ErrorKind::ConnectionRefused
         {
@@ -250,6 +233,37 @@ fn temporary_fetch_path(destination: &Path) -> PathBuf {
         .unwrap_or("object");
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     parent.join(format!(".{name}.obstore-fetch"))
+}
+
+pub fn request_create_load(socket: &Path) -> Result<String, io::Error> {
+    let mut stream = connect(socket)?;
+    stream.write_all(MAGIC)?;
+    stream.write_all(&[VERSION, OP_CREATE_LOAD])?;
+    stream.flush()?;
+    match read_status(&mut stream)? {
+        STATUS_OK => {
+            let mut public = [0_u8; 32];
+            stream.read_exact(&mut public)?;
+            Ok(hex_encode(&public))
+        }
+        STATUS_ERROR => Err(read_error_message(&mut stream)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "object store service sent an unrecognized status",
+        )),
+    }
+}
+
+fn serve_create_load<S: Read + Write>(store: &ObjectStore, stream: &mut S) -> io::Result<()> {
+    match store.create_load() {
+        Ok(public) => {
+            stream.write_all(MAGIC)?;
+            stream.write_all(&[VERSION, STATUS_OK])?;
+            stream.write_all(&public)?;
+            stream.flush()
+        }
+        Err(error) => write_error(stream, &error.to_string()),
+    }
 }
 
 pub fn request_who_has(socket: &Path, object_id: &str, index: u32) -> Result<String, io::Error> {
@@ -453,6 +467,7 @@ pub fn serve_connection<S: Read + Write>(
         OP_WHO_HAS => serve_who_has(store, transfer, stream),
         OP_CATALOG => serve_remote_catalog(transfer, stream),
         OP_PREVIEW => serve_remote_preview(transfer, stream),
+        OP_CREATE_LOAD => serve_create_load(store, stream),
         _ => write_error(stream, "unsupported object store operation"),
     }
 }
@@ -858,10 +873,10 @@ mod tests {
     fn import_streams_the_file_to_the_service() {
         let root = tempfile::tempdir().expect("temp dir");
         let socket = root.path().join("s.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open(&store_root).expect("store");
+            let store = ObjectStore::open_with_load(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
             let mut extra = [0_u8; 1];
@@ -894,10 +909,10 @@ mod tests {
     fn import_sends_the_claims_list() {
         let root = tempfile::tempdir().expect("temp dir");
         let socket = root.path().join("s.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open(&store_root).expect("store");
+            let store = ObjectStore::open_with_load(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
         });
@@ -922,10 +937,10 @@ mod tests {
     fn admit_plain_stores_no_envelope_and_admit_owner_signs_one() {
         let root = tempfile::tempdir().expect("temp dir");
         let socket = root.path().join("s.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open(&store_root).expect("store");
+            let store = ObjectStore::open_with_load(&store_root).expect("store");
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().expect("accept");
                 serve_connection(&store, None, &mut stream).expect("serve");
@@ -960,10 +975,10 @@ mod tests {
     fn admit_envelope_stores_the_foreign_envelope_unchanged() {
         let root = tempfile::tempdir().expect("temp dir");
         let socket = root.path().join("s.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open(&store_root).expect("store");
+            let store = ObjectStore::open_with_load(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
         });
@@ -1019,7 +1034,7 @@ mod tests {
     fn import_rejects_when_the_service_stores_different_bytes() {
         let root = tempfile::tempdir().expect("temp dir");
         let socket = root.path().join("s.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
             let mut prefix = [0_u8; 6];
@@ -1052,15 +1067,15 @@ mod tests {
         let root = tempfile::tempdir().expect("temp dir");
         let store_root = root.path().join("store");
         let id = {
-            let store = ObjectStore::open(&store_root).expect("store");
+            let store = ObjectStore::open_with_load(&store_root).expect("store");
             store
                 .import_reader(Cursor::new(b"abc"), 3, &Claims::none())
                 .expect("import")
         };
         let socket = root.path().join("s.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open(&store_root).expect("store");
+            let store = ObjectStore::open_with_load(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
         });
@@ -1074,10 +1089,10 @@ mod tests {
     fn fetch_reports_a_missing_object() {
         let root = tempfile::tempdir().expect("temp dir");
         let socket = root.path().join("s.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open(&store_root).expect("store");
+            let store = ObjectStore::open_with_load(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
         });

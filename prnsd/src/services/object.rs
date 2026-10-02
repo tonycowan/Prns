@@ -6,13 +6,10 @@
 //! Each object-transfer service repeats a broadcast on every interface except
 //! the one it arrived on.
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
-
-#[cfg(unix)]
-use std::cell::Cell;
-#[cfg(unix)]
-use std::collections::HashMap;
 
 use personal_rns::interfaces::{ConnectionState, InterfaceId};
 use personal_rns::routing::delivery::Delivery;
@@ -25,9 +22,7 @@ const INGRESS_BOUND: usize = 256;
 pub(crate) struct Prepared {
     events: Events,
     rx: Receiver<Ingress>,
-    #[cfg(unix)]
     stack: obstore::config::StackPaths,
-    #[cfg(unix)]
     config_dir: std::path::PathBuf,
 }
 
@@ -149,19 +144,6 @@ impl Events {
 }
 
 pub(crate) fn prepare(config_dir: &std::path::Path) -> Option<Prepared> {
-    #[cfg(unix)]
-    {
-        prepare_unix(config_dir)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = config_dir;
-        None
-    }
-}
-
-#[cfg(unix)]
-fn prepare_unix(config_dir: &std::path::Path) -> Option<Prepared> {
     if !config_dir.join("config").is_file() {
         return None;
     }
@@ -193,7 +175,6 @@ fn prepare_unix(config_dir: &std::path::Path) -> Option<Prepared> {
     })
 }
 
-#[cfg(unix)]
 pub(crate) fn register<St, R, F, S>(
     node: &mut personal_rns::runtime::PrnsNode<St, R, F, S>,
     identity: &personal_rns::identity::Zeroizing<
@@ -277,7 +258,6 @@ where
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn launch(
     handle: personal_rns::runtime::PrnsNodeHandle,
     identity: &personal_rns::identity::Zeroizing<
@@ -294,11 +274,11 @@ pub(crate) fn launch(
     let mut secret = [0_u8; personal_rns::identity::IDENTITY_SECRET_KEY_LEN];
     secret.copy_from_slice(&identity[..]);
     let address = obstore::transfer::object_transfer_address(&secret);
-    secret.fill(0);
     let address_hex = address.as_hex();
     let store = match obstore::store::ObjectStore::open(&stack.object_store) {
         Ok(store) => Arc::new(store),
         Err(error) => {
+            secret.fill(0);
             tracing::error!(event = "object_store_open_failed", error = %error);
             return;
         }
@@ -308,13 +288,15 @@ pub(crate) fn launch(
     let neighborhood = Arc::new(ReticulumNeighborhood {
         jobs: jobs_tx.clone(),
     });
-    let transfer = match obstore::transfer::ObjectTransfer::open(&stack.object_transfer, address) {
+    let transfer = match obstore::transfer::ObjectTransfer::open(&stack.object_transfer, &secret) {
         Ok(mut transfer) => {
+            secret.fill(0);
             transfer.set_fetch_policy(stack.fetch);
             transfer.set_neighborhood(neighborhood);
             transfer
         }
         Err(error) => {
+            secret.fill(0);
             tracing::error!(event = "object_transfer_open_failed", error = %error);
             return;
         }
@@ -380,12 +362,6 @@ pub(crate) fn launch(
     let command_transfer = transfer;
     let command_dir = config_dir.clone();
     std::thread::spawn(move || run_commands(&command_dir, command_store, command_transfer));
-    if store.created_loa_key() {
-        eprintln!(
-            "object-services: created Local Object Authority key {}",
-            store.loa_key_path().display()
-        );
-    }
     eprintln!("object-services: object-transfer address {address_hex}");
     eprintln!(
         "object-services: listening on {} for {}",
@@ -394,19 +370,14 @@ pub(crate) fn launch(
     );
 }
 
-#[cfg(unix)]
 const PLAIN_HEADER_LEN: usize = 13;
-#[cfg(unix)]
 const MAX_PLAIN_PARTS: usize = 256;
-#[cfg(unix)]
 static FLOOD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
-#[cfg(unix)]
 thread_local! {
     static EXCLUDE_ARRIVAL: Cell<Option<InterfaceId>> = const { Cell::new(None) };
 }
 
-#[cfg(unix)]
 enum Job {
     Flood {
         bytes: Vec<u8>,
@@ -425,12 +396,10 @@ enum Job {
     },
 }
 
-#[cfg(unix)]
 struct ReticulumNeighborhood {
     jobs: tokio::sync::mpsc::Sender<Job>,
 }
 
-#[cfg(unix)]
 impl obstore::transfer::Neighborhood for ReticulumNeighborhood {
     fn flood(&self) -> Vec<Box<dyn obstore::transfer::Pipe>> {
         let exclude = EXCLUDE_ARRIVAL.with(Cell::get);
@@ -464,14 +433,12 @@ impl obstore::transfer::Neighborhood for ReticulumNeighborhood {
     }
 }
 
-#[cfg(unix)]
 struct FloodPipe {
     jobs: tokio::sync::mpsc::Sender<Job>,
     exclude: Option<InterfaceId>,
     pending: Vec<u8>,
 }
 
-#[cfg(unix)]
 impl std::io::Write for FloodPipe {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.pending.extend_from_slice(data);
@@ -499,7 +466,6 @@ impl std::io::Write for FloodPipe {
     }
 }
 
-#[cfg(unix)]
 impl std::io::Read for FloodPipe {
     fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
         std::io::Write::flush(self)?;
@@ -507,14 +473,12 @@ impl std::io::Read for FloodPipe {
     }
 }
 
-#[cfg(unix)]
 impl Drop for FloodPipe {
     fn drop(&mut self) {
         let _ = std::io::Write::flush(self);
     }
 }
 
-#[cfg(unix)]
 struct LinkPipe {
     jobs: tokio::sync::mpsc::Sender<Job>,
     link: LinkId,
@@ -527,7 +491,6 @@ struct LinkPipe {
     pos: usize,
 }
 
-#[cfg(unix)]
 impl std::io::Write for LinkPipe {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.pending_out.extend_from_slice(data);
@@ -556,7 +519,6 @@ impl std::io::Write for LinkPipe {
     }
 }
 
-#[cfg(unix)]
 impl std::io::Read for LinkPipe {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         std::io::Write::flush(self)?;
@@ -586,26 +548,22 @@ impl std::io::Read for LinkPipe {
     }
 }
 
-#[cfg(unix)]
 impl Drop for LinkPipe {
     fn drop(&mut self) {
         let _ = std::io::Write::flush(self);
     }
 }
 
-#[cfg(unix)]
 struct MemoryPipe {
     cursor: std::io::Cursor<Vec<u8>>,
 }
 
-#[cfg(unix)]
 impl std::io::Read for MemoryPipe {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         std::io::Read::read(&mut self.cursor, buf)
     }
 }
 
-#[cfg(unix)]
 impl std::io::Write for MemoryPipe {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         Ok(data.len())
@@ -616,7 +574,6 @@ impl std::io::Write for MemoryPipe {
     }
 }
 
-#[cfg(unix)]
 fn send_flood(
     handle: &personal_rns::runtime::PrnsNodeHandle,
     plain: DestinationHash,
@@ -668,7 +625,6 @@ fn send_flood(
     Ok(())
 }
 
-#[cfg(unix)]
 async fn open_link(
     handle: &personal_rns::runtime::PrnsNodeHandle,
     links: &Mutex<HashMap<LinkId, SyncSender<Vec<u8>>>>,
@@ -728,7 +684,6 @@ async fn open_link(
     })
 }
 
-#[cfg(unix)]
 async fn send_on_link(
     handle: &personal_rns::runtime::PrnsNodeHandle,
     link: LinkId,
@@ -754,7 +709,6 @@ async fn send_on_link(
         .map_err(|error| format!("object transfer send failed: {error:?}"))
 }
 
-#[cfg(unix)]
 fn issue_unproven_link_bytes(
     handle: &personal_rns::runtime::PrnsNodeHandle,
     link: LinkId,
@@ -789,7 +743,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
     text
 }
 
-#[cfg(unix)]
 fn run_commands(
     config_dir: &std::path::Path,
     store: Arc<obstore::store::ObjectStore>,
@@ -831,7 +784,6 @@ fn run_commands(
     }
 }
 
-#[cfg(unix)]
 fn run_ingress(
     rx: Receiver<Ingress>,
     store: Arc<obstore::store::ObjectStore>,
@@ -897,12 +849,10 @@ fn run_ingress(
     }
 }
 
-#[cfg(unix)]
 struct PlainAssembly {
     parts: Vec<Option<Vec<u8>>>,
 }
 
-#[cfg(unix)]
 fn assemble_plain(
     fragments: &mut HashMap<(u32, InterfaceId), PlainAssembly>,
     interface: InterfaceId,
@@ -938,13 +888,11 @@ fn assemble_plain(
     Some(message)
 }
 
-#[cfg(unix)]
 struct SegmentAssembly {
     total: u64,
     parts: HashMap<u64, Vec<u8>>,
 }
 
-#[cfg(unix)]
 fn assemble_segment(
     segments: &mut HashMap<(LinkId, [u8; 32]), SegmentAssembly>,
     link: LinkId,
@@ -981,7 +929,6 @@ fn assemble_segment(
     Some(message)
 }
 
-#[cfg(unix)]
 fn deliver_link(
     store: &Arc<obstore::store::ObjectStore>,
     transfer: &obstore::transfer::ObjectTransfer,
@@ -1032,7 +979,6 @@ fn deliver_link(
     });
 }
 
-#[cfg(unix)]
 fn interface_rate(handle: &personal_rns::runtime::PrnsNodeHandle, id: InterfaceId) -> u64 {
     let Some(snapshot) = handle.interfaces().into_iter().find(|item| item.id == id) else {
         return u64::MAX;

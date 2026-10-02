@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn catalog_lists_a_stored_object_and_a_partial_one() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open(root.path()).expect("store");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
         let bytes = b"hello object";
         let claims = Claims::parse(["object-type=note", "name=field-note"]).expect("claims");
         let id = store
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn locate_store_accepts_a_store_root_and_its_data_directory() {
         let root = tempfile::tempdir().expect("temp dir");
-        let _store = ObjectStore::open(root.path()).expect("store");
+        let _store = ObjectStore::open_with_load(root.path()).expect("store");
         let root_location = locate_store(root.path()).expect("root");
         assert_eq!(root_location.data_dir(), root.path().join("data"));
         let data_location = locate_store(&root.path().join("data")).expect("data");

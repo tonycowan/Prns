@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
@@ -110,23 +110,10 @@ impl Destination {
 /// `sha256(sha256("reticulum.object-transfer")[..10] ‖ identity_hash)[..16]`,
 /// the same destination derivation remote control uses for `reticulum.remote.control`.
 pub fn object_transfer_address(identity_secret: &[u8; IDENTITY_LEN]) -> Destination {
-    let mut encryption_secret = [0_u8; 32];
-    encryption_secret.copy_from_slice(&identity_secret[..32]);
-    let mut signing_secret = [0_u8; 32];
-    signing_secret.copy_from_slice(&identity_secret[32..]);
-    let encryption_public = PublicKey::from(&StaticSecret::from(encryption_secret)).to_bytes();
-    let signing_public = SigningKey::from_bytes(&signing_secret)
-        .verifying_key()
-        .to_bytes();
-    encryption_secret.zeroize();
-    signing_secret.zeroize();
-    Destination(destination_hash(
-        OBJECT_TRANSFER_NAME,
-        &identity_hash(&encryption_public, &signing_public),
-    ))
+    StackIdentity::from_secret(identity_secret).destination()
 }
 
-pub fn load_object_transfer_address(config_dir: &Path) -> Result<Destination, TransferError> {
+pub fn read_transport_identity(config_dir: &Path) -> Result<[u8; IDENTITY_LEN], TransferError> {
     let path = config_dir.join("storage").join("transport_identity");
     let bytes = fs::read(&path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
@@ -144,9 +131,64 @@ pub fn load_object_transfer_address(config_dir: &Path) -> Result<Destination, Tr
     }
     let mut secret = [0_u8; IDENTITY_LEN];
     secret.copy_from_slice(&bytes);
+    Ok(secret)
+}
+
+pub fn load_object_transfer_address(config_dir: &Path) -> Result<Destination, TransferError> {
+    let mut secret = read_transport_identity(config_dir)?;
     let address = object_transfer_address(&secret);
     secret.zeroize();
     Ok(address)
+}
+
+/// The stack identity that owns an object-transfer address.
+///
+/// The address is a truncated hash of the two public keys, so a request carries
+/// the public keys and an Ed25519 signature. The signing seed is the second half
+/// of the transport identity.
+#[derive(Clone)]
+struct StackIdentity {
+    encryption_public: [u8; 32],
+    signing_public: [u8; 32],
+    signing_seed: [u8; 32],
+}
+
+impl StackIdentity {
+    fn from_secret(secret: &[u8; IDENTITY_LEN]) -> Self {
+        let mut encryption_secret = [0_u8; 32];
+        encryption_secret.copy_from_slice(&secret[..32]);
+        let mut signing_seed = [0_u8; 32];
+        signing_seed.copy_from_slice(&secret[32..]);
+        let encryption_public = PublicKey::from(&StaticSecret::from(encryption_secret)).to_bytes();
+        encryption_secret.zeroize();
+        let signing_public = SigningKey::from_bytes(&signing_seed)
+            .verifying_key()
+            .to_bytes();
+        Self {
+            encryption_public,
+            signing_public,
+            signing_seed,
+        }
+    }
+
+    fn destination(&self) -> Destination {
+        Destination(destination_hash(
+            OBJECT_TRANSFER_NAME,
+            &identity_hash(&self.encryption_public, &self.signing_public),
+        ))
+    }
+
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
+        SigningKey::from_bytes(&self.signing_seed)
+            .sign(message)
+            .to_bytes()
+    }
+}
+
+impl Drop for StackIdentity {
+    fn drop(&mut self) {
+        self.signing_seed.zeroize();
+    }
 }
 
 fn identity_hash(
@@ -180,14 +222,14 @@ impl<T: Read + Write + Send> Pipe for T {}
 
 /// How this stack reaches other object-transfer services.
 ///
-/// The stand-in uses Unix sockets listed in `peers`. prnsd replaces that with
+/// The stand-in connects to the paths listed in `peers`. prnsd replaces that with
 /// a one-hop plain broadcast for floods and a link to one destination for a pull.
 pub trait Neighborhood: Send + Sync {
     fn flood(&self) -> Vec<Box<dyn Pipe>>;
     fn open(&self, destination: &Destination) -> Result<Box<dyn Pipe>, TransferError>;
 }
 
-struct UnixNeighborhood {
+struct PeerNeighborhood {
     root: PathBuf,
 }
 
@@ -202,7 +244,7 @@ fn peer_list(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-impl UnixNeighborhood {
+impl PeerNeighborhood {
     fn peers(&self) -> Vec<PathBuf> {
         peer_list(&self.root)
     }
@@ -248,12 +290,12 @@ impl UnixNeighborhood {
     }
 }
 
-impl Neighborhood for UnixNeighborhood {
+impl Neighborhood for PeerNeighborhood {
     fn flood(&self) -> Vec<Box<dyn Pipe>> {
         self.peers()
             .into_iter()
             .filter_map(|peer| {
-                std::os::unix::net::UnixStream::connect(&peer)
+                crate::ipc::LocalStream::connect(&peer)
                     .ok()
                     .map(|stream| Box::new(stream) as Box<dyn Pipe>)
             })
@@ -262,7 +304,7 @@ impl Neighborhood for UnixNeighborhood {
 
     fn open(&self, destination: &Destination) -> Result<Box<dyn Pipe>, TransferError> {
         let peer = self.resolve(destination)?;
-        let stream = std::os::unix::net::UnixStream::connect(&peer).map_err(|error| {
+        let stream = crate::ipc::LocalStream::connect(&peer).map_err(|error| {
             TransferError::Message(format!("connect {}: {error}", peer.display()))
         })?;
         Ok(Box::new(stream))
@@ -273,18 +315,25 @@ impl Neighborhood for UnixNeighborhood {
 pub struct ObjectTransfer {
     root: PathBuf,
     destination: Destination,
+    identity: StackIdentity,
     policy: FetchPolicy,
     neighborhood: Arc<dyn Neighborhood>,
 }
 
 impl ObjectTransfer {
-    pub fn open(root: impl Into<PathBuf>, destination: Destination) -> io::Result<Self> {
+    pub fn open(
+        root: impl Into<PathBuf>,
+        identity_secret: &[u8; IDENTITY_LEN],
+    ) -> Result<Self, TransferError> {
         let root = root.into();
         fs::create_dir_all(root.join("paths"))?;
-        let neighborhood = Arc::new(UnixNeighborhood { root: root.clone() });
+        let identity = StackIdentity::from_secret(identity_secret);
+        let destination = identity.destination();
+        let neighborhood = Arc::new(PeerNeighborhood { root: root.clone() });
         Ok(Self {
             root,
             destination,
+            identity,
             policy: FetchPolicy::default(),
             neighborhood,
         })
@@ -471,6 +520,7 @@ pub fn announce_release(
     store.ensure_transfer_documents(&id)?;
     let origin = transfer.own_destination();
     let envelope = store.read_loa_envelope(&id)?.unwrap_or_default();
+    store.verify_trusted_object_envelope(&envelope, id.as_str())?;
     transfer.remember_release(&id, &origin, hops, &envelope)?;
     forward_release(transfer, &id, &origin, hops, &envelope)
 }
@@ -741,6 +791,7 @@ fn receive_release<S: Read + Write>(
             "release hops must be at most {MAX_RELEASE_HOPS}"
         )));
     }
+    store.verify_trusted_object_envelope(&envelope, id.as_str())?;
     if !transfer.remember_release(&id, &origin, hops, &envelope)? {
         return Ok(());
     }
@@ -845,11 +896,15 @@ fn seek_manifest(
     }
     let requester = transfer.own_destination();
     for hops in 0..=MAX_RELEASE_HOPS {
-        let ask = ManifestAsk {
+        let mut ask = ManifestAsk {
             id: id.clone(),
             requester,
             hops,
+            encryption_public: transfer.identity.encryption_public,
+            signing_public: transfer.identity.signing_public,
+            signature: [0; 64],
         };
+        ask.signature = transfer.identity.sign(&manifest_ask_statement(&ask));
         if !transfer.remember_manifest_ask(&ask)? {
             continue;
         }
@@ -954,6 +1009,7 @@ fn receive_manifest_ask<S: Read + Write>(
             "manifest request hops must be at most {MAX_RELEASE_HOPS}"
         )));
     }
+    verify_manifest_ask(&ask)?;
     if ask.requester == transfer.own_destination() {
         return Ok(());
     }
@@ -1003,6 +1059,9 @@ fn write_manifest_ask<S: Write>(stream: &mut S, ask: &ManifestAsk) -> Result<(),
     stream.write_all(ask.id.as_str().as_bytes())?;
     stream.write_all(ask.requester.as_bytes())?;
     stream.write_all(&[ask.hops])?;
+    stream.write_all(&ask.encryption_public)?;
+    stream.write_all(&ask.signing_public)?;
+    stream.write_all(&ask.signature)?;
     stream.flush()?;
     Ok(())
 }
@@ -1016,10 +1075,19 @@ fn read_manifest_ask<S: Read>(stream: &mut S) -> Result<ManifestAsk, TransferErr
     stream.read_exact(&mut requester)?;
     let mut hops = [0_u8; 1];
     stream.read_exact(&mut hops)?;
+    let mut encryption_public = [0_u8; 32];
+    stream.read_exact(&mut encryption_public)?;
+    let mut signing_public = [0_u8; 32];
+    stream.read_exact(&mut signing_public)?;
+    let mut signature = [0_u8; 64];
+    stream.read_exact(&mut signature)?;
     Ok(ManifestAsk {
         id: ObjectId::parse(id_text)?,
         requester: Destination(requester),
         hops: hops[0],
+        encryption_public,
+        signing_public,
+        signature,
     })
 }
 
@@ -1100,6 +1168,9 @@ struct ManifestAsk {
     id: ObjectId,
     requester: Destination,
     hops: u8,
+    encryption_public: [u8; 32],
+    signing_public: [u8; 32],
+    signature: [u8; 64],
 }
 
 fn forward_release(
@@ -1176,7 +1247,11 @@ pub fn seek_piece(
         requester,
         hops: 0,
         bytes_per_second: u64::MAX,
+        encryption_public: transfer.identity.encryption_public,
+        signing_public: transfer.identity.signing_public,
+        signature: [0; 64],
     };
+    request.signature = transfer.identity.sign(&who_has_statement(&request));
     let threshold = transfer.policy.minimum_bytes_per_second;
     for hops in 0..=MAX_RELEASE_HOPS {
         request.hops = hops;
@@ -1228,13 +1303,14 @@ fn receive_who_has<S: Read + Write>(
     interface_bytes_per_second: u64,
 ) -> Result<(), TransferError> {
     let mut request = read_who_has(stream)?;
-    request.bytes_per_second =
-        narrow_bytes_per_second(request.bytes_per_second, interface_bytes_per_second);
     if request.hops > MAX_RELEASE_HOPS {
         return Err(TransferError::Message(format!(
             "who-has hops must be at most {MAX_RELEASE_HOPS}"
         )));
     }
+    verify_who_has(&request)?;
+    request.bytes_per_second =
+        narrow_bytes_per_second(request.bytes_per_second, interface_bytes_per_second);
     if request.requester == transfer.own_destination() {
         return Ok(());
     }
@@ -1283,14 +1359,18 @@ fn answer_who_has(
         &holder,
         request.bytes_per_second,
     )?;
-    let claim = Claim {
+    let mut claim = Claim {
         id: request.id.clone(),
         index: request.index,
         hash: request.hash,
         requester: request.requester,
         holder,
         bytes_per_second: request.bytes_per_second,
+        encryption_public: transfer.identity.encryption_public,
+        signing_public: transfer.identity.signing_public,
+        signature: [0; 64],
     };
+    claim.signature = transfer.identity.sign(&claim_statement(&claim));
     forward_claim(transfer, &claim)?;
     if let Ok(mut stream) = transfer.neighborhood.open(&request.requester) {
         let _ = write_claim(&mut stream, &claim);
@@ -1351,6 +1431,9 @@ fn write_who_has<S: Write>(stream: &mut S, request: &WhoHas) -> Result<(), Trans
     stream.write_all(request.requester.as_bytes())?;
     stream.write_all(&[request.hops])?;
     stream.write_all(&request.bytes_per_second.to_le_bytes())?;
+    stream.write_all(&request.encryption_public)?;
+    stream.write_all(&request.signing_public)?;
+    stream.write_all(&request.signature)?;
     stream.flush()?;
     Ok(())
 }
@@ -1375,6 +1458,12 @@ fn read_who_has<S: Read>(stream: &mut S) -> Result<WhoHas, TransferError> {
     stream.read_exact(&mut hops)?;
     let mut bytes_per_second = [0_u8; 8];
     stream.read_exact(&mut bytes_per_second)?;
+    let mut encryption_public = [0_u8; 32];
+    stream.read_exact(&mut encryption_public)?;
+    let mut signing_public = [0_u8; 32];
+    stream.read_exact(&mut signing_public)?;
+    let mut signature = [0_u8; 64];
+    stream.read_exact(&mut signature)?;
     Ok(WhoHas {
         id,
         index: u32::from_le_bytes(index_bytes),
@@ -1384,6 +1473,9 @@ fn read_who_has<S: Read>(stream: &mut S) -> Result<WhoHas, TransferError> {
         requester: Destination(requester),
         hops: hops[0],
         bytes_per_second: u64::from_le_bytes(bytes_per_second),
+        encryption_public,
+        signing_public,
+        signature,
     })
 }
 
@@ -1392,6 +1484,7 @@ fn receive_claim<S: Read + Write>(
     stream: &mut S,
 ) -> Result<(), TransferError> {
     let claim = read_claim(stream)?;
+    verify_claim(&claim)?;
     let fresh = transfer.record_claim(
         &claim.id,
         claim.index,
@@ -1419,6 +1512,9 @@ fn write_claim<S: Write>(stream: &mut S, claim: &Claim) -> Result<(), TransferEr
     stream.write_all(claim.requester.as_bytes())?;
     stream.write_all(claim.holder.as_bytes())?;
     stream.write_all(&claim.bytes_per_second.to_le_bytes())?;
+    stream.write_all(&claim.encryption_public)?;
+    stream.write_all(&claim.signing_public)?;
+    stream.write_all(&claim.signature)?;
     stream.flush()?;
     Ok(())
 }
@@ -1439,6 +1535,12 @@ fn read_claim<S: Read>(stream: &mut S) -> Result<Claim, TransferError> {
     stream.read_exact(&mut holder)?;
     let mut bytes_per_second = [0_u8; 8];
     stream.read_exact(&mut bytes_per_second)?;
+    let mut encryption_public = [0_u8; 32];
+    stream.read_exact(&mut encryption_public)?;
+    let mut signing_public = [0_u8; 32];
+    stream.read_exact(&mut signing_public)?;
+    let mut signature = [0_u8; 64];
+    stream.read_exact(&mut signature)?;
     Ok(Claim {
         id,
         index: u32::from_le_bytes(index_bytes),
@@ -1446,6 +1548,9 @@ fn read_claim<S: Read>(stream: &mut S) -> Result<Claim, TransferError> {
         requester: Destination(requester),
         holder: Destination(holder),
         bytes_per_second: u64::from_le_bytes(bytes_per_second),
+        encryption_public,
+        signing_public,
+        signature,
     })
 }
 
@@ -1502,6 +1607,88 @@ struct WhoHas {
     requester: Destination,
     hops: u8,
     bytes_per_second: u64,
+    encryption_public: [u8; 32],
+    signing_public: [u8; 32],
+    signature: [u8; 64],
+}
+
+fn who_has_statement(request: &WhoHas) -> Vec<u8> {
+    let mut message = Vec::with_capacity(7 + 64 + 4 + 32 + 4 + 4 + DESTINATION_LEN + 32 + 32);
+    message.extend_from_slice(b"who-has");
+    message.extend_from_slice(request.id.as_str().as_bytes());
+    message.extend_from_slice(&request.index.to_le_bytes());
+    message.extend_from_slice(&request.hash);
+    message.extend_from_slice(&request.piece_size.to_le_bytes());
+    message.extend_from_slice(&request.piece_length.to_le_bytes());
+    message.extend_from_slice(request.requester.as_bytes());
+    message.extend_from_slice(&request.encryption_public);
+    message.extend_from_slice(&request.signing_public);
+    message
+}
+
+fn manifest_ask_statement(ask: &ManifestAsk) -> Vec<u8> {
+    let mut message = Vec::with_capacity(13 + 64 + DESTINATION_LEN + 32 + 32);
+    message.extend_from_slice(b"need-manifest");
+    message.extend_from_slice(ask.id.as_str().as_bytes());
+    message.extend_from_slice(ask.requester.as_bytes());
+    message.extend_from_slice(&ask.encryption_public);
+    message.extend_from_slice(&ask.signing_public);
+    message
+}
+
+fn verify_who_has(request: &WhoHas) -> Result<(), TransferError> {
+    verify_requester_signature(
+        &request.requester,
+        &request.encryption_public,
+        &request.signing_public,
+        &request.signature,
+        &who_has_statement(request),
+        "who-has",
+        "requester",
+    )
+}
+
+fn verify_manifest_ask(ask: &ManifestAsk) -> Result<(), TransferError> {
+    verify_requester_signature(
+        &ask.requester,
+        &ask.encryption_public,
+        &ask.signing_public,
+        &ask.signature,
+        &manifest_ask_statement(ask),
+        "manifest request",
+        "requester",
+    )
+}
+
+fn verify_requester_signature(
+    signer: &Destination,
+    encryption_public: &[u8; 32],
+    signing_public: &[u8; 32],
+    signature: &[u8; 64],
+    message: &[u8],
+    what: &str,
+    role: &str,
+) -> Result<(), TransferError> {
+    let derived = Destination(destination_hash(
+        OBJECT_TRANSFER_NAME,
+        &identity_hash(encryption_public, signing_public),
+    ));
+    if &derived != signer {
+        return Err(TransferError::Message(format!(
+            "{what} {role} address does not match the identity"
+        )));
+    }
+    let key = VerifyingKey::from_bytes(signing_public).map_err(|_| {
+        TransferError::Message(format!(
+            "{what} identity is not a valid Ed25519 verifying key"
+        ))
+    })?;
+    let signature = Signature::from_slice(signature)
+        .map_err(|_| TransferError::Message(format!("{what} signature is not 64 bytes")))?;
+    key.verify(message, &signature).map_err(|_| {
+        TransferError::Message(format!("{what} signature does not match the {role}"))
+    })?;
+    Ok(())
 }
 
 struct Claim {
@@ -1511,6 +1698,36 @@ struct Claim {
     requester: Destination,
     holder: Destination,
     bytes_per_second: u64,
+    encryption_public: [u8; 32],
+    signing_public: [u8; 32],
+    signature: [u8; 64],
+}
+
+fn claim_statement(claim: &Claim) -> Vec<u8> {
+    let mut message =
+        Vec::with_capacity(5 + 64 + 4 + 32 + DESTINATION_LEN + DESTINATION_LEN + 8 + 32 + 32);
+    message.extend_from_slice(b"claim");
+    message.extend_from_slice(claim.id.as_str().as_bytes());
+    message.extend_from_slice(&claim.index.to_le_bytes());
+    message.extend_from_slice(&claim.hash);
+    message.extend_from_slice(claim.requester.as_bytes());
+    message.extend_from_slice(claim.holder.as_bytes());
+    message.extend_from_slice(&claim.bytes_per_second.to_le_bytes());
+    message.extend_from_slice(&claim.encryption_public);
+    message.extend_from_slice(&claim.signing_public);
+    message
+}
+
+fn verify_claim(claim: &Claim) -> Result<(), TransferError> {
+    verify_requester_signature(
+        &claim.holder,
+        &claim.encryption_public,
+        &claim.signing_public,
+        &claim.signature,
+        &claim_statement(claim),
+        "claim",
+        "holder",
+    )
 }
 
 enum PathAnswer {
@@ -1524,7 +1741,7 @@ fn ask_path(
     destination: &Destination,
     depth: u8,
 ) -> Result<PathAnswer, TransferError> {
-    let mut stream = match std::os::unix::net::UnixStream::connect(peer) {
+    let mut stream = match crate::ipc::LocalStream::connect(peer) {
         Ok(stream) => stream,
         Err(_) => return Ok(PathAnswer::No),
     };
@@ -1861,13 +2078,15 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use ed25519_dalek::Verifier;
+    use ed25519_dalek::{Signer, Verifier};
 
     use super::{
         announce_release, destination_hash, fastest_claim, fetch_catalog, fetch_preview,
         holder_meeting, identity_hash, narrow_bytes_per_second, object_transfer_address, offer,
-        read_claim, read_who_has, release_matches, seek_piece, serve_peer, write_claim,
+        read_claim, read_who_has, receive_claim, receive_manifest_ask, receive_release,
+        receive_who_has, release_matches, seek_piece, serve_peer, write_blob, write_claim,
         write_who_has, Destination, Neighborhood, ObjectTransfer, Pipe, TransferError, WhoHas,
+        DESTINATION_LEN,
     };
     use crate::config::FetchPolicy;
     use crate::store::{
@@ -1878,7 +2097,7 @@ mod tests {
     #[test]
     fn a_transfer_creates_the_manifest_and_envelope_from_the_loa_claims() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open(root.path()).expect("store");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
         let claims =
             Claims::parse(["board=heltec-v4-r8", "provenance=local-build"]).expect("claims");
         let id = store
@@ -1906,8 +2125,9 @@ mod tests {
             .expect("signature");
         let signature_bytes = hex_decode(signature).expect("hex");
         let key =
-            std::fs::read(root.path().join("keys").join("local_object_authority")).expect("key");
-        let signing = ed25519_dalek::SigningKey::from_bytes(key[32..].try_into().expect("seed"));
+            std::fs::read(root.path().join("loa").join("local").join("private")).expect("key");
+        let signing =
+            ed25519_dalek::SigningKey::from_bytes(key.as_slice().try_into().expect("seed"));
         let signature = ed25519_dalek::Signature::from_bytes(
             signature_bytes.as_slice().try_into().expect("sig"),
         );
@@ -1921,7 +2141,7 @@ mod tests {
     fn the_receiver_pulls_the_manifest_and_then_the_pieces() {
         let root = tempfile::tempdir().expect("temp dir");
         let source_root = root.path().join("source-store");
-        let source = ObjectStore::open(&source_root).expect("source");
+        let source = ObjectStore::open_with_load(&source_root).expect("source");
         let bytes = vec![7_u8; 4097];
         let id = source
             .import_reader(
@@ -1931,19 +2151,21 @@ mod tests {
             )
             .expect("import");
         let destination_root = root.path().join("destination-store");
-        let destination_store = ObjectStore::open(&destination_root).expect("destination");
+        let destination_store =
+            ObjectStore::open_with_load(&destination_root).expect("destination");
+        trust_authority(&destination_store, &source);
         let transfer_root = root.path().join("transfer");
         let identity = [0x5a_u8; 64];
         let address = object_transfer_address(&identity);
-        let transfer = ObjectTransfer::open(&transfer_root, address).expect("transfer");
+        let transfer = ObjectTransfer::open(&transfer_root, &identity).expect("transfer");
         let socket = root.path().join("transfer.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         std::fs::write(
             transfer_root.join("peers"),
             format!("{}\n", socket.display()),
         )
         .expect("peers");
-        let peer_store = ObjectStore::open(&destination_root).expect("peer store");
+        let peer_store = ObjectStore::open_with_load(&destination_root).expect("peer store");
         let peer_transfer = transfer.clone();
         let server = thread::spawn(move || {
             for _ in 0..2 {
@@ -1988,7 +2210,7 @@ mod tests {
     #[test]
     fn a_piece_that_does_not_match_the_manifest_is_not_stored() {
         let root = tempfile::tempdir().expect("temp dir");
-        let source = ObjectStore::open(root.path().join("source-store")).expect("source");
+        let source = ObjectStore::open_with_load(root.path().join("source-store")).expect("source");
         let id = source
             .import_reader(Cursor::new(b"abc"), 3, &Claims::none())
             .expect("import");
@@ -2008,15 +2230,17 @@ mod tests {
         let transfer_root = root.path().join("transfer");
         let identity = [0x5a_u8; 64];
         let address = object_transfer_address(&identity);
-        let transfer = ObjectTransfer::open(&transfer_root, address).expect("transfer");
+        let transfer = ObjectTransfer::open(&transfer_root, &identity).expect("transfer");
         let socket = root.path().join("transfer.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         std::fs::write(
             transfer_root.join("peers"),
             format!("{}\n", socket.display()),
         )
         .expect("peers");
-        let peer_store = ObjectStore::open(root.path().join("destination-store")).expect("peer");
+        let peer_store =
+            ObjectStore::open_with_load(root.path().join("destination-store")).expect("peer");
+        trust_authority(&peer_store, &source);
         let peer_transfer = transfer.clone();
         let server = thread::spawn(move || {
             for _ in 0..2 {
@@ -2041,6 +2265,65 @@ mod tests {
     }
 
     #[test]
+    fn a_release_with_a_bad_signature_is_not_remembered_or_forwarded() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = ObjectStore::open_with_load(root.path().join("store")).expect("store");
+        let mut transfer =
+            ObjectTransfer::open(root.path().join("transfer"), &[4; 64]).expect("transfer");
+        let flooded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        struct Counting {
+            flooded: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Neighborhood for Counting {
+            fn flood(&self) -> Vec<Box<dyn Pipe>> {
+                self.flooded
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Vec::new()
+            }
+            fn open(&self, destination: &Destination) -> Result<Box<dyn Pipe>, TransferError> {
+                Err(TransferError::Message(destination.as_hex()))
+            }
+        }
+        transfer.set_neighborhood(Arc::new(Counting {
+            flooded: Arc::clone(&flooded),
+        }));
+        let id = ObjectId::parse(&"ab".repeat(32)).expect("id");
+        let foreign = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
+        let statement = format!("object-id {}\n", id.as_str());
+        let forged = format!(
+            "{statement}signature {}\n",
+            crate::store::hex_encode(&foreign.sign(statement.as_bytes()).to_bytes())
+        );
+        let mut payload = Vec::new();
+        payload.extend_from_slice(id.as_str().as_bytes());
+        payload.extend_from_slice(&[9_u8; DESTINATION_LEN]);
+        payload.push(2);
+        write_blob(&mut payload, forged.as_bytes()).expect("blob");
+        let error =
+            receive_release(&store, &transfer, &mut Cursor::new(payload)).expect_err("reject");
+        assert!(error.to_string().contains("does not match a trusted LOA"));
+        assert!(!flooded.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!transfer.root.join("releases").join(id.as_str()).exists());
+
+        let seed = std::fs::read(store.loa_key_path()).expect("seed");
+        let signing =
+            ed25519_dalek::SigningKey::from_bytes(seed.as_slice().try_into().expect("seed"));
+        let statement = format!("object-id {}\n", id.as_str());
+        let envelope = format!(
+            "{statement}signature {}\n",
+            crate::store::hex_encode(&signing.sign(statement.as_bytes()).to_bytes())
+        );
+        let mut payload = Vec::new();
+        payload.extend_from_slice(id.as_str().as_bytes());
+        payload.extend_from_slice(&[9_u8; DESTINATION_LEN]);
+        payload.push(2);
+        write_blob(&mut payload, envelope.as_bytes()).expect("blob");
+        receive_release(&store, &transfer, &mut Cursor::new(payload)).expect("accept");
+        assert!(flooded.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(transfer.root.join("releases").join(id.as_str()).is_file());
+    }
+
+    #[test]
     fn a_release_propagates_from_a_to_b_to_c_without_a_fetch() {
         let root = tempfile::tempdir().expect("temp dir");
         let bytes = b"release-bytes";
@@ -2048,12 +2331,13 @@ mod tests {
         let mut stacks = Vec::new();
         for (name, identity) in [("a", 0x11_u8), ("b", 0x22_u8), ("c", 0x33_u8)] {
             let store_root = root.path().join(name);
-            let store = Arc::new(ObjectStore::open(&store_root).expect(name));
+            let store = Arc::new(ObjectStore::open_with_load(&store_root).expect(name));
             let transfer_root = root.path().join(format!("{name}-transfer"));
-            let address = object_transfer_address(&[identity; 64]);
-            let transfer = ObjectTransfer::open(&transfer_root, address).expect(name);
+            let secret = [identity; 64];
+            let address = object_transfer_address(&secret);
+            let transfer = ObjectTransfer::open(&transfer_root, &secret).expect(name);
             let socket = root.path().join(format!("{name}.sock"));
-            let listener = std::os::unix::net::UnixListener::bind(&socket).expect(name);
+            let listener = crate::ipc::LocalListener::bind(&socket).expect(name);
             let accept_store = Arc::clone(&store);
             let accept_transfer = transfer.clone();
             listeners.push(thread::spawn(move || {
@@ -2090,6 +2374,8 @@ mod tests {
             format!("{}\n", b_socket.display()),
         )
         .expect("c peers");
+        trust_authority(stacks[1].0.as_ref(), stacks[0].0.as_ref());
+        trust_authority(stacks[2].0.as_ref(), stacks[0].0.as_ref());
         let id = a_store
             .import_reader(Cursor::new(&bytes[..]), bytes.len() as u64, &Claims::none())
             .expect("import");
@@ -2184,7 +2470,7 @@ mod tests {
         assert_eq!(piece, bytes[..crate::store::PIECE_SIZE]);
 
         let local_socket = root.path().join("local.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&local_socket).expect("local");
+        let listener = crate::ipc::LocalListener::bind(&local_socket).expect("local");
         let relay_store = Arc::clone(&seeker_store);
         let relay_transfer = seeker_transfer.clone();
         let relay = thread::spawn(move || {
@@ -2212,6 +2498,30 @@ mod tests {
         drop((holder_listen, seeker_listen));
     }
 
+    fn signed_claim(secret: &[u8; 64], mut claim: super::Claim) -> super::Claim {
+        let identity = super::StackIdentity::from_secret(secret);
+        claim.encryption_public = identity.encryption_public;
+        claim.signing_public = identity.signing_public;
+        claim.holder = identity.destination();
+        claim.signature = identity.sign(&super::claim_statement(&claim));
+        claim
+    }
+
+    fn signed_who_has(secret: &[u8; 64], mut request: WhoHas) -> WhoHas {
+        let identity = super::StackIdentity::from_secret(secret);
+        request.encryption_public = identity.encryption_public;
+        request.signing_public = identity.signing_public;
+        request.signature = identity.sign(&super::who_has_statement(&request));
+        request
+    }
+
+    fn trust_authority(member: &ObjectStore, authority: &ObjectStore) {
+        let public = std::fs::read(authority.loa_key_path().with_file_name("public"))
+            .expect("loa public key");
+        let key: [u8; 32] = public.as_slice().try_into().expect("32-byte public key");
+        member.trust_loa(&key).expect("trust loa");
+    }
+
     fn listen_stack(
         root: &std::path::Path,
         name: &str,
@@ -2226,13 +2536,14 @@ mod tests {
         std::thread::JoinHandle<()>,
     ) {
         let store_root = root.join(name);
-        let store = Arc::new(ObjectStore::open(&store_root).expect(name));
+        let store = Arc::new(ObjectStore::open_with_load(&store_root).expect(name));
         let transfer_root = root.join(format!("{name}-transfer"));
-        let address = object_transfer_address(&[identity; 64]);
-        let mut transfer = ObjectTransfer::open(&transfer_root, address).expect(name);
+        let secret = [identity; 64];
+        let address = object_transfer_address(&secret);
+        let mut transfer = ObjectTransfer::open(&transfer_root, &secret).expect(name);
         transfer.set_fetch_policy(policy);
         let socket = root.join(format!("{name}.sock"));
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect(name);
+        let listener = crate::ipc::LocalListener::bind(&socket).expect(name);
         let accept_store = Arc::clone(&store);
         let accept_transfer = transfer.clone();
         let handle = thread::spawn(move || {
@@ -2293,6 +2604,7 @@ mod tests {
         let documents = holder_store
             .ensure_transfer_documents(&id)
             .expect("manifest");
+        trust_authority(&seeker_store, &holder_store);
         seeker_store
             .store_transfer_documents(&id, &documents.manifest, &documents.envelope)
             .expect("share manifest");
@@ -2357,6 +2669,7 @@ mod tests {
         let documents = holder_store
             .ensure_transfer_documents(&id)
             .expect("manifest");
+        trust_authority(&seeker_store, &holder_store);
         seeker_store
             .store_transfer_documents(&id, &documents.manifest, &documents.envelope)
             .expect("share manifest");
@@ -2413,20 +2726,27 @@ mod tests {
         let hash = hex_decode(hash_line).expect("hash");
         let mut hash_bytes = [0_u8; 32];
         hash_bytes.copy_from_slice(&hash);
-        let requester = object_transfer_address(&[0x33_u8; 64]);
-        let socket = std::os::unix::net::UnixStream::connect(&inside_socket).expect("connect");
+        let secret = [0x33_u8; 64];
+        let requester = object_transfer_address(&secret);
+        let socket = crate::ipc::LocalStream::connect(&inside_socket).expect("connect");
         write_who_has(
             &mut &socket,
-            &WhoHas {
-                id: id.clone(),
-                index: 0,
-                hash: hash_bytes,
-                piece_size: u32::try_from(super::PIECE_SIZE).unwrap_or(u32::MAX),
-                piece_length: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
-                requester,
-                hops: 1,
-                bytes_per_second: u64::MAX,
-            },
+            &signed_who_has(
+                &secret,
+                WhoHas {
+                    id: id.clone(),
+                    index: 0,
+                    hash: hash_bytes,
+                    piece_size: u32::try_from(super::PIECE_SIZE).unwrap_or(u32::MAX),
+                    piece_length: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+                    requester,
+                    hops: 1,
+                    bytes_per_second: u64::MAX,
+                    encryption_public: [0; 32],
+                    signing_public: [0; 32],
+                    signature: [0; 64],
+                },
+            ),
         )
         .expect("who-has");
         drop(socket);
@@ -2510,6 +2830,7 @@ mod tests {
             .import_reader(Cursor::new(&bytes[..]), bytes.len() as u64, &Claims::none())
             .expect("lora import");
         let documents = wifi_store.ensure_transfer_documents(&id).expect("manifest");
+        trust_authority(&seeker_store, &wifi_store);
         seeker_store
             .store_transfer_documents(&id, &documents.manifest, &documents.envelope)
             .expect("share manifest");
@@ -2561,42 +2882,250 @@ mod tests {
     #[test]
     fn who_has_and_its_claim_carry_the_path_rate() {
         let id = ObjectId::parse(&"ab".repeat(32)).expect("id");
-        let requester = object_transfer_address(&[0x33_u8; 64]);
-        let holder = object_transfer_address(&[0x11_u8; 64]);
-        let request = WhoHas {
-            id: id.clone(),
-            index: 0,
-            hash: [7_u8; 32],
-            piece_size: 4096,
-            piece_length: 3,
-            requester,
-            hops: 1,
-            bytes_per_second: 50,
-        };
+        let secret = [0x33_u8; 64];
+        let requester = object_transfer_address(&secret);
+        let holder_secret = [0x11_u8; 64];
+        let request = signed_who_has(
+            &secret,
+            WhoHas {
+                id: id.clone(),
+                index: 0,
+                hash: [7_u8; 32],
+                piece_size: 4096,
+                piece_length: 3,
+                requester,
+                hops: 1,
+                bytes_per_second: 50,
+                encryption_public: [0; 32],
+                signing_public: [0; 32],
+                signature: [0; 64],
+            },
+        );
         let mut bytes = Vec::new();
         write_who_has(&mut bytes, &request).expect("write who-has");
-        let read = read_who_has(&mut Cursor::new(&bytes[6..])).expect("read who-has");
+        let read = read_who_has(&mut Cursor::new(bytes[6..].to_vec())).expect("read who-has");
         assert_eq!(read.bytes_per_second, 50);
         assert_eq!(read.hops, 1);
-        let claim = super::Claim {
-            id,
-            index: 0,
-            hash: [7_u8; 32],
-            requester,
-            holder,
-            bytes_per_second: 50,
-        };
+        let claim = signed_claim(
+            &holder_secret,
+            super::Claim {
+                id,
+                index: 0,
+                hash: [7_u8; 32],
+                requester,
+                holder: object_transfer_address(&holder_secret),
+                bytes_per_second: 50,
+                encryption_public: [0; 32],
+                signing_public: [0; 32],
+                signature: [0; 64],
+            },
+        );
         let mut claim_bytes = Vec::new();
         write_claim(&mut claim_bytes, &claim).expect("write claim");
         let read = read_claim(&mut Cursor::new(&claim_bytes[6..])).expect("read claim");
         assert_eq!(read.bytes_per_second, 50);
-        assert_eq!(read.holder.as_hex(), holder.as_hex());
+        assert_eq!(read.holder.as_hex(), claim.holder.as_hex());
+    }
+
+    #[test]
+    fn a_claim_that_names_another_holder_is_dropped() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let transfer =
+            ObjectTransfer::open(root.path().join("transfer"), &[4; 64]).expect("transfer");
+        let id = ObjectId::parse(&"ab".repeat(32)).expect("id");
+        let holder_secret = [0x11_u8; 64];
+        let mut claim = signed_claim(
+            &holder_secret,
+            super::Claim {
+                id: id.clone(),
+                index: 0,
+                hash: [7_u8; 32],
+                requester: object_transfer_address(&[0x33_u8; 64]),
+                holder: object_transfer_address(&holder_secret),
+                bytes_per_second: 50,
+                encryption_public: [0; 32],
+                signing_public: [0; 32],
+                signature: [0; 64],
+            },
+        );
+        claim.holder = object_transfer_address(&[0x44_u8; 64]);
+        let mut bytes = Vec::new();
+        write_claim(&mut bytes, &claim).expect("write claim");
+        let error =
+            receive_claim(&transfer, &mut Cursor::new(bytes[6..].to_vec())).expect_err("reject");
+        assert!(error.to_string().contains("does not match the identity"));
+        assert!(!transfer.root.join("who-has").exists());
+
+        claim.holder = object_transfer_address(&holder_secret);
+        claim.bytes_per_second = 1_000_000;
+        let mut bytes = Vec::new();
+        write_claim(&mut bytes, &claim).expect("write claim");
+        let error = receive_claim(&transfer, &mut Cursor::new(bytes[6..].to_vec()))
+            .expect_err("altered rate");
+        assert!(error
+            .to_string()
+            .contains("signature does not match the holder"));
+        assert!(!transfer.root.join("who-has").exists());
+
+        let claim = signed_claim(
+            &holder_secret,
+            super::Claim {
+                id: id.clone(),
+                index: 0,
+                hash: [7_u8; 32],
+                requester: object_transfer_address(&[0x33_u8; 64]),
+                holder: object_transfer_address(&holder_secret),
+                bytes_per_second: 50,
+                encryption_public: [0; 32],
+                signing_public: [0; 32],
+                signature: [0; 64],
+            },
+        );
+        let mut bytes = Vec::new();
+        write_claim(&mut bytes, &claim).expect("write claim");
+        receive_claim(&transfer, &mut Cursor::new(bytes[6..].to_vec())).expect("accept");
+        let recorded = transfer
+            .root
+            .join("who-has")
+            .join(id.as_str())
+            .join("0")
+            .join(claim.requester.as_hex())
+            .join("claims")
+            .join(claim.holder.as_hex());
+        assert_eq!(
+            std::fs::read_to_string(recorded).expect("claim").trim(),
+            "50"
+        );
+    }
+
+    #[test]
+    fn a_request_that_names_another_address_is_dropped() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = ObjectStore::open(root.path().join("store")).expect("store");
+        let mut transfer =
+            ObjectTransfer::open(root.path().join("transfer"), &[4; 64]).expect("transfer");
+        let flooded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        struct Counting {
+            flooded: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Neighborhood for Counting {
+            fn flood(&self) -> Vec<Box<dyn Pipe>> {
+                self.flooded
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Vec::new()
+            }
+            fn open(&self, destination: &Destination) -> Result<Box<dyn Pipe>, TransferError> {
+                Err(TransferError::Message(destination.as_hex()))
+            }
+        }
+        transfer.set_neighborhood(Arc::new(Counting {
+            flooded: Arc::clone(&flooded),
+        }));
+        let id = ObjectId::parse(&"ab".repeat(32)).expect("id");
+        let asker = [0x33_u8; 64];
+        let mut request = signed_who_has(
+            &asker,
+            WhoHas {
+                id: id.clone(),
+                index: 0,
+                hash: [7_u8; 32],
+                piece_size: 4096,
+                piece_length: 3,
+                requester: object_transfer_address(&asker),
+                hops: 1,
+                bytes_per_second: u64::MAX,
+                encryption_public: [0; 32],
+                signing_public: [0; 32],
+                signature: [0; 64],
+            },
+        );
+        request.requester = object_transfer_address(&[0x44_u8; 64]);
+        let mut bytes = Vec::new();
+        write_who_has(&mut bytes, &request).expect("write who-has");
+        let error = receive_who_has(
+            &store,
+            &transfer,
+            &mut Cursor::new(bytes[6..].to_vec()),
+            u64::MAX,
+        )
+        .expect_err("reject");
+        assert!(error.to_string().contains("does not match the identity"));
+        assert!(!flooded.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!transfer.root.join("who-has").exists());
+
+        request.requester = object_transfer_address(&asker);
+        request.signature[0] ^= 0xff;
+        let mut bytes = Vec::new();
+        write_who_has(&mut bytes, &request).expect("write who-has");
+        let error = receive_who_has(
+            &store,
+            &transfer,
+            &mut Cursor::new(bytes[6..].to_vec()),
+            u64::MAX,
+        )
+        .expect_err("bad signature");
+        assert!(error
+            .to_string()
+            .contains("signature does not match the requester"));
+        assert!(!transfer.root.join("who-has").exists());
+
+        let request = signed_who_has(
+            &asker,
+            WhoHas {
+                id: id.clone(),
+                index: 0,
+                hash: [7_u8; 32],
+                piece_size: 4096,
+                piece_length: 3,
+                requester: object_transfer_address(&asker),
+                hops: 1,
+                bytes_per_second: u64::MAX,
+                encryption_public: [0; 32],
+                signing_public: [0; 32],
+                signature: [0; 64],
+            },
+        );
+        let mut bytes = Vec::new();
+        write_who_has(&mut bytes, &request).expect("write who-has");
+        receive_who_has(
+            &store,
+            &transfer,
+            &mut Cursor::new(bytes[6..].to_vec()),
+            u64::MAX,
+        )
+        .expect("accept");
+        assert!(flooded.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(transfer
+            .root
+            .join("who-has")
+            .join(id.as_str())
+            .join("0")
+            .join(request.requester.as_hex())
+            .join("seen-1")
+            .is_file());
+
+        let identity = super::StackIdentity::from_secret(&asker);
+        let mut ask = super::ManifestAsk {
+            id: id.clone(),
+            requester: object_transfer_address(&[0x44_u8; 64]),
+            hops: 0,
+            encryption_public: identity.encryption_public,
+            signing_public: identity.signing_public,
+            signature: [0; 64],
+        };
+        ask.signature = identity.sign(&super::manifest_ask_statement(&ask));
+        let mut bytes = Vec::new();
+        super::write_manifest_ask(&mut bytes, &ask).expect("write ask");
+        let error = receive_manifest_ask(&store, &transfer, &mut Cursor::new(bytes[6..].to_vec()))
+            .expect_err("reject manifest ask");
+        assert!(error.to_string().contains("does not match the identity"));
+        assert!(!transfer.root.join("manifest-asks").exists());
     }
 
     #[test]
     fn a_release_matches_a_cdn_group_or_a_new_firmware_version() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open(root.path()).expect("store");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
         let cdn = FetchPolicy {
             cdn: true,
             cdn_groups: vec!["site-a".to_string()],
@@ -2685,6 +3214,8 @@ mod tests {
         let id = holder_store
             .import_reader(Cursor::new(&bytes[..]), bytes.len() as u64, &claims)
             .expect("import");
+        trust_authority(&_middle_store, &holder_store);
+        trust_authority(&_seeker_store, &holder_store);
         announce_release(&holder_store, &holder_transfer, id.as_str(), 8).expect("release");
         let data = root
             .path()
@@ -2748,12 +3279,9 @@ mod tests {
         }
 
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open(root.path()).expect("store");
-        let mut transfer = ObjectTransfer::open(
-            root.path().join("transfer"),
-            object_transfer_address(&[7; 64]),
-        )
-        .expect("transfer");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let mut transfer =
+            ObjectTransfer::open(root.path().join("transfer"), &[7; 64]).expect("transfer");
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         transfer.set_neighborhood(std::sync::Arc::new(Recording {
             bytes: std::sync::Arc::clone(&captured),

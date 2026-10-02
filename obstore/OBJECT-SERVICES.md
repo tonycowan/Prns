@@ -2,7 +2,7 @@
 
 prnsd hosts the object store, import, transfer, and release for a stack. The command line is `object-services` (`obstore/src/main.rs`). A debug build is `obstore/target/debug/object-services`.
 
-Every command takes `--config DIR`. `DIR/config` is the stack file. prnsd listens for those commands on `DIR/obstore.sock` (mode 0600). The socket magic is `OBST` version 2. Run prnsd with that config. Do not also run `object-services serve`; it binds the same socket.
+Every command takes `--config DIR`. `DIR/config` is the stack file. prnsd listens for those commands on `DIR/obstore.sock`. On Unix that path is a socket, mode 0600. On Windows the file contains `127.0.0.1:<port>` and the service listens on that loopback port. The message magic is `OBST` version 2. Run prnsd with that config. Do not also run `object-services serve`; it binds the same path.
 
 ```text
 ./prnsd/target/release/prnsd run --config DIR
@@ -92,8 +92,12 @@ There is no destination key. The unique address is derived. prnsd does not read 
 
 ```text
 <object-store>/
-  keys/local_object_authority     64 bytes, mode 0600. Directory mode 0700.
-                                  The last 32 bytes are the Ed25519 signing seed.
+  loa/                            This node's LOA credential directory. Mode 0700.
+    local/                        Mode 0700. Present when this node is the LOA.
+      private                     32-byte Ed25519 seed. Mode 0600.
+      public                      32-byte verifying key. Mode 0644.
+    trusted/                      Mode 0755. One file per trusted LOA public key.
+      <64-hex>                    Raw verifying key. The file name is the key in hex.
   data/.incoming/                 Staging directories for an import in progress.
   data/<object-id>/
     data                          The object bytes. The object id is their SHA-256.
@@ -113,11 +117,35 @@ There is no destination key. The unique address is derived. prnsd does not read 
   manifest-asks/<object-id>/<requester-hex>/seen-<hops>
 ```
 
-The Local Object Authority key is created on first open when it is missing. prnsd prints that path when it creates it.
+`loa/local/private` is this stack's signing seed, and only when this node is the LOA. Trusted LOA public keys live in `loa/trusted`. `create-load` writes `local` and installs that same public key into `trusted`. prnsd does not create either at startup. A node that only verifies has files in `trusted` and an empty `local`.
+
+## LOA domain
+
+An LOA domain (LOAD) is the scope in which one Local Object Authority manages objects. Every node in a LOAD has the same LOA public key installed in `loa/trusted`. That key is how those nodes verify an envelope signed by the LOA. The signature covers the claims and the object id. A node verifies with a trusted public key. The LOA holds the matching signing key.
+
+A release is checked before it is remembered or forwarded. An envelope that does not verify against a trusted key is dropped, so it does not occupy the release slot and it does not flood further. The same check applies to an offered object envelope and to a transfer envelope before either is stored. A node with no trusted LOA public key fails these requests with `This node is not part of a LOA Domain`.
+
+Create new LOAD generates those credentials. Run it on one machine, once for that LOAD:
+
+```text
+object-services create-load --config DIR
+object-services create-load --config DIR --offline
+object-services trust-loa --config DIR --public-key HEX
+```
+
+`create-load` asks the running prnsd to write `loa/local/private`, `loa/local/public`, and `loa/trusted/<64-hex>`, then prints the LOA public key, 64 hex characters. `--offline` writes those files without a running prnsd. A second run fails. `trust-loa` copies a verifying key into `loa/trusted` and creates an empty `loa/local` when this node is not the LOA. The firmware image can carry that public key at flash time. After the node is running, an RC Operator can set or replace the key on the node. Setting the key adds the node to that LOAD. Replacing the key moves the node into the LOAD of the new key.
+
+A request that needs the LOA credentials fails with `This node is not part of a LOA Domain` when they are missing. Signing an import, signing a transfer envelope, and `import-releases` are such requests. A plain import, an import of an envelope that is already signed, a fetch, and startup itself do not create credentials and do not require them.
+
+The authority to set a node's LOA public key is a remote-control grant. Operators receive it automatically, together with the OTA grant and the other operator grants.
+
+Joining an administrative domain is a pairing. A LOAD has no pairing exchange. The RC Operator who already controls the node sets the public key, or the key is written when the firmware is flashed.
 
 ## Commands
 
 ```text
+object-services create-load --config DIR [--offline]
+object-services trust-loa --config DIR --public-key HEX
 object-services import --config DIR --file PATH [--as-owner --claims NAME=VALUE,...]
 object-services import --config DIR --file PATH --envelope PATH --authority HEX
 object-services fetch --config DIR --object-id HEX --file PATH
@@ -129,6 +157,8 @@ object-services import-releases --config DIR [--set preview] [--set stable]
 
 | Command | Arguments | Result |
 | --- | --- | --- |
+| `create-load` | `--offline` writes the files directly. Without it, prnsd must already be listening. | Create new LOAD. Writes `loa/local/private`, `loa/local/public`, and `loa/trusted/<64-hex>` once and prints the LOA public key. Fails when the private key is already present. |
+| `trust-loa` | `--public-key` is the Ed25519 verifying key, 64 hex. | Installs that key in `loa/trusted`. Creates `loa/local` when it is missing. The same key may be installed again. |
 | `import` | `--file` is the bytes to store. `--claims` is a comma-separated `name=value` list and requires `--as-owner`. `--envelope` is an already signed envelope file; `--authority` is the signer's Ed25519 verifying key (64 hex) or identity public key (128 hex, signing half is the last 32 bytes). `--claims` and `--envelope` cannot be combined. With neither, the bytes are stored with a manifest and no LOA envelope. | Prints the object id on stdout. |
 | `fetch` | `--object-id` is 64 hex. `--file` is the path to write. | Writes the stored `data` bytes. Checks the SHA-256 before replacing `--file`. |
 | `transfer` | `--destination` is the receiver's unique object-transfer address, 32 hex. | Offers the object over a link. The receiver pulls the manifest and pieces. The object must already have a signed LOA envelope. |
@@ -232,6 +262,12 @@ Sent on the plain address.
 | requester | the seeker's unique address |
 | hops | `0` on the first ring, then `1`, up to `8` |
 | bytes/second | `18446744073709551615` (`u64::MAX`) until a receiver lowers it |
+| identity | the seeker's X25519 public key and Ed25519 public key, 32 bytes each |
+| signature | Ed25519, 64 bytes |
+
+The signature covers `who-has`, the object id, the index, the piece hash, the piece size, the piece length, the requester address, and the two public keys. `hops` and `bytes/second` stay outside it, because each hop changes them. A node derives the object-transfer address from the public keys and checks the signature before it remembers the request, relays it, or opens a link. A request whose address does not match that identity, or whose signature does not match, is dropped.
+
+The manifest request is signed the same way. Its signature covers `need-manifest`, the object id, the requester address, and the two public keys. `hops` stays outside it. The same check runs before the request is remembered, relayed, or answered with a link.
 
 The first ring is a send of hops `0`, so only the next stacks are included and they do not forward. A node that receives a count above `0` stays quiet about the piece and relays, even if it has the piece. Only the node that receives `0` answers, and only if it has the matching piece.
 
@@ -251,6 +287,10 @@ The answer to a who-has. `bytes/second` is the minimum the who-has had accumulat
 | requester | the seeker's unique address |
 | holder | the holder's unique address |
 | bytes/second | `1000000` |
+| identity | the holder's X25519 public key and Ed25519 public key, 32 bytes each |
+| signature | Ed25519, 64 bytes |
+
+The signature covers `claim`, the object id, the index, the piece hash, the requester address, the holder address, the rate, and the two public keys. A node derives the object-transfer address from the public keys and checks the signature before it records the claim. A claim that names another holder, or whose rate was changed after signing, is dropped. A holder can still sign a claim for a piece it does not have, or for a rate it cannot sustain. The piece hash check rejects any other bytes.
 
 The claim is sent on the plain address, and the holder also opens a link to the requester's unique address and writes the claim there. A node that receives a claim records it and does not relay it. The seeker takes the fastest claim at or above `minimum-bytes-per-second`. Slower claims stay in `claims/`. The search widens one hop at a time. When the rings are exhausted, the seeker uses the fastest claim it kept.
 
@@ -311,7 +351,7 @@ sequenceDiagram
     B->>A: REQ_DONE
 ```
 
-The offer is a pull. A does not push the manifest or the pieces. B stores the inventory manifest and the LOA envelope from the offer before it asks for anything else. It checks that both envelopes contain a `signature` line. It asks for the transfer manifest, checks `object-id`, `length`, and `piece-size 4096`, and stores `transfer-manifest` and `LOA-transfer-envelope`. For piece `0` it checks the SHA-256 against `piece 0`, stores the bytes, and checks that the joined bytes hash to the object id. It writes `data` and removes `pieces/`. A later piece request reads `pieces/<index>` while that directory exists, and otherwise slices `data` at `index * piece-size`.
+The offer is a pull. A does not push the manifest or the pieces. B stores the inventory manifest and the LOA envelope from the offer before it asks for anything else. It checks the object envelope signature against a public key in `loa/trusted`. The signed bytes are the claims and the object id. It asks for the transfer manifest, checks `object-id`, `length`, and `piece-size 4096`, and checks the transfer envelope signature over the claims and that manifest before storing `transfer-manifest` and `LOA-transfer-envelope`. An envelope that does not verify is not stored. For piece `0` it checks the SHA-256 against `piece 0`, stores the bytes, and checks that the joined bytes hash to the object id. It writes `data` and removes `pieces/`. A later piece request reads `pieces/<index>` while that directory exists, and otherwise slices `data` at `index * piece-size`.
 
 A blob on the wire is a `u32` little-endian length followed by the bytes. Request bytes are `0` done, `1` manifest, `2` piece, and `255` reject.
 
@@ -320,6 +360,8 @@ An object with no LOA envelope can be stored and fetched locally. A transfer req
 ## Release and fetch
 
 Three stacks. A has the object and a signed LOA envelope whose claims match C's policy. B is a neighbor of A and is not configured to fetch. C is a neighbor of B, with `auto-stage = Yes` and `board = heltec-v4`. C does not already have version `0.3.7-hotfix.5`. A, B, and C are linked by their interfaces. They do not need a peers file.
+
+`obstore/examples/three-nodes.sh` recreates those three installations. A is the LOA: `loa/local` holds the private and public keys, and `loa/trusted` holds the same public key. B and C have that public key in `loa/trusted` and an empty `loa/local`. A listens on `127.0.0.1:48001`, B connects to A and listens on `127.0.0.1:48002`, and C connects to B. `share_instance` is `No` and `enable_transport` is `Yes`, so the three processes stay separate and B can forward between A and C.
 
 The envelope A releases:
 
@@ -374,6 +416,18 @@ C opens a link to that holder and sends `GIVE_PIECE` with the object id, index `
 
 While pieces are still arriving, a node can serve a piece it has already stored. After `data` is written, that same piece is read back out of `data`.
 
-## Unix stand-in
+## Local stand-in
 
-`object-services serve --config DIR` is the stand-in that does not use Reticulum. It binds both `DIR/obstore.sock` and `DIR/object-transfer.sock`. Neighbors are one socket path per line in `<object-transfer-directory>/peers`, each line another stack's `object-transfer.sock`. Remembered sockets are `<object-transfer-directory>/paths/<destination-hex>`. The same `OBXF` messages are written on those sockets. prnsd does not bind `object-transfer.sock` and does not read `peers`.
+`object-services serve --config DIR` is the stand-in that does not use Reticulum. It binds both `DIR/obstore.sock` and `DIR/object-transfer.sock`. On Unix each path is a socket, mode 0600. On Windows each file contains `127.0.0.1:<port>` and the service listens on that loopback port. Neighbors are one path per line in `<object-transfer-directory>/peers`, each line another stack's `object-transfer.sock`. Remembered paths are `<object-transfer-directory>/paths/<destination-hex>`. The same `OBXF` messages are written on those connections. prnsd does not bind `object-transfer.sock` and does not read `peers`.
+
+## Store browser
+
+`obstore/browser` is the desktop catalog. It reads a store without importing, signing, or creating files. Pass a directory to open it:
+
+```text
+cargo run --locked --manifest-path obstore/browser/Cargo.toml -- example-nodes/a/object-store
+```
+
+`example-nodes` is what `obstore/examples/three-nodes.sh` writes. The repo has no `target/test-stacks` directory. A stack config directory, the object-store root, or that store's `data` directory all open the local catalog. To browse another stack, put its object-transfer address in the remote field. The path is then the config directory of the local object service, which must already be listening on `obstore.sock`.
+
+On Windows the window uses the system WebView2 runtime, which Windows 11 includes, and the crate builds once `obstore` does. On Linux the desktop shell links WebKitGTK 4.1. Debian and Ubuntu need `libgtk-3-dev` and `libwebkit2gtk-4.1-dev` before that crate will build. A WSL install does not include those packages until they are installed. macOS uses the system web view.

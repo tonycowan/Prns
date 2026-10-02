@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn importing_signs_the_ota_file_and_the_usb_zip() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open(root.path()).expect("store");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
         let board = identity(FirmwareSet::Preview);
         let application = part("application", b"firmware-bytes");
         let ota = import_bytes(

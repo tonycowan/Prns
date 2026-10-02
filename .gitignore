@@ -47,6 +47,8 @@ benchmarks/.benchmark-runs/
 /.codex/
 # Universal keyboard/mouse app — scratch build, not part of the committed tree yet
 /personal-km/
+# Generated three-node example. Contains an LOA private key.
+/example-nodes/
 # Reticulum runtime storage (per-node identity + state); regenerated at runtime
 **/.reticulum/
 **/.wrangler/

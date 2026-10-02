@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
 use std::io;
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -10,12 +9,12 @@ use clap::{Parser, Subcommand};
 
 use obstore::config::load_stack;
 use obstore::protocol::{
-    bind_socket, fetch_object, import_admission, request_release, request_transfer,
-    request_who_has, serve_connection, socket_path, Admission,
+    bind_socket, fetch_object, import_admission, request_create_load, request_release,
+    request_transfer, request_who_has, serve_connection, socket_path, Admission, LocalListener,
 };
 use obstore::releases::{import_sets, FirmwareSet};
 use obstore::store::{parse_verifying_key, Claims, ObjectStore};
-use obstore::transfer::{load_object_transfer_address, serve_peer, ObjectTransfer};
+use obstore::transfer::{read_transport_identity, serve_peer, ObjectTransfer};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,6 +28,28 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create new LOAD.
+    ///
+    /// Generates this stack's LOA credentials once. Run it on one machine for each domain.
+    CreateLoad {
+        /// Directory that contains the stack config file.
+        #[arg(long, value_name = "DIR")]
+        config: PathBuf,
+        /// Write the credentials without a running prnsd.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Install a trusted LOA public key.
+    ///
+    /// Writes `<object-store>/loa/trusted/<64-hex>`. The same key may be installed again.
+    TrustLoa {
+        /// Directory that contains the stack config file.
+        #[arg(long, value_name = "DIR")]
+        config: PathBuf,
+        /// Ed25519 verifying key, 64 hex characters.
+        #[arg(long, value_name = "HEX")]
+        public_key: String,
+    },
     /// Listen for store and transfer requests.
     Serve {
         /// Directory that contains the stack config file.
@@ -133,6 +154,8 @@ enum FirmwareSetArg {
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Serve { config } => serve(&config),
+        Command::CreateLoad { config, offline } => create_load(&config, offline),
+        Command::TrustLoa { config, public_key } => trust_loa(&config, &public_key),
         Command::Import {
             config,
             file,
@@ -172,6 +195,76 @@ fn main() -> ExitCode {
     }
 }
 
+fn create_load(config_dir: &std::path::Path, offline: bool) -> ExitCode {
+    if offline {
+        let stack = match load_stack(config_dir) {
+            Ok(stack) => stack,
+            Err(error) => {
+                eprintln!("object-services: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let store = match ObjectStore::open(&stack.object_store) {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("object-services: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match store.create_load() {
+            Ok(public_key) => {
+                println!("{}", obstore::store::hex_encode(&public_key));
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("object-services: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match request_create_load(&socket_path(config_dir)) {
+        Ok(public_key) => {
+            println!("{public_key}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("object-services: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn trust_loa(config_dir: &std::path::Path, public_key: &str) -> ExitCode {
+    let public_key = match parse_verifying_key(public_key) {
+        Ok(public_key) => public_key,
+        Err(error) => {
+            eprintln!("object-services: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stack = match load_stack(config_dir) {
+        Ok(stack) => stack,
+        Err(error) => {
+            eprintln!("object-services: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let store = match ObjectStore::open(&stack.object_store) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("object-services: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match store.trust_loa(&public_key) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("object-services: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn serve(config_dir: &std::path::Path) -> ExitCode {
     let stack = match load_stack(config_dir) {
         Ok(stack) => stack,
@@ -187,23 +280,26 @@ fn serve(config_dir: &std::path::Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let address = match load_object_transfer_address(config_dir) {
-        Ok(address) => address,
+    let mut identity = match read_transport_identity(config_dir) {
+        Ok(identity) => identity,
         Err(error) => {
             eprintln!("object-services: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let transfer = match ObjectTransfer::open(&stack.object_transfer, address) {
+    let address = obstore::transfer::object_transfer_address(&identity);
+    let transfer = match ObjectTransfer::open(&stack.object_transfer, &identity) {
         Ok(mut transfer) => {
             transfer.set_fetch_policy(stack.fetch);
             transfer
         }
         Err(error) => {
+            identity.fill(0);
             eprintln!("object-services: {error}");
             return ExitCode::FAILURE;
         }
     };
+    identity.fill(0);
     eprintln!(
         "object-services: object-transfer address {}",
         address.as_hex()
@@ -224,12 +320,6 @@ fn serve(config_dir: &std::path::Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if store.created_loa_key() {
-        eprintln!(
-            "object-services: created Local Object Authority key {}",
-            store.loa_key_path().display()
-        );
-    }
     eprintln!(
         "object-services: listening on {} for {}",
         socket.display(),
@@ -358,12 +448,6 @@ fn import_releases(config_dir: &std::path::Path, sets: &[FirmwareSetArg]) -> Exi
             return ExitCode::FAILURE;
         }
     };
-    if store.created_loa_key() {
-        eprintln!(
-            "object-services: created Local Object Authority key {}",
-            store.loa_key_path().display()
-        );
-    }
     match import_sets(&store, &selected) {
         Ok(outcome) => {
             for notice in outcome.unpublished {
@@ -447,7 +531,7 @@ fn transfer(config_dir: &std::path::Path, object_id: &str, destination: &str) ->
     }
 }
 
-fn bind_listener(socket: &std::path::Path) -> io::Result<UnixListener> {
+fn bind_listener(socket: &std::path::Path) -> io::Result<LocalListener> {
     bind_socket(socket)
 }
 

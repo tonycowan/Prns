@@ -404,12 +404,8 @@ pub(super) async fn run(
             }),
         });
     let request_nnpages = nnpages.clone();
-    #[cfg(unix)]
     let mut object_host = services::object::prepare(&config_dir);
-    #[cfg(unix)]
     let object_events = object_host.as_ref().map(services::object::Prepared::events);
-    #[cfg(not(unix))]
-    let object_events: Option<services::object::Events> = None;
     let mut prns = PrnsNode::new_with_handle(move |handle| PrnsNodeRecipe {
         transport_identity: transport_secret,
         remote_control,
@@ -539,7 +535,6 @@ pub(super) async fn run(
         }
     }
 
-    #[cfg(unix)]
     if object_host.is_some() && !services::object::register(&mut prns, &visible_secret) {
         object_host = None;
     }
@@ -560,7 +555,6 @@ pub(super) async fn run(
         started,
     });
 
-    #[cfg(unix)]
     if let Some(host) = object_host {
         services::object::launch(prns_handle.clone(), &visible_secret, host);
     }

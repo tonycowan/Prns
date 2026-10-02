@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -12,8 +13,11 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-const LOA_KEY_FILE: &str = "local_object_authority";
-const LOA_KEY_LEN: usize = 64;
+const LOA_DIR: &str = "loa";
+const LOA_LOCAL_DIR: &str = "local";
+const LOA_TRUSTED_DIR: &str = "trusted";
+const LOA_PRIVATE_FILE: &str = "private";
+const LOA_PUBLIC_FILE: &str = "public";
 const SIGNING_SEED_LEN: usize = 32;
 pub(crate) const PIECE_SIZE: usize = 4096;
 pub(crate) const TRANSFER_MANIFEST_FILE: &str = "transfer-manifest";
@@ -86,6 +90,8 @@ pub enum StoreError {
         id: String,
         name: String,
     },
+    NotInLoadDomain,
+    LoadAlreadyExists,
 }
 
 impl fmt::Display for StoreError {
@@ -108,7 +114,7 @@ impl fmt::Display for StoreError {
             ),
             Self::MalformedLoaKey { path, found } => write!(
                 formatter,
-                "Local Object Authority key {} holds {found} bytes, expected {LOA_KEY_LEN}",
+                "LOA private key {} holds {found} bytes, expected {SIGNING_SEED_LEN}",
                 path.display()
             ),
             Self::Entropy(message) => write!(
@@ -125,6 +131,12 @@ impl fmt::Display for StoreError {
             Self::ObjectNotFound { id } => write!(formatter, "object {id} is not in the store"),
             Self::ManifestMismatch { id } => {
                 write!(formatter, "object {id} manifest does not match its data")
+            }
+            Self::NotInLoadDomain => {
+                write!(formatter, "This node is not part of a LOA Domain")
+            }
+            Self::LoadAlreadyExists => {
+                write!(formatter, "This node already belongs to a LOA Domain")
             }
             Self::MissingPiece { id, index } => {
                 write!(formatter, "object {id} has no piece {index}")
@@ -286,34 +298,127 @@ pub struct PublishedObject {
 pub struct ObjectStore {
     data: PathBuf,
     loa_key_path: PathBuf,
-    signing_seed: [u8; SIGNING_SEED_LEN],
-    created_loa_key: bool,
+    signing_seed: Mutex<Option<[u8; SIGNING_SEED_LEN]>>,
 }
 
 impl ObjectStore {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let root = root.into();
-        let keys = root.join("keys");
         let data = root.join("data");
-        fs::create_dir_all(&keys)?;
-        #[cfg(unix)]
-        fs::set_permissions(&keys, fs::Permissions::from_mode(0o700))?;
         fs::create_dir_all(data.join(".incoming"))?;
-        let (signing_seed, created_loa_key, loa_key_path) = load_or_create_loa_key(&keys)?;
+        let loa_key_path = loa_private_path(&root);
+        let signing_seed = if loa_key_path.is_file() {
+            Some(read_loa_signing_seed(&loa_key_path)?)
+        } else {
+            None
+        };
+        load_trusted_loas(&loa_key_path)?;
         Ok(Self {
             data,
             loa_key_path,
-            signing_seed,
-            created_loa_key,
+            signing_seed: Mutex::new(signing_seed),
         })
     }
 
-    pub fn created_loa_key(&self) -> bool {
-        self.created_loa_key
+    /// Create new LOAD. Writes this node's LOA credentials once.
+    ///
+    /// A second call fails. The returned bytes are the Ed25519 verifying key.
+    pub fn create_load(&self) -> Result<[u8; 32], StoreError> {
+        let mut slot = self
+            .signing_seed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_some() || self.loa_key_path.is_file() {
+            return Err(StoreError::LoadAlreadyExists);
+        }
+        let mut seed = [0_u8; SIGNING_SEED_LEN];
+        if let Err(error) = getrandom::getrandom(&mut seed) {
+            seed.zeroize();
+            return Err(StoreError::Entropy(error.to_string()));
+        }
+        let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+        if let Err(error) = install_local_loa(&self.loa_key_path, &seed, &public) {
+            seed.zeroize();
+            return Err(error);
+        }
+        *slot = Some(seed);
+        Ok(public)
+    }
+
+    /// Copy a LOA verifying key into this store's trusted set.
+    ///
+    /// The same key may be installed again. A file that already holds different
+    /// bytes is left untouched and reported as an error.
+    pub fn trust_loa(&self, public_key: &[u8; 32]) -> Result<(), StoreError> {
+        if VerifyingKey::from_bytes(public_key).is_err() {
+            return Err(StoreError::InvalidEnvelope(
+                "trusted LOA public key is not a valid Ed25519 verifying key".to_string(),
+            ));
+        }
+        ensure_loa_dirs(&self.loa_key_path)?;
+        write_trusted(&self.loa_key_path, public_key)
+    }
+
+    /// Check an object envelope against this node's trusted LOA public keys.
+    ///
+    /// The signed bytes are every line before `signature`, including `object-id`.
+    pub fn verify_trusted_object_envelope(
+        &self,
+        envelope: &str,
+        object_id: &str,
+    ) -> Result<(), StoreError> {
+        let (statement, signature_hex) = split_signature(envelope)?;
+        if !statement.ends_with(&format!("object-id {object_id}\n")) {
+            return Err(StoreError::InvalidEnvelope(
+                "object envelope names a different object".to_string(),
+            ));
+        }
+        verify_statement(
+            statement,
+            signature_hex,
+            &load_trusted_loas(&self.loa_key_path)?,
+            "object envelope signature does not match a trusted LOA",
+        )
+    }
+
+    /// Check a transfer envelope against this node's trusted LOA public keys.
+    ///
+    /// The signed bytes are the claims in the envelope followed by the transfer manifest.
+    pub fn verify_trusted_transfer_envelope(
+        &self,
+        envelope: &str,
+        manifest: &str,
+    ) -> Result<(), StoreError> {
+        let (claims, signature_hex) = split_signature(envelope)?;
+        let statement = format!("{claims}{manifest}");
+        verify_statement(
+            &statement,
+            signature_hex,
+            &load_trusted_loas(&self.loa_key_path)?,
+            "transfer envelope signature does not match a trusted LOA",
+        )
     }
 
     pub fn loa_key_path(&self) -> &Path {
         &self.loa_key_path
+    }
+
+    fn signing_seed(&self) -> Result<[u8; SIGNING_SEED_LEN], StoreError> {
+        self.signing_seed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ok_or(StoreError::NotInLoadDomain)
+    }
+
+    /// A store opened in tests can sign. Create new LOAD when this directory has none.
+    #[cfg(test)]
+    pub fn open_with_load(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        let store = Self::open(root)?;
+        if store.signing_seed().is_ok() {
+            return Ok(store);
+        }
+        store.create_load()?;
+        Ok(store)
     }
 
     pub fn import_reader(
@@ -322,17 +427,18 @@ impl ObjectStore {
         length: u64,
         claims: &Claims,
     ) -> Result<ObjectId, StoreError> {
+        let seed = self.signing_seed()?;
         let staged = self.stage_import(reader, length)?;
         let id = staged.id.clone();
         let destination = self.data.join(&id);
         if destination.exists() {
             require_same_length(&destination, &id, length)?;
-            write_loa_envelope(&destination, &id, &self.signing_seed, claims)?;
+            write_loa_envelope(&destination, &id, &seed, claims)?;
             drop(staged.cleanup);
             return Ok(ObjectId(id));
         }
         write_manifest(&staged.staging, &id, length)?;
-        write_loa_envelope(&staged.staging, &id, &self.signing_seed, claims)?;
+        write_loa_envelope(&staged.staging, &id, &seed, claims)?;
         self.commit_staged(&staged, &destination)?;
         Ok(ObjectId(id))
     }
@@ -460,7 +566,8 @@ impl ObjectStore {
         } else {
             let loa = fs::read_to_string(dir.join("LOA-envelope"))?;
             let claims = claims_from_loa_envelope(&loa, id.as_str())?;
-            let text = transfer_envelope_text(&claims, &manifest, &self.signing_seed);
+            let seed = self.signing_seed()?;
+            let text = transfer_envelope_text(&claims, &manifest, &seed);
             write_atomic(&envelope_path, text.as_bytes())?;
             text
         };
@@ -677,15 +784,8 @@ impl ObjectStore {
                 id: id.as_str().to_string(),
             });
         }
-        if claims_from_loa_envelope(object_envelope, id.as_str()).is_err()
-            || !object_envelope
-                .lines()
-                .any(|line| line.starts_with("signature "))
-        {
-            return Err(StoreError::InvalidClaim(
-                "object envelope does not match the object".to_string(),
-            ));
-        }
+        claims_from_loa_envelope(object_envelope, id.as_str())?;
+        self.verify_trusted_object_envelope(object_envelope, id.as_str())?;
         let destination = self.data.join(id.as_str());
         fs::create_dir_all(&destination)?;
         install_document(&destination.join("manifest"), object_manifest, id.as_str())?;
@@ -704,6 +804,7 @@ impl ObjectStore {
         transfer_manifest: &str,
         transfer_envelope: &str,
     ) -> Result<(), StoreError> {
+        self.verify_trusted_transfer_envelope(transfer_envelope, transfer_manifest)?;
         let destination = self.data.join(id.as_str());
         fs::create_dir_all(&destination)?;
         install_document(
@@ -795,61 +896,99 @@ impl ObjectStore {
 
 impl Drop for ObjectStore {
     fn drop(&mut self) {
-        self.signing_seed.zeroize();
+        if let Some(seed) = self
+            .signing_seed
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+        {
+            seed.zeroize();
+        }
     }
 }
 
-fn load_or_create_loa_key(
-    keys: &Path,
-) -> Result<([u8; SIGNING_SEED_LEN], bool, PathBuf), StoreError> {
-    let path = keys.join(LOA_KEY_FILE);
-    if path.is_file() {
-        let seed = read_loa_signing_seed(&path)?;
-        return Ok((seed, false, path));
-    }
-    let mut secret = [0_u8; LOA_KEY_LEN];
-    getrandom::getrandom(&mut secret).map_err(|error| StoreError::Entropy(error.to_string()))?;
-    let staging = keys.join(format!(".{LOA_KEY_FILE}.{}.staging", std::process::id()));
-    write_secret(&staging, &secret)?;
-    let created = match fs::hard_link(&staging, &path) {
-        Ok(()) => true,
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
-        Err(error) => {
-            let _ = fs::remove_file(&staging);
-            secret.zeroize();
-            return Err(error.into());
-        }
-    };
-    let _ = fs::remove_file(&staging);
-    if created {
-        let mut seed = [0_u8; SIGNING_SEED_LEN];
-        seed.copy_from_slice(&secret[SIGNING_SEED_LEN..]);
-        secret.zeroize();
-        return Ok((seed, true, path));
-    }
-    secret.zeroize();
-    let seed = read_loa_signing_seed(&path)?;
-    Ok((seed, false, path))
+fn loa_private_path(root: &Path) -> PathBuf {
+    root.join(LOA_DIR)
+        .join(LOA_LOCAL_DIR)
+        .join(LOA_PRIVATE_FILE)
+}
+
+fn loa_public_path(private: &Path) -> PathBuf {
+    private.with_file_name(LOA_PUBLIC_FILE)
+}
+
+fn trusted_loa_path(private: &Path, public_key: &[u8; 32]) -> PathBuf {
+    private
+        .parent()
+        .and_then(Path::parent)
+        .expect("loa directory")
+        .join(LOA_TRUSTED_DIR)
+        .join(hex_encode(public_key))
 }
 
 fn read_loa_signing_seed(path: &Path) -> Result<[u8; SIGNING_SEED_LEN], StoreError> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
-    if length != LOA_KEY_LEN as u64 {
+    if length != SIGNING_SEED_LEN as u64 {
         return Err(StoreError::MalformedLoaKey {
             path: path.to_path_buf(),
             found: length,
         });
     }
-    let mut secret = [0_u8; LOA_KEY_LEN];
-    file.read_exact(&mut secret)?;
     let mut seed = [0_u8; SIGNING_SEED_LEN];
-    seed.copy_from_slice(&secret[SIGNING_SEED_LEN..]);
-    secret.zeroize();
+    file.read_exact(&mut seed)?;
     Ok(seed)
 }
 
-fn write_secret(path: &Path, secret: &[u8; LOA_KEY_LEN]) -> Result<(), StoreError> {
+fn install_local_loa(
+    private_path: &Path,
+    seed: &[u8; SIGNING_SEED_LEN],
+    public: &[u8; 32],
+) -> Result<(), StoreError> {
+    ensure_loa_dirs(private_path)?;
+    let staging = private_path.with_file_name(format!(
+        ".{LOA_PRIVATE_FILE}.{}.staging",
+        std::process::id()
+    ));
+    if let Err(error) = write_secret(&staging, seed) {
+        let _ = fs::remove_file(&staging);
+        return Err(error);
+    }
+    let created = match fs::hard_link(&staging, private_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            let _ = fs::remove_file(&staging);
+            return Err(error.into());
+        }
+    };
+    let _ = fs::remove_file(&staging);
+    if !created {
+        return Err(StoreError::LoadAlreadyExists);
+    }
+    if let Err(error) = write_public(&loa_public_path(private_path), public) {
+        let _ = fs::remove_file(private_path);
+        return Err(error);
+    }
+    if let Err(error) = write_trusted(private_path, public) {
+        let _ = fs::remove_file(private_path);
+        let _ = fs::remove_file(loa_public_path(private_path));
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn write_trusted(private_path: &Path, public: &[u8; 32]) -> Result<(), StoreError> {
+    let path = trusted_loa_path(private_path, public);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o755))?;
+    }
+    write_public(&path, public)
+}
+
+fn write_secret(path: &Path, secret: &[u8; SIGNING_SEED_LEN]) -> Result<(), StoreError> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -857,6 +996,45 @@ fn write_secret(path: &Path, secret: &[u8; LOA_KEY_LEN]) -> Result<(), StoreErro
     let mut file = options.open(path)?;
     file.write_all(secret)?;
     file.sync_all()?;
+    Ok(())
+}
+
+fn write_public(path: &Path, public: &[u8; 32]) -> Result<(), StoreError> {
+    if path.is_file() {
+        let existing = fs::read(path)?;
+        if existing == public {
+            return Ok(());
+        }
+        return Err(StoreError::InvalidEnvelope(
+            "LOA public key already exists with different bytes".to_string(),
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o644);
+    let mut file = options.open(path)?;
+    file.write_all(public)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn ensure_loa_dirs(private_path: &Path) -> Result<(), StoreError> {
+    let Some(local) = private_path.parent() else {
+        return Ok(());
+    };
+    fs::create_dir_all(local)?;
+    #[cfg(unix)]
+    fs::set_permissions(local, fs::Permissions::from_mode(0o700))?;
+    let Some(loa) = local.parent() else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    fs::set_permissions(loa, fs::Permissions::from_mode(0o700))?;
+    let trusted = loa.join(LOA_TRUSTED_DIR);
+    fs::create_dir_all(&trusted)?;
+    #[cfg(unix)]
+    fs::set_permissions(&trusted, fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -934,11 +1112,52 @@ pub fn parse_verifying_key(text: &str) -> Result<[u8; 32], StoreError> {
     Ok(key)
 }
 
-fn verify_loa_envelope(
-    envelope: &str,
-    object_id: &str,
-    verifying_key: &[u8; 32],
-) -> Result<(), StoreError> {
+fn load_trusted_loas(private_path: &Path) -> Result<Vec<[u8; 32]>, StoreError> {
+    let Some(loa) = private_path.parent().and_then(Path::parent) else {
+        return Ok(Vec::new());
+    };
+    let trusted = loa.join(LOA_TRUSTED_DIR);
+    if !trusted.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut keys = Vec::new();
+    for entry in fs::read_dir(&trusted)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = fs::read(&path)?;
+        if bytes.len() != 32 {
+            return Err(StoreError::InvalidEnvelope(format!(
+                "trusted LOA public key {} holds {} bytes, expected 32",
+                path.display(),
+                bytes.len()
+            )));
+        }
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(&bytes);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name != hex_encode(&key) {
+            return Err(StoreError::InvalidEnvelope(format!(
+                "trusted LOA public key {} is not named with its hex encoding",
+                path.display()
+            )));
+        }
+        if VerifyingKey::from_bytes(&key).is_err() {
+            return Err(StoreError::InvalidEnvelope(format!(
+                "trusted LOA public key {} is not a valid Ed25519 verifying key",
+                path.display()
+            )));
+        }
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn split_signature(envelope: &str) -> Result<(&str, &str), StoreError> {
     let Some((statement, signature_line)) = envelope.rsplit_once("signature ") else {
         return Err(StoreError::InvalidEnvelope(
             "object envelope has no signature".to_string(),
@@ -950,27 +1169,56 @@ fn verify_loa_envelope(
             "object envelope has no signature".to_string(),
         ));
     }
-    if !statement.ends_with(&format!("object-id {object_id}\n")) {
-        return Err(StoreError::InvalidEnvelope(
-            "object envelope names a different object".to_string(),
-        ));
+    Ok((statement, signature_hex))
+}
+
+fn verify_statement(
+    statement: &str,
+    signature_hex: &str,
+    keys: &[[u8; 32]],
+    mismatch: &str,
+) -> Result<(), StoreError> {
+    if keys.is_empty() {
+        return Err(StoreError::NotInLoadDomain);
     }
     let signature_bytes = hex_decode(signature_hex)
         .filter(|bytes| bytes.len() == 64)
         .ok_or_else(|| {
             StoreError::InvalidEnvelope("object envelope signature is not 64 bytes".to_string())
         })?;
-    let key = VerifyingKey::from_bytes(verifying_key).map_err(|_| {
-        StoreError::InvalidEnvelope("authority is not a valid Ed25519 verifying key".to_string())
-    })?;
     let signature = Signature::from_slice(&signature_bytes).map_err(|_| {
         StoreError::InvalidEnvelope("object envelope signature is not 64 bytes".to_string())
     })?;
-    key.verify(statement.as_bytes(), &signature).map_err(|_| {
-        StoreError::InvalidEnvelope(
-            "object envelope signature does not match the authority".to_string(),
-        )
-    })
+    for key in keys {
+        let verifying = VerifyingKey::from_bytes(key).map_err(|_| {
+            StoreError::InvalidEnvelope(
+                "authority is not a valid Ed25519 verifying key".to_string(),
+            )
+        })?;
+        if verifying.verify(statement.as_bytes(), &signature).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(StoreError::InvalidEnvelope(mismatch.to_string()))
+}
+
+fn verify_loa_envelope(
+    envelope: &str,
+    object_id: &str,
+    verifying_key: &[u8; 32],
+) -> Result<(), StoreError> {
+    let (statement, signature_hex) = split_signature(envelope)?;
+    if !statement.ends_with(&format!("object-id {object_id}\n")) {
+        return Err(StoreError::InvalidEnvelope(
+            "object envelope names a different object".to_string(),
+        ));
+    }
+    verify_statement(
+        statement,
+        signature_hex,
+        &[*verifying_key],
+        "object envelope signature does not match the authority",
+    )
 }
 
 struct StagedImport {
@@ -1173,7 +1421,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -1206,7 +1454,7 @@ mod tests {
     #[test]
     fn import_writes_data_and_manifest_and_repeats_the_same_id() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open(root.path()).expect("store");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
         let bytes = b"abc";
         let first = store
             .import_reader(Cursor::new(bytes), bytes.len() as u64, &Claims::none())
@@ -1236,9 +1484,8 @@ mod tests {
             first.as_str(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert!(store.created_loa_key());
         let object = root.path().join("data").join(first.as_str());
-        assert!(root.path().join("keys").is_dir());
+        assert!(root.path().join("loa").join("local").is_dir());
         assert!(!root.path().join(first.as_str()).exists());
         assert_eq!(fs::read(object.join("data")).expect("data"), bytes);
         assert_eq!(
@@ -1254,9 +1501,10 @@ mod tests {
             .and_then(|rest| rest.strip_suffix('\n'))
             .expect("signature line");
         let signature_bytes = hex_decode(signature).expect("signature hex");
-        let key = fs::read(root.path().join("keys").join("local_object_authority")).expect("key");
-        assert_eq!(key.len(), 64);
-        let signing = ed25519_dalek::SigningKey::from_bytes(key[32..].try_into().expect("seed"));
+        let key = fs::read(root.path().join("loa").join("local").join("private")).expect("key");
+        assert_eq!(key.len(), 32);
+        let signing =
+            ed25519_dalek::SigningKey::from_bytes(key.as_slice().try_into().expect("seed"));
         let signature = ed25519_dalek::Signature::from_bytes(
             signature_bytes.as_slice().try_into().expect("sig"),
         );
@@ -1265,16 +1513,165 @@ mod tests {
             .verify(statement.as_bytes(), &signature)
             .expect("signature verifies");
         let again = ObjectStore::open(root.path()).expect("reopen");
-        assert!(!again.created_loa_key());
         assert_eq!(fs::read(again.loa_key_path()).expect("same key"), key);
+    }
+
+    #[test]
+    fn open_does_not_create_loa_credentials() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = ObjectStore::open(root.path()).expect("store");
+        assert!(!store.loa_key_path().is_file());
+        let error = store
+            .import_reader(Cursor::new(b"abc"), 3, &Claims::none())
+            .expect_err("signing import");
+        assert_eq!(error.to_string(), "This node is not part of a LOA Domain");
+
+        let bytes = b"abc";
+        let id = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
+        let statement = format!("object-id {id}\n");
+        let signature = signing.sign(statement.as_bytes());
+        let envelope = format!(
+            "{statement}signature {}\n",
+            hex_encode(&signature.to_bytes())
+        );
+        store
+            .import_envelope(
+                Cursor::new(bytes),
+                bytes.len() as u64,
+                &envelope,
+                &signing.verifying_key().to_bytes(),
+            )
+            .expect("stored envelope");
+        let stored = ObjectId::parse(id).expect("id");
+        match store.ensure_transfer_documents(&stored) {
+            Err(error) => assert_eq!(error.to_string(), "This node is not part of a LOA Domain"),
+            Ok(_) => panic!("transfer signature must require LOA credentials"),
+        }
+
+        let public = store.create_load().expect("create load");
+        assert_eq!(public.len(), 32);
+        assert!(store.loa_key_path().is_file());
+        assert_eq!(
+            fs::read(root.path().join("loa").join("local").join("public")).expect("public"),
+            public
+        );
+        assert_eq!(
+            fs::read(
+                root.path()
+                    .join("loa")
+                    .join("trusted")
+                    .join(hex_encode(&public))
+            )
+            .expect("trusted"),
+            public
+        );
+        store
+            .ensure_transfer_documents(&stored)
+            .expect("signed after create");
+        let again = store.create_load().expect_err("second create");
+        assert_eq!(
+            again.to_string(),
+            "This node already belongs to a LOA Domain"
+        );
+        let reopened = ObjectStore::open(root.path()).expect("reopen");
+        let still = reopened.create_load().expect_err("create after reopen");
+        assert_eq!(
+            still.to_string(),
+            "This node already belongs to a LOA Domain"
+        );
+    }
+
+    #[test]
+    fn trust_loa_installs_a_public_key_without_a_local_secret() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = ObjectStore::open(root.path()).expect("store");
+        let public = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32])
+            .verifying_key()
+            .to_bytes();
+        store.trust_loa(&public).expect("trust");
+        store.trust_loa(&public).expect("same key again");
+        assert!(!store.loa_key_path().is_file());
+        assert!(root.path().join("loa").join("local").is_dir());
+        assert_eq!(
+            fs::read(
+                root.path()
+                    .join("loa")
+                    .join("trusted")
+                    .join(hex_encode(&public))
+            )
+            .expect("trusted"),
+            public
+        );
+    }
+
+    #[test]
+    fn an_offer_envelope_must_match_a_trusted_loa() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let id = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let object_id = ObjectId::parse(id).expect("id");
+        let manifest = format!("object-id {id}\nlength 3\n");
+        let statement = format!("object-id {id}\n");
+        let foreign = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
+        let foreign_envelope = format!(
+            "{statement}signature {}\n",
+            hex_encode(&foreign.sign(statement.as_bytes()).to_bytes())
+        );
+        let error = store
+            .store_object_documents(&object_id, &manifest, &foreign_envelope)
+            .expect_err("foreign signature");
+        assert!(error.to_string().contains("does not match a trusted LOA"));
+        assert!(!root
+            .path()
+            .join("data")
+            .join(id)
+            .join("LOA-envelope")
+            .exists());
+
+        let local = fs::read(store.loa_key_path()).expect("private");
+        let signing =
+            ed25519_dalek::SigningKey::from_bytes(local.as_slice().try_into().expect("seed"));
+        let envelope = format!(
+            "{statement}signature {}\n",
+            hex_encode(&signing.sign(statement.as_bytes()).to_bytes())
+        );
+        store
+            .store_object_documents(&object_id, &manifest, &envelope)
+            .expect("trusted signature");
+
+        let transfer_manifest =
+            format!("object-id {id}\nlength 3\npiece-size 4096\npiece 0 {id}\n");
+        let foreign_transfer = format!(
+            "signature {}\n",
+            hex_encode(&foreign.sign(transfer_manifest.as_bytes()).to_bytes())
+        );
+        let error = store
+            .store_transfer_documents(&object_id, &transfer_manifest, &foreign_transfer)
+            .expect_err("foreign transfer signature");
+        assert!(error.to_string().contains("does not match a trusted LOA"));
+        let transfer_envelope = format!(
+            "signature {}\n",
+            hex_encode(&signing.sign(transfer_manifest.as_bytes()).to_bytes())
+        );
+        store
+            .store_transfer_documents(&object_id, &transfer_manifest, &transfer_envelope)
+            .expect("trusted transfer signature");
+
+        let bare_root = tempfile::tempdir().expect("temp dir");
+        let bare = ObjectStore::open(bare_root.path()).expect("bare");
+        let missing = bare
+            .store_object_documents(&object_id, &manifest, &envelope)
+            .expect_err("no trusted key");
+        assert_eq!(missing.to_string(), "This node is not part of a LOA Domain");
     }
 
     #[test]
     fn open_refuses_a_short_loa_key() {
         let root = tempfile::tempdir().expect("temp dir");
-        let keys = root.path().join("keys");
-        fs::create_dir_all(&keys).expect("keys");
-        fs::write(keys.join("local_object_authority"), [1, 2, 3]).expect("short key");
+        let local = root.path().join("loa").join("local");
+        fs::create_dir_all(&local).expect("local");
+        fs::write(local.join("private"), [1, 2, 3]).expect("short key");
         match ObjectStore::open(root.path()) {
             Err(error) => assert!(error.to_string().contains("3 bytes")),
             Ok(_store) => panic!("a short Local Object Authority key must not open"),
@@ -1284,7 +1681,7 @@ mod tests {
     #[test]
     fn import_signs_the_claims_into_the_loa_envelope() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open(root.path()).expect("store");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
         let bytes = b"abc";
         let claims = Claims::parse([
             "board=heltec-v4-r8",
@@ -1310,8 +1707,9 @@ mod tests {
             .and_then(|rest| rest.strip_suffix('\n'))
             .expect("signature line");
         let signature_bytes = hex_decode(signature).expect("signature hex");
-        let key = fs::read(root.path().join("keys").join("local_object_authority")).expect("key");
-        let signing = ed25519_dalek::SigningKey::from_bytes(key[32..].try_into().expect("seed"));
+        let key = fs::read(root.path().join("loa").join("local").join("private")).expect("key");
+        let signing =
+            ed25519_dalek::SigningKey::from_bytes(key.as_slice().try_into().expect("seed"));
         let signature = ed25519_dalek::Signature::from_bytes(
             signature_bytes.as_slice().try_into().expect("sig"),
         );
@@ -1406,7 +1804,7 @@ mod tests {
     #[test]
     fn open_data_returns_the_stored_bytes() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open(root.path()).expect("store");
+        let store = ObjectStore::open_with_load(root.path()).expect("store");
         let id = store
             .import_reader(Cursor::new(b"abc"), 3, &Claims::none())
             .expect("import");
