@@ -1392,8 +1392,28 @@ pub(crate) fn manifest_length(text: &str) -> Option<u64> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), StoreError> {
-    File::open(path)?.sync_all()?;
+    open_directory(path)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_directory(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// Windows flushes a directory only through a writable handle opened with
+/// backup semantics. A read-only handle makes `FlushFileBuffers` return
+/// access denied.
+#[cfg(windows)]
+fn open_directory(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
 }
 
 pub(crate) fn hex_decode(text: &str) -> Option<Vec<u8>> {
