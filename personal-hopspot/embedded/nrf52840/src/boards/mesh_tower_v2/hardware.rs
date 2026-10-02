@@ -6,7 +6,9 @@ use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::rng::Rng;
+use embassy_nrf::saadc::{self, ChannelConfig, Config as SaadcConfig, Gain, Reference, Saadc};
 use embassy_nrf::spim::{self, Spim};
+use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::usb::Driver;
 use embassy_nrf::{bind_interrupts, config, peripherals, usb};
@@ -23,6 +25,8 @@ use crate::boards::status_led::StatusLed;
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
     TWISPI0 => spim::InterruptHandler<peripherals::TWISPI0>;
+    TWISPI1 => twim::InterruptHandler<peripherals::TWISPI1>;
+    SAADC => saadc::InterruptHandler;
 });
 
 type MeshTowerV2SpiDevice = ExclusiveDevice<Spim<'static>, Output<'static>, Delay>;
@@ -40,6 +44,8 @@ pub(crate) struct MeshTowerV2Hardware {
     pub(crate) radio: MeshTowerV2Radio,
     pub(crate) status_led: StatusLed,
     pub(crate) button: Input<'static>,
+    pub(crate) sd: super::sd::SdCard,
+    pub(crate) battery: super::battery::BatteryProbe,
 }
 
 struct HeldIo {
@@ -47,8 +53,8 @@ struct HeldIo {
     fem_tx_rx: Output<'static>,
     watchdog_done: Output<'static>,
     _watchdog_wake: Input<'static>,
-    _gps_en: Output<'static>,
     _pa_detect: Input<'static>,
+    _gps_en: Output<'static>,
 }
 
 static HELD_IO: Mutex<CriticalSectionRawMutex, RefCell<Option<HeldIo>>> =
@@ -76,6 +82,8 @@ impl MeshTowerV2Board {
         // radio event can preempt LoRa SPI.
         interrupt::USBD.set_priority(Priority::P2);
         interrupt::TWISPI0.set_priority(Priority::P3);
+        interrupt::TWISPI1.set_priority(Priority::P3);
+        interrupt::SAADC.set_priority(Priority::P3);
         static SOFTWARE_VBUS: StaticCell<SoftwareVbusDetect> = StaticCell::new();
         let vbus = crate::runtime::software_vbus::initialize(&SOFTWARE_VBUS);
         let usb = Driver::new(peripherals.USBD, Irqs, vbus);
@@ -117,17 +125,16 @@ impl MeshTowerV2Board {
         Timer::after_millis(1).await;
         watchdog_done.set_low();
 
-        // GPS_EN is active-low; hold it high so the L76K stays off until a GPS face exists.
+        // VGNSS_Ctrl is active-low through a P-channel MOSFET. Hold it off.
         let gps_en = Output::new(peripherals.P0_07, Level::High, OutputDrive::Standard);
-
         HELD_IO.lock(|held| {
             *held.borrow_mut() = Some(HeldIo {
                 fem_enable,
                 fem_tx_rx,
                 watchdog_done,
                 _watchdog_wake: watchdog_wake,
-                _gps_en: gps_en,
                 _pa_detect: pa_detect,
+                _gps_en: gps_en,
             });
         });
 
@@ -158,6 +165,41 @@ impl MeshTowerV2Board {
         ));
         let button = Input::new(peripherals.P1_10, Pull::Up);
 
+        // HT-N5262M netlist: CS P1.00, CLK P0.06, MOSI P1.01, MISO P0.26.
+        // Clocked from GPIO so a silent hardware SPI block cannot hide the card.
+        let sd_sck = Output::new(peripherals.P0_06, Level::Low, OutputDrive::Standard);
+        let sd_mosi = Output::new(peripherals.P1_01, Level::High, OutputDrive::Standard);
+        let sd_miso = Input::new(peripherals.P0_26, Pull::Up);
+        let sd_cs = Output::new(peripherals.P1_00, Level::High, OutputDrive::Standard);
+        let sd = super::sd::SdCard::new(sd_sck, sd_mosi, sd_miso, sd_cs);
+
+        let mut battery_channel = ChannelConfig::single_ended(peripherals.P0_04);
+        battery_channel.reference = Reference::INTERNAL;
+        battery_channel.gain = Gain::GAIN1_5;
+        let battery_adc = Saadc::new(
+            peripherals.SAADC,
+            Irqs,
+            SaadcConfig::default(),
+            [battery_channel],
+        );
+        let battery_divider = Output::new(peripherals.P0_21, Level::Low, OutputDrive::Standard);
+        // HUSB238 USB-PD sink. It is powered with the battery switch, so a 5 V Mac cable
+        // alone does not make it acknowledge.
+        static PD_RAM: StaticCell<[u8; 1]> = StaticCell::new();
+        let mut pd_config = twim::Config::default();
+        pd_config.frequency = twim::Frequency::K100;
+        pd_config.sda_pullup = true;
+        pd_config.scl_pullup = true;
+        let pd_bus = Twim::new(
+            peripherals.TWISPI1,
+            Irqs,
+            peripherals.P0_30,
+            peripherals.P0_05,
+            pd_config,
+            PD_RAM.init([0]),
+        );
+        let battery = super::battery::BatteryProbe::new(battery_adc, battery_divider, pd_bus);
+
         (
             identity,
             MeshTowerV2Hardware {
@@ -166,6 +208,8 @@ impl MeshTowerV2Board {
                 radio,
                 status_led,
                 button,
+                sd,
+                battery,
             },
         )
     }

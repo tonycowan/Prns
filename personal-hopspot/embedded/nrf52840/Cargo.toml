@@ -29,6 +29,10 @@ board-rak10724 = ["embassy-nrf/nfc-pins-as-gpio", "softdevice-s140-v6", "remote-
 remote-control-path-table = ["personal-rns/remote-control-path-table", "prns-core/remote-control-path-table"]
 # USB CDC console beside WebUSB. Opt in per image: `--features <board>,usb-debug-log`.
 usb-debug-log = ["personal-rns/log", "dep:log"]
+# Proof image: wait, then print its name. The default MeshTower image is the card copier.
+image-spruce-101 = []
+# Power-report image. Skips the card copier so a held button cannot rewrite flash.
+image-battery-sense = []
 softdevice-s140-v6 = ["dep:nrf-softdevice", "nrf-softdevice/s140-v6"]
 softdevice-s140-v7 = ["dep:nrf-softdevice", "nrf-softdevice/s140-v7"]
 

@@ -1,5 +1,11 @@
+mod battery;
 mod hardware;
 mod identity;
+mod sd;
+mod update;
+
+pub(crate) use battery::{console_tick, report_battery};
+pub(crate) use sd::publish_root_test_file;
 
 use embassy_nrf::gpio::Input;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;

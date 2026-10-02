@@ -301,6 +301,8 @@ pub async fn run(spawner: Spawner) -> ! {
         radio,
         mut status_led,
         button,
+        sd: sd_card,
+        battery,
     } = hardware;
     #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
     let Hardware {
@@ -629,6 +631,12 @@ pub async fn run(spawner: Spawner) -> ! {
         gnss,
     )
     .await;
+    #[cfg(feature = "board-mesh-tower-v2")]
+    spawner.spawn(board::publish_root_test_file(sd_card).expect("sd card task fits"));
+    #[cfg(feature = "board-mesh-tower-v2")]
+    spawner.spawn(board::console_tick().expect("console tick task fits"));
+    #[cfg(feature = "board-mesh-tower-v2")]
+    spawner.spawn(board::report_battery(battery).expect("battery task fits"));
     #[cfg(any(
         feature = "board-mesh-tower-v2",
         feature = "board-rak4631",

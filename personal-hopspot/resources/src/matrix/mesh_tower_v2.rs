@@ -14,7 +14,7 @@ pub(super) const fn recipe() -> firmware::Recipe<'static> {
         package: "t-echo",
         binary: "heltec-mesh-tower-v2",
         rust_target: "thumbv7em-none-eabihf",
-        cargo_features: "board-mesh-tower-v2,softdevice-s140-v6",
+        cargo_features: "board-mesh-tower-v2,softdevice-s140-v6,usb-debug-log",
         lto: LtoMode::Thin,
     }
 }
