@@ -2,7 +2,7 @@
 
 This checked bundle covers the shipped and qualification Rust, JavaScript, and Android product graphs.
 It was generated with `cargo-about 0.9.1` by `./tools/prns repo notices generate`.
-Notice input fingerprint: `sha256:83ad9cce337a2cb85aaa5b3c7d0b65845157642c31668d0438264aca47bb7c97`.
+Notice input fingerprint: `sha256:a9137048743c65f4056da870bde6d6a79fa8d4d515c7765983191531641d892b`.
 Each locked Rust manifest closure is fetched into a fresh isolated Cargo home before cargo-about reads its target-filtered packaged license material offline.
 Entries are deduplicated by SPDX identifier and canonical notice text; line endings, trailing space, and repeated blank lines are normalized without changing legal words.
 
@@ -1417,7 +1417,7 @@ License: Apache License 2.0
 
 Used by: `zopfli 0.8.3`
 
-Release graphs: daemon Linux, daemon macOS
+Release graphs: daemon Linux, daemon Windows, daemon macOS
 
 ```text
 Apache License
@@ -2240,7 +2240,7 @@ License: BSD 3-Clause "New" or "Revised" License
 
 Used by: `curve25519-dalek 4.1.3`, `nrf-pac 0.3.0`
 
-Release graphs: daemon Linux, daemon macOS, nRF52840
+Release graphs: daemon Linux, daemon Windows, daemon macOS, nRF52840
 
 ```text
 Copyright (c) <year> <owner>.
@@ -2584,7 +2584,7 @@ License: Community Data License Agreement Permissive 2.0
 
 Used by: `webpki-roots 1.0.8`, `webpki-roots 1.0.9`
 
-Release graphs: daemon Linux, daemon macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: daemon Linux, daemon Windows, daemon macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 # Community Data License Agreement - Permissive - Version 2.0
@@ -2896,7 +2896,7 @@ License: MIT License
 
 Used by: `zip 2.4.2`
 
-Release graphs: daemon Linux, daemon macOS
+Release graphs: daemon Linux, daemon Windows, daemon macOS
 
 ```text
 The MIT License (MIT)
@@ -3581,7 +3581,7 @@ License: MIT License
 
 Used by: `flate2 1.1.9`
 
-Release graphs: daemon Linux, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 Copyright (c) 2014-2026 Alex Crichton
@@ -3795,7 +3795,7 @@ License: MIT License
 
 Used by: `ureq 3.3.0`
 
-Release graphs: daemon Linux, daemon macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: daemon Linux, daemon Windows, daemon macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 MIT License
@@ -4021,7 +4021,7 @@ License: MIT License
 
 Used by: `base64 0.23.1`
 
-Release graphs: daemon Linux, daemon macOS
+Release graphs: daemon Linux, daemon Windows, daemon macOS
 
 ```text
 The MIT License (MIT)
@@ -4902,7 +4902,7 @@ License: MIT License
 
 Used by: `equivalent 1.0.2`
 
-Release graphs: ESP32-C6, ESP32-S3 Heltec, ESP32-S3 Heltec E290, ESP32-S3 Heltec R8, ESP32-S3 Heltec Wireless Stick Lite V3, ESP32-S3 T-Beam, Node addon macOS, daemon Linux, daemon macOS, desktop Linux, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: ESP32-C6, ESP32-S3 Heltec, ESP32-S3 Heltec E290, ESP32-S3 Heltec R8, ESP32-S3 Heltec Wireless Stick Lite V3, ESP32-S3 T-Beam, Node addon macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 Copyright (c) 2016--2023
@@ -5322,7 +5322,7 @@ License: MIT License
 
 Used by: `indexmap 2.14.0`
 
-Release graphs: ESP32-C6, ESP32-S3 Heltec, ESP32-S3 Heltec E290, ESP32-S3 Heltec R8, ESP32-S3 Heltec Wireless Stick Lite V3, ESP32-S3 T-Beam, Node addon macOS, daemon Linux, daemon macOS, desktop Linux, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: ESP32-C6, ESP32-S3 Heltec, ESP32-S3 Heltec E290, ESP32-S3 Heltec R8, ESP32-S3 Heltec Wireless Stick Lite V3, ESP32-S3 T-Beam, Node addon macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 Copyright (c) 2016--2017
@@ -5564,7 +5564,7 @@ License: MIT License
 
 Used by: `bumpalo 3.20.3`
 
-Release graphs: Nordic DFU browser core, WASM, daemon Linux, daemon macOS, engine, website Rust/WASM
+Release graphs: Nordic DFU browser core, WASM, daemon Linux, daemon Windows, daemon macOS, engine, website Rust/WASM
 
 ```text
 Copyright (c) 2019 Nick Fitzgerald
@@ -5837,7 +5837,7 @@ License: MIT License
 
 Used by: `simd-adler32 0.3.10`, `simd-adler32 0.3.9`
 
-Release graphs: daemon Linux, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 MIT License
@@ -6562,7 +6562,7 @@ License: MIT License
 
 Used by: `ed25519 2.2.3`, `signature 2.2.0`
 
-Release graphs: daemon Linux, daemon macOS
+Release graphs: daemon Linux, daemon Windows, daemon macOS
 
 ```text
 Copyright (c) 2018-2023 RustCrypto Developers
@@ -8425,7 +8425,7 @@ License: MIT License
 
 Used by: `miniz_oxide 0.8.9`
 
-Release graphs: daemon Linux, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 MIT License
@@ -8965,7 +8965,7 @@ License: MIT License
 
 Used by: `ureq-proto 0.6.0`, `ureq-proto 0.6.4`
 
-Release graphs: daemon Linux, daemon macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: daemon Linux, daemon Windows, daemon macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 Copyright 2022 Martin Algesten
