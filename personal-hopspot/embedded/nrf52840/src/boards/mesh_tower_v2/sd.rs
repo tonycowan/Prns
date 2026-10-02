@@ -1896,6 +1896,114 @@ pub(crate) async fn publish_test_file(card: SdCard) {
     alder_boot(card).await;
 }
 
+// Card read/write proof, kept out of the boot path. It read /Test.txt, then wrote and
+// read back /write.txt, before the firmware.bin check.
+//
+// const ROOT_FILE: &[u8] = b"Test.txt";
+// const PUBLISH_LIMIT: u64 = 2048;
+// const LINE_BYTES: usize = 96;
+// const LINE_PAUSE: Duration = Duration::from_millis(20);
+//
+// sd_log!("sd: /Test.txt in 5s");
+// match card.open_root_file(ROOT_FILE, scratch).await {
+//     Ok(file) => {
+//         sd_log!(
+//             "sd: {} lba {} /Test.txt {} bytes",
+//             card.link_label(),
+//             card.volume_lba(),
+//             file.valid_bytes
+//         );
+//         if let Err(error) = publish_contents(&mut card, &file, scratch).await {
+//             sd_log!("sd: {error}");
+//         }
+//         sd_log!("sd: /Test.txt end");
+//     }
+//     Err(error) => {
+//         sd_log!("sd: {error}");
+//         if matches!(error, VolumeError::NotExfat) && card.read_block(0, scratch).await.is_ok() {
+//             log_sector_prefix(scratch);
+//         }
+//     }
+// }
+// sd_log!("sd: writing /write.txt");
+// match card.store_root_file(WRITE_NAME, WRITE_BODY, scratch).await {
+//     Ok(()) => {
+//         sd_log!("sd: wrote /write.txt {} bytes", WRITE_BODY.len());
+//         match card.open_root_file(WRITE_NAME, scratch).await {
+//             Ok(file) => {
+//                 sd_log!("sd: read /write.txt {} bytes", file.valid_bytes);
+//                 if let Err(error) = publish_contents(&mut card, &file, scratch).await {
+//                     sd_log!("sd: {error}");
+//                 }
+//                 sd_log!("sd: /write.txt end");
+//             }
+//             Err(error) => sd_log!("sd: read /write.txt {error}"),
+//         }
+//     }
+//     Err(error) => sd_log!("sd: write /write.txt {error}"),
+// }
+//
+// async fn publish_contents(
+//     card: &mut SdCard,
+//     file: &RootFile,
+//     scratch: &mut [u8; BLOCK],
+// ) -> Result<(), VolumeError> {
+//     let mut shown = 0u64;
+//     while shown < file.valid_bytes && shown < PUBLISH_LIMIT {
+//         let len = card.load_file_slice(file, shown, scratch).await?;
+//         if len == 0 {
+//             return Err(VolumeError::Fat);
+//         }
+//         let room = usize::try_from(PUBLISH_LIMIT - shown).unwrap_or(len);
+//         let take = len.min(room);
+//         publish_text(&scratch[..take]).await;
+//         shown += take as u64;
+//     }
+//     if shown < file.valid_bytes {
+//         sd_log!("sd: truncated");
+//         Timer::after(LINE_PAUSE).await;
+//     }
+//     Ok(())
+// }
+//
+// async fn publish_text(bytes: &[u8]) {
+//     let mut line = heapless::String::<LINE_BYTES>::new();
+//     for &byte in bytes {
+//         if byte == b'\n' {
+//             sd_log!("{line}");
+//             line.clear();
+//             Timer::after(LINE_PAUSE).await;
+//             continue;
+//         }
+//         if byte == b'\r' {
+//             continue;
+//         }
+//         let ch = if byte.is_ascii_graphic() || byte == b' ' || byte == b'\t' {
+//             byte as char
+//         } else {
+//             '.'
+//         };
+//         if line.push(ch).is_err() {
+//             sd_log!("{line}");
+//             line.clear();
+//             Timer::after(LINE_PAUSE).await;
+//             let _ = line.push(ch);
+//         }
+//     }
+//     if !line.is_empty() {
+//         sd_log!("{line}");
+//         Timer::after(LINE_PAUSE).await;
+//     }
+// }
+//
+// fn log_sector_prefix(block: &[u8]) {
+//     let mut hex = heapless::String::<32>::new();
+//     for byte in block.iter().take(8) {
+//         let _ = write!(hex, "{byte:02x}");
+//     }
+//     sd_log!("sd: sector0 {hex}");
+// }
+
 #[cfg(all(
     not(feature = "image-battery-sense"),
     not(feature = "image-spruce-101")
