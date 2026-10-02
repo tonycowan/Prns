@@ -127,6 +127,7 @@
       "graphs": {
         "daemon-linux": [],
         "daemon-macos": [],
+        "daemon-windows": [],
         "desktop-linux": [],
         "desktop-macos": [],
         "desktop-windows": []
@@ -679,6 +680,10 @@
           "std"
         ],
         "daemon-macos": [
+          "alloc",
+          "std"
+        ],
+        "daemon-windows": [
           "alloc",
           "std"
         ]
@@ -1478,6 +1483,9 @@
           "default"
         ],
         "daemon-macos": [
+          "default"
+        ],
+        "daemon-windows": [
           "default"
         ],
         "nrf-dfu-browser": [
@@ -2490,7 +2498,8 @@
     {
       "graphs": {
         "daemon-linux": [],
-        "daemon-macos": []
+        "daemon-macos": [],
+        "daemon-windows": []
       },
       "name": "const-oid",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -3347,6 +3356,12 @@
           "digest",
           "precomputed-tables",
           "zeroize"
+        ],
+        "daemon-windows": [
+          "alloc",
+          "digest",
+          "precomputed-tables",
+          "zeroize"
         ]
       },
       "name": "curve25519-dalek",
@@ -4127,6 +4142,12 @@
           "oid",
           "std",
           "zeroize"
+        ],
+        "daemon-windows": [
+          "alloc",
+          "oid",
+          "std",
+          "zeroize"
         ]
       },
       "name": "der",
@@ -4837,6 +4858,10 @@
         "daemon-macos": [
           "alloc",
           "std"
+        ],
+        "daemon-windows": [
+          "alloc",
+          "std"
         ]
       },
       "name": "ed25519",
@@ -4932,6 +4957,13 @@
           "zeroize"
         ],
         "daemon-macos": [
+          "alloc",
+          "default",
+          "fast",
+          "std",
+          "zeroize"
+        ],
+        "daemon-windows": [
           "alloc",
           "default",
           "fast",
@@ -8048,6 +8080,12 @@
           "rust_backend"
         ],
         "daemon-macos": [
+          "any_impl",
+          "default",
+          "miniz_oxide",
+          "rust_backend"
+        ],
+        "daemon-windows": [
           "any_impl",
           "default",
           "miniz_oxide",
@@ -12589,7 +12627,8 @@
     {
       "graphs": {
         "daemon-linux": [],
-        "daemon-macos": []
+        "daemon-macos": [],
+        "daemon-windows": []
       },
       "name": "minisign-verify",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -12611,6 +12650,12 @@
           "with-alloc"
         ],
         "daemon-macos": [
+          "default",
+          "simd",
+          "simd-adler32",
+          "with-alloc"
+        ],
+        "daemon-windows": [
           "default",
           "simd",
           "simd-adler32",
@@ -15383,7 +15428,8 @@
     {
       "graphs": {
         "daemon-linux": [],
-        "daemon-macos": []
+        "daemon-macos": [],
+        "daemon-windows": []
       },
       "name": "obstore",
       "source": "obstore",
@@ -15941,6 +15987,7 @@
       "graphs": {
         "daemon-linux": [],
         "daemon-macos": [],
+        "daemon-windows": [],
         "esp32-c6": [],
         "esp32-s3-heltec": [],
         "esp32-s3-heltec-e290": [],
@@ -16396,6 +16443,10 @@
           "std"
         ],
         "daemon-macos": [
+          "alloc",
+          "std"
+        ],
+        "daemon-windows": [
           "alloc",
           "std"
         ]
@@ -17158,7 +17209,8 @@
     {
       "graphs": {
         "daemon-linux": [],
-        "daemon-macos": []
+        "daemon-macos": [],
+        "daemon-windows": []
       },
       "name": "prns-flash-manifest",
       "source": "prns-flash-manifest",
@@ -20966,6 +21018,10 @@
         "daemon-macos": [
           "alloc",
           "std"
+        ],
+        "daemon-windows": [
+          "alloc",
+          "std"
         ]
       },
       "name": "signature",
@@ -21078,6 +21134,11 @@
           "std"
         ],
         "daemon-macos": [
+          "const-generics",
+          "default",
+          "std"
+        ],
+        "daemon-windows": [
           "const-generics",
           "default",
           "std"
@@ -21693,6 +21754,10 @@
           "std"
         ],
         "daemon-macos": [
+          "alloc",
+          "std"
+        ],
+        "daemon-windows": [
           "alloc",
           "std"
         ]
@@ -24989,6 +25054,15 @@
           "rustls",
           "rustls-no-provider",
           "rustls-webpki-roots"
+        ],
+        "daemon-windows": [
+          "_ring",
+          "_rustls",
+          "_tls",
+          "gzip",
+          "rustls",
+          "rustls-no-provider",
+          "rustls-webpki-roots"
         ]
       },
       "name": "ureq",
@@ -25008,6 +25082,9 @@
           "client"
         ],
         "daemon-macos": [
+          "client"
+        ],
+        "daemon-windows": [
           "client"
         ]
       },
@@ -25141,6 +25218,10 @@
           "std"
         ],
         "daemon-macos": [
+          "default",
+          "std"
+        ],
+        "daemon-windows": [
           "default",
           "std"
         ]
@@ -25582,7 +25663,8 @@
     {
       "graphs": {
         "daemon-linux": [],
-        "daemon-macos": []
+        "daemon-macos": [],
+        "daemon-windows": []
       },
       "name": "webpki-roots",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -27223,6 +27305,14 @@
           "deflate-zopfli",
           "flate2",
           "zopfli"
+        ],
+        "daemon-windows": [
+          "_deflate-any",
+          "deflate",
+          "deflate-flate2",
+          "deflate-zopfli",
+          "flate2",
+          "zopfli"
         ]
       },
       "name": "zip",
@@ -27279,6 +27369,12 @@
           "zlib"
         ],
         "daemon-macos": [
+          "default",
+          "gzip",
+          "std",
+          "zlib"
+        ],
+        "daemon-windows": [
           "default",
           "gzip",
           "std",
