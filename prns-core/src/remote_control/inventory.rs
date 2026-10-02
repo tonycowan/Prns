@@ -1330,6 +1330,14 @@ pub enum RemoteControlTcpClientParseError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteControlTcpClientWireError {
+    Truncated,
+    Malformed,
+}
+
+/// The hostname bytes stay inline so a no_std node can encode a target without allocating.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteControlTcpClientHost {
     Ipv4([u8; 4]),
     Hostname {
@@ -1352,7 +1360,7 @@ impl RemoteControlTcpClientHost {
     const fn encoded_len(self) -> usize {
         match self {
             Self::Ipv4(_) => 4,
-            Self::Hostname { len, .. } => 1 + len as usize,
+            Self::Hostname { len, .. } => 1usize.saturating_add(len as usize),
         }
     }
 }
@@ -1403,12 +1411,13 @@ impl RemoteControlTcpClientTarget {
             return Err(RemoteControlTcpClientParseError::Invalid);
         }
         if let Some(address) = parse_ipv4(host) {
-            return valid_tcp_ipv4(address)
-                .then(|| Self {
-                    host: RemoteControlTcpClientHost::Ipv4(address),
-                    port,
-                })
-                .ok_or(RemoteControlTcpClientParseError::Invalid);
+            if !valid_tcp_ipv4(address) {
+                return Err(RemoteControlTcpClientParseError::Invalid);
+            }
+            return Ok(Self {
+                host: RemoteControlTcpClientHost::Ipv4(address),
+                port,
+            });
         }
         if host.len() > REMOTE_CONTROL_TCP_HOSTNAME_CAP {
             return Err(RemoteControlTcpClientParseError::Invalid);
@@ -1417,13 +1426,13 @@ impl RemoteControlTcpClientTarget {
         for (out, byte) in lower.iter_mut().zip(host.bytes()) {
             *out = byte.to_ascii_lowercase();
         }
-        let hostname = core::str::from_utf8(&lower[..host.len()])
+        let hostname = core::str::from_utf8(lower.get(..host.len()).unwrap_or(&[]))
             .map_err(|_| RemoteControlTcpClientParseError::Invalid)?;
-        valid_tcp_hostname(hostname)
-            .then(|| hostname_host(hostname))
-            .flatten()
-            .map(|host| Self { host, port })
-            .ok_or(RemoteControlTcpClientParseError::Invalid)
+        if !valid_tcp_hostname(hostname) {
+            return Err(RemoteControlTcpClientParseError::Invalid);
+        }
+        let host = hostname_host(hostname).ok_or(RemoteControlTcpClientParseError::Invalid)?;
+        Ok(Self { host, port })
     }
 
     #[must_use]
@@ -1449,7 +1458,7 @@ impl RemoteControlTcpClientTarget {
 
     #[must_use]
     pub const fn encoded_len(self) -> usize {
-        2 + self.host.encoded_len()
+        2usize.saturating_add(self.host.encoded_len())
     }
 }
 
@@ -1508,7 +1517,8 @@ fn valid_tcp_hostname(hostname: &str) -> bool {
         })
 }
 
-/// One TCP client target, or an explicit clear.
+/// One TCP client target, or an explicit clear. `Target` carries the hostname buffer inline.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteControlTcpClientConfig {
     Clear,
@@ -1516,91 +1526,144 @@ pub enum RemoteControlTcpClientConfig {
 }
 
 impl RemoteControlTcpClientConfig {
-    pub const MAX_ENCODED_LEN: usize = 1 + 2 + 1 + REMOTE_CONTROL_TCP_HOSTNAME_CAP;
+    pub const MAX_ENCODED_LEN: usize = 1usize
+        .saturating_add(2)
+        .saturating_add(1)
+        .saturating_add(REMOTE_CONTROL_TCP_HOSTNAME_CAP);
 
     #[must_use]
     pub const fn encoded_len(self) -> usize {
         match self {
             Self::Clear => 1,
-            Self::Target(target) => 1 + target.encoded_len(),
+            Self::Target(target) => 1usize.saturating_add(target.encoded_len()),
         }
     }
 
-    pub fn write_into(self, out: &mut [u8]) -> Result<usize, ()> {
+    pub fn write_into(
+        self,
+        out: &mut [u8],
+    ) -> Result<usize, super::RemoteControlMessageWriteError> {
         let encoded_len = self.encoded_len();
         let Some(out) = out.get_mut(..encoded_len) else {
-            return Err(());
+            return Err(super::RemoteControlMessageWriteError::BufferTooShort);
         };
         match self {
-            Self::Clear => out[0] = TCP_ABSENT_TAG,
-            Self::Target(target) => {
-                out[0] = match target.host {
-                    RemoteControlTcpClientHost::Ipv4(_) => TCP_IPV4_TAG,
-                    RemoteControlTcpClientHost::Hostname { .. } => TCP_HOSTNAME_TAG,
+            Self::Clear => {
+                let Some(tag) = out.first_mut() else {
+                    return Err(super::RemoteControlMessageWriteError::BufferTooShort);
                 };
-                out[1..3].copy_from_slice(&target.port.to_be_bytes());
-                match target.host {
-                    RemoteControlTcpClientHost::Ipv4(address) => {
-                        out[3..7].copy_from_slice(&address);
-                    }
-                    RemoteControlTcpClientHost::Hostname { bytes, len } => {
-                        out[3] = len;
-                        let host_len = usize::from(len);
-                        out.get_mut(4..4 + host_len)
-                            .ok_or(())?
-                            .copy_from_slice(bytes.get(..host_len).ok_or(())?);
-                    }
-                }
+                *tag = TCP_ABSENT_TAG;
             }
+            Self::Target(target) => write_tcp_target(out, target)?,
         }
         Ok(encoded_len)
     }
 
-    pub fn parse(bytes: &[u8]) -> Result<Self, ()> {
+    pub fn parse(bytes: &[u8]) -> Result<Self, RemoteControlTcpClientWireError> {
         let Some((tag, rest)) = bytes.split_first() else {
-            return Err(());
+            return Err(RemoteControlTcpClientWireError::Truncated);
         };
         match *tag {
             TCP_ABSENT_TAG if rest.is_empty() => Ok(Self::Clear),
             TCP_IPV4_TAG => {
                 let port = read_port(rest)?;
-                let address = rest.get(2..6).ok_or(())?;
+                let address = rest
+                    .get(2..6)
+                    .ok_or(RemoteControlTcpClientWireError::Truncated)?;
                 if rest.len() != 6 {
-                    return Err(());
+                    return Err(RemoteControlTcpClientWireError::Malformed);
                 }
-                let address: [u8; 4] = address.try_into().map_err(|_| ())?;
-                valid_tcp_ipv4(address)
-                    .then(|| {
-                        Self::Target(RemoteControlTcpClientTarget {
-                            host: RemoteControlTcpClientHost::Ipv4(address),
-                            port,
-                        })
-                    })
-                    .ok_or(())
+                let address: [u8; 4] = address
+                    .try_into()
+                    .map_err(|_| RemoteControlTcpClientWireError::Malformed)?;
+                if !valid_tcp_ipv4(address) {
+                    return Err(RemoteControlTcpClientWireError::Malformed);
+                }
+                Ok(Self::Target(RemoteControlTcpClientTarget {
+                    host: RemoteControlTcpClientHost::Ipv4(address),
+                    port,
+                }))
             }
             TCP_HOSTNAME_TAG => {
                 let port = read_port(rest)?;
-                let len = *rest.get(2).ok_or(())?;
+                let len = *rest
+                    .get(2)
+                    .ok_or(RemoteControlTcpClientWireError::Truncated)?;
                 let host_len = usize::from(len);
-                let host = rest.get(3..3 + host_len).ok_or(())?;
-                if rest.len() != 3 + host_len {
-                    return Err(());
+                let host_end = 3usize.saturating_add(host_len);
+                let host = rest
+                    .get(3..host_end)
+                    .ok_or(RemoteControlTcpClientWireError::Truncated)?;
+                if rest.len() != host_end {
+                    return Err(RemoteControlTcpClientWireError::Malformed);
                 }
-                let hostname = core::str::from_utf8(host).map_err(|_| ())?;
-                valid_tcp_hostname(hostname)
-                    .then(|| hostname_host(hostname))
-                    .flatten()
-                    .map(|host| Self::Target(RemoteControlTcpClientTarget { host, port }))
-                    .ok_or(())
+                let hostname = core::str::from_utf8(host)
+                    .map_err(|_| RemoteControlTcpClientWireError::Malformed)?;
+                if !valid_tcp_hostname(hostname) {
+                    return Err(RemoteControlTcpClientWireError::Malformed);
+                }
+                let host =
+                    hostname_host(hostname).ok_or(RemoteControlTcpClientWireError::Malformed)?;
+                Ok(Self::Target(RemoteControlTcpClientTarget { host, port }))
             }
-            _ => Err(()),
+            _ => Err(RemoteControlTcpClientWireError::Malformed),
         }
     }
 }
 
-fn read_port(bytes: &[u8]) -> Result<u16, ()> {
-    let port = u16::from_be_bytes(bytes.get(..2).ok_or(())?.try_into().map_err(|_| ())?);
-    (port != 0).then_some(port).ok_or(())
+fn write_tcp_target(
+    out: &mut [u8],
+    target: RemoteControlTcpClientTarget,
+) -> Result<(), super::RemoteControlMessageWriteError> {
+    let Some((tag, rest)) = out.split_first_mut() else {
+        return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+    };
+    *tag = match target.host {
+        RemoteControlTcpClientHost::Ipv4(_) => TCP_IPV4_TAG,
+        RemoteControlTcpClientHost::Hostname { .. } => TCP_HOSTNAME_TAG,
+    };
+    let Some((port_bytes, rest)) = rest.split_at_mut_checked(2) else {
+        return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+    };
+    port_bytes.copy_from_slice(&target.port.to_be_bytes());
+    match target.host {
+        RemoteControlTcpClientHost::Ipv4(address) => {
+            let Some(slot) = rest.get_mut(..4) else {
+                return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+            };
+            slot.copy_from_slice(&address);
+        }
+        RemoteControlTcpClientHost::Hostname { bytes, len } => {
+            let Some((len_slot, host_out)) = rest.split_first_mut() else {
+                return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+            };
+            *len_slot = len;
+            let host_len = usize::from(len);
+            let Some(slot) = host_out.get_mut(..host_len) else {
+                return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+            };
+            let Some(src) = bytes.get(..host_len) else {
+                return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+            };
+            slot.copy_from_slice(src);
+        }
+    }
+    Ok(())
+}
+
+fn read_port(bytes: &[u8]) -> Result<u16, RemoteControlTcpClientWireError> {
+    let port = u16::from_be_bytes(
+        bytes
+            .get(..2)
+            .ok_or(RemoteControlTcpClientWireError::Truncated)?
+            .try_into()
+            .map_err(|_| RemoteControlTcpClientWireError::Malformed)?,
+    );
+    if port == 0 {
+        Err(RemoteControlTcpClientWireError::Malformed)
+    } else {
+        Ok(port)
+    }
 }
 
 /// Live TCP client: the configured target, whether the interface is enabled, and its connection.
@@ -1613,32 +1676,51 @@ pub struct RemoteControlTcpClientStatus {
 
 impl RemoteControlTcpClientStatus {
     pub const MAX_ENCODED_LEN: usize =
-        TCP_STATUS_PREFIX_LEN + RemoteControlTcpClientConfig::MAX_ENCODED_LEN;
+        TCP_STATUS_PREFIX_LEN.saturating_add(RemoteControlTcpClientConfig::MAX_ENCODED_LEN);
 
     #[must_use]
     pub const fn encoded_len(self) -> usize {
-        TCP_STATUS_PREFIX_LEN + self.config.encoded_len()
+        TCP_STATUS_PREFIX_LEN.saturating_add(self.config.encoded_len())
     }
 
-    pub fn write_into(self, out: &mut [u8]) -> Result<usize, ()> {
+    pub fn write_into(
+        self,
+        out: &mut [u8],
+    ) -> Result<usize, super::RemoteControlMessageWriteError> {
         let encoded_len = self.encoded_len();
         let Some(out) = out.get_mut(..encoded_len) else {
-            return Err(());
+            return Err(super::RemoteControlMessageWriteError::BufferTooShort);
         };
-        out[0] = u8::from(self.enabled);
-        out[1] = connection_state_wire(self.connection);
-        self.config.write_into(&mut out[2..])?;
+        let Some((enabled, rest)) = out.split_first_mut() else {
+            return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+        };
+        *enabled = u8::from(self.enabled);
+        let Some((connection, rest)) = rest.split_first_mut() else {
+            return Err(super::RemoteControlMessageWriteError::BufferTooShort);
+        };
+        *connection = connection_state_wire(self.connection);
+        self.config.write_into(rest)?;
         Ok(encoded_len)
     }
 
-    pub fn parse(bytes: &[u8]) -> Result<Self, ()> {
-        let enabled = match *bytes.first().ok_or(())? {
-            0 => false,
-            1 => true,
-            _ => return Err(()),
+    pub fn parse(bytes: &[u8]) -> Result<Self, RemoteControlTcpClientWireError> {
+        let enabled = match bytes.first().copied() {
+            Some(0) => false,
+            Some(1) => true,
+            Some(_) => return Err(RemoteControlTcpClientWireError::Malformed),
+            None => return Err(RemoteControlTcpClientWireError::Truncated),
         };
-        let connection = connection_state_from_wire(*bytes.get(1).ok_or(())?).ok_or(())?;
-        let config = RemoteControlTcpClientConfig::parse(bytes.get(2..).ok_or(())?)?;
+        let connection = connection_state_from_wire(
+            *bytes
+                .get(1)
+                .ok_or(RemoteControlTcpClientWireError::Truncated)?,
+        )
+        .ok_or(RemoteControlTcpClientWireError::Malformed)?;
+        let config = RemoteControlTcpClientConfig::parse(
+            bytes
+                .get(2..)
+                .ok_or(RemoteControlTcpClientWireError::Truncated)?,
+        )?;
         Ok(Self {
             config,
             enabled,

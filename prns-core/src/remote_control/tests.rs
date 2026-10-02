@@ -1984,14 +1984,14 @@ fn tcp_client_configuration_round_trips() {
         let mut bytes = [0u8; RemoteControlTcpClientConfig::MAX_ENCODED_LEN];
         let written = config.write_into(&mut bytes).unwrap();
         assert_eq!(
-            RemoteControlTcpClientConfig::parse(&bytes[..written]),
+            RemoteControlTcpClientConfig::parse(bytes.get(..written).unwrap()),
             Ok(config)
         );
         let request = RemoteControlRequest::SetTcpClient { config };
         let mut encoded = [0u8; RemoteControlRequest::MAX_ENCODED_LEN];
         let written = request.write_into(&mut encoded).unwrap();
         assert_eq!(
-            RemoteControlRequest::parse(&encoded[..written]),
+            RemoteControlRequest::parse(encoded.get(..written).unwrap()),
             Ok(request)
         );
         let status = RemoteControlTcpClientStatus {
@@ -2002,7 +2002,7 @@ fn tcp_client_configuration_round_trips() {
         let mut body = [0u8; RemoteControlTcpClientStatus::MAX_ENCODED_LEN];
         let written = status.write_into(&mut body).unwrap();
         assert_eq!(
-            RemoteControlTcpClientStatus::parse(&body[..written]),
+            RemoteControlTcpClientStatus::parse(body.get(..written).unwrap()),
             Ok(status)
         );
     }
