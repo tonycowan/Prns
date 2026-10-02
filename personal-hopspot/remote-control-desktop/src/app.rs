@@ -4198,7 +4198,9 @@ fn AnnouncesSection(
     let filter = announce_filter();
     let entries = announce_stream();
     let labels = announce_labels();
-    let visible = filtered_announces(&entries, &filter, &labels);
+    let ble_aliases = backend().announce_ble_aliases();
+    let peer_aliases = backend().peer_aliases();
+    let visible = filtered_announces(&entries, &filter, &labels, &ble_aliases, &peer_aliases);
     let total = entries.len();
     let shown = visible.len();
     let summary = if total == 0 {
@@ -4225,7 +4227,7 @@ fn AnnouncesSection(
             p { class: "lead", "Live stream of announces this controller hears on its interfaces. Newest first." }
             if announces_info() {
                 p { class: "note info-note",
-                    "Each row is one AnnounceHeard diagnostic: destination hash, hop count, ingress interface, and announce app data (UTF-8 when printable, otherwise hex). When the announce's name hash matches a known address type, that dotted name is shown. The filter matches any of those fields, including managed-node and sibling aliases. This list is saved with the controller and restored on the next launch. Clearing it drops that saved list; the mesh keeps announcing."
+                    "Each row is one AnnounceHeard diagnostic: destination hash, hop count, ingress interface, and announce app data (UTF-8 when printable, otherwise hex). When the announce's name hash matches a known address type, that dotted name is shown. A one-hop announce heard on a Bluetooth peer is also labeled with that peer's node when the short id matches one managed node. The filter matches any of those fields, including managed-node and sibling aliases. This list is saved with the controller and restored on the next launch. Clearing it drops that saved list; the mesh keeps announcing."
                 }
             }
         }
@@ -4260,10 +4262,21 @@ fn AnnouncesSection(
                         {
                             let destination_name =
                                 RemoteControlBackend::announce_destination_name(&entry.name_hash);
+                            let peer_alias = RemoteControlBackend::announce_ingress_alias(
+                                entry.hops,
+                                &entry.interface,
+                                &entry.interface_id,
+                                &ble_aliases,
+                                &peer_aliases,
+                            );
                             let title = RemoteControlBackend::announce_title(
                                 &entry.destination,
                                 &labels,
-                                &destination_name,
+                                &peer_alias,
+                            );
+                            let interface_label = RemoteControlBackend::announce_interface_label(
+                                &entry.interface,
+                                &entry.interface_id,
                             );
                             rsx! {
                                 li {
@@ -4293,7 +4306,7 @@ fn AnnouncesSection(
                                         }
                                         div {
                                             dt { "Interface" }
-                                            dd { title: "{entry.interface_id}", "{entry.interface}" }
+                                            dd { title: "{entry.interface_id}", "{interface_label}" }
                                         }
                                         if !entry.app_data_text.is_empty() {
                                             div {
@@ -4322,6 +4335,8 @@ fn filtered_announces<'a>(
     entries: &'a [HeardAnnounce],
     filter: &str,
     labels: &HashMap<String, String>,
+    ble_aliases: &HashMap<String, String>,
+    peer_aliases: &HashMap<String, String>,
 ) -> Vec<&'a HeardAnnounce> {
     let needle = filter.trim().to_ascii_lowercase();
     if needle.is_empty() {
@@ -4329,19 +4344,35 @@ fn filtered_announces<'a>(
     }
     entries
         .iter()
-        .filter(|entry| announce_matches(entry, &needle, labels))
+        .filter(|entry| announce_matches(entry, &needle, labels, ble_aliases, peer_aliases))
         .collect()
 }
 
-fn announce_matches(entry: &HeardAnnounce, needle: &str, labels: &HashMap<String, String>) -> bool {
+fn announce_matches(
+    entry: &HeardAnnounce,
+    needle: &str,
+    labels: &HashMap<String, String>,
+    ble_aliases: &HashMap<String, String>,
+    peer_aliases: &HashMap<String, String>,
+) -> bool {
     let destination_name = RemoteControlBackend::announce_destination_name(&entry.name_hash);
-    let title = RemoteControlBackend::announce_title(&entry.destination, labels, &destination_name);
+    let peer_alias = RemoteControlBackend::announce_ingress_alias(
+        entry.hops,
+        &entry.interface,
+        &entry.interface_id,
+        ble_aliases,
+        peer_aliases,
+    );
+    let title = RemoteControlBackend::announce_title(&entry.destination, labels, &peer_alias);
+    let interface_label =
+        RemoteControlBackend::announce_interface_label(&entry.interface, &entry.interface_id);
     let contains = |field: &str| field.to_ascii_lowercase().contains(needle);
     contains(&title)
         || contains(&destination_name)
         || contains(&entry.destination)
         || contains(&entry.destination_short)
         || contains(&entry.name_hash)
+        || contains(&interface_label)
         || contains(&entry.interface)
         || contains(&entry.interface_id)
         || contains(&entry.app_data_text)

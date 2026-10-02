@@ -573,19 +573,54 @@ impl RemoteControlBackend {
         known_path_node_labels(session)
     }
 
-    /// Short destination title, with `(alias)` when the hash maps to a managed node or sibling.
-    /// A recognized destination name fills the parentheses when there is no alias.
+    /// Short destination title. A known destination hash keeps its alias. Otherwise a
+    /// direct Bluetooth peer's node fills the parentheses. The dotted name stays on its own line.
     pub fn announce_title(
         destination_hex: &str,
         labels: &HashMap<String, String>,
-        destination_name: &str,
+        peer_alias: &str,
     ) -> String {
         let titled = annotate_known_hash(destination_hex, labels);
-        if destination_name.is_empty() || titled.contains(" (") {
+        if titled.contains(" (") || peer_alias.is_empty() {
             titled
         } else {
-            format!("{titled} ({destination_name})")
+            format!("{titled} ({peer_alias})")
         }
+    }
+
+    /// Node alias for a one-hop announce heard on a Bluetooth peer whose short id matches one node.
+    pub fn announce_ingress_alias(
+        hops: u8,
+        interface: &str,
+        interface_id_hex: &str,
+        ble_aliases: &HashMap<String, String>,
+        peer_aliases: &HashMap<String, String>,
+    ) -> String {
+        if hops > 1 || interface != InterfaceKind::BluetoothPeer.name() {
+            return String::new();
+        }
+        let Ok(bytes) = parse_hex::<8>(interface_id_hex.trim()) else {
+            return String::new();
+        };
+        ble_peer_alias(InterfaceId::new(bytes), ble_aliases, peer_aliases).unwrap_or_default()
+    }
+
+    /// `bluetooth-peer` plus the four-hex peer id. Other interfaces stay the kind name.
+    pub fn announce_interface_label(interface: &str, interface_id_hex: &str) -> String {
+        if interface != InterfaceKind::BluetoothPeer.name() {
+            return interface.to_string();
+        }
+        let Ok(bytes) = parse_hex::<8>(interface_id_hex.trim()) else {
+            return interface.to_string();
+        };
+        format!("{interface} {}", appearance_prefix(InterfaceId::new(bytes)))
+    }
+
+    /// Bluetooth short-id → node alias map used to title direct peer announces.
+    pub fn announce_ble_aliases(&self) -> HashMap<String, String> {
+        self.session()
+            .map(|session| known_ble_prefix_aliases(session))
+            .unwrap_or_default()
     }
 
     /// Dotted destination name when `name_hash_hex` is the name hash of a known address type.
@@ -10861,9 +10896,9 @@ mod tests {
             super::RemoteControlBackend::announce_title(
                 "63dacc2a2125ebb72b6c33a7e290e09e",
                 &HashMap::new(),
-                "nomadnetwork.node",
+                "",
             ),
-            "63dacc2a (nomadnetwork.node)"
+            "63dacc2a"
         );
         let mut labels = HashMap::new();
         labels.insert(
@@ -10874,9 +10909,55 @@ mod tests {
             super::RemoteControlBackend::announce_title(
                 "3af3fdab91e0416fbc7b12d645bce5fd",
                 &labels,
-                "reticulum.remote.control",
+                "MT2A",
             ),
             "3af3fdab (MT2A/RC)"
+        );
+
+        let mt2 = InterfaceId::from_channel_tag(InterfaceKind::BluetoothPeer, b"mt2-identity");
+        let prefix = appearance_prefix(mt2);
+        let mt2_id = "750d80a9876ea2162bd026d32bf5fe46";
+        let mut prefixes = HashMap::new();
+        prefixes.insert(mt2_id.to_string(), prefix.clone());
+        let mut aliases = HashMap::new();
+        aliases.insert(mt2_id.to_string(), "MT2A".to_string());
+        let ble = ble_prefix_alias_map(&prefixes, &aliases, Some("abcd"), "This controller");
+        let interface_id = encode_hex(mt2.as_bytes());
+        assert_eq!(
+            super::RemoteControlBackend::announce_interface_label("bluetooth-peer", &interface_id),
+            format!("bluetooth-peer {prefix}")
+        );
+        assert_eq!(
+            super::RemoteControlBackend::announce_interface_label("lora", &interface_id),
+            "lora"
+        );
+        assert_eq!(
+            super::RemoteControlBackend::announce_ingress_alias(
+                1,
+                "bluetooth-peer",
+                &interface_id,
+                &ble,
+                &HashMap::new(),
+            ),
+            "MT2A"
+        );
+        assert_eq!(
+            super::RemoteControlBackend::announce_ingress_alias(
+                2,
+                "bluetooth-peer",
+                &interface_id,
+                &ble,
+                &HashMap::new(),
+            ),
+            ""
+        );
+        assert_eq!(
+            super::RemoteControlBackend::announce_title(
+                "63dacc2a2125ebb72b6c33a7e290e09e",
+                &HashMap::new(),
+                "MT2A",
+            ),
+            "63dacc2a (MT2A)"
         );
     }
 
