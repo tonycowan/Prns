@@ -30150,11 +30150,11 @@
       "name": "t-echo",
       "source": "personal-hopspot/embedded/nrf52840",
       "unsafe": {
-        "blocks": 1485,
+        "blocks": 1502,
         "externs": 13,
-        "functions": 299,
+        "functions": 301,
         "impls": 17,
-        "tokens": 1815
+        "tokens": 1834
       },
       "version": "0.1.0"
     },
