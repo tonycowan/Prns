@@ -128,6 +128,8 @@ pub enum WifiConfigurationStatus {
 }
 
 /// TCP client stored beside Wi-Fi credentials. `Inherit` keeps the flash-time provisioning target.
+/// The target stays inline so a no_std node can persist it without allocating.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WifiTcpConfiguration {
     Inherit,

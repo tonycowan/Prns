@@ -474,12 +474,10 @@ mod tests {
 
         let mut member = snapshot(InterfaceKind::WifiPeer);
         member.id = InterfaceId::new([InterfaceKind::WifiPeer as u8, 1, 0, 0, 0, 0, 0, 0]);
-        member.membership = Membership::FleetMember {
-            supervisor_id: supervisor_id,
-        };
+        member.membership = Membership::FleetMember { supervisor_id };
         let mut queued = std::vec::Vec::new();
         let outcome = queue_interface_mode_change(
-            &[supervisor.clone(), member],
+            &[supervisor, member],
             supervisor_id,
             InterfaceMode::Gateway,
             |id, mode| {
