@@ -69,6 +69,7 @@ async fn main() {
                 hops,
                 destination,
                 app_data: _,
+                dotted_name_hash: _,
             }) = event
             {
                 println!(

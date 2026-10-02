@@ -12,6 +12,7 @@ use super::inventory::{
     RemoteControlInterfacePower, RemoteControlLoRaOutcome, RemoteControlLoRaProfile,
     RemoteControlModeOutcome, RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome,
     RemoteControlPowerOutcome, RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome,
+    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
     RemoteControlWifiStation, RemoteControlWifiStationOutcome, REMOTE_CONTROL_BUILD_VERSION_CAP,
     REMOTE_CONTROL_INTERFACE_CONFIG_CAP, REMOTE_CONTROL_INTERFACE_ENTRY_ENCODED_LEN,
     REMOTE_CONTROL_INTERFACE_GROUP_CAP, REMOTE_CONTROL_INTERFACE_INVENTORY_CAP,
@@ -31,7 +32,7 @@ const MESSAGE_HEADER_ENCODED_LEN: usize = 2;
 const DESCRIPTION_COUNT_ENCODED_LEN: usize = 1;
 const PROTOCOL_ERROR_KIND_ENCODED_LEN: usize = 1;
 const PROTOCOL_ERROR_DETAIL_ENCODED_LEN: usize = 1;
-// V1 request kinds occupy the contiguous wire range 0x01..=0x22. Unknown values are rejected
+// V1 request kinds occupy the contiguous wire range 0x01..=0x24. Unknown values are rejected
 // before a request can enter this typed set, so five bytes represent the complete domain.
 const REQUEST_KIND_BITMAP_LEN: usize = 5;
 
@@ -95,6 +96,8 @@ prns_macros::iterable_enum! {
         /// remote-control request the node answers. Managing grants receive it through
         /// `effective_requests` when it was added after the grant was stored.
         FirmwareUpdate = 0x22,
+        DescribeTcpClient = 0x23,
+        SetTcpClient = 0x24,
     }
 }
 
@@ -231,6 +234,14 @@ impl RemoteControlRequestKind {
             )),
             Self::FirmwareUpdate => MESSAGE_HEADER_ENCODED_LEN
                 .saturating_add(RemoteControlProtocolError::MAX_ENCODED_BODY_LEN),
+            Self::DescribeTcpClient => MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
+                RemoteControlTcpClientStatus::MAX_ENCODED_LEN,
+                RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
+            )),
+            Self::SetTcpClient => MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
+                RemoteControlTcpClientOutcome::ENCODED_LEN,
+                RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
+            )),
             Self::InventoryPathTable => MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
                 REMOTE_CONTROL_PATH_INVENTORY_MAX_ENCODED_BODY_LEN,
                 RemoteControlProtocolError::MAX_ENCODED_BODY_LEN,
@@ -288,6 +299,8 @@ prns_macros::iterable_enum! {
         InventoryPathTable = 0x1F,
         DescribeNetworkTransport = 0x20,
         SetNetworkTransport = 0x21,
+        DescribeTcpClient = 0x23,
+        SetTcpClient = 0x24,
         ProtocolError = 0xFF,
     }
 }
@@ -450,6 +463,10 @@ pub enum RemoteControlRequest {
     SetNetworkTransport {
         transport: RemoteControlNetworkTransport,
     },
+    DescribeTcpClient,
+    SetTcpClient {
+        config: RemoteControlTcpClientConfig,
+    },
     InventoryPathTable {
         page: RemoteControlPathPage,
     },
@@ -457,12 +474,15 @@ pub enum RemoteControlRequest {
 
 impl RemoteControlRequest {
     pub const MAX_ENCODED_LEN: usize = MESSAGE_HEADER_ENCODED_LEN.saturating_add(maximum(
-        INTERFACE_ID_LEN
-            .saturating_add(1)
-            .saturating_add(REMOTE_CONTROL_WIFI_SSID_CAP)
-            .saturating_add(1)
-            .saturating_add(REMOTE_CONTROL_WIFI_PASSWORD_CAP),
-        INTERFACE_ID_LEN.saturating_add(RemoteControlDiscoveryGroups::MAX_ENCODED_BODY_LEN),
+        maximum(
+            INTERFACE_ID_LEN
+                .saturating_add(1)
+                .saturating_add(REMOTE_CONTROL_WIFI_SSID_CAP)
+                .saturating_add(1)
+                .saturating_add(REMOTE_CONTROL_WIFI_PASSWORD_CAP),
+            INTERFACE_ID_LEN.saturating_add(RemoteControlDiscoveryGroups::MAX_ENCODED_BODY_LEN),
+        ),
+        RemoteControlTcpClientConfig::MAX_ENCODED_LEN,
     ));
 
     #[must_use]
@@ -514,6 +534,8 @@ impl RemoteControlRequest {
             Self::InspectWifiTransaction => RemoteControlRequestKind::InspectWifiTransaction,
             Self::DescribeNetworkTransport => RemoteControlRequestKind::DescribeNetworkTransport,
             Self::SetNetworkTransport { .. } => RemoteControlRequestKind::SetNetworkTransport,
+            Self::DescribeTcpClient => RemoteControlRequestKind::DescribeTcpClient,
+            Self::SetTcpClient { .. } => RemoteControlRequestKind::SetTcpClient,
             Self::InventoryPathTable { .. } => RemoteControlRequestKind::InventoryPathTable,
         }
     }
@@ -528,13 +550,17 @@ impl RemoteControlRequest {
             | Self::SleepRadios
             | Self::WakeRadios
             | Self::InspectWifiTransaction
-            | Self::DescribeNetworkTransport => MESSAGE_HEADER_ENCODED_LEN,
+            | Self::DescribeNetworkTransport
+            | Self::DescribeTcpClient => MESSAGE_HEADER_ENCODED_LEN,
             Self::SetSystemPower { .. }
             | Self::SetGnssPower { .. }
             | Self::SetDisplayVisibility { .. }
             | Self::SetDisplayAutoOff { .. }
             | Self::SetEspRadioMode { .. }
             | Self::SetNetworkTransport { .. } => MESSAGE_HEADER_ENCODED_LEN.saturating_add(1),
+            Self::SetTcpClient { config } => {
+                MESSAGE_HEADER_ENCODED_LEN.saturating_add(config.encoded_len())
+            }
             Self::SetStationUplink { .. } => {
                 MESSAGE_HEADER_ENCODED_LEN.saturating_add(INTERFACE_ID_LEN.saturating_add(1))
             }
@@ -643,6 +669,10 @@ impl RemoteControlRequest {
                 Ok(Self::DescribeNetworkTransport)
             }
             RemoteControlRequestKind::SetNetworkTransport => parse_set_network_transport(body),
+            RemoteControlRequestKind::DescribeTcpClient if body.is_empty() => {
+                Ok(Self::DescribeTcpClient)
+            }
+            RemoteControlRequestKind::SetTcpClient => parse_set_tcp_client(body),
             RemoteControlRequestKind::FirmwareUpdate => {
                 Err(RemoteControlRequestParseError::Malformed)
             }
@@ -677,7 +707,8 @@ impl RemoteControlRequest {
             | RemoteControlRequestKind::SleepRadios
             | RemoteControlRequestKind::WakeRadios
             | RemoteControlRequestKind::InspectWifiTransaction
-            | RemoteControlRequestKind::DescribeNetworkTransport => {
+            | RemoteControlRequestKind::DescribeNetworkTransport
+            | RemoteControlRequestKind::DescribeTcpClient => {
                 Err(RemoteControlRequestParseError::Malformed)
             }
         }
@@ -704,7 +735,8 @@ impl RemoteControlRequest {
             | Self::SleepRadios
             | Self::WakeRadios
             | Self::InspectWifiTransaction
-            | Self::DescribeNetworkTransport => {}
+            | Self::DescribeNetworkTransport
+            | Self::DescribeTcpClient => {}
             Self::InventoryInterfaces { page } => page.write_into(body)?,
             Self::InventoryControllers { page } => page.write_into(body)?,
             Self::InventoryPathTable { page } => page.write_into(body)?,
@@ -767,6 +799,11 @@ impl RemoteControlRequest {
             Self::SetNetworkTransport { transport } => {
                 write_single_byte(body, transport.wire_value())?;
             }
+            Self::SetTcpClient { config } => {
+                config
+                    .write_into(body)
+                    .map_err(|_| RemoteControlMessageWriteError::BufferTooShort)?;
+            }
             Self::StageWifiCredentials { station } => write_wifi_station(body, station)?,
             Self::ActivateWifiCredentials { revision }
             | Self::ConfirmWifiCredentials { revision }
@@ -805,6 +842,20 @@ fn parse_set_gnss_power(
     let power = RemoteControlGnssPower::from_wire(value)
         .ok_or(RemoteControlRequestParseError::Malformed)?;
     Ok(RemoteControlRequest::SetGnssPower { power })
+}
+
+fn parse_set_tcp_client(
+    body: &[u8],
+) -> Result<RemoteControlRequest, RemoteControlRequestParseError> {
+    RemoteControlTcpClientConfig::parse(body)
+        .map(|config| RemoteControlRequest::SetTcpClient { config })
+        .map_err(|_| {
+            if body.is_empty() {
+                RemoteControlRequestParseError::Truncated
+            } else {
+                RemoteControlRequestParseError::Malformed
+            }
+        })
 }
 
 fn parse_set_network_transport(
@@ -1633,6 +1684,8 @@ pub enum RemoteControlResponse {
     InspectWifiTransaction(RemoteControlWifiTransactionStatus),
     DescribeNetworkTransport(RemoteControlNetworkTransport),
     SetNetworkTransport(RemoteControlNetworkTransportOutcome),
+    DescribeTcpClient(RemoteControlTcpClientStatus),
+    SetTcpClient(RemoteControlTcpClientOutcome),
     InventoryPathTable(RemoteControlPathInventory),
     ProtocolError(RemoteControlProtocolError),
 }
@@ -1728,6 +1781,8 @@ impl RemoteControlResponse {
                 RemoteControlResponseKind::DescribeNetworkTransport
             }
             Self::SetNetworkTransport(_) => RemoteControlResponseKind::SetNetworkTransport,
+            Self::DescribeTcpClient(_) => RemoteControlResponseKind::DescribeTcpClient,
+            Self::SetTcpClient(_) => RemoteControlResponseKind::SetTcpClient,
             Self::InventoryPathTable(_) => RemoteControlResponseKind::InventoryPathTable,
             Self::ProtocolError(_) => RemoteControlResponseKind::ProtocolError,
         }
@@ -1771,6 +1826,8 @@ impl RemoteControlResponse {
             Self::InspectWifiTransaction(status) => status.encoded_len(),
             Self::DescribeNetworkTransport(_) => RemoteControlNetworkTransport::ENCODED_LEN,
             Self::SetNetworkTransport(_) => RemoteControlNetworkTransportOutcome::ENCODED_LEN,
+            Self::DescribeTcpClient(status) => status.encoded_len(),
+            Self::SetTcpClient(_) => RemoteControlTcpClientOutcome::ENCODED_LEN,
             Self::InventoryPathTable(inventory) => inventory.encoded_body_len(),
             Self::ProtocolError(error) => error.encoded_body_len(),
         };
@@ -1895,6 +1952,12 @@ impl RemoteControlResponse {
             RemoteControlResponseKind::SetNetworkTransport => {
                 parse_network_transport_outcome(body).map(Self::SetNetworkTransport)
             }
+            RemoteControlResponseKind::DescribeTcpClient => {
+                parse_tcp_client_status(body).map(Self::DescribeTcpClient)
+            }
+            RemoteControlResponseKind::SetTcpClient => {
+                parse_tcp_client_outcome(body).map(Self::SetTcpClient)
+            }
             RemoteControlResponseKind::InventoryPathTable => {
                 RemoteControlPathInventory::parse_body(body).map(Self::InventoryPathTable)
             }
@@ -1957,6 +2020,8 @@ impl RemoteControlResponse {
             Self::InspectWifiTransaction(status) => write_wifi_transaction_status(*status, body),
             Self::DescribeNetworkTransport(transport) => write_network_transport(*transport, body),
             Self::SetNetworkTransport(outcome) => write_network_transport_outcome(*outcome, body),
+            Self::DescribeTcpClient(status) => write_tcp_client_status(*status, body),
+            Self::SetTcpClient(outcome) => write_tcp_client_outcome(*outcome, body),
             Self::InventoryPathTable(inventory) => inventory.write_body(body)?,
             Self::ProtocolError(error) => write_protocol_error(error, body),
         }
@@ -2493,6 +2558,42 @@ fn write_sleep_outcome(outcome: RemoteControlSleepOutcome, body: &mut [u8]) {
 }
 
 fn write_apply_outcome(outcome: RemoteControlApplyOutcome, body: &mut [u8]) {
+    if let Some(out) = body.first_mut() {
+        *out = outcome.wire_value();
+    }
+}
+
+fn parse_tcp_client_status(
+    body: &[u8],
+) -> Result<RemoteControlTcpClientStatus, RemoteControlResponseParseError> {
+    RemoteControlTcpClientStatus::parse(body).map_err(|_| {
+        if body.is_empty() {
+            RemoteControlResponseParseError::Truncated
+        } else {
+            RemoteControlResponseParseError::Malformed
+        }
+    })
+}
+
+fn parse_tcp_client_outcome(
+    body: &[u8],
+) -> Result<RemoteControlTcpClientOutcome, RemoteControlResponseParseError> {
+    let [value] = body else {
+        return Err(if body.is_empty() {
+            RemoteControlResponseParseError::Truncated
+        } else {
+            RemoteControlResponseParseError::Malformed
+        });
+    };
+    RemoteControlTcpClientOutcome::from_wire(*value)
+        .ok_or(RemoteControlResponseParseError::Malformed)
+}
+
+fn write_tcp_client_status(status: RemoteControlTcpClientStatus, body: &mut [u8]) {
+    let _ = status.write_into(body);
+}
+
+fn write_tcp_client_outcome(outcome: RemoteControlTcpClientOutcome, body: &mut [u8]) {
     if let Some(out) = body.first_mut() {
         *out = outcome.wire_value();
     }

@@ -91,7 +91,8 @@ use personal_rns::runtime::{
 };
 use personal_rns::storage::StorageLayout;
 use personal_rns::tcp::{
-    TcpClient, TcpClientInput, TcpClientTarget, TcpSocketBuffers, TCP_DNS_HOSTNAME_MAX_BYTES,
+    TcpClient, TcpClientInput, TcpClientTarget, TcpRetarget, TcpSocketBuffers,
+    TCP_DNS_HOSTNAME_MAX_BYTES,
 };
 use personal_rns::usb_auto::{PhysicalHostPresence, UsbAutoDevice, UsbAutoDeviceInput};
 use personal_rns::wifi_auto::{
@@ -190,6 +191,9 @@ pub const NOTIFY_CAP: usize = minimum_manifold_notification_capacity(LANE_COUNT,
 const _: () = assert!(EngineStorageType::LINK_SESSIONS > MEMBERS + BLE_PEER_CAPACITY);
 const _: () = assert!(BLE_CONTROLLER_ACTIVITY_CAPACITY <= 10);
 const COMMANDS_CAP: usize = 8;
+/// Kept small on purpose. This channel lives in `dram_seg`, and core 0's main stack is whatever
+/// DRAM remains above `.bss`. A slot per fleet member steals that stack and the Wi-Fi configuration
+/// load overflows its guard. Mode changes drain the channel as they are applied.
 pub const LIFECYCLE_CAP: usize = 8;
 const COMPLETIONS_CAP: usize = 4;
 
@@ -273,7 +277,10 @@ mod display;
 use captive_portal::ap_ssid;
 use configuration::{hopspot_wifi_config, HopspotWifiConfig, HopspotWifiConfigSource};
 use configuration::{HopspotTcpClientConfig, HopspotTcpClientHost};
-use connectivity::{build_tcp, build_wifi, espnow_channel_policy, EspNowAdapter, ESPNOW_PHY};
+use connectivity::{
+    build_tcp, build_wifi, espnow_channel_policy, hopspot_tcp_config, install_tcp_target,
+    remote_tcp_target, EspNowAdapter, ESPNOW_PHY, TCP_CONFIG,
+};
 use display::build_interface_menu_details;
 use display::{build_cards, build_snapshots, button_task};
 

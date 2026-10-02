@@ -100,6 +100,7 @@ pub(super) fn capabilities() -> RemoteControlCapabilities {
         RemoteControlRequestKind::AnnounceSelf,
         RemoteControlRequestKind::InventoryInterfaces,
         RemoteControlRequestKind::SetInterfacePower,
+        RemoteControlRequestKind::SetInterfaceMode,
         RemoteControlRequestKind::InventoryInterfacePeers,
         RemoteControlRequestKind::InventoryInterfaceConfig,
         RemoteControlRequestKind::SetInterfaceLoRaProfile,
@@ -442,6 +443,25 @@ async fn execute(
             };
             Ok(RemoteControlHostResponse::SetGnssPower(outcome))
         }
+        RemoteControlHostCommand::SetInterfaceMode { id, mode } => Ok(
+            RemoteControlHostResponse::SetInterfaceMode(hopspot::queue_interface_mode_change(
+                context.snapshots,
+                id,
+                mode,
+                |target, mode| {
+                    super::LIFECYCLE
+                        .sender()
+                        .try_send(
+                            personal_rns::manifold::embassy::InterfaceLifecycle::SetMode {
+                                id: target,
+                                mode,
+                            },
+                        )
+                        .is_ok()
+                },
+                |target, mode| INTERFACE_STORE.set_interface_mode(target, mode),
+            )),
+        ),
         _ => Err(RemoteControlHostCommandError::Unsupported),
     }
 }
@@ -773,7 +793,9 @@ fn snapshots(
         snapshots
             .push(InterfaceSnapshot {
                 id: status.id(),
-                mode: InterfaceMode::Full,
+                mode: INTERFACE_STORE
+                    .interface_mode(status.id())
+                    .unwrap_or(InterfaceMode::Full),
                 gravity: InterfaceGravity::ZERO,
                 connection: status.connection(),
                 failure_reason: status.failure_reason(),

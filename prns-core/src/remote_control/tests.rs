@@ -8,6 +8,7 @@ use crate::identity::{
     IdentityEncryptionPublicKey, IdentityPublicKeys, IdentitySigningPublicKey, Zeroizing,
     IDENTITY_SECRET_KEY_LEN,
 };
+use crate::interfaces::ConnectionState;
 use proptest::prelude::*;
 
 struct TestEntropySource(u8);
@@ -436,6 +437,8 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlRequestKind::DescribeNetworkTransport,
             RemoteControlRequestKind::SetNetworkTransport,
             RemoteControlRequestKind::FirmwareUpdate,
+            RemoteControlRequestKind::DescribeTcpClient,
+            RemoteControlRequestKind::SetTcpClient,
         ],
     );
     assert_eq!(
@@ -474,6 +477,8 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlResponseKind::InventoryPathTable,
             RemoteControlResponseKind::DescribeNetworkTransport,
             RemoteControlResponseKind::SetNetworkTransport,
+            RemoteControlResponseKind::DescribeTcpClient,
+            RemoteControlResponseKind::SetTcpClient,
             RemoteControlResponseKind::ProtocolError,
         ],
     );
@@ -605,6 +610,11 @@ fn protocol_discriminants_are_stable_typed_values() {
         0x21
     );
     assert_eq!(RemoteControlRequestKind::FirmwareUpdate.wire_value(), 0x22);
+    assert_eq!(
+        RemoteControlRequestKind::DescribeTcpClient.wire_value(),
+        0x23
+    );
+    assert_eq!(RemoteControlRequestKind::SetTcpClient.wire_value(), 0x24);
     assert_eq!(
         RemoteControlResponseKind::InventoryPathTable.wire_value(),
         0x1F
@@ -913,6 +923,15 @@ fn managing_grants_include_network_transport_added_after_pairing() {
     assert!(!describe_only
         .effective_requests()
         .supports(RemoteControlRequestKind::FirmwareUpdate));
+    assert!(!describe_only
+        .effective_requests()
+        .supports(RemoteControlRequestKind::DescribeTcpClient));
+    assert!(!describe_only
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetTcpClient));
+    assert!(!describe_only
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetInterfaceMode));
 
     let manager = grant(0x22, RemoteControlRequestKind::DescribePower);
     assert!(manager
@@ -927,6 +946,15 @@ fn managing_grants_include_network_transport_added_after_pairing() {
     assert!(manager
         .effective_requests()
         .supports(RemoteControlRequestKind::FirmwareUpdate));
+    assert!(manager
+        .effective_requests()
+        .supports(RemoteControlRequestKind::DescribeTcpClient));
+    assert!(manager
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetTcpClient));
+    assert!(manager
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetInterfaceMode));
     assert!(!manager
         .permitted_requests()
         .supports(RemoteControlRequestKind::DescribeNetworkTransport));
@@ -969,6 +997,12 @@ fn managing_grants_include_network_transport_added_after_pairing() {
     assert!(interfaces
         .effective_requests()
         .supports(RemoteControlRequestKind::FirmwareUpdate));
+    assert!(interfaces
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetTcpClient));
+    assert!(interfaces
+        .effective_requests()
+        .supports(RemoteControlRequestKind::SetInterfaceMode));
     assert!(!interfaces
         .permitted_requests()
         .supports(RemoteControlRequestKind::DescribePower));
@@ -1934,6 +1968,46 @@ fn desired_state_and_wifi_transaction_parsers_refuse_noncanonical_values() {
         ]),
         Err(RemoteControlResponseParseError::UnknownWifiTransactionStatus { found: 0xFF }),
     );
+}
+
+#[test]
+fn tcp_client_configuration_round_trips() {
+    let ipv4 = RemoteControlTcpClientTarget::parse("192.0.2.10:5252").unwrap();
+    let hostname = RemoteControlTcpClientTarget::parse("Node.Example.:4242").unwrap();
+    assert_eq!(hostname.host().as_str(), "node.example");
+    assert_eq!(hostname.port(), 4242);
+    for config in [
+        RemoteControlTcpClientConfig::Clear,
+        RemoteControlTcpClientConfig::Target(ipv4),
+        RemoteControlTcpClientConfig::Target(hostname),
+    ] {
+        let mut bytes = [0u8; RemoteControlTcpClientConfig::MAX_ENCODED_LEN];
+        let written = config.write_into(&mut bytes).unwrap();
+        assert_eq!(
+            RemoteControlTcpClientConfig::parse(&bytes[..written]),
+            Ok(config)
+        );
+        let request = RemoteControlRequest::SetTcpClient { config };
+        let mut encoded = [0u8; RemoteControlRequest::MAX_ENCODED_LEN];
+        let written = request.write_into(&mut encoded).unwrap();
+        assert_eq!(
+            RemoteControlRequest::parse(&encoded[..written]),
+            Ok(request)
+        );
+        let status = RemoteControlTcpClientStatus {
+            config,
+            enabled: true,
+            connection: ConnectionState::Connected,
+        };
+        let mut body = [0u8; RemoteControlTcpClientStatus::MAX_ENCODED_LEN];
+        let written = status.write_into(&mut body).unwrap();
+        assert_eq!(
+            RemoteControlTcpClientStatus::parse(&body[..written]),
+            Ok(status)
+        );
+    }
+    assert!(RemoteControlTcpClientTarget::parse("0.0.0.0:4242").is_err());
+    assert!(RemoteControlTcpClientTarget::parse("[2001:db8::1]:4242").is_err());
 }
 
 proptest! {

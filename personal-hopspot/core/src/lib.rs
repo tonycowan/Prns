@@ -77,9 +77,9 @@ pub use remote_control_executor::{
 };
 pub use remote_control_inventory::{
     bluetooth_auto_interface_name, decorate_hopspot_remote_control_card,
-    hopspot_remote_control_build_version, remote_control_interface_config_from_snapshots,
-    remote_control_interface_peers_from_snapshots, remote_control_inventory_from_snapshots,
-    singleton_discovery_group,
+    hopspot_remote_control_build_version, queue_interface_mode_change,
+    remote_control_interface_config_from_snapshots, remote_control_interface_peers_from_snapshots,
+    remote_control_inventory_from_snapshots, singleton_discovery_group,
 };
 #[cfg(feature = "display")]
 pub use screen::{
@@ -102,7 +102,7 @@ pub use subg_configuration_store::{
 pub use wifi_configuration_store::{
     LoadedWifiConfiguration, WifiConfigurationCommitOutcome, WifiConfigurationFlashOperation,
     WifiConfigurationStatus, WifiConfigurationStore, WifiConfigurationStoreError,
-    WifiConfigurationTransactionPhase, WIFI_CONFIGURATION_SEALING_DOMAIN,
+    WifiConfigurationTransactionPhase, WifiTcpConfiguration, WIFI_CONFIGURATION_SEALING_DOMAIN,
 };
 
 use personal_rns::engine::{

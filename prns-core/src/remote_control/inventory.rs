@@ -1314,6 +1314,364 @@ pub fn parse_wifi_station_rssi_dbm(config: &str) -> Option<i16> {
     rssi.parse().ok()
 }
 
+/// DNS hostname limit shared with the embedded TCP client.
+pub const REMOTE_CONTROL_TCP_HOSTNAME_CAP: usize = 253;
+pub const REMOTE_CONTROL_TCP_DEFAULT_PORT: u16 = 4242;
+
+const TCP_ABSENT_TAG: u8 = 0;
+const TCP_IPV4_TAG: u8 = 1;
+const TCP_HOSTNAME_TAG: u8 = 2;
+const TCP_STATUS_PREFIX_LEN: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteControlTcpClientParseError {
+    Empty,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteControlTcpClientHost {
+    Ipv4([u8; 4]),
+    Hostname {
+        bytes: [u8; REMOTE_CONTROL_TCP_HOSTNAME_CAP],
+        len: u8,
+    },
+}
+
+impl RemoteControlTcpClientHost {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Ipv4(_) => "",
+            Self::Hostname { bytes, len } => {
+                core::str::from_utf8(bytes.get(..usize::from(*len)).unwrap_or(&[])).unwrap_or("")
+            }
+        }
+    }
+
+    const fn encoded_len(self) -> usize {
+        match self {
+            Self::Ipv4(_) => 4,
+            Self::Hostname { len, .. } => 1 + len as usize,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteControlTcpClientTarget {
+    host: RemoteControlTcpClientHost,
+    port: u16,
+}
+
+impl RemoteControlTcpClientTarget {
+    #[must_use]
+    pub const fn new(host: RemoteControlTcpClientHost, port: u16) -> Option<Self> {
+        if port == 0 {
+            None
+        } else {
+            Some(Self { host, port })
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, RemoteControlTcpClientParseError> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(RemoteControlTcpClientParseError::Empty);
+        }
+        if value.contains('@') {
+            return Err(RemoteControlTcpClientParseError::Invalid);
+        }
+        let value = value
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(value);
+        let value = value.split(['/', '?', '#']).next().unwrap_or(value);
+        if value.is_empty() || value.contains(':') && value.matches(':').count() > 1 {
+            return Err(RemoteControlTcpClientParseError::Invalid);
+        }
+        let (host, port) = match value.rsplit_once(':') {
+            Some((host, port)) => {
+                let port = port
+                    .parse::<u16>()
+                    .map_err(|_| RemoteControlTcpClientParseError::Invalid)?;
+                (host, port)
+            }
+            None => (value, REMOTE_CONTROL_TCP_DEFAULT_PORT),
+        };
+        let host = host.strip_suffix('.').unwrap_or(host);
+        if port == 0 || host.is_empty() {
+            return Err(RemoteControlTcpClientParseError::Invalid);
+        }
+        if let Some(address) = parse_ipv4(host) {
+            return valid_tcp_ipv4(address)
+                .then(|| Self {
+                    host: RemoteControlTcpClientHost::Ipv4(address),
+                    port,
+                })
+                .ok_or(RemoteControlTcpClientParseError::Invalid);
+        }
+        if host.len() > REMOTE_CONTROL_TCP_HOSTNAME_CAP {
+            return Err(RemoteControlTcpClientParseError::Invalid);
+        }
+        let mut lower = [0u8; REMOTE_CONTROL_TCP_HOSTNAME_CAP];
+        for (out, byte) in lower.iter_mut().zip(host.bytes()) {
+            *out = byte.to_ascii_lowercase();
+        }
+        let hostname = core::str::from_utf8(&lower[..host.len()])
+            .map_err(|_| RemoteControlTcpClientParseError::Invalid)?;
+        valid_tcp_hostname(hostname)
+            .then(|| hostname_host(hostname))
+            .flatten()
+            .map(|host| Self { host, port })
+            .ok_or(RemoteControlTcpClientParseError::Invalid)
+    }
+
+    #[must_use]
+    pub const fn host(&self) -> RemoteControlTcpClientHost {
+        self.host
+    }
+
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn write_endpoint(&self, out: &mut impl core::fmt::Write) -> core::fmt::Result {
+        match self.host {
+            RemoteControlTcpClientHost::Ipv4([a, b, c, d]) => {
+                write!(out, "{a}.{b}.{c}.{d}:{}", self.port)
+            }
+            RemoteControlTcpClientHost::Hostname { .. } => {
+                write!(out, "{}:{}", self.host.as_str(), self.port)
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn encoded_len(self) -> usize {
+        2 + self.host.encoded_len()
+    }
+}
+
+fn hostname_host(hostname: &str) -> Option<RemoteControlTcpClientHost> {
+    if hostname.len() > REMOTE_CONTROL_TCP_HOSTNAME_CAP {
+        return None;
+    }
+    let mut bytes = [0u8; REMOTE_CONTROL_TCP_HOSTNAME_CAP];
+    bytes
+        .get_mut(..hostname.len())?
+        .copy_from_slice(hostname.as_bytes());
+    Some(RemoteControlTcpClientHost::Hostname {
+        bytes,
+        len: hostname.len() as u8,
+    })
+}
+
+fn parse_ipv4(value: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut parts = value.split('.');
+    for octet in &mut octets {
+        let part = parts.next()?;
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        if part.len() > 1 && part.starts_with('0') {
+            return None;
+        }
+        *octet = part.parse().ok()?;
+    }
+    parts.next().is_none().then_some(octets)
+}
+
+fn valid_tcp_ipv4(address: [u8; 4]) -> bool {
+    let address = core::net::Ipv4Addr::from(address);
+    !address.is_unspecified() && !address.is_multicast() && !address.is_broadcast()
+}
+
+fn valid_tcp_hostname(hostname: &str) -> bool {
+    !hostname.is_empty()
+        && hostname.len() <= REMOTE_CONTROL_TCP_HOSTNAME_CAP
+        && hostname.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
+        && hostname.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && label
+                    .bytes()
+                    .last()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+/// One TCP client target, or an explicit clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteControlTcpClientConfig {
+    Clear,
+    Target(RemoteControlTcpClientTarget),
+}
+
+impl RemoteControlTcpClientConfig {
+    pub const MAX_ENCODED_LEN: usize = 1 + 2 + 1 + REMOTE_CONTROL_TCP_HOSTNAME_CAP;
+
+    #[must_use]
+    pub const fn encoded_len(self) -> usize {
+        match self {
+            Self::Clear => 1,
+            Self::Target(target) => 1 + target.encoded_len(),
+        }
+    }
+
+    pub fn write_into(self, out: &mut [u8]) -> Result<usize, ()> {
+        let encoded_len = self.encoded_len();
+        let Some(out) = out.get_mut(..encoded_len) else {
+            return Err(());
+        };
+        match self {
+            Self::Clear => out[0] = TCP_ABSENT_TAG,
+            Self::Target(target) => {
+                out[0] = match target.host {
+                    RemoteControlTcpClientHost::Ipv4(_) => TCP_IPV4_TAG,
+                    RemoteControlTcpClientHost::Hostname { .. } => TCP_HOSTNAME_TAG,
+                };
+                out[1..3].copy_from_slice(&target.port.to_be_bytes());
+                match target.host {
+                    RemoteControlTcpClientHost::Ipv4(address) => {
+                        out[3..7].copy_from_slice(&address);
+                    }
+                    RemoteControlTcpClientHost::Hostname { bytes, len } => {
+                        out[3] = len;
+                        let host_len = usize::from(len);
+                        out.get_mut(4..4 + host_len)
+                            .ok_or(())?
+                            .copy_from_slice(bytes.get(..host_len).ok_or(())?);
+                    }
+                }
+            }
+        }
+        Ok(encoded_len)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, ()> {
+        let Some((tag, rest)) = bytes.split_first() else {
+            return Err(());
+        };
+        match *tag {
+            TCP_ABSENT_TAG if rest.is_empty() => Ok(Self::Clear),
+            TCP_IPV4_TAG => {
+                let port = read_port(rest)?;
+                let address = rest.get(2..6).ok_or(())?;
+                if rest.len() != 6 {
+                    return Err(());
+                }
+                let address: [u8; 4] = address.try_into().map_err(|_| ())?;
+                valid_tcp_ipv4(address)
+                    .then(|| {
+                        Self::Target(RemoteControlTcpClientTarget {
+                            host: RemoteControlTcpClientHost::Ipv4(address),
+                            port,
+                        })
+                    })
+                    .ok_or(())
+            }
+            TCP_HOSTNAME_TAG => {
+                let port = read_port(rest)?;
+                let len = *rest.get(2).ok_or(())?;
+                let host_len = usize::from(len);
+                let host = rest.get(3..3 + host_len).ok_or(())?;
+                if rest.len() != 3 + host_len {
+                    return Err(());
+                }
+                let hostname = core::str::from_utf8(host).map_err(|_| ())?;
+                valid_tcp_hostname(hostname)
+                    .then(|| hostname_host(hostname))
+                    .flatten()
+                    .map(|host| Self::Target(RemoteControlTcpClientTarget { host, port }))
+                    .ok_or(())
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+fn read_port(bytes: &[u8]) -> Result<u16, ()> {
+    let port = u16::from_be_bytes(bytes.get(..2).ok_or(())?.try_into().map_err(|_| ())?);
+    (port != 0).then_some(port).ok_or(())
+}
+
+/// Live TCP client: the configured target, whether the interface is enabled, and its connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteControlTcpClientStatus {
+    pub config: RemoteControlTcpClientConfig,
+    pub enabled: bool,
+    pub connection: ConnectionState,
+}
+
+impl RemoteControlTcpClientStatus {
+    pub const MAX_ENCODED_LEN: usize =
+        TCP_STATUS_PREFIX_LEN + RemoteControlTcpClientConfig::MAX_ENCODED_LEN;
+
+    #[must_use]
+    pub const fn encoded_len(self) -> usize {
+        TCP_STATUS_PREFIX_LEN + self.config.encoded_len()
+    }
+
+    pub fn write_into(self, out: &mut [u8]) -> Result<usize, ()> {
+        let encoded_len = self.encoded_len();
+        let Some(out) = out.get_mut(..encoded_len) else {
+            return Err(());
+        };
+        out[0] = u8::from(self.enabled);
+        out[1] = connection_state_wire(self.connection);
+        self.config.write_into(&mut out[2..])?;
+        Ok(encoded_len)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, ()> {
+        let enabled = match *bytes.first().ok_or(())? {
+            0 => false,
+            1 => true,
+            _ => return Err(()),
+        };
+        let connection = connection_state_from_wire(*bytes.get(1).ok_or(())?).ok_or(())?;
+        let config = RemoteControlTcpClientConfig::parse(bytes.get(2..).ok_or(())?)?;
+        Ok(Self {
+            config,
+            enabled,
+            connection,
+        })
+    }
+}
+
+prns_macros::iterable_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum RemoteControlTcpClientOutcome {
+        Applied = 0x01,
+        Unchanged = 0x02,
+        Failed = 0x03,
+    }
+}
+
+impl RemoteControlTcpClientOutcome {
+    pub const ENCODED_LEN: usize = 1;
+
+    #[must_use]
+    pub const fn wire_value(self) -> u8 {
+        self as u8
+    }
+
+    pub(crate) fn from_wire(value: u8) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.wire_value() == value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteControlLoRaProfile {
     bytes: [u8; REMOTE_CONTROL_INTERFACE_CONFIG_CAP],

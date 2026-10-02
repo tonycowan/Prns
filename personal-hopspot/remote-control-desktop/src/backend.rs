@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use dioxus::prelude::spawn;
@@ -40,11 +40,13 @@ use personal_rns::remote_control::{
     RemoteControlPairingInvitationCode, RemoteControlPathContinuation, RemoteControlPathEntry,
     RemoteControlPathPage, RemoteControlPowerOutcome, RemoteControlRequestKind,
     RemoteControlRequestSet, RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome,
-    RemoteControlTargetAccess, RemoteControlWifiStation, RemoteControlWifiStationOutcome,
+    RemoteControlTargetAccess, RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome,
+    RemoteControlTcpClientStatus, RemoteControlWifiStation, RemoteControlWifiStationOutcome,
     FIRMWARE_UPDATE_APPLICATION_ASPECTS, REMOTE_CONTROL_APPLICATION_ASPECTS,
-    REMOTE_CONTROL_APPLICATION_NAME,
+    REMOTE_CONTROL_APPLICATION_NAME, REMOTE_CONTROL_PAIRING_APPLICATION_ASPECTS,
+    REMOTE_CONTROL_PAIRING_APPLICATION_NAME,
 };
-use personal_rns::routing::announce::{derive_destination_hash, expand_name};
+use personal_rns::routing::announce::{derive_destination_hash, expand_name, DottedNameHash};
 use personal_rns::routing::NextHop;
 use personal_rns::runtime::RoutingControl;
 use personal_rns::units::InstantMillis;
@@ -99,6 +101,7 @@ const MANAGER_ALIASES_FILE: &str = "manager-aliases";
 const SIBLING_ALIASES_FILE: &str = "sibling-aliases";
 const SIBLING_WIFI_LL_FILE: &str = "sibling-wifi-ll";
 const TCP_TARGET_FILE: &str = "tcp-target";
+const ANNOUNCE_STREAM_FILE: &str = "announce-stream.json";
 const CONTROLLER_IDENTITY_FILE: &str = "controller";
 const INSTANCE_IDENTITY_FILE: &str = "instance";
 const CONTROL_ANNOUNCE_POLL: Duration = Duration::from_millis(500);
@@ -181,7 +184,7 @@ pub struct PathTableRow {
 }
 
 /// One announce observed by this controller, newest-first in [`RemoteControlBackend::announce_stream`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HeardAnnounce {
     /// Monotonic id for stable list keys while the ring buffer rotates.
     pub seq: u64,
@@ -194,6 +197,9 @@ pub struct HeardAnnounce {
     /// UTF-8 lossy app data when printable; empty when binary-only.
     pub app_data_text: String,
     pub app_data_hex: String,
+    /// Lowercase hex of the announce's 10-byte dotted-name hash. Empty on rows saved before it was kept.
+    #[serde(default)]
+    pub name_hash: String,
 }
 
 const ANNOUNCE_STREAM_LIMIT: usize = 400;
@@ -202,9 +208,34 @@ const ANNOUNCE_STREAM_LIMIT: usize = 400;
 struct AnnounceStreamState {
     next_seq: u64,
     entries: VecDeque<HeardAnnounce>,
+    path: Option<PathBuf>,
 }
 
 impl AnnounceStreamState {
+    fn load(path: PathBuf) -> Self {
+        let mut state = Self {
+            path: Some(path),
+            ..Self::default()
+        };
+        let Some(path) = state.path.clone() else {
+            return state;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return state;
+        };
+        let Ok(loaded) = serde_json::from_str::<Vec<HeardAnnounce>>(&text) else {
+            return state;
+        };
+        state.entries = loaded.into_iter().take(ANNOUNCE_STREAM_LIMIT).collect();
+        state.next_seq = state
+            .entries
+            .iter()
+            .map(|entry| entry.seq)
+            .max()
+            .unwrap_or(0);
+        state
+    }
+
     fn push(&mut self, mut entry: HeardAnnounce) {
         self.next_seq = self.next_seq.saturating_add(1);
         entry.seq = self.next_seq;
@@ -212,6 +243,7 @@ impl AnnounceStreamState {
         while self.entries.len() > ANNOUNCE_STREAM_LIMIT {
             self.entries.pop_back();
         }
+        self.persist();
     }
 
     fn snapshot(&self) -> Vec<HeardAnnounce> {
@@ -220,6 +252,17 @@ impl AnnounceStreamState {
 
     fn clear(&mut self) {
         self.entries.clear();
+        self.persist();
+    }
+
+    fn persist(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let Ok(bytes) = serde_json::to_vec(&self.snapshot()) else {
+            return;
+        };
+        let _ = std::fs::write(path, bytes);
     }
 }
 
@@ -531,8 +574,27 @@ impl RemoteControlBackend {
     }
 
     /// Short destination title, with `(alias)` when the hash maps to a managed node or sibling.
-    pub fn announce_title(destination_hex: &str, labels: &HashMap<String, String>) -> String {
-        annotate_known_hash(destination_hex, labels)
+    /// A recognized destination name fills the parentheses when there is no alias.
+    pub fn announce_title(
+        destination_hex: &str,
+        labels: &HashMap<String, String>,
+        destination_name: &str,
+    ) -> String {
+        let titled = annotate_known_hash(destination_hex, labels);
+        if destination_name.is_empty() || titled.contains(" (") {
+            titled
+        } else {
+            format!("{titled} ({destination_name})")
+        }
+    }
+
+    /// Dotted destination name when `name_hash_hex` is the name hash of a known address type.
+    pub fn announce_destination_name(name_hash_hex: &str) -> String {
+        known_announce_names()
+            .get(name_hash_hex.trim())
+            .copied()
+            .unwrap_or("")
+            .to_string()
     }
 
     pub fn clear_announce_stream(&self) {
@@ -2086,6 +2148,12 @@ impl RemoteControlBackend {
                 .cmp(right.destination.as_bytes())
         });
         let labels = known_path_node_labels(session);
+        let ble_aliases = known_ble_prefix_aliases(session);
+        let peer_aliases = session
+            .peer_aliases
+            .lock()
+            .expect("peer aliases mutex poisoned")
+            .clone();
         Ok(routes
             .into_iter()
             .map(|snapshot| {
@@ -2099,6 +2167,8 @@ impl RemoteControlBackend {
                         snapshot.expires_at.0,
                     ),
                     &labels,
+                    &ble_aliases,
+                    &peer_aliases,
                 )
             })
             .collect())
@@ -2367,6 +2437,40 @@ impl RemoteControlBackend {
             RemoteControlWifiStationOutcome::Failed => Err(BackendError::Operation {
                 operation: "set interface Wi-Fi station",
                 detail: "the target has no live station radio to join. Flash Wi-Fi once so the board starts a station stack, then you can change SSID and password here".to_string(),
+            }),
+        }
+    }
+
+    pub async fn set_interface_tcp_client(
+        &self,
+        target_id: &str,
+        target: &str,
+    ) -> Result<(), BackendError> {
+        let config = if target.trim().is_empty() {
+            RemoteControlTcpClientConfig::Clear
+        } else {
+            RemoteControlTcpClientConfig::Target(
+                personal_rns::remote_control::RemoteControlTcpClientTarget::parse(target.trim())
+                    .map_err(|_| BackendError::Operation {
+                        operation: "set TCP client",
+                        detail: "enter a hostname or IPv4 address, with an optional :port"
+                            .to_string(),
+                    })?,
+            )
+        };
+        let remote = self.connect_target(target_id).await?;
+        let (outcome, _) = remote
+            .set_tcp_client(config)
+            .await
+            .map_err(tcp_client_exchange_error)?;
+        remote.close();
+        match outcome {
+            RemoteControlTcpClientOutcome::Applied | RemoteControlTcpClientOutcome::Unchanged => {
+                Ok(())
+            }
+            RemoteControlTcpClientOutcome::Failed => Err(BackendError::Operation {
+                operation: "set TCP client",
+                detail: "the target could not store the TCP client".to_string(),
             }),
         }
     }
@@ -3253,10 +3357,29 @@ impl RemoteControlBackend {
             .map(|entry| remote_interface_entry(entry, None))
             .collect::<Vec<_>>();
         ensure_wifi_auto_tcp_client(&mut items);
+        let tcp_status = if items.iter().any(|item| item.kind == "auto-wifi") {
+            remote
+                .describe_tcp_client()
+                .await
+                .ok()
+                .map(|(status, _)| status)
+        } else {
+            None
+        };
+        if let Some(status) = tcp_status.as_ref() {
+            apply_tcp_client_status(&mut items, status);
+        }
         let ble_prefix = self.remote_bluetooth_auto_prefix(target_id).await;
         self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         for index in 0..items.len() {
             fetch_interface_config(&remote, &mut items[index]).await;
+            // InventoryInterfaceConfig names the card but does not carry the TCP target.
+            // Re-apply the describe result so that fetch does not clear host and port.
+            if items[index].kind == "tcp-client" {
+                if let Some(status) = tcp_status.as_ref() {
+                    apply_tcp_client_status_to_entry(&mut items[index], status);
+                }
+            }
             self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         }
         if let Ok((version, _)) = remote.describe_build().await {
@@ -3368,9 +3491,18 @@ impl RemoteControlBackend {
         &self,
         remote: &RemoteControlTargetHandle<'_>,
     ) -> Result<Vec<PathTableRow>, BackendError> {
-        let labels = {
+        let (labels, ble_aliases, peer_aliases) = {
             let session = self.session()?;
-            known_path_node_labels(session)
+            let peer_aliases = session
+                .peer_aliases
+                .lock()
+                .expect("peer aliases mutex poisoned")
+                .clone();
+            (
+                known_path_node_labels(session),
+                known_ble_prefix_aliases(session),
+                peer_aliases,
+            )
         };
         let mut page = RemoteControlPathPage::First;
         let mut rows = Vec::new();
@@ -3380,7 +3512,7 @@ impl RemoteControlBackend {
                 .await
                 .map_err(|error| operation("read path table", error))?;
             for entry in inventory.entries() {
-                rows.push(path_table_row(entry, &labels));
+                rows.push(path_table_row(entry, &labels, &ble_aliases, &peer_aliases));
             }
             match inventory.continuation() {
                 RemoteControlPathContinuation::Complete => return Ok(rows),
@@ -3463,6 +3595,11 @@ impl RemoteControlBackend {
         };
         let mut item = remote_interface_entry(entry, None);
         fetch_interface_config(&remote, &mut item).await;
+        if item.kind == "tcp-client" {
+            if let Ok((status, _)) = remote.describe_tcp_client().await {
+                apply_tcp_client_status_to_entry(&mut item, &status);
+            }
+        }
         if item.shows_peers {
             let Ok(id) = parse_hex::<INTERFACE_ID_BYTES>(&item.id) else {
                 remote.close();
@@ -4341,7 +4478,9 @@ impl ControllerSession {
             RemoteControlInitialControllerGrants::Nobody,
             RemoteControlSelfAnnouncement::Unavailable,
         );
-        let announce_stream = Arc::new(Mutex::new(AnnounceStreamState::default()));
+        let announce_stream = Arc::new(Mutex::new(AnnounceStreamState::load(
+            data_dir.join(ANNOUNCE_STREAM_FILE),
+        )));
         let announce_stream_events = announce_stream.clone();
         let pairing = Arc::new(Mutex::new(PairingEvents::load(
             data_dir.join(TARGET_NAMES_FILE),
@@ -4531,6 +4670,7 @@ impl ControllerSession {
                     hops,
                     source_interface,
                     app_data,
+                    dotted_name_hash,
                 }) => {
                     if let Ok(mut stream) = announce_stream_for_events.lock() {
                         stream.push(heard_announce_entry(
@@ -4538,6 +4678,7 @@ impl ControllerSession {
                             hops,
                             source_interface,
                             app_data,
+                            dotted_name_hash,
                         ));
                     }
                     if let Ok(mut shared) = roster_events.lock() {
@@ -6539,7 +6680,12 @@ fn apply_remote_card(entry: &mut InterfaceEntry, card: &RemoteControlInterfaceCa
     entry.transported_links = card.transported_links;
     let kind = parse_hex::<INTERFACE_ID_BYTES>(&entry.id)
         .ok()
-        .and_then(|bytes| operator_remote_kind(InterfaceId::new(bytes)));
+        .and_then(|bytes| operator_remote_kind(InterfaceId::new(bytes)))
+        .or_else(|| {
+            InterfaceKind::ALL
+                .into_iter()
+                .find(|kind| kind.name() == entry.kind)
+        });
     entry.extras = hopspot_extra_facts(entry.detail.as_deref(), kind, None);
     ensure_auto_wifi_rssi_fact(&mut entry.extras, kind);
     if let Some(ipv6) = take_ipv6_group(&mut entry.group) {
@@ -6605,6 +6751,37 @@ fn interface_peer_from_wire(peer: &RemoteControlInterfacePeer) -> InterfacePeer 
     )
 }
 
+fn apply_tcp_client_status(items: &mut Vec<InterfaceEntry>, status: &RemoteControlTcpClientStatus) {
+    ensure_wifi_auto_tcp_client(items);
+    let Some(entry) = items.iter_mut().find(|item| item.kind == "tcp-client") else {
+        return;
+    };
+    apply_tcp_client_status_to_entry(entry, status);
+}
+
+fn apply_tcp_client_status_to_entry(
+    entry: &mut InterfaceEntry,
+    status: &RemoteControlTcpClientStatus,
+) {
+    match status.config {
+        RemoteControlTcpClientConfig::Clear => {
+            entry.detail = None;
+            entry.extras = hopspot_extra_facts(None, Some(InterfaceKind::TcpClient), None);
+        }
+        RemoteControlTcpClientConfig::Target(target) => {
+            let mut text = String::new();
+            let _ = target.write_endpoint(&mut text);
+            apply_tcp_target_to_entry(entry, &text);
+        }
+    }
+    entry.power = if status.enabled {
+        InterfacePower::On
+    } else {
+        InterfacePower::Off
+    };
+    entry.connection = connection_label(Some(InterfaceKind::TcpClient), status.connection);
+}
+
 fn ensure_wifi_auto_tcp_client(items: &mut Vec<InterfaceEntry>) {
     let has_wifi = items.iter().any(|item| item.kind == "auto-wifi");
     let has_tcp = items.iter().any(|item| item.kind == "tcp-client");
@@ -6620,7 +6797,7 @@ fn ensure_wifi_auto_tcp_client(items: &mut Vec<InterfaceEntry>) {
 fn unconfigured_tcp_client_entry() -> InterfaceEntry {
     let id = InterfaceId::from_channel_tag(InterfaceKind::TcpClient, b"unconfigured");
     InterfaceEntry {
-        name: "tcp-client".to_string(),
+        name: "TCP client".to_string(),
         id: encode_hex(id.as_bytes()),
         kind: InterfaceKind::TcpClient.name().to_string(),
         power: InterfacePower::Off,
@@ -6661,10 +6838,14 @@ fn remote_interface_entry(
     let card_name = card
         .map(|card| card.name.as_str().trim())
         .filter(|name| !name.is_empty());
-    let name = card_name
-        .filter(|name| !generic_bluetooth_auto_title(name))
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{} {}", kind, short_id(&id)));
+    let name = if entry.kind == InterfaceKind::TcpClient {
+        "TCP client".to_string()
+    } else {
+        card_name
+            .filter(|name| !generic_bluetooth_auto_title(name))
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("{} {}", kind, short_id(&id)))
+    };
     let mut group = card
         .map(|card| card.group.as_str().trim())
         .filter(|value| !value.is_empty())
@@ -7788,17 +7969,25 @@ fn hopspot_extra_facts(
                 } else if let Some((host, port)) = split_host_port(part) {
                     extras.push(interface_fact("Host", host.to_string()));
                     extras.push(interface_fact("Port", port.to_string()));
+                } else if kind == Some(InterfaceKind::TcpClient) && tcp_endpoint_part(part) {
+                    extras.push(interface_fact("Host", part.to_string()));
+                    extras.push(interface_fact(
+                        "Port",
+                        personal_rns::remote_control::REMOTE_CONTROL_TCP_DEFAULT_PORT.to_string(),
+                    ));
                 } else if part == "LoRa" {
                     extras.push(interface_fact("Config", part.to_string()));
-                } else if !part.is_empty() {
+                } else if !part.is_empty() && kind != Some(InterfaceKind::TcpClient) {
                     extras.push(interface_fact("Role", part.to_string()));
                 }
             }
         }
     } else if matches!(kind, Some(InterfaceKind::LoRa | InterfaceKind::Rnode)) {
         extras.push(interface_fact("Config", "LoRa".to_string()));
-    } else if let Some(role) = kind.and_then(interface_role_label) {
-        extras.push(interface_fact("Role", role.to_string()));
+    } else if kind != Some(InterfaceKind::TcpClient) {
+        if let Some(role) = kind.and_then(interface_role_label) {
+            extras.push(interface_fact("Role", role.to_string()));
+        }
     }
     extras
 }
@@ -7836,6 +8025,10 @@ fn interface_fact(label: &str, value: String) -> InterfaceFact {
         label: label.to_string(),
         value,
     }
+}
+
+fn tcp_endpoint_part(value: &str) -> bool {
+    !value.is_empty() && value != "TCP dial" && value != "LoRa" && !value.starts_with("IFAC ")
 }
 
 fn split_host_port(value: &str) -> Option<(&str, &str)> {
@@ -8118,6 +8311,22 @@ fn controller_whitelist_exchange_error(error: RemoteControlTargetOperationError)
     }
 }
 
+fn tcp_client_exchange_error(error: RemoteControlTargetOperationError) -> BackendError {
+    match error {
+        RemoteControlTargetOperationError::Exchange(RemoteControlError::Remote(
+            RemoteControlProtocolError::UnknownRequestKind { found },
+        )) if found == RemoteControlRequestKind::SetTcpClient.wire_value()
+            || found == RemoteControlRequestKind::DescribeTcpClient.wire_value() =>
+        {
+            BackendError::Operation {
+                operation: "set TCP client",
+                detail: "the target firmware does not recognize TCP client edits yet. Flash the current Hopspot build onto that board; an existing pair already has the grant".to_string(),
+            }
+        }
+        error => operation("set TCP client", error),
+    }
+}
+
 fn wifi_station_exchange_error(error: RemoteControlTargetOperationError) -> BackendError {
     match error {
         RemoteControlTargetOperationError::Exchange(RemoteControlError::Remote(
@@ -8381,12 +8590,171 @@ const KNOWN_NODE_DESTINATIONS: &[(&str, &[&str], &str)] = &[
     ("rnstransport", &["remote", "management"], ""),
 ];
 
+/// Address types whose 10-byte name hash (`sha256(dotted name)[..10]`) can be named from an announce.
+const KNOWN_ANNOUNCE_NAMES: &[(&str, &[&str], &str)] = &[
+    (
+        REMOTE_CONTROL_APPLICATION_NAME,
+        REMOTE_CONTROL_APPLICATION_ASPECTS,
+        "reticulum.remote.control",
+    ),
+    (
+        REMOTE_CONTROL_APPLICATION_NAME,
+        FIRMWARE_UPDATE_APPLICATION_ASPECTS,
+        "reticulum.remote.ota",
+    ),
+    (
+        REMOTE_CONTROL_PAIRING_APPLICATION_NAME,
+        REMOTE_CONTROL_PAIRING_APPLICATION_ASPECTS,
+        "reticulum.remote.control.pairing",
+    ),
+    (
+        ROSTER_SYNC_APP_NAME,
+        ROSTER_SYNC_ASPECTS,
+        "prns.controller.roster-sync",
+    ),
+    (
+        IDENTITY_CLONE_APP_NAME,
+        IDENTITY_CLONE_ASPECTS,
+        "prns.controller.identity-clone",
+    ),
+    ("lxmf", &["delivery"], "lxmf.delivery"),
+    ("nomadnetwork", &["node"], "nomadnetwork.node"),
+    ("rnstransport", &["probe"], "rnstransport.probe"),
+    (
+        "rnstransport",
+        &["remote", "management"],
+        "rnstransport.remote.management",
+    ),
+    (
+        "rnstransport",
+        &["discovery", "interface"],
+        "rnstransport.discovery.interface",
+    ),
+];
+
+fn known_announce_names() -> &'static HashMap<String, &'static str> {
+    static NAMES: OnceLock<HashMap<String, &'static str>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        KNOWN_ANNOUNCE_NAMES
+            .iter()
+            .filter_map(|(app_name, aspects, dotted)| {
+                let name = expand_name(app_name, aspects).ok()?;
+                Some((encode_hex(name.as_bytes()), *dotted))
+            })
+            .collect()
+    })
+}
+
 fn annotate_known_hash(full_hex: &str, labels: &HashMap<String, String>) -> String {
     let short = short_id(full_hex);
     match labels.get(&full_hex.trim().to_ascii_lowercase()) {
         Some(alias) => format!("{short} ({alias})"),
         None => short.to_string(),
     }
+}
+
+/// BLE appearance prefix to the one node it identifies.
+///
+/// A managed node's `bluetooth-auto` title and every `bluetooth-peer` interface for that
+/// radio share this four-hex prefix. A prefix owned by two different aliases is left
+/// unlabeled.
+fn known_ble_prefix_aliases(session: &ControllerSession) -> HashMap<String, String> {
+    let target_prefixes = session
+        .target_ble_prefixes
+        .lock()
+        .ok()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let target_aliases = session
+        .target_aliases
+        .lock()
+        .ok()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let controller_prefix = appearance_prefix(InterfaceId::from_channel_tag(
+        InterfaceKind::BluetoothPeer,
+        session.ble_identity.as_bytes(),
+    ));
+    ble_prefix_alias_map(
+        &target_prefixes,
+        &target_aliases,
+        Some(controller_prefix.as_str()),
+        THIS_CONTROLLER_PEER_ALIAS,
+    )
+}
+
+fn ble_prefix_alias_map(
+    target_prefixes: &HashMap<String, String>,
+    target_aliases: &HashMap<String, String>,
+    controller_prefix: Option<&str>,
+    controller_alias: &str,
+) -> HashMap<String, String> {
+    let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+    let mut claim = |prefix: &str, alias: &str| {
+        let Some(prefix) = normalize_ble_prefix(prefix) else {
+            return;
+        };
+        let Some(alias) = stored_alias(Some(alias)) else {
+            return;
+        };
+        let aliases = owners.entry(prefix).or_default();
+        if !aliases.iter().any(|known| known == &alias) {
+            aliases.push(alias);
+        }
+    };
+    for (target_id, prefix) in target_prefixes {
+        if let Some(alias) = stored_alias(target_aliases.get(target_id).map(String::as_str)) {
+            claim(prefix, &alias);
+        }
+    }
+    if let Some(prefix) = controller_prefix {
+        claim(prefix, controller_alias);
+    }
+    owners
+        .into_iter()
+        .filter_map(|(prefix, mut aliases)| {
+            (aliases.len() == 1).then(|| (prefix, aliases.pop().expect("one alias")))
+        })
+        .collect()
+}
+
+fn normalize_ble_prefix(prefix: &str) -> Option<String> {
+    let prefix = prefix.trim().to_ascii_lowercase();
+    (prefix.len() == 4 && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(prefix)
+}
+
+/// Alias of the node that owns this Bluetooth peer radio, from its short id.
+fn ble_peer_alias(
+    interface: InterfaceId,
+    ble_aliases: &HashMap<String, String>,
+    peer_aliases: &HashMap<String, String>,
+) -> Option<String> {
+    if interface.kind() != Some(InterfaceKind::BluetoothPeer) {
+        return None;
+    }
+    let prefix = appearance_prefix(interface).to_ascii_lowercase();
+    ble_aliases.get(&prefix).cloned().or_else(|| {
+        stored_alias(
+            peer_aliases
+                .get(&encode_hex(interface.as_bytes()))
+                .map(String::as_str),
+        )
+    })
+}
+
+/// Alias of the node on the other end of a direct Bluetooth peer, when that peer's
+/// short id matches one known node. The interface column stays `bluetooth-peer XXXX`.
+fn direct_ble_peer_alias(
+    hops: u8,
+    via: NextHop,
+    interface: InterfaceId,
+    ble_aliases: &HashMap<String, String>,
+    peer_aliases: &HashMap<String, String>,
+) -> Option<String> {
+    if hops > 1 || !matches!(via, NextHop::Direct) {
+        return None;
+    }
+    ble_peer_alias(interface, ble_aliases, peer_aliases)
 }
 
 fn format_path_via(via: NextHop, labels: &HashMap<String, String>) -> (String, String) {
@@ -8402,11 +8770,30 @@ fn format_path_via(via: NextHop, labels: &HashMap<String, String>) -> (String, S
 fn path_table_row(
     entry: &RemoteControlPathEntry,
     labels: &HashMap<String, String>,
+    ble_aliases: &HashMap<String, String>,
+    peer_aliases: &HashMap<String, String>,
 ) -> PathTableRow {
     let destination_full = encode_hex(entry.destination().as_bytes());
-    let (via, via_full) = format_path_via(entry.via(), labels);
+    let (mut via, via_full) = format_path_via(entry.via(), labels);
+    if !via.contains(" (") && !matches!(entry.via(), NextHop::Direct) {
+        if let Some(alias) = ble_peer_alias(entry.interface(), ble_aliases, peer_aliases) {
+            via = format!("{via} ({alias})");
+        }
+    }
+    let mut destination = annotate_known_hash(&destination_full, labels);
+    if !destination.contains(" (") {
+        if let Some(alias) = direct_ble_peer_alias(
+            entry.hops(),
+            entry.via(),
+            entry.interface(),
+            ble_aliases,
+            peer_aliases,
+        ) {
+            destination = format!("{destination} ({alias})");
+        }
+    }
     PathTableRow {
-        destination: annotate_known_hash(&destination_full, labels),
+        destination,
         destination_full,
         hops: format_hop_count(entry.hops()),
         via,
@@ -8511,6 +8898,7 @@ fn heard_announce_entry(
     hops: u8,
     source_interface: InterfaceId,
     app_data: &[u8],
+    dotted_name_hash: DottedNameHash,
 ) -> HeardAnnounce {
     let destination_full = encode_hex(destination.as_bytes());
     let interface_id = encode_hex(source_interface.as_bytes());
@@ -8525,6 +8913,7 @@ fn heard_announce_entry(
         interface_id,
         app_data_text,
         app_data_hex,
+        name_hash: encode_hex(dotted_name_hash.as_bytes()),
     }
 }
 
@@ -8706,24 +9095,24 @@ fn utc_date_time(seconds: u64) -> (i32, u32, u32, u32, u32, u32) {
 mod tests {
     use super::{
         annotate_known_hash, appearance_prefix, apply_bluetooth_auto_identity_title,
-        apply_peer_aliases, apply_remote_card, attach_auto_wifi_local_addresses,
-        attach_our_side_of_the_link, attach_usb_link_peer, auto_wifi_peer_list_note,
-        bluetooth_auto_name_prefix, bluetooth_auto_peer_list_note,
-        bluetooth_auto_prefix_from_direct_peer, bluetooth_auto_title, clone_announce_is_usb_local,
-        control_announce_satisfies, controller_identity_secret_path, encode_hex,
-        endpoint_matches_wifi_ll_keys, ensure_wifi_auto_tcp_client, format_activity_age,
-        format_announce_millis, format_connect_label, format_hop_count, format_interface,
-        format_managed_node_battery, format_next_hop, format_pairing_open_label,
-        format_target_announce, format_target_route, format_utc_millis,
-        generic_bluetooth_auto_title, instance_identity_secret_path, interface_peer,
-        interface_peer_from_wire, interface_power_from_connection, inventory_recovery_continues,
-        label_known_nodes, labeled_local_peer, load_persisted_tcp_target, local_interface_config,
-        local_interface_entry, managed_targets_from_disk, monitor_remaining_at,
-        normalize_stored_wifi_ll, operator_interface_kind, operator_local_kind,
-        parse_invitation_code, parse_target_names, parse_tcp_dial_target, path_is_better_than,
-        path_is_direct_ble, path_table_row, peer_is_auto_gateway,
-        peer_is_this_controller_bluetooth, peer_is_this_controller_wifi, peer_label,
-        persist_tcp_target, radio_facts, remember_known_node, remote_interface_entry,
+        apply_peer_aliases, apply_remote_card, apply_tcp_client_status_to_entry,
+        attach_auto_wifi_local_addresses, attach_our_side_of_the_link, attach_usb_link_peer,
+        auto_wifi_peer_list_note, ble_prefix_alias_map, bluetooth_auto_name_prefix,
+        bluetooth_auto_peer_list_note, bluetooth_auto_prefix_from_direct_peer,
+        bluetooth_auto_title, clone_announce_is_usb_local, control_announce_satisfies,
+        controller_identity_secret_path, encode_hex, endpoint_matches_wifi_ll_keys,
+        ensure_wifi_auto_tcp_client, format_activity_age, format_announce_millis,
+        format_connect_label, format_hop_count, format_interface, format_managed_node_battery,
+        format_next_hop, format_pairing_open_label, format_target_announce, format_target_route,
+        format_utc_millis, generic_bluetooth_auto_title, instance_identity_secret_path,
+        interface_peer, interface_peer_from_wire, interface_power_from_connection,
+        inventory_recovery_continues, label_known_nodes, labeled_local_peer,
+        load_persisted_tcp_target, local_interface_config, local_interface_entry,
+        managed_targets_from_disk, monitor_remaining_at, normalize_stored_wifi_ll,
+        operator_interface_kind, operator_local_kind, parse_invitation_code, parse_target_names,
+        parse_tcp_dial_target, path_is_better_than, path_is_direct_ble, path_table_row,
+        peer_is_auto_gateway, peer_is_this_controller_bluetooth, peer_is_this_controller_wifi,
+        peer_label, persist_tcp_target, radio_facts, remember_known_node, remote_interface_entry,
         render_target_names, resolve_controller_tcp_target, resolve_paired_target_hash,
         route_interface_kind, short_id, should_forget_control_route,
         should_wait_for_control_announce, stored_alias, target_label, BackendError, InterfaceEntry,
@@ -10269,6 +10658,8 @@ mod tests {
                 0,
             ),
             &labels,
+            &HashMap::new(),
+            &HashMap::new(),
         );
         assert_eq!(known.destination, "0c6a2ad8 (This controller)");
         assert_eq!(known.destination_full, identity_hex);
@@ -10285,10 +10676,208 @@ mod tests {
                 0,
             ),
             &labels,
+            &HashMap::new(),
+            &HashMap::new(),
         );
         assert_eq!(direct.destination, "38317e86");
         assert_eq!(direct.via, "direct");
         assert!(direct.via_full.is_empty());
+    }
+
+    #[test]
+    fn path_table_labels_a_bluetooth_peer_from_its_short_id() {
+        let mt2 = InterfaceId::from_channel_tag(InterfaceKind::BluetoothPeer, b"mt2-identity");
+        let prefix = appearance_prefix(mt2);
+        let mt2_id = "750d80a9876ea2162bd026d32bf5fe46";
+        let mut prefixes = HashMap::new();
+        prefixes.insert(mt2_id.to_string(), prefix.clone());
+        let mut aliases = HashMap::new();
+        aliases.insert(mt2_id.to_string(), "MT2A".to_string());
+        let ble = ble_prefix_alias_map(&prefixes, &aliases, Some(&prefix), "This controller");
+        assert!(ble.is_empty(), "a shared prefix is not a single node");
+
+        let ble = ble_prefix_alias_map(&prefixes, &aliases, Some("abcd"), "This controller");
+        assert_eq!(
+            ble.get(&prefix.to_ascii_lowercase()).map(String::as_str),
+            Some("MT2A")
+        );
+
+        let row = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0x63, 0xda, 0xcc, 0x2a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                1,
+                NextHop::Direct,
+                mt2,
+                0,
+                0,
+            ),
+            &HashMap::new(),
+            &ble,
+            &HashMap::new(),
+        );
+        assert_eq!(row.destination, "63dacc2a (MT2A)");
+        assert_eq!(row.interface, format!("bluetooth-peer {prefix}"));
+
+        let lora = InterfaceId::from_channel_tag(InterfaceKind::LoRa, b"lora");
+        let unlabeled = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0x11; 16]),
+                1,
+                NextHop::Direct,
+                lora,
+                0,
+                0,
+            ),
+            &HashMap::new(),
+            &ble,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            unlabeled.interface,
+            format!("lora {}", appearance_prefix(lora))
+        );
+
+        let peer_only = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0x22; 16]),
+                1,
+                NextHop::Direct,
+                mt2,
+                0,
+                0,
+            ),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::from([(encode_hex(mt2.as_bytes()), "MT2A".to_string())]),
+        );
+        assert_eq!(peer_only.destination, "22222222 (MT2A)");
+        assert_eq!(peer_only.interface, format!("bluetooth-peer {prefix}"));
+
+        let relayed = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0x33; 16]),
+                2,
+                NextHop::Direct,
+                mt2,
+                0,
+                0,
+            ),
+            &HashMap::new(),
+            &ble,
+            &HashMap::new(),
+        );
+        assert_eq!(relayed.destination, "33333333");
+        assert_eq!(relayed.via, "direct");
+
+        let transport = personal_rns::TransportId::new([
+            0xf2, 0xf5, 0x4a, 0x4b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        let via_peer = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0x54; 16]),
+                2,
+                NextHop::Via(transport),
+                mt2,
+                0,
+                0,
+            ),
+            &HashMap::new(),
+            &ble,
+            &HashMap::new(),
+        );
+        assert_eq!(via_peer.destination, "54545454");
+        assert_eq!(
+            via_peer.via,
+            format!("via {} (MT2A)", short_id(&encode_hex(transport.as_bytes())))
+        );
+        assert_eq!(via_peer.interface, format!("bluetooth-peer {prefix}"));
+    }
+
+    #[test]
+    fn announce_stream_restores_newest_first_and_drops_when_cleared() {
+        fn heard(destination: &str, seq: u64) -> super::HeardAnnounce {
+            super::HeardAnnounce {
+                seq,
+                at: "2026-10-02 17:00:00".to_string(),
+                destination: destination.to_string(),
+                destination_short: super::short_id(destination).to_string(),
+                hops: 1,
+                interface: "bluetooth-peer".to_string(),
+                interface_id: "00".to_string(),
+                app_data_text: String::new(),
+                app_data_hex: String::new(),
+                name_hash: String::new(),
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "hopspot-announce-stream-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("announce-stream.json");
+
+        let overflow = (0..401).map(|seq| heard("older", seq)).collect::<Vec<_>>();
+        std::fs::write(&path, serde_json::to_vec(&overflow).expect("json")).expect("write");
+        let mut loaded = super::AnnounceStreamState::load(path.clone());
+        assert_eq!(loaded.snapshot().len(), 400);
+        assert_eq!(loaded.snapshot()[0].seq, 0);
+        loaded.push(heard("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 0));
+        loaded.push(heard("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0));
+        drop(loaded);
+
+        let restored = super::AnnounceStreamState::load(path.clone());
+        let rows = restored.snapshot();
+        assert_eq!(rows[0].destination, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(rows[1].destination, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert!(rows[0].seq > rows[1].seq);
+        assert_eq!(rows.len(), 400);
+
+        let mut cleared = restored;
+        cleared.clear();
+        let empty = super::AnnounceStreamState::load(path);
+        assert!(empty.snapshot().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn announce_name_hash_names_nomadnetwork_node_and_leaves_aliases_in_place() {
+        let name =
+            personal_rns::routing::announce::expand_name("nomadnetwork", &["node"]).expect("name");
+        let hex = super::encode_hex(name.as_bytes());
+        assert_eq!(
+            super::RemoteControlBackend::announce_destination_name(&hex),
+            "nomadnetwork.node"
+        );
+        assert_eq!(
+            super::RemoteControlBackend::announce_destination_name("00000000000000000000"),
+            ""
+        );
+        assert_eq!(
+            super::RemoteControlBackend::announce_title(
+                "63dacc2a2125ebb72b6c33a7e290e09e",
+                &HashMap::new(),
+                "nomadnetwork.node",
+            ),
+            "63dacc2a (nomadnetwork.node)"
+        );
+        let mut labels = HashMap::new();
+        labels.insert(
+            "3af3fdab91e0416fbc7b12d645bce5fd".to_string(),
+            "MT2A/RC".to_string(),
+        );
+        assert_eq!(
+            super::RemoteControlBackend::announce_title(
+                "3af3fdab91e0416fbc7b12d645bce5fd",
+                &labels,
+                "reticulum.remote.control",
+            ),
+            "3af3fdab (MT2A/RC)"
+        );
     }
 
     #[test]
@@ -10405,6 +10994,83 @@ mod tests {
         let mut lora_only = vec![test_local_interface("lora", "Connected")];
         ensure_wifi_auto_tcp_client(&mut lora_only);
         assert!(lora_only.iter().all(|item| item.kind != "tcp-client"));
+    }
+
+    #[test]
+    fn tcp_client_card_keeps_the_remote_control_target_after_interface_config() {
+        let target =
+            personal_rns::remote_control::RemoteControlTcpClientTarget::parse("mesh.example:4242")
+                .expect("hostname target");
+        let status = personal_rns::remote_control::RemoteControlTcpClientStatus {
+            config: personal_rns::remote_control::RemoteControlTcpClientConfig::Target(target),
+            enabled: true,
+            connection: ConnectionState::Connected,
+        };
+        let mut entry = test_local_interface("tcp-client", "Disconnected");
+        apply_tcp_client_status_to_entry(&mut entry, &status);
+        apply_remote_card(&mut entry, &RemoteControlInterfaceCard::empty());
+        assert!(entry.extras.iter().all(|fact| fact.label != "Host"));
+        apply_tcp_client_status_to_entry(&mut entry, &status);
+        assert_eq!(
+            entry
+                .extras
+                .iter()
+                .find(|fact| fact.label == "Host")
+                .map(|fact| fact.value.as_str()),
+            Some("mesh.example")
+        );
+        assert_eq!(
+            entry
+                .extras
+                .iter()
+                .find(|fact| fact.label == "Port")
+                .map(|fact| fact.value.as_str()),
+            Some("4242")
+        );
+        assert_eq!(entry.power, InterfacePower::On);
+        assert_eq!(entry.connection, "Connected");
+    }
+
+    #[test]
+    fn a_tcp_client_target_is_host_and_port_not_a_role() {
+        let mut entry = test_local_interface("tcp-client", "Off");
+        super::apply_tcp_target_to_entry(&mut entry, "127.0.0.1:4242");
+        assert!(entry.extras.iter().all(|fact| fact.label != "Role"));
+        assert_eq!(
+            entry
+                .extras
+                .iter()
+                .find(|fact| fact.label == "Host")
+                .map(|fact| fact.value.as_str()),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            entry
+                .extras
+                .iter()
+                .find(|fact| fact.label == "Port")
+                .map(|fact| fact.value.as_str()),
+            Some("4242")
+        );
+
+        super::apply_tcp_target_to_entry(&mut entry, "mesh.example");
+        assert!(entry.extras.iter().all(|fact| fact.label != "Role"));
+        assert_eq!(
+            entry
+                .extras
+                .iter()
+                .find(|fact| fact.label == "Host")
+                .map(|fact| fact.value.as_str()),
+            Some("mesh.example")
+        );
+        assert_eq!(
+            entry
+                .extras
+                .iter()
+                .find(|fact| fact.label == "Port")
+                .map(|fact| fact.value.as_str()),
+            Some("4242")
+        );
     }
 
     fn test_local_interface(kind: &str, connection: &str) -> InterfaceEntry {

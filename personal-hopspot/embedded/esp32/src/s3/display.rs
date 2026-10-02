@@ -205,7 +205,9 @@ pub(super) fn build_snapshots(
             snapshots
                 .push(InterfaceSnapshot {
                     id,
-                    mode: personal_rns::interfaces::InterfaceMode::Full,
+                    mode: INTERFACE_STORE
+                        .interface_mode(id)
+                        .unwrap_or(personal_rns::interfaces::InterfaceMode::Full),
                     gravity: personal_rns::interfaces::InterfaceGravity::ZERO,
                     connection,
                     failure_reason: status.failure_reason(),

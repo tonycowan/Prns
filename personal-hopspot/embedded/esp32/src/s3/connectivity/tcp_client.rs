@@ -1,40 +1,32 @@
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+use personal_rns::remote_control::{RemoteControlTcpClientHost, RemoteControlTcpClientTarget};
+
 use super::super::*;
+
+pub(in crate::s3) static TCP_RETARGET: TcpRetarget = TcpRetarget::new();
+pub(in crate::s3) static TCP_CONFIG: Mutex<
+    CriticalSectionRawMutex,
+    Option<RemoteControlTcpClientTarget>,
+> = Mutex::new(None);
+
+const TCP_CHANNEL_TAG: &[u8] = b"hopspot-tcp";
+
+pub(in crate::s3) fn tcp_interface_id() -> InterfaceId {
+    TcpClient::interface_id(TCP_CHANNEL_TAG)
+}
 
 pub(in crate::s3) fn build_tcp(
     stack: Stack<'static>,
-    config: &HopspotTcpClientConfig,
-) -> Option<(
+) -> (
     TcpClient<'static>,
     &'static EmbassyInterfaceStatus,
     InterfaceId,
-)> {
-    let channel_tag = crate::storage::allocate_psram_slice(256, 0u8);
-    let (target, target_len) = match &config.host {
-        HopspotTcpClientHost::Ipv4(address) => {
-            channel_tag[0] = 1;
-            channel_tag[1..5].copy_from_slice(&address.octets());
-            (
-                TcpClientTarget::endpoint(IpEndpoint::new((*address).into(), config.port)),
-                5,
-            )
-        }
-        HopspotTcpClientHost::Hostname(hostname) => {
-            let dns_hostname =
-                heapless::String::<TCP_DNS_HOSTNAME_MAX_BYTES>::try_from(hostname.as_str()).ok()?;
-            channel_tag[0] = 2;
-            channel_tag[1..1 + hostname.len()].copy_from_slice(hostname.as_bytes());
-            (
-                TcpClientTarget::dns(dns_hostname, config.port),
-                1 + hostname.len(),
-            )
-        }
-    };
-    channel_tag[target_len..target_len + 2].copy_from_slice(&config.port.to_be_bytes());
-    let channel_tag: &'static [u8] = &channel_tag[..target_len + 2];
-    let id = TcpClient::interface_id(channel_tag);
+) {
+    let id = tcp_interface_id();
     let status: &'static EmbassyInterfaceStatus = mk_static!(
         EmbassyInterfaceStatus,
-        EmbassyInterfaceStatus::new_accounted(id, ConnectionState::Initializing)
+        EmbassyInterfaceStatus::new_accounted(id, ConnectionState::Disconnected)
     );
     let rx_buffer: &'static mut [u8] =
         crate::storage::allocate_psram_slice(TCP_SOCKET_BUFFER_BYTES, 0u8);
@@ -42,8 +34,12 @@ pub(in crate::s3) fn build_tcp(
         crate::storage::allocate_psram_slice(TCP_SOCKET_BUFFER_BYTES, 0u8);
     let tcp = TcpClient::new(TcpClientInput {
         stack,
-        target,
-        channel_tag,
+        target: TcpClientTarget::endpoint(IpEndpoint::new(
+            core::net::Ipv4Addr::UNSPECIFIED.into(),
+            1,
+        )),
+        retarget: Some(&TCP_RETARGET),
+        channel_tag: TCP_CHANNEL_TAG,
         bitrate: TCP_BITRATE_BPS,
         reconnect_policy: ReconnectPolicy::STANDARD,
         socket_buffers: TcpSocketBuffers {
@@ -52,5 +48,54 @@ pub(in crate::s3) fn build_tcp(
         },
         status,
     });
-    Some((tcp, status, id))
+    (tcp, status, id)
+}
+
+pub(in crate::s3) fn embassy_tcp_target(
+    target: &RemoteControlTcpClientTarget,
+) -> Option<TcpClientTarget> {
+    match target.host() {
+        RemoteControlTcpClientHost::Ipv4(address) => Some(TcpClientTarget::endpoint(
+            IpEndpoint::new(core::net::Ipv4Addr::from(address).into(), target.port()),
+        )),
+        RemoteControlTcpClientHost::Hostname { .. } => {
+            let hostname =
+                heapless::String::<TCP_DNS_HOSTNAME_MAX_BYTES>::try_from(target.host().as_str())
+                    .ok()?;
+            Some(TcpClientTarget::dns(hostname, target.port()))
+        }
+    }
+}
+
+pub(in crate::s3) fn hopspot_tcp_config(
+    target: &RemoteControlTcpClientTarget,
+) -> Option<HopspotTcpClientConfig> {
+    let host = match target.host() {
+        RemoteControlTcpClientHost::Ipv4(address) => {
+            HopspotTcpClientHost::Ipv4(core::net::Ipv4Addr::from(address))
+        }
+        RemoteControlTcpClientHost::Hostname { .. } => {
+            HopspotTcpClientHost::Hostname(target.host().as_str().to_string())
+        }
+    };
+    Some(HopspotTcpClientConfig {
+        host,
+        port: target.port(),
+    })
+}
+
+pub(in crate::s3) fn remote_tcp_target(
+    config: &HopspotTcpClientConfig,
+) -> Option<RemoteControlTcpClientTarget> {
+    let text = match &config.host {
+        HopspotTcpClientHost::Ipv4(address) => alloc::format!("{address}:{}", config.port),
+        HopspotTcpClientHost::Hostname(hostname) => alloc::format!("{hostname}:{}", config.port),
+    };
+    RemoteControlTcpClientTarget::parse(&text).ok()
+}
+
+pub(in crate::s3) async fn install_tcp_target(target: Option<RemoteControlTcpClientTarget>) {
+    *TCP_CONFIG.lock().await = target;
+    let embassy = target.as_ref().and_then(embassy_tcp_target);
+    TCP_RETARGET.replace(embassy).await;
 }

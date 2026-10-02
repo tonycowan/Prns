@@ -2,7 +2,8 @@ use embedded_storage_async::nor_flash::NorFlash;
 use personal_rns::crypto::{sealed_len, token_open, token_seal, TokenKey, TokenOpenError};
 use personal_rns::identity::IdentityHash;
 use personal_rns::remote_control::{
-    RemoteControlTargetSealingKey, RemoteControlWifiCredentialRevision, RemoteControlWifiStation,
+    RemoteControlTargetSealingKey, RemoteControlTcpClientHost, RemoteControlTcpClientTarget,
+    RemoteControlWifiCredentialRevision, RemoteControlWifiStation, REMOTE_CONTROL_TCP_HOSTNAME_CAP,
     REMOTE_CONTROL_WIFI_PASSWORD_CAP, REMOTE_CONTROL_WIFI_SSID_CAP,
 };
 use prns_core::entropy::{EntropySource, RuntimeEntropy};
@@ -34,7 +35,8 @@ pub const WIFI_CONFIGURATION_SEALING_DOMAIN: &[u8] =
     b"personal-hopspot/remote-control/wifi-configuration/v1";
 
 const MAGIC: [u8; 4] = *b"HWC1";
-const SCHEMA_VERSION: u16 = 1;
+const SCHEMA_VERSION_V1: u16 = 1;
+const SCHEMA_VERSION: u16 = 2;
 const HEADER_LEN: usize = 16;
 const COMMIT_OFFSET: usize = HEADER_LEN;
 const COMMIT_LEN: usize = 16;
@@ -46,7 +48,7 @@ const REVISION_LEN: usize = 4;
 const CONTROLLER_LEN: usize = 16;
 const CREDENTIAL_LEN: usize =
     1 + REMOTE_CONTROL_WIFI_SSID_CAP + 1 + REMOTE_CONTROL_WIFI_PASSWORD_CAP;
-const PLAIN_LEN: usize = 1
+const PLAIN_LEN_V1: usize = 1
     + 8 // generation
     + REVISION_LEN // next revision
     + 1 // confirmed present
@@ -56,8 +58,15 @@ const PLAIN_LEN: usize = 1
     + REVISION_LEN
     + CONTROLLER_LEN
     + CREDENTIAL_LEN;
+const TCP_TAIL_LEN: usize = 1 + 2 + 1 + REMOTE_CONTROL_TCP_HOSTNAME_CAP;
+const PLAIN_LEN: usize = PLAIN_LEN_V1 + TCP_TAIL_LEN;
+const TOKEN_LEN_V1: usize = sealed_len(PLAIN_LEN_V1);
 const TOKEN_LEN: usize = sealed_len(PLAIN_LEN);
 const RECORD_LEN: usize = TOKEN_OFFSET + TOKEN_LEN;
+const TCP_INHERIT: u8 = 0;
+const TCP_CLEARED: u8 = 1;
+const TCP_IPV4: u8 = 2;
+const TCP_HOSTNAME: u8 = 3;
 const IV_LEN: usize = 16;
 
 const STATE_FACTORY: u8 = 0;
@@ -118,10 +127,19 @@ pub enum WifiConfigurationStatus {
     },
 }
 
+/// TCP client stored beside Wi-Fi credentials. `Inherit` keeps the flash-time provisioning target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiTcpConfiguration {
+    Inherit,
+    Cleared,
+    Target(RemoteControlTcpClientTarget),
+}
+
 pub struct LoadedWifiConfiguration {
     pub active: Option<RemoteControlWifiStation>,
     pub status: WifiConfigurationStatus,
     pub recovered_unconfirmed_transaction: bool,
+    pub tcp: WifiTcpConfiguration,
 }
 
 impl core::fmt::Debug for LoadedWifiConfiguration {
@@ -137,6 +155,7 @@ impl core::fmt::Debug for LoadedWifiConfiguration {
                 "recovered_unconfirmed_transaction",
                 &self.recovered_unconfirmed_transaction,
             )
+            .field("tcp", &self.tcp)
             .finish()
     }
 }
@@ -157,6 +176,7 @@ struct StoredState {
     confirmed: Option<StoredCredential>,
     candidate: Option<CandidateCredential>,
     phase: Option<WifiConfigurationTransactionPhase>,
+    tcp: WifiTcpConfiguration,
 }
 
 impl StoredState {
@@ -167,6 +187,7 @@ impl StoredState {
             confirmed: None,
             candidate: None,
             phase: None,
+            tcp: WifiTcpConfiguration::Inherit,
         }
     }
 
@@ -253,7 +274,27 @@ where
             active: state.confirmed.map(|confirmed| confirmed.station),
             status,
             recovered_unconfirmed_transaction: recovered,
+            tcp: state.tcp,
         })
+    }
+
+    pub async fn set_tcp_client(
+        &mut self,
+        tcp: WifiTcpConfiguration,
+        key: &RemoteControlTargetSealingKey,
+        entropy: &mut impl WifiConfigurationEntropy,
+    ) -> WifiConfigurationCommitOutcome<F::Error, ()> {
+        let mut state = match self.read_active(key).await {
+            Ok(Some(state)) => state,
+            Ok(None) => StoredState::factory(),
+            Err(error) => return WifiConfigurationCommitOutcome::NotCommitted(error),
+        };
+        if state.tcp == tcp {
+            return WifiConfigurationCommitOutcome::Committed(());
+        }
+        state.tcp = tcp;
+        state.generation = state.generation.wrapping_add(1);
+        self.commit_state(&state, key, entropy).await
     }
 
     pub async fn status(
@@ -682,12 +723,21 @@ fn decode_record(
     key: &RemoteControlTargetSealingKey,
 ) -> Result<StoredState, TokenOpenError> {
     if bytes[..4] != MAGIC
-        || bytes[4..6] != SCHEMA_VERSION.to_be_bytes()
         || bytes[6..8] != [0, 0]
         || bytes[COMMIT_OFFSET..TOKEN_OFFSET] != COMMIT_MARKER
     {
         return Err(TokenOpenError::Malformed);
     }
+    let version = u16::from_be_bytes(
+        bytes[4..6]
+            .try_into()
+            .map_err(|_| TokenOpenError::Malformed)?,
+    );
+    let token_end = match version {
+        SCHEMA_VERSION_V1 => TOKEN_OFFSET + TOKEN_LEN_V1,
+        SCHEMA_VERSION => TOKEN_OFFSET + TOKEN_LEN,
+        _ => return Err(TokenOpenError::Malformed),
+    };
     let generation = u64::from_be_bytes(
         bytes[8..16]
             .try_into()
@@ -695,11 +745,19 @@ fn decode_record(
     );
     let token_key = TokenKey::from_aes256(key.as_bytes());
     let mut plain = Zeroizing::new([0u8; PLAIN_LEN + 16]);
-    let plain_len = token_open(&token_key, &bytes[TOKEN_OFFSET..], &mut plain[..])?;
-    if plain_len != PLAIN_LEN {
+    let token = bytes
+        .get(TOKEN_OFFSET..token_end)
+        .ok_or(TokenOpenError::Malformed)?;
+    let plain_len = token_open(&token_key, token, &mut plain[..])?;
+    let expected = if version == SCHEMA_VERSION_V1 {
+        PLAIN_LEN_V1
+    } else {
+        PLAIN_LEN
+    };
+    if plain_len != expected {
         return Err(TokenOpenError::Malformed);
     }
-    decode_plain(generation, &plain[..PLAIN_LEN]).ok_or(TokenOpenError::Malformed)
+    decode_plain(generation, &plain[..plain_len]).ok_or(TokenOpenError::Malformed)
 }
 
 fn encode_plain(state: &StoredState, out: &mut [u8; PLAIN_LEN]) -> Result<(), ()> {
@@ -737,11 +795,98 @@ fn encode_plain(state: &StoredState, out: &mut [u8; PLAIN_LEN]) -> Result<(), ()
             &mut out[offset..offset + CREDENTIAL_LEN],
         )?;
     }
+    encode_tcp_tail(state.tcp, &mut out[PLAIN_LEN_V1..])?;
     Ok(())
 }
 
+fn encode_tcp_tail(tcp: WifiTcpConfiguration, out: &mut [u8]) -> Result<(), ()> {
+    if out.len() != TCP_TAIL_LEN {
+        return Err(());
+    }
+    out.fill(0);
+    match tcp {
+        WifiTcpConfiguration::Inherit => out[0] = TCP_INHERIT,
+        WifiTcpConfiguration::Cleared => out[0] = TCP_CLEARED,
+        WifiTcpConfiguration::Target(target) => {
+            out[1..3].copy_from_slice(&target.port().to_be_bytes());
+            match target.host() {
+                RemoteControlTcpClientHost::Ipv4(address) => {
+                    out[0] = TCP_IPV4;
+                    out[3] = 4;
+                    out[4..8].copy_from_slice(&address);
+                }
+                RemoteControlTcpClientHost::Hostname { bytes, len } => {
+                    out[0] = TCP_HOSTNAME;
+                    out[3] = len;
+                    let host_len = usize::from(len);
+                    out.get_mut(4..4 + host_len)
+                        .ok_or(())?
+                        .copy_from_slice(bytes.get(..host_len).ok_or(())?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_tcp_tail(tail: &[u8]) -> Option<WifiTcpConfiguration> {
+    if tail.len() != TCP_TAIL_LEN {
+        return None;
+    }
+    match tail[0] {
+        TCP_INHERIT if tail[1..].iter().all(|byte| *byte == 0) => {
+            Some(WifiTcpConfiguration::Inherit)
+        }
+        TCP_CLEARED if tail[1..].iter().all(|byte| *byte == 0) => {
+            Some(WifiTcpConfiguration::Cleared)
+        }
+        TCP_IPV4 => {
+            let port = u16::from_be_bytes(tail[1..3].try_into().ok()?);
+            if tail[3] != 4 {
+                return None;
+            }
+            let address: [u8; 4] = tail.get(4..8)?.try_into().ok()?;
+            if tail.get(8..)?.iter().any(|byte| *byte != 0) {
+                return None;
+            }
+            RemoteControlTcpClientTarget::new(RemoteControlTcpClientHost::Ipv4(address), port)
+                .map(WifiTcpConfiguration::Target)
+        }
+        TCP_HOSTNAME => {
+            let port = u16::from_be_bytes(tail[1..3].try_into().ok()?);
+            let host_len = usize::from(tail[3]);
+            let host = tail.get(4..4 + host_len)?;
+            if tail.get(4 + host_len..)?.iter().any(|byte| *byte != 0) {
+                return None;
+            }
+            let hostname = core::str::from_utf8(host).ok()?;
+            let mut text = heapless::String::<{ REMOTE_CONTROL_TCP_HOSTNAME_CAP + 6 }>::new();
+            core::fmt::Write::write_fmt(&mut text, format_args!("{hostname}:{port}")).ok()?;
+            RemoteControlTcpClientTarget::parse(&text)
+                .ok()
+                .map(WifiTcpConfiguration::Target)
+        }
+        _ => None,
+    }
+}
+
 fn decode_plain(generation: u64, plain: &[u8]) -> Option<StoredState> {
-    if plain.len() != PLAIN_LEN || u64::from_be_bytes(plain[1..9].try_into().ok()?) != generation {
+    let (wifi, tcp) = if plain.len() == PLAIN_LEN {
+        let (wifi, tail) = plain.split_at(PLAIN_LEN_V1);
+        (wifi, decode_tcp_tail(tail)?)
+    } else if plain.len() == PLAIN_LEN_V1 {
+        (plain, WifiTcpConfiguration::Inherit)
+    } else {
+        return None;
+    };
+    let mut state = decode_wifi(generation, wifi)?;
+    state.tcp = tcp;
+    Some(state)
+}
+
+fn decode_wifi(generation: u64, plain: &[u8]) -> Option<StoredState> {
+    if plain.len() != PLAIN_LEN_V1 || u64::from_be_bytes(plain[1..9].try_into().ok()?) != generation
+    {
         return None;
     }
     let state_tag = plain[0];
@@ -797,6 +942,7 @@ fn decode_plain(generation: u64, plain: &[u8]) -> Option<StoredState> {
         confirmed,
         candidate,
         phase,
+        tcp: WifiTcpConfiguration::Inherit,
     })
 }
 
@@ -1197,6 +1343,55 @@ mod tests {
             WifiConfigurationStatus::Confirmed { revision }
         );
         assert!(!loaded.recovered_unconfirmed_transaction);
+    }
+
+    #[test]
+    fn tcp_client_override_survives_reboot_and_a_later_station_commit() {
+        let key = sealing_key(0x2a);
+        let mut entropy = entropy(0x3a);
+        let controller = IdentityHash::new([0x4a; CONTROLLER_LEN]);
+        let mut store = WifiConfigurationStore::new(FakeFlash::erased(), PAGES);
+
+        let factory = block_on(store.load(&key, &mut entropy)).unwrap();
+        assert_eq!(factory.tcp, WifiTcpConfiguration::Inherit);
+
+        let target =
+            personal_rns::remote_control::RemoteControlTcpClientTarget::parse("mesh.example:4242")
+                .expect("hostname target");
+        committed(block_on(store.set_tcp_client(
+            WifiTcpConfiguration::Target(target),
+            &key,
+            &mut entropy,
+        )));
+        let flash = store.into_flash();
+        let mut store = WifiConfigurationStore::new(flash, PAGES);
+        let loaded = block_on(store.load(&key, &mut entropy)).unwrap();
+        assert_eq!(loaded.tcp, WifiTcpConfiguration::Target(target));
+
+        confirm_station(
+            &mut store,
+            &key,
+            &mut entropy,
+            controller,
+            "new-network",
+            "sensitive-password",
+        );
+        let flash = store.into_flash();
+        let mut store = WifiConfigurationStore::new(flash, PAGES);
+        let loaded = block_on(store.load(&key, &mut entropy)).unwrap();
+        assert_eq!(loaded.active.as_ref().unwrap().ssid(), "new-network");
+        assert_eq!(loaded.tcp, WifiTcpConfiguration::Target(target));
+
+        committed(block_on(store.set_tcp_client(
+            WifiTcpConfiguration::Cleared,
+            &key,
+            &mut entropy,
+        )));
+        let flash = store.into_flash();
+        let mut store = WifiConfigurationStore::new(flash, PAGES);
+        let loaded = block_on(store.load(&key, &mut entropy)).unwrap();
+        assert_eq!(loaded.tcp, WifiTcpConfiguration::Cleared);
+        assert_eq!(loaded.active.as_ref().unwrap().ssid(), "new-network");
     }
 
     #[test]

@@ -1,16 +1,17 @@
 use super::*;
 use crate::persistence::S3SharedFlash;
 use personal_hopspot_core::display::{DisplayBlankReason, DisplayVisibility, MonotonicMillis};
+use personal_rns::interfaces::InterfaceMode;
 use personal_rns::remote_control::{
     RemoteControlApplyOutcome, RemoteControlCapabilities, RemoteControlDiscoveryGroups,
     RemoteControlDiscoveryGroupsInventoryOutcome, RemoteControlDiscoveryGroupsReplaceOutcome,
     RemoteControlDisplayAutoOff, RemoteControlDisplayVisibility, RemoteControlEspRadioMode,
     RemoteControlGnssPower, RemoteControlGroupOutcome, RemoteControlInterfacePower,
-    RemoteControlLoRaOutcome, RemoteControlPowerOutcome, RemoteControlRequestKind,
-    RemoteControlStationUplink, RemoteControlSystemPower, RemoteControlTargetSealingKey,
-    RemoteControlWifiConfirmationRemaining, RemoteControlWifiCredentialRevision,
-    RemoteControlWifiStageOutcome, RemoteControlWifiTransactionStatus,
-    REMOTE_CONTROL_WIFI_CONFIRMATION_WINDOW_SECONDS,
+    RemoteControlLoRaOutcome, RemoteControlModeOutcome, RemoteControlPowerOutcome,
+    RemoteControlRequestKind, RemoteControlStationUplink, RemoteControlSystemPower,
+    RemoteControlTargetSealingKey, RemoteControlWifiConfirmationRemaining,
+    RemoteControlWifiCredentialRevision, RemoteControlWifiStageOutcome,
+    RemoteControlWifiTransactionStatus, REMOTE_CONTROL_WIFI_CONFIRMATION_WINDOW_SECONDS,
 };
 use personal_rns::runtime::{
     RemoteControlHostCommand, RemoteControlHostCommandError, RemoteControlHostResponse,
@@ -162,6 +163,7 @@ pub(super) fn capabilities<B: Esp32S3Board>() -> RemoteControlCapabilities {
         RemoteControlRequestKind::AnnounceSelf,
         RemoteControlRequestKind::InventoryInterfaces,
         RemoteControlRequestKind::SetInterfacePower,
+        RemoteControlRequestKind::SetInterfaceMode,
         RemoteControlRequestKind::InventoryInterfacePeers,
         RemoteControlRequestKind::InventoryInterfaceConfig,
         RemoteControlRequestKind::SetInterfaceGroup,
@@ -171,6 +173,8 @@ pub(super) fn capabilities<B: Esp32S3Board>() -> RemoteControlCapabilities {
         RemoteControlRequestKind::DescribePower,
         RemoteControlRequestKind::DescribeNetworkTransport,
         RemoteControlRequestKind::SetNetworkTransport,
+        RemoteControlRequestKind::DescribeTcpClient,
+        RemoteControlRequestKind::SetTcpClient,
         RemoteControlRequestKind::InventoryPathTable,
         RemoteControlRequestKind::SetSystemPower,
         RemoteControlRequestKind::SetStationUplink,
@@ -200,6 +204,47 @@ pub(super) fn capabilities<B: Esp32S3Board>() -> RemoteControlCapabilities {
         capabilities = capabilities.with_request(RemoteControlRequestKind::SetDisplayAutoOff);
     }
     capabilities
+}
+
+/// The lifecycle channel holds only a few messages. Yield between sends so core 1 can apply each
+/// one before the next fleet member is queued.
+async fn send_interface_mode(id: InterfaceId, mode: InterfaceMode) -> bool {
+    for _ in 0..16 {
+        if super::LIFECYCLE
+            .sender()
+            .try_send(personal_rns::manifold::embassy::InterfaceLifecycle::SetMode { id, mode })
+            .is_ok()
+        {
+            super::INTERFACE_STORE.set_interface_mode(id, mode);
+            return true;
+        }
+        embassy_futures::yield_now().await;
+    }
+    false
+}
+
+async fn apply_interface_mode(
+    snapshots: &[InterfaceSnapshot],
+    id: InterfaceId,
+    mode: InterfaceMode,
+) -> RemoteControlModeOutcome {
+    if !snapshots.iter().any(|snapshot| snapshot.id == id) {
+        return RemoteControlModeOutcome::UnknownInterface;
+    }
+    if !send_interface_mode(id, mode).await {
+        return RemoteControlModeOutcome::Failed;
+    }
+    for snapshot in snapshots {
+        if let Membership::FleetMember { supervisor_id } = snapshot.membership {
+            if supervisor_id == id
+                && snapshot.id != id
+                && !send_interface_mode(snapshot.id, mode).await
+            {
+                return RemoteControlModeOutcome::Failed;
+            }
+        }
+    }
+    RemoteControlModeOutcome::Applied
 }
 
 pub(super) async fn execute<B: Esp32S3Board>(
@@ -252,8 +297,10 @@ pub(super) async fn execute<B: Esp32S3Board>(
             };
             Ok(RemoteControlHostResponse::SetInterfacePower(outcome))
         }
-        RemoteControlHostCommand::SetInterfaceMode { .. } => {
-            Err(RemoteControlHostCommandError::Unsupported)
+        RemoteControlHostCommand::SetInterfaceMode { id, mode } => {
+            Ok(RemoteControlHostResponse::SetInterfaceMode(
+                apply_interface_mode(context.snapshots, id, mode).await,
+            ))
         }
         RemoteControlHostCommand::SetInterfaceGroup { id, group } => {
             let groups = personal_rns::interfaces::DiscoveryGroupSet::from_singleton(group);
@@ -367,6 +414,69 @@ pub(super) async fn execute<B: Esp32S3Board>(
                 }
             }
             Ok(RemoteControlHostResponse::SetNetworkTransport(outcome))
+        }
+        RemoteControlHostCommand::DescribeTcpClient => {
+            let config = match TCP_CONFIG.lock().await.clone() {
+                Some(target) => {
+                    personal_rns::remote_control::RemoteControlTcpClientConfig::Target(target)
+                }
+                None => personal_rns::remote_control::RemoteControlTcpClientConfig::Clear,
+            };
+            let (enabled, connection) = context
+                .tcp_status
+                .map(|status| (status.is_enabled(), status.connection()))
+                .unwrap_or((false, ConnectionState::Disconnected));
+            Ok(RemoteControlHostResponse::DescribeTcpClient(
+                personal_rns::remote_control::RemoteControlTcpClientStatus {
+                    config,
+                    enabled,
+                    connection,
+                },
+            ))
+        }
+        RemoteControlHostCommand::SetTcpClient { config } => {
+            let requested = match config {
+                personal_rns::remote_control::RemoteControlTcpClientConfig::Clear => None,
+                personal_rns::remote_control::RemoteControlTcpClientConfig::Target(target) => {
+                    Some(target)
+                }
+            };
+            if TCP_CONFIG.lock().await.as_ref() == requested.as_ref() {
+                return Ok(RemoteControlHostResponse::SetTcpClient(
+                    personal_rns::remote_control::RemoteControlTcpClientOutcome::Unchanged,
+                ));
+            }
+            let stored = match requested {
+                None => screen::WifiTcpConfiguration::Cleared,
+                Some(target) => screen::WifiTcpConfiguration::Target(target),
+            };
+            let mut entropy = runtime_entropy();
+            match context
+                .wifi_store
+                .set_tcp_client(stored, context.wifi_key, &mut entropy)
+                .await
+            {
+                screen::WifiConfigurationCommitOutcome::Committed(()) => {}
+                screen::WifiConfigurationCommitOutcome::NotCommitted(_)
+                | screen::WifiConfigurationCommitOutcome::Indeterminate(_) => {
+                    return Err(RemoteControlHostCommandError::PersistenceFailed);
+                }
+            }
+            if requested.is_none() {
+                if let Some(status) = context.tcp_status {
+                    set_desired_interface(&mut context, status.id(), false);
+                }
+            }
+            install_tcp_target(requested).await;
+            context.wifi_config.tcp_client = requested.as_ref().and_then(hopspot_tcp_config);
+            if requested.is_some() {
+                if let Some(status) = context.tcp_status {
+                    set_desired_interface(&mut context, status.id(), true);
+                }
+            }
+            Ok(RemoteControlHostResponse::SetTcpClient(
+                personal_rns::remote_control::RemoteControlTcpClientOutcome::Applied,
+            ))
         }
         RemoteControlHostCommand::SetSystemPower { power } => {
             let desired_awake = power == RemoteControlSystemPower::Awake;

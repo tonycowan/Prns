@@ -156,6 +156,8 @@ pub struct AnnounceArrival<'a> {
 pub struct AnnounceObservation<'a> {
     pub destination: DestinationHash,
     pub announced_identity: IdentityHash,
+    /// `sha256(dotted name)[..10]` from the announce packet. This is the name hash, not the destination hash.
+    pub dotted_name_hash: DottedNameHash,
     pub hops: HopCount,
     pub source_interface: InterfaceId,
     pub arrived_at: InstantMillis,
@@ -178,6 +180,7 @@ impl<'a> AnnounceObservation<'a> {
         Self {
             destination: arrival.announce.destination,
             announced_identity,
+            dotted_name_hash: arrival.announce.dotted_name_hash,
             hops: HopCount(arrival.hops),
             source_interface: arrival.receiving_interface,
             arrived_at: arrival.arrived_at,

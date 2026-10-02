@@ -180,6 +180,7 @@ fn emit_diagnostic(diagnostic: &Diagnostic<'_>) {
             hops,
             source_interface,
             app_data,
+            dotted_name_hash: _,
         } => tracing::debug!(
             target: "prns.runtime",
             event = "announce_heard",
@@ -527,6 +528,7 @@ mod tests {
                 hops: 2,
                 source_interface: crate::interfaces::InterfaceId::new([0x5A; 8]),
                 app_data: &[0x00, 0x70, 0x72, 0x6E, 0x73, 0xFF],
+                dotted_name_hash: crate::routing::announce::DottedNameHash::new([0x11; 10]),
             }));
         });
 

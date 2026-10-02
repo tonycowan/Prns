@@ -8,7 +8,7 @@ use crate::interface_discovery::{
     AutoConnectPolicy, AutoConnectRoutingPolicy, DiscoveryDecryptionError, DiscoveryIntake,
     DiscoverySourcePolicy, GeographicLocation, InterfaceDiscoveryPolicy, PublishedIfac,
 };
-use crate::routing::announce::AnnounceObservation;
+use crate::routing::announce::{AnnounceObservation, DottedNameHash};
 use crate::units::HopCount;
 use crate::wire::TransportId;
 
@@ -206,6 +206,7 @@ fn network_encrypted_publication_round_trips_through_the_shared_identity_crypto(
                 &identity.identity_hash(),
             ),
             announced_identity: identity.identity_hash(),
+            dotted_name_hash: DottedNameHash::new([0; 10]),
             hops: HopCount(1),
             source_interface: InterfaceId::new([0x91; 8]),
             arrived_at: InstantMillis(8_000),

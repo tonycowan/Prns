@@ -19,6 +19,7 @@ use crate::remote_control::{
     RemoteControlPairingAvailabilityObservation, RemoteControlPairingEndpoint,
     RemoteControlTargetPairingAborted,
 };
+use crate::routing::announce::DottedNameHash;
 use crate::routing::delivery::Delivery;
 use crate::routing::links::channel::MessageType;
 use crate::routing::links::request::RequestId;
@@ -135,6 +136,8 @@ pub enum Diagnostic<'a> {
         hops: u8,
         source_interface: InterfaceId,
         app_data: &'a [u8],
+        /// `sha256(dotted name)[..10]` carried in the announce. Compare with `expand_name`.
+        dotted_name_hash: DottedNameHash,
     },
     /// The recipe's persistence store was seeded into this boot's engine before the first frame moved.
     PersistenceRestored {
@@ -356,6 +359,7 @@ impl<'a> From<Journaled<'a>> for PrnsEvent<'a> {
                     hops: observation.hops.0,
                     source_interface: observation.source_interface,
                     app_data: observation.app_data,
+                    dotted_name_hash: observation.dotted_name_hash,
                 })
             }
             Journaled::SelfRatchetRotated { destination } => {
@@ -448,6 +452,7 @@ mod tests {
             observation: AnnounceObservation {
                 destination: DestinationHash::new([1; 16]),
                 announced_identity: IdentityHash::new([2; 16]),
+                dotted_name_hash: DottedNameHash::new([6; 10]),
                 hops: HopCount(3),
                 source_interface: InterfaceId::new([4; 8]),
                 arrived_at: InstantMillis(5),

@@ -248,8 +248,8 @@ pub enum RemoteControlControllerGrantError {
 /// Stored grants keep the request set from pairing. Administrators also receive
 /// the current administrator-only kinds. A controller that already manages the
 /// node can describe power, describe and set network transport, read the path
-/// table, and install firmware when those kinds were added after the grant was
-/// stored.
+/// table, describe and set the TCP client, set interface mode, and install
+/// firmware when those kinds were added after the grant was stored.
 fn grant_effective_requests(
     authority: RemoteControlControllerAuthority,
     permitted_requests: RemoteControlRequestSet,
@@ -270,6 +270,9 @@ fn grant_effective_requests(
         let _inserted = requests.insert(RemoteControlRequestKind::DescribeNetworkTransport);
         let _inserted = requests.insert(RemoteControlRequestKind::SetNetworkTransport);
         let _inserted = requests.insert(RemoteControlRequestKind::InventoryPathTable);
+        let _inserted = requests.insert(RemoteControlRequestKind::DescribeTcpClient);
+        let _inserted = requests.insert(RemoteControlRequestKind::SetTcpClient);
+        let _inserted = requests.insert(RemoteControlRequestKind::SetInterfaceMode);
         let _inserted = requests.insert(RemoteControlRequestKind::FirmwareUpdate);
     }
     requests

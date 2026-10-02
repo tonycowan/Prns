@@ -99,6 +99,7 @@ pub(super) fn capabilities() -> RemoteControlCapabilities {
         RemoteControlRequestKind::AnnounceSelf,
         RemoteControlRequestKind::InventoryInterfaces,
         RemoteControlRequestKind::SetInterfacePower,
+        RemoteControlRequestKind::SetInterfaceMode,
         RemoteControlRequestKind::SetInterfaceGroup,
         RemoteControlRequestKind::InventoryInterfaceDiscoveryGroups,
         RemoteControlRequestKind::ReplaceInterfaceDiscoveryGroups,
@@ -378,6 +379,25 @@ pub(super) async fn execute<D: ImmediateDisplayDevice>(
             };
             Ok(RemoteControlHostResponse::SetGnssPower(outcome))
         }
+        RemoteControlHostCommand::SetInterfaceMode { id, mode } => Ok(
+            RemoteControlHostResponse::SetInterfaceMode(hopspot::queue_interface_mode_change(
+                context.snapshots,
+                id,
+                mode,
+                |target, mode| {
+                    super::LIFECYCLE
+                        .sender()
+                        .try_send(
+                            personal_rns::manifold::embassy::InterfaceLifecycle::SetMode {
+                                id: target,
+                                mode,
+                            },
+                        )
+                        .is_ok()
+                },
+                |target, mode| super::INTERFACE_STORE.set_interface_mode(target, mode),
+            )),
+        ),
         _ => Err(RemoteControlHostCommandError::Unsupported),
     }
 }

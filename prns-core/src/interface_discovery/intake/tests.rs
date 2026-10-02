@@ -49,6 +49,7 @@ fn observation<'a>(source: IdentityHash, app_data: &'a [u8]) -> AnnounceObservat
     AnnounceObservation {
         destination: discovery_destination_hash(&source),
         announced_identity: source,
+        dotted_name_hash: crate::routing::announce::DottedNameHash::new([0; 10]),
         hops: HopCount(3),
         source_interface: InterfaceId::new([0x44; 8]),
         arrived_at: InstantMillis(9_000),

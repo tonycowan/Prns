@@ -128,6 +128,16 @@ pub(super) async fn run_core<B: Esp32S3Board>(
                 wifi_config_source = HopspotWifiConfigSource::RuntimeSealed;
                 runtime_wifi_station = Some(station);
             }
+            match loaded.tcp {
+                screen::WifiTcpConfiguration::Inherit => {}
+                screen::WifiTcpConfiguration::Cleared => wifi_config.tcp_client = None,
+                screen::WifiTcpConfiguration::Target(target) => {
+                    if let Some(config) = hopspot_tcp_config(&target) {
+                        wifi_config.tcp_client = Some(config);
+                        wifi_config_source = HopspotWifiConfigSource::RuntimeSealed;
+                    }
+                }
+            }
             if loaded.recovered_unconfirmed_transaction {
                 log::warn!("wifi-config: restored the last confirmed revision after reboot");
             }
@@ -290,12 +300,14 @@ pub(super) async fn run_core<B: Esp32S3Board>(
     });
 
     boot_stage(BootPhase::TcpBegin);
-    let tcp_built = tcp_stack.and_then(|stack| {
-        wifi_config
-            .tcp_client
-            .as_ref()
-            .and_then(|tcp_client| build_tcp(stack, tcp_client))
-    });
+    let tcp_built = if let Some(stack) = tcp_stack {
+        if let Some(target) = wifi_config.tcp_client.as_ref().and_then(remote_tcp_target) {
+            install_tcp_target(Some(target)).await;
+        }
+        Some(build_tcp(stack))
+    } else {
+        None
+    };
     boot_stage(BootPhase::TcpReady);
     let tcp_status = tcp_built.as_ref().map(|(_, status, _)| *status);
     let tcp_id = tcp_built.as_ref().map(|(_, _, id)| *id);

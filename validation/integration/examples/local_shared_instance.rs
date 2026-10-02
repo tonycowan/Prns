@@ -79,6 +79,7 @@ async fn main() {
                     hops,
                     source_interface,
                     app_data,
+                    dotted_name_hash: _,
                 }) => {
                     println!(
                         "HEARD dest={} hops={} kind={:?}",

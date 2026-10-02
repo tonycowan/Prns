@@ -22,7 +22,7 @@ use crate::remote_control::{
     RemoteControlNodeIdentitySecrets, RemoteControlSelfAnnouncement, RemoteControlService,
     RemoteControlTargetIdentitySecret,
 };
-use crate::routing::announce::AnnounceObservation;
+use crate::routing::announce::{AnnounceObservation, DottedNameHash};
 use crate::routing::links::resources::{ResourceMemoryLimits, ResourceStrategy};
 use crate::routing::request_handlers::RequestHandlerError;
 use crate::runtime::{
@@ -647,6 +647,7 @@ fn accepted_announce_observers_receive_the_complete_observation() {
     let observation = AnnounceObservation {
         destination: DestinationHash::new([0x11; 16]),
         announced_identity: crate::identity::IdentityHash::new([0x22; 16]),
+        dotted_name_hash: DottedNameHash::new([0x55; 10]),
         hops: crate::units::HopCount(3),
         source_interface: InterfaceId::new([0x33; 8]),
         arrived_at: InstantMillis(4_000),

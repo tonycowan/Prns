@@ -5,6 +5,7 @@ use prns_core::interface_discovery::{
     DiscoveryPublicationSecurity, DiscoverySourcePolicy, GeographicLocation, StampCost,
 };
 use prns_core::interfaces::InterfaceOriginKind;
+use prns_core::routing::announce::DottedNameHash;
 use prns_core::wire::TransportId;
 
 use super::*;
@@ -59,6 +60,7 @@ fn observation<'a>(identity: IdentityHash, app_data: &'a [u8]) -> AnnounceObserv
     AnnounceObservation {
         destination: discovery_destination_hash(&identity),
         announced_identity: identity,
+        dotted_name_hash: DottedNameHash::new([0; 10]),
         hops: HopCount(2),
         source_interface: InterfaceId::new([0x55; 8]),
         arrived_at: InstantMillis(10_000),

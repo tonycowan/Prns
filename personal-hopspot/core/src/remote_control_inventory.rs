@@ -3,7 +3,7 @@ use core::fmt::Write as _;
 use personal_rns::interfaces::bluetooth_auto::BleIdentity;
 use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::interfaces::{
-    DiscoveryGroupSet, InterfaceId, InterfaceKind, InterfaceSnapshot, Membership,
+    DiscoveryGroupSet, InterfaceId, InterfaceKind, InterfaceMode, InterfaceSnapshot, Membership,
 };
 use personal_rns::remote_control::{
     wifi_station_inventory_config_with_rssi, RemoteControlBuildVersion,
@@ -12,9 +12,9 @@ use personal_rns::remote_control::{
     RemoteControlInterfaceContinuation, RemoteControlInterfaceCursor, RemoteControlInterfaceEntry,
     RemoteControlInterfaceInventory, RemoteControlInterfaceInventoryError,
     RemoteControlInterfacePage, RemoteControlInterfacePeer, RemoteControlInterfacePeerPage,
-    RemoteControlInterfacePeersOutcome, RemoteControlPeerContinuation, RemoteControlPeerCursor,
-    RemoteControlPeerPage, RemoteControlResponse, REMOTE_CONTROL_INTERFACE_INVENTORY_CAP,
-    REMOTE_CONTROL_INTERFACE_PEER_CAP,
+    RemoteControlInterfacePeersOutcome, RemoteControlModeOutcome, RemoteControlPeerContinuation,
+    RemoteControlPeerCursor, RemoteControlPeerPage, RemoteControlResponse,
+    REMOTE_CONTROL_INTERFACE_INVENTORY_CAP, REMOTE_CONTROL_INTERFACE_PEER_CAP,
 };
 use prns_core::engine::MAX_RESPOND_DATA_LEN;
 
@@ -78,6 +78,47 @@ pub fn remote_control_inventory_from_snapshots(
         }
     }
     Ok(inventory)
+}
+
+/// Queue a mode change for one interface and the fleet members it supervises.
+///
+/// `enqueue` reports whether the manifold accepted that interface. A missing
+/// interface is [`RemoteControlModeOutcome::UnknownInterface`]. A full queue is
+/// [`RemoteControlModeOutcome::Failed`].
+pub fn queue_interface_mode_change(
+    snapshots: &[InterfaceSnapshot],
+    id: InterfaceId,
+    mode: InterfaceMode,
+    mut enqueue: impl FnMut(InterfaceId, InterfaceMode) -> bool,
+    mut record: impl FnMut(InterfaceId, InterfaceMode),
+) -> RemoteControlModeOutcome {
+    if !snapshots.iter().any(|snapshot| snapshot.id == id) {
+        return RemoteControlModeOutcome::UnknownInterface;
+    }
+    let mut failed = false;
+    let mut visit = |target: InterfaceId| {
+        if failed {
+            return;
+        }
+        if enqueue(target, mode) {
+            record(target, mode);
+        } else {
+            failed = true;
+        }
+    };
+    visit(id);
+    for snapshot in snapshots {
+        if let Membership::FleetMember { supervisor_id } = snapshot.membership {
+            if supervisor_id == id && snapshot.id != id {
+                visit(snapshot.id);
+            }
+        }
+    }
+    if failed {
+        RemoteControlModeOutcome::Failed
+    } else {
+        RemoteControlModeOutcome::Applied
+    }
 }
 
 /// One supervisor card: name, group, LoRa tune, destinations, failure.
@@ -430,6 +471,36 @@ mod tests {
         assert_eq!(card.group.as_str(), "reticulum");
         assert_eq!(card.config.as_str(), "W,field-lab");
         assert!(!card.config.as_str().contains("secret"));
+
+        let mut member = snapshot(InterfaceKind::WifiPeer);
+        member.id = InterfaceId::new([InterfaceKind::WifiPeer as u8, 1, 0, 0, 0, 0, 0, 0]);
+        member.membership = Membership::FleetMember {
+            supervisor_id: supervisor_id,
+        };
+        let mut queued = std::vec::Vec::new();
+        let outcome = queue_interface_mode_change(
+            &[supervisor.clone(), member],
+            supervisor_id,
+            InterfaceMode::Gateway,
+            |id, mode| {
+                assert_eq!(mode, InterfaceMode::Gateway);
+                queued.push(id);
+                true
+            },
+            |_, _| {},
+        );
+        assert_eq!(outcome, RemoteControlModeOutcome::Applied);
+        assert_eq!(queued.len(), 2);
+        assert_eq!(
+            queue_interface_mode_change(
+                &[supervisor],
+                InterfaceId::new([0xff; 8]),
+                InterfaceMode::Full,
+                |_, _| true,
+                |_, _| {},
+            ),
+            RemoteControlModeOutcome::UnknownInterface
+        );
 
         let mut with_rssi = snapshot(InterfaceKind::AutoWifi);
         with_rssi.id = supervisor_id;

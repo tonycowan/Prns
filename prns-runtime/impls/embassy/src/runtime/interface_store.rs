@@ -6,7 +6,7 @@ use embassy_sync::signal::Signal;
 use heapless::FnvIndexMap;
 
 use crate::engine::InterfaceCounts;
-use crate::interfaces::{InterfaceId, PacketPhyStats};
+use crate::interfaces::{InterfaceId, InterfaceMode, PacketPhyStats};
 use crate::routing::dedup::PacketHash;
 
 use prns_runtime::runtime::packet_phy_retention::{
@@ -24,6 +24,8 @@ pub(crate) trait InterfaceInspectionStore: Sync {
     const RETAINS_PACKET_PHY: bool;
 
     fn set_interface_counts(&self, interface: InterfaceId, counts: InterfaceCounts);
+    fn set_interface_mode(&self, interface: InterfaceId, mode: InterfaceMode);
+    fn interface_mode(&self, interface: InterfaceId) -> Option<InterfaceMode>;
     fn forget_interface(&self, interface: InterfaceId);
     fn signal_interface_counts_changed(&self);
     fn remember_packet_phy(&self, packet_hash: PacketHash, stats: PacketPhyStats);
@@ -36,6 +38,12 @@ impl InterfaceInspectionStore for NoInterfaceInspectionStore {
     const RETAINS_PACKET_PHY: bool = false;
 
     fn set_interface_counts(&self, _interface: InterfaceId, _counts: InterfaceCounts) {}
+
+    fn set_interface_mode(&self, _interface: InterfaceId, _mode: InterfaceMode) {}
+
+    fn interface_mode(&self, _interface: InterfaceId) -> Option<InterfaceMode> {
+        None
+    }
 
     fn forget_interface(&self, _interface: InterfaceId) {}
 
@@ -51,6 +59,7 @@ pub struct EmbassyInterfaceStore<
     const PACKET_PHY_INDEX_BUCKETS: usize,
 > {
     counts: Mutex<M, RefCell<FnvIndexMap<InterfaceId, InterfaceCounts, INTERFACES>>>,
+    modes: Mutex<M, RefCell<FnvIndexMap<InterfaceId, InterfaceMode, INTERFACES>>>,
     packet_phy:
         Mutex<M, RefCell<FixedPacketPhyRetention<PACKET_PHY_CAPACITY, PACKET_PHY_INDEX_BUCKETS>>>,
     signal: Signal<M, ()>,
@@ -86,9 +95,27 @@ impl<
         };
         Self {
             counts: Mutex::new(RefCell::new(FnvIndexMap::new())),
+            modes: Mutex::new(RefCell::new(FnvIndexMap::new())),
             packet_phy: Mutex::new(RefCell::new(fixed_packet_phy_retention())),
             signal: Signal::new(),
         }
+    }
+
+    #[must_use]
+    pub fn interface_mode(&self, interface: InterfaceId) -> Option<InterfaceMode> {
+        self.modes
+            .lock(|cell| cell.borrow().get(&interface).copied())
+    }
+
+    pub fn set_interface_mode(&self, interface: InterfaceId, mode: InterfaceMode) {
+        self.modes.lock(|cell| {
+            let stored = cell.borrow_mut().insert(interface, mode);
+            assert!(
+                stored.is_ok(),
+                "EmbassyInterfaceStore INTERFACES is smaller than the live interface count"
+            );
+        });
+        self.signal.signal(());
     }
 
     #[must_use]
@@ -128,8 +155,19 @@ impl<
         });
     }
 
+    fn set_interface_mode(&self, interface: InterfaceId, mode: InterfaceMode) {
+        EmbassyInterfaceStore::set_interface_mode(self, interface, mode);
+    }
+
+    fn interface_mode(&self, interface: InterfaceId) -> Option<InterfaceMode> {
+        EmbassyInterfaceStore::interface_mode(self, interface)
+    }
+
     fn forget_interface(&self, interface: InterfaceId) {
         self.counts.lock(|cell| {
+            let _ = cell.borrow_mut().remove(&interface);
+        });
+        self.modes.lock(|cell| {
             let _ = cell.borrow_mut().remove(&interface);
         });
     }
@@ -195,5 +233,13 @@ mod tests {
 
         assert_eq!(store.counts(interface).transported_links, 4);
         assert_eq!(store.packet_phy(packet_hash), Some(packet_phy));
+        assert_eq!(store.interface_mode(interface), None);
+        store.set_interface_mode(interface, InterfaceMode::Gateway);
+        assert_eq!(
+            store.interface_mode(interface),
+            Some(InterfaceMode::Gateway)
+        );
+        store.forget_interface(interface);
+        assert_eq!(store.interface_mode(interface), None);
     }
 }

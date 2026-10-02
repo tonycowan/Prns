@@ -11,7 +11,7 @@ use crate::interface_discovery::{
     FixedDiscoveryValidationCache, GeographicLocation, StampCost, StampValue,
     DISCOVERED_INTERFACE_DETACH_AFTER,
 };
-use crate::routing::announce::AnnounceObservation;
+use crate::routing::announce::{AnnounceObservation, DottedNameHash};
 use crate::storage::TablePushError;
 use crate::units::HopCount;
 use crate::wire::{DestinationHash, TransportId};
@@ -263,6 +263,7 @@ fn observation<'a>(identity: IdentityHash, app_data: &'a [u8]) -> AnnounceObserv
     AnnounceObservation {
         destination: discovery_destination_hash(&identity),
         announced_identity: identity,
+        dotted_name_hash: DottedNameHash::new([0; 10]),
         hops: HopCount(2),
         source_interface: InterfaceId::new([0x55; 8]),
         arrived_at: InstantMillis(10_000),

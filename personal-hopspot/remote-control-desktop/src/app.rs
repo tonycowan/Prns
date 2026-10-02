@@ -1543,7 +1543,7 @@ fn ManagedTargetConfiguration(
                             if let Some(battery) = target.battery.as_deref().filter(|text| !text.is_empty()) {
                                 div { dt { "Battery" } dd { "{battery}" } }
                             }
-                            div { dt { "Address" } dd { "{target.id}" } }
+                            div { dt { "RC identity hash" } dd { "{target.id}" } }
                             div {
                                 dt { "Path found at" }
                                 dd {
@@ -4225,7 +4225,7 @@ fn AnnouncesSection(
             p { class: "lead", "Live stream of announces this controller hears on its interfaces. Newest first." }
             if announces_info() {
                 p { class: "note info-note",
-                    "Each row is one AnnounceHeard diagnostic: destination hash, hop count, ingress interface, and announce app data (UTF-8 when printable, otherwise hex). The filter matches any of those fields, including managed-node and sibling aliases. Clearing the list only drops this app's ring buffer; the mesh keeps announcing."
+                    "Each row is one AnnounceHeard diagnostic: destination hash, hop count, ingress interface, and announce app data (UTF-8 when printable, otherwise hex). When the announce's name hash matches a known address type, that dotted name is shown. The filter matches any of those fields, including managed-node and sibling aliases. This list is saved with the controller and restored on the next launch. Clearing it drops that saved list; the mesh keeps announcing."
                 }
             }
         }
@@ -4235,7 +4235,7 @@ fn AnnouncesSection(
                     "Filter"
                     input {
                         r#type: "search",
-                        placeholder: "destination, alias, interface, hops, app data…",
+                        placeholder: "destination, name, alias, interface, hops, app data…",
                         value: "{filter}",
                         oninput: move |event| announce_filter.set(event.value()),
                     }
@@ -4258,9 +4258,12 @@ fn AnnouncesSection(
                 ul { class: "announce-stream",
                     for entry in visible.into_iter() {
                         {
+                            let destination_name =
+                                RemoteControlBackend::announce_destination_name(&entry.name_hash);
                             let title = RemoteControlBackend::announce_title(
                                 &entry.destination,
                                 &labels,
+                                &destination_name,
                             );
                             rsx! {
                                 li {
@@ -4274,6 +4277,12 @@ fn AnnouncesSection(
                                         time { "{entry.at}" }
                                     }
                                     dl { class: "announce-facts",
+                                        if !destination_name.is_empty() {
+                                            div {
+                                                dt { "Name" }
+                                                dd { "{destination_name}" }
+                                            }
+                                        }
                                         div {
                                             dt { "Destination" }
                                             dd { "{entry.destination}" }
@@ -4325,11 +4334,14 @@ fn filtered_announces<'a>(
 }
 
 fn announce_matches(entry: &HeardAnnounce, needle: &str, labels: &HashMap<String, String>) -> bool {
-    let title = RemoteControlBackend::announce_title(&entry.destination, labels);
+    let destination_name = RemoteControlBackend::announce_destination_name(&entry.name_hash);
+    let title = RemoteControlBackend::announce_title(&entry.destination, labels, &destination_name);
     let contains = |field: &str| field.to_ascii_lowercase().contains(needle);
     contains(&title)
+        || contains(&destination_name)
         || contains(&entry.destination)
         || contains(&entry.destination_short)
+        || contains(&entry.name_hash)
         || contains(&entry.interface)
         || contains(&entry.interface_id)
         || contains(&entry.app_data_text)
@@ -6079,7 +6091,14 @@ fn save_interface_drafts(
     spawn(async move {
         let mut applied = Vec::new();
         for (key, scope, interface_id, previous, draft) in pending {
-            for field in draft.changed_fields(&previous) {
+            let fields = draft.changed_fields(&previous);
+            if fields.is_empty() {
+                drafts.write().remove(&key);
+                continue;
+            }
+            let keep_mode = !fields.contains(&InterfaceField::Mode);
+            let kept_mode = previous.mode;
+            for field in fields {
                 let result = match field {
                     InterfaceField::Mode => {
                         if scope == CONTROLLER_SCOPE {
@@ -6135,10 +6154,9 @@ fn save_interface_drafts(
                         if scope == CONTROLLER_SCOPE {
                             backend.set_local_tcp_target(&draft.tcp_target)
                         } else {
-                            Err(BackendError::Operation {
-                                operation: "set controller TCP target",
-                                detail: "TCP host:port on this card is only for this app's outbound client".to_string(),
-                            })
+                            backend
+                                .set_interface_tcp_client(&scope, &draft.tcp_target)
+                                .await
                         }
                     }
                 };
@@ -6154,6 +6172,9 @@ fn save_interface_drafts(
             }
             write_interface_entry(&mut interfaces_by_target, &scope, &interface_id, |item| {
                 apply_draft_to_entry(item, &draft);
+                if keep_mode {
+                    item.mode = kept_mode;
+                }
             });
             drafts.write().remove(&key);
             save_notices.write().remove(&key);
@@ -6162,13 +6183,15 @@ fn save_interface_drafts(
         for key in &in_flight {
             saving.write().remove(key);
         }
-        push_activity(
-            activity_log,
-            match applied.as_slice() {
-                [name] => format!("Saved configuration for {name}."),
-                _ => format!("Saved configuration for {}.", applied.join(", ")),
-            },
-        );
+        if !applied.is_empty() {
+            push_activity(
+                activity_log,
+                match applied.as_slice() {
+                    [name] => format!("Saved configuration for {name}."),
+                    _ => format!("Saved configuration for {}.", applied.join(", ")),
+                },
+            );
+        }
         if let Some(after) = after {
             unsaved.set(None);
             finish_unsaved_after(

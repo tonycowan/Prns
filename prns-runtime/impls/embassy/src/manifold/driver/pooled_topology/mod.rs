@@ -15,6 +15,7 @@ use crate::interfaces::rns_management::{
 use crate::interfaces::InterfaceIfac;
 use crate::interfaces::{
     AttachedInterfaces, IfacUnmaskError, InboundPacket, InterfaceDescriptor, InterfaceId,
+    InterfaceMode,
 };
 use crate::manifold::grant::{FrameTarget, ManifoldLaneReader};
 use crate::manifold::interface_seam::{EMBEDDED_MAX_LINK_MTU, EMBEDDED_MAX_WIRE_FRAME_LEN};
@@ -69,6 +70,22 @@ pub enum InterfaceLifecycle {
         new_id: InterfaceId,
         descriptor: InterfaceDescriptor,
     },
+    SetMode {
+        id: InterfaceId,
+        mode: InterfaceMode,
+    },
+}
+
+fn adopt_stored_mode(
+    store: &impl InterfaceInspectionStore,
+    mut descriptor: InterfaceDescriptor,
+) -> InterfaceDescriptor {
+    if let Some(mode) = store.interface_mode(descriptor.id) {
+        descriptor.mode = mode;
+    } else {
+        store.set_interface_mode(descriptor.id, descriptor.mode);
+    }
+    descriptor
 }
 
 fn clamp_to_embedded_ceiling(mut descriptor: InterfaceDescriptor) -> InterfaceDescriptor {
@@ -241,7 +258,7 @@ pub(crate) async fn run_pooled<
     let _ = path_page_reply;
     let mut pacers: HeaplessVec<InterfacePacer, LANE_COUNT> = HeaplessVec::new();
     for descriptor in descriptors.iter_mut() {
-        *descriptor = clamp_to_embedded_ceiling(*descriptor);
+        *descriptor = adopt_stored_mode(store, clamp_to_embedded_ceiling(*descriptor));
         engine.interface_attached(descriptor.id, host.now());
         if let Some(lane) = egress.lane_for(descriptor.id) {
             if !pacers.iter().any(|pacer| pacer.id == lane) {
@@ -503,7 +520,8 @@ pub(crate) async fn run_pooled<
             }
             Either6::Fifth(message) => match message {
                 InterfaceLifecycle::Add { descriptor } => {
-                    let descriptor = clamp_to_embedded_ceiling(descriptor);
+                    let descriptor =
+                        adopt_stored_mode(store, clamp_to_embedded_ceiling(descriptor));
                     let id = descriptor.id;
                     let present = descriptors.iter().any(|existing| existing.id == id);
                     if !present {
@@ -574,7 +592,8 @@ pub(crate) async fn run_pooled<
                     wake_schedules = engine.wake_schedules(AttachedInterfaces::new(&*descriptors));
                 }
                 InterfaceLifecycle::Update { descriptor } => {
-                    let descriptor = clamp_to_embedded_ceiling(descriptor);
+                    let descriptor =
+                        adopt_stored_mode(store, clamp_to_embedded_ceiling(descriptor));
                     if let Some(slot) = descriptors
                         .iter()
                         .position(|existing| existing.id == descriptor.id)
@@ -594,7 +613,8 @@ pub(crate) async fn run_pooled<
                     new_id,
                     descriptor,
                 } => {
-                    let descriptor = clamp_to_embedded_ceiling(descriptor);
+                    let descriptor =
+                        adopt_stored_mode(store, clamp_to_embedded_ceiling(descriptor));
                     let present = descriptors
                         .iter()
                         .position(|existing| existing.id == old_id);
@@ -616,6 +636,20 @@ pub(crate) async fn run_pooled<
                             {
                                 pacers[pos] =
                                     InterfacePacer::from_descriptor(new_lane, &descriptor);
+                            }
+                        }
+                        wake_schedules =
+                            engine.wake_schedules(AttachedInterfaces::new(&*descriptors));
+                    }
+                }
+                InterfaceLifecycle::SetMode { id, mode } => {
+                    store.set_interface_mode(id, mode);
+                    if let Some(slot) = descriptors.iter().position(|existing| existing.id == id) {
+                        descriptors[slot].mode = mode;
+                        if let Some(lane) = egress.lane_for(id) {
+                            if let Some(pos) = pacers.iter().position(|pacer| pacer.id == lane) {
+                                pacers[pos] =
+                                    InterfacePacer::from_descriptor(lane, &descriptors[slot]);
                             }
                         }
                         wake_schedules =

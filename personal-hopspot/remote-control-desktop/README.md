@@ -253,7 +253,7 @@ the controller first so it is already listening. Heard announcements show up on
    prints them). Approve on either side, in either order. The desktop
    waits if the target has not finished yet.
 5. Expand the new paired target to see its interfaces. The firmware / PRNS
-   version appears on its own line above Address after the controller first
+   version appears on its own line above RC identity hash after the controller first
    reaches that node. The row keeps the pairing announcement name; type an optional alias
    beside it. The list uses any
    heard route to the target's remote-control destination (the pairing

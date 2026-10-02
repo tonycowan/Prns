@@ -3101,6 +3101,7 @@ fn translate_diagnostic(diagnostic: Diagnostic<'_>) -> Option<DiagnosticEvent> {
             hops,
             source_interface,
             app_data,
+            dotted_name_hash: _,
         } => DiagnosticEvent::AnnounceHeard {
             destination: host_destination(destination),
             hops,

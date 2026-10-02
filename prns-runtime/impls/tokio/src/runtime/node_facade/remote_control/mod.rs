@@ -12,18 +12,19 @@ use crate::runtime::{
     RemoteControlActivateWifiCredentials, RemoteControlAnnounceSelf,
     RemoteControlAuthorizeController, RemoteControlCancelWifiCredentials,
     RemoteControlConfirmWifiCredentials, RemoteControlDescribe, RemoteControlDescribeBuild,
-    RemoteControlDescribeNetworkTransport, RemoteControlDescribePower, RemoteControlError,
-    RemoteControlInspectWifiTransaction, RemoteControlInventoryControllers,
-    RemoteControlInventoryInterfaceConfig, RemoteControlInventoryInterfaceDiscoveryGroups,
-    RemoteControlInventoryInterfacePeers, RemoteControlInventoryInterfaces,
-    RemoteControlInventoryPathTable, RemoteControlReplaceInterfaceDiscoveryGroups,
-    RemoteControlRevokeController, RemoteControlSetDisplayAutoOff,
-    RemoteControlSetDisplayVisibility, RemoteControlSetEspRadioMode, RemoteControlSetGnssPower,
-    RemoteControlSetInterfaceGroup, RemoteControlSetInterfaceLoRaProfile,
-    RemoteControlSetInterfaceMode, RemoteControlSetInterfacePower,
-    RemoteControlSetInterfaceWifiStation, RemoteControlSetNetworkTransport,
-    RemoteControlSetStationUplink, RemoteControlSetSystemPower, RemoteControlSleepRadios,
-    RemoteControlStageWifiCredentials, RemoteControlWakeRadios,
+    RemoteControlDescribeNetworkTransport, RemoteControlDescribePower,
+    RemoteControlDescribeTcpClient, RemoteControlError, RemoteControlInspectWifiTransaction,
+    RemoteControlInventoryControllers, RemoteControlInventoryInterfaceConfig,
+    RemoteControlInventoryInterfaceDiscoveryGroups, RemoteControlInventoryInterfacePeers,
+    RemoteControlInventoryInterfaces, RemoteControlInventoryPathTable,
+    RemoteControlReplaceInterfaceDiscoveryGroups, RemoteControlRevokeController,
+    RemoteControlSetDisplayAutoOff, RemoteControlSetDisplayVisibility,
+    RemoteControlSetEspRadioMode, RemoteControlSetGnssPower, RemoteControlSetInterfaceGroup,
+    RemoteControlSetInterfaceLoRaProfile, RemoteControlSetInterfaceMode,
+    RemoteControlSetInterfacePower, RemoteControlSetInterfaceWifiStation,
+    RemoteControlSetNetworkTransport, RemoteControlSetStationUplink, RemoteControlSetSystemPower,
+    RemoteControlSetTcpClient, RemoteControlSleepRadios, RemoteControlStageWifiCredentials,
+    RemoteControlWakeRadios,
 };
 use crate::units::RttMillis;
 use prns_core::capabilities::power::PowerSnapshot;
@@ -41,6 +42,7 @@ use prns_core::remote_control::{
     RemoteControlNetworkTransportOutcome, RemoteControlPeerPage, RemoteControlPowerOutcome,
     RemoteControlRequest, RemoteControlRequestSet, RemoteControlRevokeControllerOutcome,
     RemoteControlSleepOutcome, RemoteControlStationUplink, RemoteControlSystemPower,
+    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
     RemoteControlWifiCredentialRevision, RemoteControlWifiStageOutcome, RemoteControlWifiStation,
     RemoteControlWifiStationOutcome, RemoteControlWifiTransactionStatus,
 };
@@ -277,6 +279,53 @@ impl RemoteControlHandle<'_> {
             .await
             .map_err(RemoteControlError::Request)?;
         let outcome = RemoteControlSetNetworkTransport::parse_response(response.as_slice())?;
+        Ok((outcome, rtt))
+    }
+
+    pub async fn describe_tcp_client(
+        &self,
+    ) -> Result<(RemoteControlTcpClientStatus, RttMillis), RemoteControlError> {
+        let mut encoded = std::vec![0u8; RemoteControlDescribeTcpClient::REQUEST.encoded_len()];
+        let encoded_len = RemoteControlDescribeTcpClient::write_request(encoded.as_mut_slice())?;
+        encoded.truncate(encoded_len);
+        let (response, rtt) = self
+            .node
+            .request_owned_with_options(
+                self.link_id,
+                RequestEndpointId::of(REMOTE_CONTROL_REQUEST_ENDPOINT_ID),
+                encoded,
+                RequestOptions {
+                    response_timeout: RequestResponseTimeout::LinkDefault,
+                    maximum_response_bytes: RemoteControlDescribeTcpClient::MAXIMUM_RESPONSE_BYTES,
+                },
+            )
+            .await
+            .map_err(RemoteControlError::Request)?;
+        let status = RemoteControlDescribeTcpClient::parse_response(response.as_slice())?;
+        Ok((status, rtt))
+    }
+
+    pub async fn set_tcp_client(
+        &self,
+        config: RemoteControlTcpClientConfig,
+    ) -> Result<(RemoteControlTcpClientOutcome, RttMillis), RemoteControlError> {
+        let mut encoded = std::vec![0u8; RemoteControlRequest::MAX_ENCODED_LEN];
+        let encoded_len = RemoteControlSetTcpClient::write_request(config, encoded.as_mut_slice())?;
+        encoded.truncate(encoded_len);
+        let (response, rtt) = self
+            .node
+            .request_owned_with_options(
+                self.link_id,
+                RequestEndpointId::of(REMOTE_CONTROL_REQUEST_ENDPOINT_ID),
+                encoded,
+                RequestOptions {
+                    response_timeout: RequestResponseTimeout::LinkDefault,
+                    maximum_response_bytes: RemoteControlSetTcpClient::MAXIMUM_RESPONSE_BYTES,
+                },
+            )
+            .await
+            .map_err(RemoteControlError::Request)?;
+        let outcome = RemoteControlSetTcpClient::parse_response(response.as_slice())?;
         Ok((outcome, rtt))
     }
 

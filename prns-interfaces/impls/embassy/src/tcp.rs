@@ -1,7 +1,11 @@
+use ::core::sync::atomic::{AtomicU32, Ordering};
 use ::core::time::Duration as CoreDuration;
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_net::tcp::{Error as TcpIoError, TcpSocket};
 use embassy_net::{IpEndpoint, Stack};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_io_async_07::Write;
 
@@ -30,6 +34,7 @@ pub enum TcpClientExitCause {
     Timeout,
     NetworkUnavailable,
     Disabled,
+    Retargeted,
 }
 
 enum TcpConnectionAttempt {
@@ -57,9 +62,58 @@ pub struct TcpSocketBuffers<'a> {
     pub tx: &'a mut [u8],
 }
 
+/// Shared dial target. The TCP task reads it on every attempt and drops a live socket when it changes.
+pub struct TcpRetarget {
+    generation: AtomicU32,
+    target: Mutex<CriticalSectionRawMutex, Option<TcpClientTarget>>,
+    changed: Signal<CriticalSectionRawMutex, u32>,
+}
+
+impl TcpRetarget {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            generation: AtomicU32::new(0),
+            target: Mutex::new(None),
+            changed: Signal::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u32 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub async fn current(&self) -> Option<TcpClientTarget> {
+        self.target.lock().await.clone()
+    }
+
+    pub async fn replace(&self, target: Option<TcpClientTarget>) {
+        *self.target.lock().await = target;
+        let generation = self
+            .generation
+            .fetch_add(1, Ordering::Release)
+            .wrapping_add(1);
+        self.changed.signal(generation);
+    }
+
+    pub async fn wait_changed(&self, seen: u32) {
+        loop {
+            if self.generation() != seen {
+                return;
+            }
+            let signaled = self.changed.wait().await;
+            if signaled != seen {
+                return;
+            }
+        }
+    }
+}
+
 pub struct TcpClientInput<'a> {
     pub stack: Stack<'a>,
     pub target: TcpClientTarget,
+    pub retarget: Option<&'a TcpRetarget>,
     pub channel_tag: &'a [u8],
     pub bitrate: BitrateBps,
     pub reconnect_policy: ReconnectPolicy,
@@ -67,7 +121,7 @@ pub struct TcpClientInput<'a> {
     pub status: &'a EmbassyInterfaceStatus,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TcpClientTarget {
     endpoint: Option<IpEndpoint>,
     #[cfg(feature = "tcp-dns")]
@@ -110,6 +164,7 @@ pub struct TcpClient<'a> {
     id: InterfaceId,
     stack: Stack<'a>,
     target: TcpClientTarget,
+    retarget: Option<&'a TcpRetarget>,
     tag: &'a [u8],
     bitrate: BitrateBps,
     reconnect_policy: ReconnectPolicy,
@@ -129,6 +184,7 @@ impl<'a> TcpClient<'a> {
         let TcpClientInput {
             stack,
             target,
+            retarget,
             channel_tag,
             bitrate,
             reconnect_policy,
@@ -139,6 +195,7 @@ impl<'a> TcpClient<'a> {
             id: Self::interface_id(channel_tag),
             stack,
             target,
+            retarget,
             tag: channel_tag,
             bitrate,
             reconnect_policy,
@@ -170,7 +227,8 @@ impl Interface for TcpClient<'_> {
         let TcpClient {
             id: _,
             stack,
-            target,
+            target: fixed_target,
+            retarget,
             tag: _,
             bitrate,
             reconnect_policy,
@@ -192,6 +250,18 @@ impl Interface for TcpClient<'_> {
                 status.wait_until_enabled().await;
                 continue;
             }
+            let generation = retarget.map(TcpRetarget::generation).unwrap_or(0);
+            let Some(target) = current_tcp_target(&fixed_target, retarget).await else {
+                status.set_connection(ConnectionState::Disconnected);
+                if let Some(retarget) = retarget {
+                    let _ = select(
+                        retarget.wait_changed(generation),
+                        status.wait_until_disabled(),
+                    )
+                    .await;
+                }
+                continue;
+            };
             status.set_connection(connection_attempt.connection_state());
             connection_attempt = TcpConnectionAttempt::Retry;
             let network_family = target.network_family();
@@ -205,19 +275,20 @@ impl Interface for TcpClient<'_> {
                 continue;
             }
             crate::diagnostic_log::info!("tcp-client [configured]: resolving target={target:?}");
-            let resolved_target = select(
+            let resolved_target = select3(
                 with_timeout(CONNECT_TIMEOUT, resolve_target(stack, &target)),
                 status.wait_until_disabled(),
+                wait_retarget(retarget, generation),
             )
             .await;
             let resolved_target = match resolved_target {
-                Either::First(Ok(Some(resolved_target))) => {
+                Either3::First(Ok(Some(resolved_target))) => {
                     crate::diagnostic_log::info!(
                         "tcp-client [configured]: resolved target={target:?} endpoint={resolved_target:?}"
                     );
                     resolved_target
                 }
-                Either::First(Ok(None)) => {
+                Either3::First(Ok(None)) => {
                     crate::diagnostic_log::warn!(
                         "tcp-client [configured]: resolution failed target={target:?}"
                     );
@@ -234,7 +305,7 @@ impl Interface for TcpClient<'_> {
                     .await;
                     continue;
                 }
-                Either::First(Err(_)) => {
+                Either3::First(Err(_)) => {
                     crate::diagnostic_log::warn!(
                         "tcp-client [configured]: resolution failed target={target:?} cause={:?}",
                         TcpClientExitCause::Timeout
@@ -252,7 +323,7 @@ impl Interface for TcpClient<'_> {
                     .await;
                     continue;
                 }
-                Either::Second(()) => {
+                Either3::Second(()) => {
                     status.set_connection(ConnectionState::Disabled);
                     crate::diagnostic_log::info!(
                         "tcp-client [configured]: target={target:?} exit={:?}",
@@ -260,6 +331,7 @@ impl Interface for TcpClient<'_> {
                     );
                     continue;
                 }
+                Either3::Third(()) => continue,
             };
             let mut socket = TcpSocket::new(stack, &mut *rx_buffer, &mut *tx_buffer);
             socket.set_timeout(Some(SOCKET_TIMEOUT));
@@ -267,13 +339,15 @@ impl Interface for TcpClient<'_> {
             crate::diagnostic_log::info!(
                 "tcp-client [configured]: connecting target={target:?} endpoint={resolved_target:?}"
             );
-            let connected = select(
+            let connected = select3(
                 with_timeout(CONNECT_TIMEOUT, socket.connect(resolved_target)),
                 status.wait_until_disabled(),
+                wait_retarget(retarget, generation),
             )
             .await;
+            let mut retargeted = false;
             match connected {
-                Either::First(Ok(Ok(()))) => {
+                Either3::First(Ok(Ok(()))) => {
                     let connected_at = Instant::now();
                     reset_decoder_for_connection(&mut decoder);
                     status.set_connection(ConnectionState::Connected);
@@ -293,33 +367,40 @@ impl Interface for TcpClient<'_> {
                         started,
                         stack,
                         network_family,
+                        retarget,
+                        generation,
                     )
                     .await;
+                    retargeted = matches!(exit, TcpClientExitCause::Retargeted);
                     let lifetime_ms = connected_at.elapsed().as_millis();
                     reconnect.record_connection_lifetime(CoreDuration::from_millis(lifetime_ms));
                     crate::diagnostic_log::info!(
                         "tcp-client [configured]: target={target:?} endpoint={resolved_target:?} exit={exit:?} lifetime_ms={lifetime_ms}"
                     );
                 }
-                Either::First(Ok(Err(error))) => {
+                Either3::First(Ok(Err(error))) => {
                     crate::diagnostic_log::warn!(
                         "tcp-client [configured]: connect failed target={target:?} endpoint={resolved_target:?} error={error:?}"
                     );
                 }
-                Either::First(Err(_)) => {
+                Either3::First(Err(_)) => {
                     crate::diagnostic_log::warn!(
                         "tcp-client [configured]: connect failed target={target:?} endpoint={resolved_target:?} cause={:?}",
                         TcpClientExitCause::Timeout
                     );
                 }
-                Either::Second(()) => {
+                Either3::Second(()) => {
                     crate::diagnostic_log::info!(
                         "tcp-client [configured]: connect stopped target={target:?} endpoint={resolved_target:?} exit={:?}",
                         TcpClientExitCause::Disabled
                     );
                 }
+                Either3::Third(()) => retargeted = true,
             }
             socket.abort();
+            if retargeted {
+                continue;
+            }
             // Skip reconnect delay after disable so status changes immediately.
             if status.is_enabled() {
                 status.set_connection(ConnectionState::Disconnected);
@@ -342,6 +423,45 @@ impl Interface for TcpClient<'_> {
 
 fn reset_decoder_for_connection(decoder: &mut RnsSerialDecoder<{ tcp::EMBEDDED_FRAME_CAP }>) {
     decoder.reset();
+}
+
+async fn current_tcp_target(
+    fixed: &TcpClientTarget,
+    retarget: Option<&TcpRetarget>,
+) -> Option<TcpClientTarget> {
+    match retarget {
+        Some(retarget) => retarget.current().await,
+        None => Some(fixed.clone()),
+    }
+}
+
+async fn wait_retarget(retarget: Option<&TcpRetarget>, generation: u32) {
+    match retarget {
+        Some(retarget) => retarget.wait_changed(generation).await,
+        None => core::future::pending().await,
+    }
+}
+
+enum LeaveReason {
+    Network,
+    Retarget,
+}
+
+async fn wait_to_leave(
+    stack: Stack<'_>,
+    family: TcpNetworkFamily,
+    retarget: Option<&TcpRetarget>,
+    generation: u32,
+) -> LeaveReason {
+    match select(
+        wait_until_network_unavailable(stack, family),
+        wait_retarget(retarget, generation),
+    )
+    .await
+    {
+        Either::First(()) => LeaveReason::Network,
+        Either::Second(()) => LeaveReason::Retarget,
+    }
 }
 
 async fn resolve_target(_stack: Stack<'_>, target: &TcpClientTarget) -> Option<IpEndpoint> {
@@ -408,6 +528,8 @@ async fn serve<Seam: InterfaceSeam>(
     started: Instant,
     stack: Stack<'_>,
     network_family: TcpNetworkFamily,
+    retarget: Option<&TcpRetarget>,
+    generation: u32,
 ) -> TcpClientExitCause {
     let (mut reader, mut writer) = socket.split();
     loop {
@@ -415,11 +537,12 @@ async fn serve<Seam: InterfaceSeam>(
             reader.read(read_buf),
             seam.next_outbound(),
             status.wait_until_disabled(),
-            wait_until_network_unavailable(stack, network_family),
+            wait_to_leave(stack, network_family, retarget, generation),
         )
         .await
         {
-            Either4::Fourth(()) => return TcpClientExitCause::NetworkUnavailable,
+            Either4::Fourth(LeaveReason::Retarget) => return TcpClientExitCause::Retargeted,
+            Either4::Fourth(LeaveReason::Network) => return TcpClientExitCause::NetworkUnavailable,
             Either4::Third(()) => return TcpClientExitCause::Disabled,
             Either4::First(read) => {
                 let read = match read {

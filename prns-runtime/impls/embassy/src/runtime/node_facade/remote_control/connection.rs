@@ -7,8 +7,8 @@ use crate::routing::links::LinkId;
 use crate::runtime::{
     CloseRemoteControlTargetOutcome, ConnectRemoteControlTargetError, RemoteControlAnnounceSelf,
     RemoteControlDescribe, RemoteControlDescribeBuild, RemoteControlDescribeNetworkTransport,
-    RemoteControlDescribePower, RemoteControlInventoryInterfaces, RemoteControlSleepRadios,
-    RemoteControlTargetConnection, RemoteControlTargetConnectionControl,
+    RemoteControlDescribePower, RemoteControlDescribeTcpClient, RemoteControlInventoryInterfaces,
+    RemoteControlSleepRadios, RemoteControlTargetConnection, RemoteControlTargetConnectionControl,
     RemoteControlTargetConnectionTransport, RemoteControlTargetOperationError,
     RemoteControlWakeRadios, SendError,
 };
@@ -29,6 +29,7 @@ use prns_core::remote_control::{
     RemoteControlNetworkTransportOutcome, RemoteControlPeerPage, RemoteControlPowerOutcome,
     RemoteControlRequestKind, RemoteControlRequestSet, RemoteControlRevokeControllerOutcome,
     RemoteControlSleepOutcome, RemoteControlStationUplink, RemoteControlSystemPower,
+    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
     RemoteControlWifiCredentialRevision, RemoteControlWifiStageOutcome, RemoteControlWifiStation,
     RemoteControlWifiStationOutcome, RemoteControlWifiTransactionStatus,
 };
@@ -253,6 +254,29 @@ impl<
             .admit(RemoteControlRequestKind::SetNetworkTransport)?;
         self.remote_control
             .set_network_transport(transport)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn describe_tcp_client(
+        &self,
+    ) -> Result<(RemoteControlTcpClientStatus, RttMillis), RemoteControlTargetOperationError> {
+        self.connection
+            .admit(RemoteControlDescribeTcpClient::REQUEST.kind())?;
+        self.remote_control
+            .describe_tcp_client()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn set_tcp_client(
+        &self,
+        config: RemoteControlTcpClientConfig,
+    ) -> Result<(RemoteControlTcpClientOutcome, RttMillis), RemoteControlTargetOperationError> {
+        self.connection
+            .admit(RemoteControlRequestKind::SetTcpClient)?;
+        self.remote_control
+            .set_tcp_client(config)
             .await
             .map_err(Into::into)
     }

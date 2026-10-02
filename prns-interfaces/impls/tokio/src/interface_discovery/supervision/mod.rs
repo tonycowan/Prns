@@ -18,7 +18,7 @@ use prns_core::interfaces::{
     ConfiguredInterfacePolicy, InterfaceCommonPolicy, InterfaceId, InterfaceStatus, ReportsStatus,
 };
 use prns_core::interfaces::{IfacContext, IfacSize};
-use prns_core::routing::announce::AnnounceObservation;
+use prns_core::routing::announce::{AnnounceObservation, DottedNameHash};
 use prns_core::units::{HopCount, InstantMillis};
 use prns_core::wire::DestinationHash;
 use prns_runtime::manifold::driver::{TokioClock, TokioInterfaceStatus};
@@ -480,6 +480,7 @@ fn dial_target(host: &str, port: u16) -> String {
 struct OwnedAnnounceObservation {
     destination: DestinationHash,
     announced_identity: IdentityHash,
+    dotted_name_hash: DottedNameHash,
     hops: HopCount,
     source_interface: InterfaceId,
     arrived_at: InstantMillis,
@@ -492,6 +493,7 @@ impl OwnedAnnounceObservation {
         Self {
             destination: observation.destination,
             announced_identity: observation.announced_identity,
+            dotted_name_hash: observation.dotted_name_hash,
             hops: observation.hops,
             source_interface: observation.source_interface,
             arrived_at: observation.arrived_at,
@@ -504,6 +506,7 @@ impl OwnedAnnounceObservation {
         AnnounceObservation {
             destination: self.destination,
             announced_identity: self.announced_identity,
+            dotted_name_hash: self.dotted_name_hash,
             hops: self.hops,
             source_interface: self.source_interface,
             arrived_at: self.arrived_at,

@@ -92,6 +92,7 @@ pub(super) fn capabilities() -> RemoteControlCapabilities {
         RemoteControlRequestKind::AnnounceSelf,
         RemoteControlRequestKind::InventoryInterfaces,
         RemoteControlRequestKind::SetInterfacePower,
+        RemoteControlRequestKind::SetInterfaceMode,
         RemoteControlRequestKind::SetInterfaceGroup,
         RemoteControlRequestKind::InventoryInterfaceDiscoveryGroups,
         RemoteControlRequestKind::ReplaceInterfaceDiscoveryGroups,
@@ -313,6 +314,25 @@ pub(super) async fn execute<D: RetainedDisplayDevice>(
             };
             Ok(RemoteControlHostResponse::SetDisplayVisibility(outcome))
         }
+        RemoteControlHostCommand::SetInterfaceMode { id, mode } => Ok(
+            RemoteControlHostResponse::SetInterfaceMode(hopspot::queue_interface_mode_change(
+                context.snapshots,
+                id,
+                mode,
+                |target, mode| {
+                    super::node::LIFECYCLE
+                        .sender()
+                        .try_send(
+                            personal_rns::manifold::embassy::InterfaceLifecycle::SetMode {
+                                id: target,
+                                mode,
+                            },
+                        )
+                        .is_ok()
+                },
+                |target, mode| super::node::INTERFACE_STORE.set_interface_mode(target, mode),
+            )),
+        ),
         _ => Err(RemoteControlHostCommandError::Unsupported),
     }
 }
