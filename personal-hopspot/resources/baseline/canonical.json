@@ -19313,7 +19313,7 @@
         ]
       },
       "build": {
-        "fingerprint": "5de4b9a223b2b31486456bbc2cd2c8750ce22a492338f6e5b0682c08cd279a29",
+        "fingerprint": "12516abfe8af93cd960098c52d27f2e03dfbab864d53189af2b4850b054716a3",
         "firmware_version": "0.3.7",
         "cargo_profile": "release",
         "recipe_kind": "build-only",
@@ -19322,7 +19322,8 @@
         "binary": "heltec-mesh-tower-v2",
         "features": [
           "board-mesh-tower-v2",
-          "softdevice-s140-v6"
+          "softdevice-s140-v6",
+          "usb-debug-log"
         ],
         "requested": {
           "lto": "configured"
