@@ -1,8 +1,8 @@
 use super::backend::{AdvertisingMode, Origin, ScanningMode};
 use super::framing::BLE_HW_MTU;
 use super::handshake::{
-    is_keeper, l2cap_arrangement, l2cap_plan, needs_redial, EstablishedPeer, EstablishedTransport,
-    HandshakeRole, L2capPlan, LocalPeer,
+    is_keeper, l2cap_arrangement, l2cap_plan, needs_redial, BleFailureCode, EstablishedPeer,
+    EstablishedTransport, HandshakeRole, L2capPlan, LocalPeer,
 };
 use super::identity::{BleAddress, BleIdentity};
 use crate::interfaces::{
@@ -80,6 +80,7 @@ pub enum PolicyAction {
     Reject {
         address: BleAddress,
         dialed: bool,
+        code: super::BleFailureCode,
     },
     NotifyClosed(BleAddress),
     SetAdvertising(AdvertisingMode),
@@ -251,7 +252,11 @@ impl<const MAX_PEERS: usize, const DIAL_TRACK: usize> ConnectionPolicy<MAX_PEERS
                 self.upsert_backoff(address, BackoffKind::Suppressed, now_ms);
                 self.dial_pause_until_ms = now_ms.saturating_add(DIAL_PAUSE_MS);
             }
-            emit(PolicyAction::Reject { address, dialed });
+            emit(PolicyAction::Reject {
+                address,
+                dialed,
+                code: BleFailureCode::NeedsRedial,
+            });
             if we_open && !dialed {
                 // Opener was peripheral: redial as central on the address we already have.
                 self.upsert_backoff(address, BackoffKind::Dialing, now_ms);
@@ -279,7 +284,11 @@ impl<const MAX_PEERS: usize, const DIAL_TRACK: usize> ConnectionPolicy<MAX_PEERS
                 if dialed {
                     self.dial_pause_until_ms = now_ms.saturating_add(DIAL_PAUSE_MS);
                 }
-                emit(PolicyAction::Reject { address, dialed });
+                emit(PolicyAction::Reject {
+                    address,
+                    dialed,
+                    code: BleFailureCode::DuplicatePeer,
+                });
                 return;
             }
             self.settled[existing] = None;
@@ -289,13 +298,21 @@ impl<const MAX_PEERS: usize, const DIAL_TRACK: usize> ConnectionPolicy<MAX_PEERS
             });
         } else if self.settled_count() >= MAX_PEERS {
             self.upsert_backoff(address, BackoffKind::Suppressed, now_ms);
-            emit(PolicyAction::Reject { address, dialed });
+            emit(PolicyAction::Reject {
+                address,
+                dialed,
+                code: BleFailureCode::PeerTableFull,
+            });
             return;
         }
 
         let Some(slot) = self.first_free_settled() else {
             self.upsert_backoff(address, BackoffKind::Suppressed, now_ms);
-            emit(PolicyAction::Reject { address, dialed });
+            emit(PolicyAction::Reject {
+                address,
+                dialed,
+                code: BleFailureCode::NoSettledSlot,
+            });
             return;
         };
         let lane = match established.transport {
@@ -684,7 +701,8 @@ mod tests {
             actions,
             std::vec![PolicyAction::Reject {
                 address: addr(3),
-                dialed: true
+                dialed: true,
+                code: BleFailureCode::PeerTableFull,
             }]
         );
         assert_eq!(manager.settled_count(), 1);
@@ -761,6 +779,7 @@ mod tests {
                 PolicyAction::Reject {
                     address: addr(2),
                     dialed: false,
+                    code: BleFailureCode::NeedsRedial,
                 },
                 PolicyAction::Dial(addr(2)),
             ]
@@ -807,6 +826,7 @@ mod tests {
             std::vec![PolicyAction::Reject {
                 address: addr(2),
                 dialed: true,
+                code: BleFailureCode::NeedsRedial,
             }]
         );
         assert_eq!(manager.settled_count(), 0);
@@ -901,7 +921,8 @@ mod tests {
             resolve,
             std::vec![PolicyAction::Reject {
                 address: addr(11),
-                dialed: true
+                dialed: true,
+                code: BleFailureCode::DuplicatePeer,
             }]
         );
         assert_eq!(manager.settled_count(), 1);
@@ -1002,7 +1023,8 @@ mod tests {
             resolve,
             std::vec![PolicyAction::Reject {
                 address: addr(11),
-                dialed: true
+                dialed: true,
+                code: BleFailureCode::DuplicatePeer,
             }]
         );
         assert_eq!(manager.settled_count(), 1);
@@ -1034,7 +1056,8 @@ mod tests {
             reject,
             std::vec![PolicyAction::Reject {
                 address: addr(11),
-                dialed: true
+                dialed: true,
+                code: BleFailureCode::DuplicatePeer,
             }]
         );
 

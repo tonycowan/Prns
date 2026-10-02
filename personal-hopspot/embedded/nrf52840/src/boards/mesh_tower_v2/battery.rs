@@ -18,6 +18,7 @@ use embassy_nrf::gpio::Output;
 use embassy_nrf::saadc::Saadc;
 use embassy_nrf::twim::{self, Twim};
 use embassy_time::{Duration, Timer};
+use personal_hopspot_core::{BatteryPercent, ChargingState, ExternalPowerState, PowerSnapshot};
 
 const HUSB238_ADDRESS: u8 = 0x08;
 const DIVIDER_SETTLE: Duration = Duration::from_millis(10);
@@ -60,16 +61,28 @@ impl BatteryProbe {
 }
 
 pub(crate) async fn report(mut probe: BatteryProbe) {
-    Timer::after(REPORT_DELAY).await;
+    loop {
+        Timer::after(REPORT_DELAY).await;
+        let snapshot = observe(&mut probe).await;
+        personal_hopspot_core::publish_power_snapshot(snapshot);
+    }
+}
+
+/// One pack sample plus the HUSB238 reading, logged the same way as the boot report and
+/// returned as the remote-control power snapshot.
+async fn observe(probe: &mut BatteryProbe) -> PowerSnapshot {
     let raw = probe.sample_raw().await;
     let millivolts = pack_millivolts(raw);
-    if millivolts < NO_CELL_MV {
+    let battery = if millivolts < NO_CELL_MV {
         console(format_args!("bat: {millivolts}mV no-cell adc {raw}"));
+        None
     } else {
         let percent = state_of_charge(millivolts);
         console(format_args!("bat: {millivolts}mV {percent}% adc {raw}"));
-    }
-    match read_pd(&mut probe.i2c).await {
+        Some(BatteryPercent::saturating(percent))
+    };
+    let usb = mcu_usb();
+    let external = match read_pd(&mut probe.i2c).await {
         Ok(pd) => {
             let attach = if pd.attached { "attached" } else { "open" };
             if pd.voltage == 0 {
@@ -90,19 +103,50 @@ pub(crate) async fn report(mut probe: BatteryProbe) {
                 ));
             }
             console(format_args!("charge: {}", pd.charge));
+            external_from_pd(&pd, usb)
         }
         Err(twim::Error::AddressNack | twim::Error::DataNack) => {
             // Seen with the battery switch off. The Mac cable can still power the nRF.
             console(format_args!("pd: nack"));
             console(format_args!("charge: pd-unpowered"));
+            external_from_usb(usb)
         }
         Err(_) => {
             console(format_args!("pd: error"));
             console(format_args!("charge: pd-unread"));
+            ExternalPowerState::Unknown
         }
-    }
-    console(format_args!("mcu-usb: {}", mcu_usb()));
+    };
+    console(format_args!("mcu-usb: {usb}"));
     console(format_args!("solar: unsensed"));
+    PowerSnapshot::new(battery, external)
+}
+
+/// A 20 V PD contract is the only attach this board treats as charging. Any other attach is
+/// external power that is not charging the pack. With no attach, the nRF USB pin is the
+/// remaining evidence.
+fn external_from_pd(pd: &PdReading, usb: &'static str) -> ExternalPowerState {
+    if pd.attached && pd.voltage == 6 {
+        ExternalPowerState::Present {
+            charging: ChargingState::Charging,
+        }
+    } else if pd.attached {
+        ExternalPowerState::Present {
+            charging: ChargingState::Idle,
+        }
+    } else {
+        external_from_usb(usb)
+    }
+}
+
+fn external_from_usb(usb: &'static str) -> ExternalPowerState {
+    match usb {
+        "vbus" | "vbus-ready" => ExternalPowerState::Present {
+            charging: ChargingState::Unknown,
+        },
+        "absent" => ExternalPowerState::Absent,
+        _ => ExternalPowerState::Unknown,
+    }
 }
 
 struct PdReading {

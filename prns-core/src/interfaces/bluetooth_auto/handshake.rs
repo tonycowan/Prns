@@ -341,6 +341,69 @@ pub enum CloseReason {
     Incompatible,
 }
 
+/// Stable identifier for one Bluetooth Auto link failure. The USB console prints
+/// `ble: fail <code> <name>`. Numbers stay fixed so a log line from a device can be
+/// matched without the firmware source beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BleFailureCode {
+    SelfConnection = 1,
+    RemoteCloseSelf = 2,
+    GroupMismatch = 3,
+    UnexpectedControl = 4,
+    ColumbaRejected = 5,
+    ControlSendFailed = 6,
+    ControlRecvFailed = 7,
+    HandshakeTimeout = 8,
+    HandshakeInvariant = 9,
+    NoHandshakeLane = 10,
+    PeerTableFull = 11,
+    NeedsRedial = 12,
+    DuplicatePeer = 13,
+    NoSettledSlot = 14,
+    ActionOverflow = 15,
+    SettledDropped = 16,
+    ControlNotifyFailed = 17,
+    DataNotifyFailed = 18,
+    ColumbaSendFailed = 19,
+    ColumbaRecvFailed = 20,
+    RemoteCloseDuplicate = 21,
+    RemoteCloseIncompatible = 22,
+    L2capEnded = 23,
+    HandshakeCapacity = 24,
+}
+
+impl BleFailureCode {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SelfConnection => "self-connection",
+            Self::RemoteCloseSelf => "remote-close-self",
+            Self::GroupMismatch => "group-mismatch",
+            Self::UnexpectedControl => "unexpected-control",
+            Self::ColumbaRejected => "columba-rejected",
+            Self::ControlSendFailed => "control-send-failed",
+            Self::ControlRecvFailed => "control-recv-failed",
+            Self::HandshakeTimeout => "handshake-timeout",
+            Self::HandshakeInvariant => "handshake-invariant",
+            Self::NoHandshakeLane => "no-handshake-lane",
+            Self::PeerTableFull => "peer-table-full",
+            Self::NeedsRedial => "needs-redial",
+            Self::DuplicatePeer => "duplicate-peer",
+            Self::NoSettledSlot => "no-settled-slot",
+            Self::ActionOverflow => "action-overflow",
+            Self::SettledDropped => "settled-dropped",
+            Self::ControlNotifyFailed => "control-notify-failed",
+            Self::DataNotifyFailed => "data-notify-failed",
+            Self::ColumbaSendFailed => "columba-send-failed",
+            Self::ColumbaRecvFailed => "columba-recv-failed",
+            Self::RemoteCloseDuplicate => "remote-close-duplicate",
+            Self::RemoteCloseIncompatible => "remote-close-incompatible",
+            Self::L2capEnded => "l2cap-ended",
+            Self::HandshakeCapacity => "handshake-capacity",
+        }
+    }
+}
+
 impl CloseReason {
     const fn as_u8(self) -> u8 {
         match self {
@@ -640,6 +703,7 @@ pub enum HandshakeOutcome {
 pub struct HandshakeReaction {
     pub reply: Option<Control>,
     pub outcome: HandshakeOutcome,
+    pub code: Option<BleFailureCode>,
 }
 
 pub struct Handshake {
@@ -685,10 +749,11 @@ impl Handshake {
                 },
             ) => {
                 if identity == local.identity {
-                    return self.we_close(CloseReason::SelfConnection);
+                    return self
+                        .we_close(CloseReason::SelfConnection, BleFailureCode::SelfConnection);
                 }
                 if !discovery_groups.shares_group_with(&local.discovery_groups) {
-                    return self.we_close(CloseReason::Incompatible);
+                    return self.we_close(CloseReason::Incompatible, BleFailureCode::GroupMismatch);
                 }
                 HandshakeReaction {
                     reply: Some(Control::Welcome {
@@ -706,6 +771,7 @@ impl Handshake {
                         },
                         peer_rssi,
                     }),
+                    code: None,
                 }
             }
             (
@@ -719,10 +785,11 @@ impl Handshake {
                 },
             ) => {
                 if identity == local.identity {
-                    return self.we_close(CloseReason::SelfConnection);
+                    return self
+                        .we_close(CloseReason::SelfConnection, BleFailureCode::SelfConnection);
                 }
                 if !discovery_groups.shares_group_with(&local.discovery_groups) {
-                    return self.we_close(CloseReason::Incompatible);
+                    return self.we_close(CloseReason::Incompatible, BleFailureCode::GroupMismatch);
                 }
                 HandshakeReaction {
                     reply: None,
@@ -734,13 +801,19 @@ impl Handshake {
                         },
                         peer_rssi,
                     }),
+                    code: None,
                 }
             }
             (_, Control::Close { reason }) => HandshakeReaction {
                 reply: None,
                 outcome: HandshakeOutcome::Aborted(reason),
+                code: Some(match reason {
+                    CloseReason::SelfConnection => BleFailureCode::RemoteCloseSelf,
+                    CloseReason::DuplicateLink => BleFailureCode::RemoteCloseDuplicate,
+                    CloseReason::Incompatible => BleFailureCode::RemoteCloseIncompatible,
+                }),
             },
-            _ => self.we_close(CloseReason::Incompatible),
+            _ => self.we_close(CloseReason::Incompatible, BleFailureCode::UnexpectedControl),
         }
     }
 
@@ -749,10 +822,11 @@ impl Handshake {
         self.measured_rssi
     }
 
-    fn we_close(&self, reason: CloseReason) -> HandshakeReaction {
+    fn we_close(&self, reason: CloseReason, code: BleFailureCode) -> HandshakeReaction {
         HandshakeReaction {
             reply: Some(Control::Close { reason }),
             outcome: HandshakeOutcome::Aborted(reason),
+            code: Some(code),
         }
     }
 }

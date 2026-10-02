@@ -28,10 +28,10 @@ pub use framing::{
 };
 pub use handshake::{
     is_keeper, l2cap_arrangement, l2cap_plan, needs_redial, we_should_be_central, AndroidHost,
-    AppleHost, BlueZHost, CloseReason, Control, ControlParseError, Endpoint, Esp32Host,
-    EstablishedPeer, EstablishedTransport, Handshake, HandshakeOutcome, HandshakeReaction,
-    HandshakeRole, L2capArrangement, L2capPlan, LinkCapabilities, LocalPeer, Nrf52Host,
-    PeerDiscoveryGroups, PeerProtocol, Psm, WinRtHost, CONTROL_MAX_LEN,
+    AppleHost, BleFailureCode, BlueZHost, CloseReason, Control, ControlParseError, Endpoint,
+    Esp32Host, EstablishedPeer, EstablishedTransport, Handshake, HandshakeOutcome,
+    HandshakeReaction, HandshakeRole, L2capArrangement, L2capPlan, LinkCapabilities, LocalPeer,
+    Nrf52Host, PeerDiscoveryGroups, PeerProtocol, Psm, WinRtHost, CONTROL_MAX_LEN,
 };
 pub use identity::{
     decode_persisted_ble_identity, encode_persisted_ble_identity, BleAddress, BleIdentity,

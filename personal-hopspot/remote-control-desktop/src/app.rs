@@ -313,6 +313,8 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .path-table { display: grid; grid-template-columns: repeat(6, max-content); column-gap: 16px; row-gap: var(--path-gap); width: max-content; padding-right: 8px; }
 .path-table-head, .path-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; height: var(--path-line); line-height: var(--path-line); }
 .path-table-head span, .path-row span { white-space: nowrap; }
+.path-hash-toggle { border: 0; background: transparent; padding: 0; margin: 0; font: inherit; font-weight: inherit; color: inherit; cursor: pointer; text-align: left; white-space: nowrap; }
+.path-hash-toggle:hover { color: #183d2b; }
 .path-table-head { position: sticky; top: 0; z-index: 1; background: white; font-size: 11px; font-weight: 700; color: #5a6a60; }
 .path-row { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: #17221b; }
 .whitelist-table.can-remove { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
@@ -473,6 +475,7 @@ pub fn App() -> Element {
     let mut interfaces_by_target = use_signal(HashMap::<String, LoadedInterfaces>::new);
     let mut expanded_targets = use_signal(HashSet::<String>::new);
     let expanded_path_tables = use_signal(HashSet::<String>::new);
+    let path_hash_long = use_signal(HashSet::<String>::new);
     let expanded_interfaces = use_signal(HashSet::<String>::new);
     let drafts = use_signal(HashMap::<String, InterfaceDraft>::new);
     let mut editing = use_signal(HashSet::<String>::new);
@@ -744,8 +747,10 @@ pub fn App() -> Element {
                             }
                             p { class: "note", "Destinations this controller has heard. A managed node that is announcing shows up here." }
                             PathTableBody {
+                                id: CONTROLLER_SCOPE.to_string(),
                                 state: controller_path_table(),
                                 expanded: expanded_path_tables().contains(CONTROLLER_SCOPE),
+                                path_hash_long,
                             }
                         }
                         section { class: "card",
@@ -1152,8 +1157,10 @@ pub fn App() -> Element {
                                                                         }
                                                                     }
                                                                     PathTableBody {
+                                                                        id: target.id.clone(),
                                                                         state: target.path_table.clone(),
                                                                         expanded: expanded_path_tables().contains(&target.id),
+                                                                        path_hash_long,
                                                                     }
                                                                 }
                                                                 hr { class: "whitelist-rule" }
@@ -4355,14 +4362,57 @@ fn PathTableTwisty(id: String, mut expanded_path_tables: Signal<HashSet<String>>
     }
 }
 
+fn path_hash_key(table_id: &str, column: &str) -> String {
+    format!("{table_id}:{column}")
+}
+
+fn path_hash_title(name: &str, long: bool) -> String {
+    if long {
+        format!("{name} (Long)")
+    } else {
+        format!("{name} (short)")
+    }
+}
+
+fn alias_suffix(labeled: &str) -> &str {
+    labeled
+        .find(" (")
+        .map(|index| &labeled[index..])
+        .unwrap_or("")
+}
+
+fn displayed_hash(short_annotated: &str, full: &str, long: bool) -> String {
+    if !long || full.is_empty() {
+        return short_annotated.to_string();
+    }
+    format!("{full}{}", alias_suffix(short_annotated))
+}
+
+fn displayed_via(short: &str, full: &str, long: bool) -> String {
+    if !long || full.is_empty() {
+        return short.to_string();
+    }
+    format!("via {full}{}", alias_suffix(short))
+}
+
 #[component]
-fn PathTableBody(state: PathTableState, expanded: bool) -> Element {
+fn PathTableBody(
+    id: String,
+    state: PathTableState,
+    expanded: bool,
+    mut path_hash_long: Signal<HashSet<String>>,
+) -> Element {
     match state {
         PathTableState::Idle => rsx! { p { class: "note", "Waiting for a path table." } },
         PathTableState::Loading => rsx! { p { class: "note", "Loading…" } },
         PathTableState::Failed(message) => rsx! { p { class: "error", "{message}" } },
         PathTableState::Ready(rows) if rows.is_empty() => rsx! { p { class: "note", "No paths." } },
         PathTableState::Ready(rows) => {
+            let modes = path_hash_long();
+            let destination_long = modes.contains(&path_hash_key(&id, "destination"));
+            let via_long = modes.contains(&path_hash_key(&id, "via"));
+            let destination_title = path_hash_title("Destination", destination_long);
+            let via_title = path_hash_title("Via", via_long);
             let visible = path_table_visible_rows(rows.len(), expanded);
             let scroll_y = expanded && rows.len() > PATH_TABLE_EXPANDED_ROWS;
             rsx! {
@@ -4371,21 +4421,61 @@ fn PathTableBody(state: PathTableState, expanded: bool) -> Element {
                     style: "--path-rows: {visible}",
                     div { class: "path-table",
                         div { class: "path-table-head",
-                            span { "Destination" }
+                            button {
+                                class: "path-hash-toggle",
+                                r#type: "button",
+                                onclick: {
+                                    let id = id.clone();
+                                    move |_| {
+                                        let key = path_hash_key(&id, "destination");
+                                        let mut next = path_hash_long();
+                                        if !next.remove(&key) {
+                                            next.insert(key);
+                                        }
+                                        path_hash_long.set(next);
+                                    }
+                                },
+                                "{destination_title}"
+                            }
                             span { "Hops" }
-                            span { "Via" }
+                            button {
+                                class: "path-hash-toggle",
+                                r#type: "button",
+                                onclick: {
+                                    let id = id.clone();
+                                    move |_| {
+                                        let key = path_hash_key(&id, "via");
+                                        let mut next = path_hash_long();
+                                        if !next.remove(&key) {
+                                            next.insert(key);
+                                        }
+                                        path_hash_long.set(next);
+                                    }
+                                },
+                                "{via_title}"
+                            }
                             span { "Interface" }
                             span { "Learned" }
                             span { "Expires" }
                         }
                         for row in rows.iter() {
-                            div { class: "path-row", key: "{row.destination_full}",
-                                span { title: "{row.destination_full}", "{row.destination}" }
-                                span { "{row.hops}" }
-                                span { title: "{row.via_full}", "{row.via}" }
-                                span { "{row.interface}" }
-                                span { "{row.learned}" }
-                                span { "{row.expires}" }
+                            {
+                                let destination = displayed_hash(
+                                    &row.destination,
+                                    &row.destination_full,
+                                    destination_long,
+                                );
+                                let via = displayed_via(&row.via, &row.via_full, via_long);
+                                rsx! {
+                                    div { class: "path-row", key: "{row.destination_full}",
+                                        span { title: "{row.destination_full}", "{destination}" }
+                                        span { "{row.hops}" }
+                                        span { title: "{row.via_full}", "{via}" }
+                                        span { "{row.interface}" }
+                                        span { "{row.learned}" }
+                                        span { "{row.expires}" }
+                                    }
+                                }
                             }
                         }
                     }

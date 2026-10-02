@@ -28,9 +28,9 @@ use personal_rns::bluetooth_auto::{
 };
 use personal_rns::interfaces::bluetooth_auto::{
     columba_connection_role, columba_role_capabilities, contains_service, encode_advertisement,
-    encode_stream_frame, fragments_of, BleAddress, BleIdentity, BleRoleCapabilities,
-    ColumbaConnectionRole, Control, Fragment, L2capPlan, PeerProtocol, Reassembler, BLE_HW_MTU,
-    CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN, STREAM_FRAME_PREFIX_LEN,
+    encode_stream_frame, fragments_of, BleAddress, BleFailureCode, BleIdentity,
+    BleRoleCapabilities, ColumbaConnectionRole, Control, Fragment, L2capPlan, PeerProtocol,
+    Reassembler, BLE_HW_MTU, CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN, STREAM_FRAME_PREFIX_LEN,
 };
 use personal_rns::interfaces::bluetooth_auto::{
     AdvertisingMode, BleBackend, BleEvent, BleLink, BleSink, BleSource, DialOutcome, Origin,
@@ -1024,9 +1024,24 @@ async fn notify_with_backpressure(
                 // until the next link event drains that entry, then submit this same fragment.
                 Timer::after(NOTIFY_BACKPRESSURE_RETRY).await;
             }
-            Err(_) => return Err(Closed),
+            Err(_) => {
+                log_ble_failure(match target {
+                    ServerNotification::Control => BleFailureCode::ControlNotifyFailed,
+                    ServerNotification::NativeData | ServerNotification::ColumbaData => {
+                        BleFailureCode::DataNotifyFailed
+                    }
+                });
+                return Err(Closed);
+            }
         }
     }
+}
+
+fn log_ble_failure(code: BleFailureCode) {
+    #[cfg(feature = "usb-debug-log")]
+    log::info!("ble: fail {} {}", code as u8, code.name());
+    #[cfg(not(feature = "usb-debug-log"))]
+    let _ = code;
 }
 
 fn record_ingress_pressure(pressure: IngressPressure) -> IngressAdmission {
@@ -1214,6 +1229,7 @@ async fn l2cap_pump(
             let frame = frame.lock().await;
             if let Some(packet) = L2capPacket::from_frame(&frame) {
                 if channel.tx(packet).await.is_err() {
+                    log_ble_failure(BleFailureCode::L2capEnded);
                     break;
                 }
             }
@@ -1223,7 +1239,10 @@ async fn l2cap_pump(
         loop {
             let packet = match channel.rx().await {
                 Ok(packet) => packet,
-                Err(_) => break,
+                Err(_) => {
+                    log_ble_failure(BleFailureCode::L2capEnded);
+                    break;
+                }
             };
             let bytes = packet.bytes();
             if bytes.len() < STREAM_FRAME_PREFIX_LEN {

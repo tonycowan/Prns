@@ -104,7 +104,11 @@ pub(super) fn capabilities() -> RemoteControlCapabilities {
         RemoteControlRequestKind::InventoryInterfaceConfig,
         RemoteControlRequestKind::SetInterfaceLoRaProfile,
         RemoteControlRequestKind::DescribeBuild,
-        #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+        #[cfg(any(
+            feature = "board-mesh-tower-v2",
+            feature = "board-rak4631",
+            feature = "board-rak10724"
+        ))]
         RemoteControlRequestKind::DescribePower,
         RemoteControlRequestKind::DescribeNetworkTransport,
         RemoteControlRequestKind::SetNetworkTransport,
@@ -374,7 +378,11 @@ async fn execute(
             hopspot::hopspot_remote_control_build_version()
                 .map_err(|_| RemoteControlHostCommandError::ApplyFailed)?,
         )),
-        #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+        #[cfg(any(
+            feature = "board-mesh-tower-v2",
+            feature = "board-rak4631",
+            feature = "board-rak10724"
+        ))]
         RemoteControlHostCommand::DescribePower => Ok(RemoteControlHostResponse::DescribePower(
             hopspot::latest_power_snapshot(),
         )),

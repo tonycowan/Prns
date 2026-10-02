@@ -774,6 +774,7 @@ fn handshakes_require_at_least_one_shared_group() {
                 reason: CloseReason::Incompatible,
             }),
             outcome: HandshakeOutcome::Aborted(CloseReason::Incompatible),
+            code: Some(BleFailureCode::GroupMismatch),
         }
     );
 }

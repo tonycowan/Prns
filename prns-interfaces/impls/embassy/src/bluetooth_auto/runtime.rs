@@ -10,9 +10,9 @@ use portable_atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use prns_core::engine::FanTarget;
 use prns_core::interfaces::bluetooth_auto::{
-    self as contract, BleAddress, BleIdentity, CloseReason, Control, DiscoveryGroupSet, Endpoint,
-    EstablishedPeer, EstablishedTransport, Handshake, HandshakeFailureKind, HandshakeOutcome,
-    L2capPlan, LinkCapabilities, LocalPeer, PeerProtocol,
+    self as contract, BleAddress, BleFailureCode, BleIdentity, CloseReason, Control,
+    DiscoveryGroupSet, Endpoint, EstablishedPeer, EstablishedTransport, Handshake,
+    HandshakeFailureKind, HandshakeOutcome, L2capPlan, LinkCapabilities, LocalPeer, PeerProtocol,
 };
 use prns_core::interfaces::bluetooth_auto::{
     role_for, ConnectionPolicy, PolicyAction, PolicyInput,
@@ -603,7 +603,22 @@ enum HandshakeStage {
         handshake: Option<Handshake>,
         control: PendingNativeControl,
         outcome: HandshakeOutcome,
+        failure: Option<BleFailureCode>,
     },
+}
+
+fn log_ble_failure(code: BleFailureCode) {
+    crate::diagnostic_log::info!("ble: fail {} {}", code as u8, code.name());
+}
+
+fn failure_kind(code: BleFailureCode) -> HandshakeFailureKind {
+    match code {
+        BleFailureCode::GroupMismatch
+        | BleFailureCode::UnexpectedControl
+        | BleFailureCode::ColumbaRejected
+        | BleFailureCode::RemoteCloseIncompatible => HandshakeFailureKind::Incompatible,
+        _ => HandshakeFailureKind::Other,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -686,11 +701,12 @@ impl<L: BleLink> PendingHandshake<L> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HandshakeFailure {
-    Timeout,
-    Link,
-    Aborted(CloseReason),
-    InvariantViolation,
+struct HandshakeFailure {
+    code: BleFailureCode,
+}
+
+fn ble_fail(code: BleFailureCode) -> HandshakeFailure {
+    HandshakeFailure { code }
 }
 
 struct HandshakeDone<L: BleLink> {
@@ -935,18 +951,9 @@ where
                         .await;
                     }
                     Err(reason) => {
+                        log_ble_failure(reason.code);
                         status.note_setup_failure();
-                        let failure = match reason {
-                            HandshakeFailure::Aborted(CloseReason::Incompatible) => {
-                                HandshakeFailureKind::Incompatible
-                            }
-                            HandshakeFailure::Timeout
-                            | HandshakeFailure::Link
-                            | HandshakeFailure::InvariantViolation
-                            | HandshakeFailure::Aborted(
-                                CloseReason::SelfConnection | CloseReason::DuplicateLink,
-                            ) => HandshakeFailureKind::Other,
-                        };
+                        let failure = failure_kind(reason.code);
                         manager.handle(
                             PolicyInput::HandshakeFailed {
                                 address,
@@ -1151,7 +1158,13 @@ async fn queue_handshake<B, const MEMBERS: usize>(
         Some(entry) if manager.begin_handshake(origin) => {
             *entry = Some(PendingHandshake::new(link, origin, local));
         }
-        _ => {
+        Some(_) => {
+            log_ble_failure(BleFailureCode::HandshakeCapacity);
+            drop(link);
+            backend.on_link_closed(address).await;
+        }
+        None => {
+            log_ble_failure(BleFailureCode::NoHandshakeLane);
             drop(link);
             backend.on_link_closed(address).await;
         }
@@ -1184,7 +1197,7 @@ async fn advance_handshake<L: BleLink>(
                 let mut next_stage = None;
                 let completion = match &mut pending.stage {
                     HandshakeStage::RejectColumba => {
-                        Some(Err(HandshakeFailure::Aborted(CloseReason::Incompatible)))
+                        Some(Err(ble_fail(BleFailureCode::ColumbaRejected)))
                     }
                     HandshakeStage::ColumbaReceive => {
                         match pending.link.receive_columba_peer_identity().await {
@@ -1197,7 +1210,7 @@ async fn advance_handshake<L: BleLink>(
                                 transport: EstablishedTransport::ColumbaGatt,
                                 peer_rssi: None,
                             })),
-                            Err(_) => Some(Err(HandshakeFailure::Link)),
+                            Err(_) => Some(Err(ble_fail(BleFailureCode::ColumbaRecvFailed))),
                         }
                     }
                     HandshakeStage::ColumbaSend { identity } => {
@@ -1208,12 +1221,12 @@ async fn advance_handshake<L: BleLink>(
                                 transport: EstablishedTransport::ColumbaGatt,
                                 peer_rssi: None,
                             })),
-                            Err(_) => Some(Err(HandshakeFailure::Link)),
+                            Err(_) => Some(Err(ble_fail(BleFailureCode::ColumbaSendFailed))),
                         }
                     }
                     HandshakeStage::NativeSend { handshake, control } => {
                         let Some(control) = control.materialize(handshake.as_ref(), local) else {
-                            return Some(Err(HandshakeFailure::InvariantViolation));
+                            return Some(Err(ble_fail(BleFailureCode::HandshakeInvariant)));
                         };
                         match pending.link.control_send(&control).await {
                             Ok(()) => match handshake.take() {
@@ -1223,9 +1236,9 @@ async fn advance_handshake<L: BleLink>(
                                     });
                                     None
                                 }
-                                None => Some(Err(HandshakeFailure::InvariantViolation)),
+                                None => Some(Err(ble_fail(BleFailureCode::HandshakeInvariant))),
                             },
-                            Err(_) => Some(Err(HandshakeFailure::Link)),
+                            Err(_) => Some(Err(ble_fail(BleFailureCode::ControlSendFailed))),
                         }
                     }
                     HandshakeStage::NativeReceive { handshake } => {
@@ -1242,34 +1255,41 @@ async fn advance_handshake<L: BleLink>(
                                                         control,
                                                     ),
                                                     outcome: reaction.outcome,
+                                                    failure: reaction.code,
                                                 });
                                                 None
                                             }
-                                            None => Some(Err(HandshakeFailure::InvariantViolation)),
+                                            None => Some(Err(ble_fail(
+                                                BleFailureCode::HandshakeInvariant,
+                                            ))),
                                         },
                                         None => match reaction.outcome {
                                             HandshakeOutcome::Pending => None,
                                             HandshakeOutcome::Settled(established) => {
                                                 Some(Ok(established))
                                             }
-                                            HandshakeOutcome::Aborted(reason) => {
-                                                Some(Err(HandshakeFailure::Aborted(reason)))
+                                            HandshakeOutcome::Aborted(_) => {
+                                                Some(Err(ble_fail(reaction.code.unwrap_or(
+                                                    BleFailureCode::HandshakeInvariant,
+                                                ))))
                                             }
                                         },
                                     }
                                 }
-                                None => Some(Err(HandshakeFailure::InvariantViolation)),
+                                None => Some(Err(ble_fail(BleFailureCode::HandshakeInvariant))),
                             },
-                            Err(_) => Some(Err(HandshakeFailure::Link)),
+                            Err(_) => Some(Err(ble_fail(BleFailureCode::ControlRecvFailed))),
                         }
                     }
                     HandshakeStage::NativeReply {
                         handshake,
                         control,
                         outcome,
+                        failure,
                     } => {
+                        let failure = *failure;
                         let Some(control) = control.materialize(handshake.as_ref(), local) else {
-                            return Some(Err(HandshakeFailure::InvariantViolation));
+                            return Some(Err(ble_fail(BleFailureCode::HandshakeInvariant)));
                         };
                         let outcome = *outcome;
                         match pending.link.control_send(&control).await {
@@ -1281,14 +1301,14 @@ async fn advance_handshake<L: BleLink>(
                                         });
                                         None
                                     }
-                                    None => Some(Err(HandshakeFailure::InvariantViolation)),
+                                    None => Some(Err(ble_fail(BleFailureCode::HandshakeInvariant))),
                                 },
                                 HandshakeOutcome::Settled(established) => Some(Ok(established)),
-                                HandshakeOutcome::Aborted(reason) => {
-                                    Some(Err(HandshakeFailure::Aborted(reason)))
-                                }
+                                HandshakeOutcome::Aborted(_) => Some(Err(ble_fail(
+                                    failure.unwrap_or(BleFailureCode::HandshakeInvariant),
+                                ))),
                             },
-                            Err(_) => Some(Err(HandshakeFailure::Link)),
+                            Err(_) => Some(Err(ble_fail(BleFailureCode::ControlSendFailed))),
                         }
                     }
                 };
@@ -1300,7 +1320,7 @@ async fn advance_handshake<L: BleLink>(
             .await
             {
                 Ok(completion) => completion,
-                Err(_) => Some(Err(HandshakeFailure::Timeout)),
+                Err(_) => Some(Err(ble_fail(BleFailureCode::HandshakeTimeout))),
             }
         }
         None => ::core::future::pending().await,
@@ -1672,6 +1692,7 @@ async fn apply_settled<
 {
     let address = link.address();
     if pending.overflowed {
+        log_ble_failure(BleFailureCode::ActionOverflow);
         status.mark_failed(ACTION_OVERFLOW_REASON);
         drop(link);
         backend.on_link_closed(address).await;
@@ -1713,7 +1734,8 @@ async fn apply_settled<
                     });
                 }
             }
-            PolicyAction::Reject { address, .. } => {
+            PolicyAction::Reject { address, code, .. } => {
+                log_ble_failure(code);
                 held = None;
                 backend.on_link_closed(address).await;
             }
@@ -1723,6 +1745,7 @@ async fn apply_settled<
         }
     }
     if held.is_some() {
+        log_ble_failure(BleFailureCode::SettledDropped);
         drop(held.take());
         backend.on_link_closed(address).await;
     }
