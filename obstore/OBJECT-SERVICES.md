@@ -1,12 +1,20 @@
 # Object services
 
-prnsd hosts the object store, import, transfer, and release for a stack. The command line is `object-services` (`obstore/src/main.rs`). A debug build is `obstore/target/debug/object-services`.
+prnsd hosts the object store, import, transfer, and release for a stack. The command line is `object-services` (`obstore/src/main.rs`). A debug build is `obstore/target/debug/object-services`. On Windows that file is `object-services.exe`.
 
 Every command takes `--config DIR`. `DIR/config` is the stack file. prnsd listens for those commands on `DIR/obstore.sock`. On Unix that path is a socket, mode 0600. On Windows the file contains `127.0.0.1:<port>` and the service listens on that loopback port. The message magic is `OBST` version 2. Run prnsd with that config. Do not also run `object-services serve`; it binds the same path.
 
 ```text
 ./prnsd/target/release/prnsd run --config DIR
 ```
+
+On Windows, build that exe once and start each stack from it:
+
+```text
+prnsd\target\debug\prnsd.exe run --config DIR
+```
+
+A later `cargo run` rebuilds `prnsd.exe`. Windows refuses to replace the exe while the first process has it open.
 
 When `[object-services]` is present and valid, prnsd prints the unique object-transfer address and the command socket:
 
@@ -117,34 +125,36 @@ There is no destination key. The unique address is derived. prnsd does not read 
   manifest-asks/<object-id>/<requester-hex>/seen-<hops>
 ```
 
-`loa/local/private` is this stack's signing seed, and only when this node is the LOA. Trusted LOA public keys live in `loa/trusted`. `create-load` writes `local` and installs that same public key into `trusted`. prnsd does not create either at startup. A node that only verifies has files in `trusted` and an empty `local`.
+`loa/local/private` is this stack's signing seed, and only when this node is the LOA. Trusted LOA public keys live in `loa/trusted`. `create-lod` writes `local` and installs that same public key into `trusted`. prnsd does not create either at startup. A node that only verifies has files in `trusted` and an empty `local`.
 
-## LOA domain
+On Unix the store sets the modes in the tree: `loa` and `loa/local` are 0700, `private` is 0600, `public` is 0644, and `trusted` is 0755. On Windows a new file inherits its directory's access list. After an import renames a staged directory into `data`, the store flushes `data`. The Windows flush opens that directory for write and sets `FILE_FLAG_BACKUP_SEMANTICS`, which is the handle the flush accepts.
 
-An LOA domain (LOAD) is the scope in which one Local Object Authority manages objects. Every node in a LOAD has the same LOA public key installed in `loa/trusted`. That key is how those nodes verify an envelope signed by the LOA. The signature covers the claims and the object id. A node verifies with a trusted public key. The LOA holds the matching signing key.
+## Local object domain
 
-A release is checked before it is remembered or forwarded. An envelope that does not verify against a trusted key is dropped, so it does not occupy the release slot and it does not flood further. The same check applies to an offered object envelope and to a transfer envelope before either is stored. A node with no trusted LOA public key fails these requests with `This node is not part of a LOA Domain`.
+A local object domain (LOD) is the scope in which one Local Object Authority manages objects. Every node in a LOD has the same LOA public key installed in `loa/trusted`. That key is how those nodes verify an envelope signed by the LOA. The signature covers the claims and the object id. A node verifies with a trusted public key. The LOA holds the matching signing key.
 
-Create new LOAD generates those credentials. Run it on one machine, once for that LOAD:
+A release is checked before it is remembered or forwarded. An envelope that does not verify against a trusted key is dropped, so it does not occupy the release slot and it does not flood further. The same check applies to an offered object envelope and to a transfer envelope before either is stored. A node with no trusted LOA public key fails these requests with `This node is not part of a local object domain`.
+
+Creating a LOD generates those credentials. Run it on one machine, once for that LOD:
 
 ```text
-object-services create-load --config DIR
-object-services create-load --config DIR --offline
+object-services create-lod --config DIR
+object-services create-lod --config DIR --offline
 object-services trust-loa --config DIR --public-key HEX
 ```
 
-`create-load` asks the running prnsd to write `loa/local/private`, `loa/local/public`, and `loa/trusted/<64-hex>`, then prints the LOA public key, 64 hex characters. `--offline` writes those files without a running prnsd. A second run fails. `trust-loa` copies a verifying key into `loa/trusted` and creates an empty `loa/local` when this node is not the LOA. The firmware image can carry that public key at flash time. After the node is running, an RC Operator can set or replace the key on the node. Setting the key adds the node to that LOAD. Replacing the key moves the node into the LOAD of the new key.
+`create-lod` asks the running prnsd to write `loa/local/private`, `loa/local/public`, and `loa/trusted/<64-hex>`, then prints the LOA public key, 64 hex characters. `--offline` writes those files without a running prnsd. A second run fails. `trust-loa` copies a verifying key into `loa/trusted` and creates an empty `loa/local` when this node is not the LOA. The firmware image can carry that public key at flash time. After the node is running, an RC Operator can set or replace the key on the node. Setting the key adds the node to that LOD. Replacing the key moves the node into the LOD of the new key.
 
-A request that needs the LOA credentials fails with `This node is not part of a LOA Domain` when they are missing. Signing an import, signing a transfer envelope, and `import-releases` are such requests. A plain import, an import of an envelope that is already signed, a fetch, and startup itself do not create credentials and do not require them.
+A request that needs the LOA credentials fails with `This node is not part of a local object domain` when they are missing. Signing an import, signing a transfer envelope, and `import-releases` are such requests. A plain import, an import of an envelope that is already signed, a fetch, and startup itself do not create credentials and do not require them.
 
 The authority to set a node's LOA public key is a remote-control grant. Operators receive it automatically, together with the OTA grant and the other operator grants.
 
-Joining an administrative domain is a pairing. A LOAD has no pairing exchange. The RC Operator who already controls the node sets the public key, or the key is written when the firmware is flashed.
+Joining an administrative domain is a pairing. A LOD has no pairing exchange. The RC Operator who already controls the node sets the public key, or the key is written when the firmware is flashed.
 
 ## Commands
 
 ```text
-object-services create-load --config DIR [--offline]
+object-services create-lod --config DIR [--offline]
 object-services trust-loa --config DIR --public-key HEX
 object-services import --config DIR --file PATH [--as-owner --claims NAME=VALUE,...]
 object-services import --config DIR --file PATH --envelope PATH --authority HEX
@@ -157,7 +167,7 @@ object-services import-releases --config DIR [--set preview] [--set stable]
 
 | Command | Arguments | Result |
 | --- | --- | --- |
-| `create-load` | `--offline` writes the files directly. Without it, prnsd must already be listening. | Create new LOAD. Writes `loa/local/private`, `loa/local/public`, and `loa/trusted/<64-hex>` once and prints the LOA public key. Fails when the private key is already present. |
+| `create-lod` | `--offline` writes the files directly. Without it, prnsd must already be listening. | Creates a LOD. Writes `loa/local/private`, `loa/local/public`, and `loa/trusted/<64-hex>` once and prints the LOA public key. Fails when the private key is already present. |
 | `trust-loa` | `--public-key` is the Ed25519 verifying key, 64 hex. | Installs that key in `loa/trusted`. Creates `loa/local` when it is missing. The same key may be installed again. |
 | `import` | `--file` is the bytes to store. `--claims` is a comma-separated `name=value` list and requires `--as-owner`. `--envelope` is an already signed envelope file; `--authority` is the signer's Ed25519 verifying key (64 hex) or identity public key (128 hex, signing half is the last 32 bytes). `--claims` and `--envelope` cannot be combined. With neither, the bytes are stored with a manifest and no LOA envelope. | Prints the object id on stdout. |
 | `fetch` | `--object-id` is 64 hex. `--file` is the path to write. | Writes the stored `data` bytes. Checks the SHA-256 before replacing `--file`. |
@@ -166,9 +176,9 @@ object-services import-releases --config DIR [--set preview] [--set stable]
 | `release` | `--hops` defaults to `8` and cannot exceed `8`. | Announces the LOA envelope on the plain address. Each forward decrements the hop count. |
 | `import-releases` | `--set` repeats. Empty means preview, then stable. | Downloads signed firmware from `https://reticulum.rs/releases/`, stores it, and signs it with this stack's LOA. Prints each object id on stdout. A missing preview channel is a notice on stderr; the stable import continues. |
 
-`import-releases` stores two objects per board. The USB object is a zip of `target.json` and the board's files, with `flash-mode=usb`. The OTA object is the exact file that would be sent to the board, with `flash-mode=ota`. Those imports do not set a `mode` claim, so a later `release` of them does not match `auto-stage` or `auto-update` until that claim is present.
+`import-releases` opens the object-store directory in this process and writes the firmware there. It stores two objects per board. The USB object is a zip of `target.json` and the board's files, with `flash-mode=usb`. The OTA object is the exact file that would be sent to the board, with `flash-mode=ota`. Those imports do not set a `mode` claim, so a later `release` of them does not match `auto-stage` or `auto-update` until that claim is present. Only the LOA stack can sign them, the one with `loa/local/private`.
 
-The socket mode `0600` is the import access check. The short import header is not signed.
+On Unix, mode 0600 on `obstore.sock` is the import access check. On Windows the file names a loopback port, and any process on the machine can connect. The short import header is not signed.
 
 ## Data types
 

@@ -19,7 +19,7 @@
 # Set OBJECT_SERVICES to an already-built object-services binary to skip cargo.
 #
 # The script writes configs and credentials. It does not start prnsd.
-# The generated private key is a new LOAD secret. Do not commit DEST.
+# The generated private key is a new LOD secret. Do not commit DEST.
 
 set -euo pipefail
 
@@ -51,7 +51,7 @@ reticulum='[reticulum]
   logtimestamps = Yes'
 
 cat > "$dest/a/config" <<EOF
-# Node A. LOA for this LOAD, and the origin of the release example.
+# Node A. LOA for this LOD, and the origin of the release example.
 $reticulum
 
 [interfaces]
@@ -134,7 +134,7 @@ run_object_services() {
     fi
 }
 
-public_key=$(run_object_services create-load --config "$dest/a" --offline)
+public_key=$(run_object_services create-lod --config "$dest/a" --offline)
 run_object_services trust-loa --config "$dest/b" --public-key "$public_key"
 run_object_services trust-loa --config "$dest/c" --public-key "$public_key"
 
@@ -149,7 +149,7 @@ test -d "$dest/c/object-store/loa/local"
 test -f "$dest/c/object-store/loa/trusted/$public_key"
 
 cat <<EOF
-LOAD public key: $public_key
+LOD public key: $public_key
 
 A  $dest/a   loa/local private+public, loa/trusted/$public_key
 B  $dest/b   loa/trusted/$public_key

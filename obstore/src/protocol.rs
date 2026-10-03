@@ -18,7 +18,7 @@ const OP_ADMIT: u8 = 5;
 const OP_WHO_HAS: u8 = 6;
 const OP_CATALOG: u8 = 7;
 const OP_PREVIEW: u8 = 8;
-const OP_CREATE_LOAD: u8 = 9;
+const OP_CREATE_LOD: u8 = 9;
 const ADMIT_PLAIN: u8 = 0;
 const ADMIT_OWNER: u8 = 1;
 const ADMIT_ENVELOPE: u8 = 2;
@@ -235,10 +235,10 @@ fn temporary_fetch_path(destination: &Path) -> PathBuf {
     parent.join(format!(".{name}.obstore-fetch"))
 }
 
-pub fn request_create_load(socket: &Path) -> Result<String, io::Error> {
+pub fn request_create_lod(socket: &Path) -> Result<String, io::Error> {
     let mut stream = connect(socket)?;
     stream.write_all(MAGIC)?;
-    stream.write_all(&[VERSION, OP_CREATE_LOAD])?;
+    stream.write_all(&[VERSION, OP_CREATE_LOD])?;
     stream.flush()?;
     match read_status(&mut stream)? {
         STATUS_OK => {
@@ -254,8 +254,8 @@ pub fn request_create_load(socket: &Path) -> Result<String, io::Error> {
     }
 }
 
-fn serve_create_load<S: Read + Write>(store: &ObjectStore, stream: &mut S) -> io::Result<()> {
-    match store.create_load() {
+fn serve_create_lod<S: Read + Write>(store: &ObjectStore, stream: &mut S) -> io::Result<()> {
+    match store.create_lod() {
         Ok(public) => {
             stream.write_all(MAGIC)?;
             stream.write_all(&[VERSION, STATUS_OK])?;
@@ -467,7 +467,7 @@ pub fn serve_connection<S: Read + Write>(
         OP_WHO_HAS => serve_who_has(store, transfer, stream),
         OP_CATALOG => serve_remote_catalog(transfer, stream),
         OP_PREVIEW => serve_remote_preview(transfer, stream),
-        OP_CREATE_LOAD => serve_create_load(store, stream),
+        OP_CREATE_LOD => serve_create_lod(store, stream),
         _ => write_error(stream, "unsupported object store operation"),
     }
 }
@@ -876,7 +876,7 @@ mod tests {
         let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open_with_load(&store_root).expect("store");
+            let store = ObjectStore::open_with_lod(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
             let mut extra = [0_u8; 1];
@@ -912,7 +912,7 @@ mod tests {
         let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open_with_load(&store_root).expect("store");
+            let store = ObjectStore::open_with_lod(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
         });
@@ -940,7 +940,7 @@ mod tests {
         let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open_with_load(&store_root).expect("store");
+            let store = ObjectStore::open_with_lod(&store_root).expect("store");
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().expect("accept");
                 serve_connection(&store, None, &mut stream).expect("serve");
@@ -978,7 +978,7 @@ mod tests {
         let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open_with_load(&store_root).expect("store");
+            let store = ObjectStore::open_with_lod(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
         });
@@ -1067,7 +1067,7 @@ mod tests {
         let root = tempfile::tempdir().expect("temp dir");
         let store_root = root.path().join("store");
         let id = {
-            let store = ObjectStore::open_with_load(&store_root).expect("store");
+            let store = ObjectStore::open_with_lod(&store_root).expect("store");
             store
                 .import_reader(Cursor::new(b"abc"), 3, &Claims::none())
                 .expect("import")
@@ -1075,7 +1075,7 @@ mod tests {
         let socket = root.path().join("s.sock");
         let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open_with_load(&store_root).expect("store");
+            let store = ObjectStore::open_with_lod(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
         });
@@ -1092,7 +1092,7 @@ mod tests {
         let listener = crate::ipc::LocalListener::bind(&socket).expect("bind");
         let store_root = root.path().join("store");
         let server = thread::spawn(move || {
-            let store = ObjectStore::open_with_load(&store_root).expect("store");
+            let store = ObjectStore::open_with_lod(&store_root).expect("store");
             let (mut stream, _) = listener.accept().expect("accept");
             serve_connection(&store, None, &mut stream).expect("serve");
         });

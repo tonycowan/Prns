@@ -2097,7 +2097,7 @@ mod tests {
     #[test]
     fn a_transfer_creates_the_manifest_and_envelope_from_the_loa_claims() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let store = ObjectStore::open_with_lod(root.path()).expect("store");
         let claims =
             Claims::parse(["board=heltec-v4-r8", "provenance=local-build"]).expect("claims");
         let id = store
@@ -2141,7 +2141,7 @@ mod tests {
     fn the_receiver_pulls_the_manifest_and_then_the_pieces() {
         let root = tempfile::tempdir().expect("temp dir");
         let source_root = root.path().join("source-store");
-        let source = ObjectStore::open_with_load(&source_root).expect("source");
+        let source = ObjectStore::open_with_lod(&source_root).expect("source");
         let bytes = vec![7_u8; 4097];
         let id = source
             .import_reader(
@@ -2151,8 +2151,7 @@ mod tests {
             )
             .expect("import");
         let destination_root = root.path().join("destination-store");
-        let destination_store =
-            ObjectStore::open_with_load(&destination_root).expect("destination");
+        let destination_store = ObjectStore::open_with_lod(&destination_root).expect("destination");
         trust_authority(&destination_store, &source);
         let transfer_root = root.path().join("transfer");
         let identity = [0x5a_u8; 64];
@@ -2165,7 +2164,7 @@ mod tests {
             format!("{}\n", socket.display()),
         )
         .expect("peers");
-        let peer_store = ObjectStore::open_with_load(&destination_root).expect("peer store");
+        let peer_store = ObjectStore::open_with_lod(&destination_root).expect("peer store");
         let peer_transfer = transfer.clone();
         let server = thread::spawn(move || {
             for _ in 0..2 {
@@ -2210,7 +2209,7 @@ mod tests {
     #[test]
     fn a_piece_that_does_not_match_the_manifest_is_not_stored() {
         let root = tempfile::tempdir().expect("temp dir");
-        let source = ObjectStore::open_with_load(root.path().join("source-store")).expect("source");
+        let source = ObjectStore::open_with_lod(root.path().join("source-store")).expect("source");
         let id = source
             .import_reader(Cursor::new(b"abc"), 3, &Claims::none())
             .expect("import");
@@ -2239,7 +2238,7 @@ mod tests {
         )
         .expect("peers");
         let peer_store =
-            ObjectStore::open_with_load(root.path().join("destination-store")).expect("peer");
+            ObjectStore::open_with_lod(root.path().join("destination-store")).expect("peer");
         trust_authority(&peer_store, &source);
         let peer_transfer = transfer.clone();
         let server = thread::spawn(move || {
@@ -2267,7 +2266,7 @@ mod tests {
     #[test]
     fn a_release_with_a_bad_signature_is_not_remembered_or_forwarded() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open_with_load(root.path().join("store")).expect("store");
+        let store = ObjectStore::open_with_lod(root.path().join("store")).expect("store");
         let mut transfer =
             ObjectTransfer::open(root.path().join("transfer"), &[4; 64]).expect("transfer");
         let flooded = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2331,7 +2330,7 @@ mod tests {
         let mut stacks = Vec::new();
         for (name, identity) in [("a", 0x11_u8), ("b", 0x22_u8), ("c", 0x33_u8)] {
             let store_root = root.path().join(name);
-            let store = Arc::new(ObjectStore::open_with_load(&store_root).expect(name));
+            let store = Arc::new(ObjectStore::open_with_lod(&store_root).expect(name));
             let transfer_root = root.path().join(format!("{name}-transfer"));
             let secret = [identity; 64];
             let address = object_transfer_address(&secret);
@@ -2536,7 +2535,7 @@ mod tests {
         std::thread::JoinHandle<()>,
     ) {
         let store_root = root.join(name);
-        let store = Arc::new(ObjectStore::open_with_load(&store_root).expect(name));
+        let store = Arc::new(ObjectStore::open_with_lod(&store_root).expect(name));
         let transfer_root = root.join(format!("{name}-transfer"));
         let secret = [identity; 64];
         let address = object_transfer_address(&secret);
@@ -3125,7 +3124,7 @@ mod tests {
     #[test]
     fn a_release_matches_a_cdn_group_or_a_new_firmware_version() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let store = ObjectStore::open_with_lod(root.path()).expect("store");
         let cdn = FetchPolicy {
             cdn: true,
             cdn_groups: vec!["site-a".to_string()],
@@ -3279,7 +3278,7 @@ mod tests {
         }
 
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let store = ObjectStore::open_with_lod(root.path()).expect("store");
         let mut transfer =
             ObjectTransfer::open(root.path().join("transfer"), &[7; 64]).expect("transfer");
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

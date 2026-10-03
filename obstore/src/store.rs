@@ -90,8 +90,8 @@ pub enum StoreError {
         id: String,
         name: String,
     },
-    NotInLoadDomain,
-    LoadAlreadyExists,
+    NotInLod,
+    LodAlreadyExists,
 }
 
 impl fmt::Display for StoreError {
@@ -132,11 +132,14 @@ impl fmt::Display for StoreError {
             Self::ManifestMismatch { id } => {
                 write!(formatter, "object {id} manifest does not match its data")
             }
-            Self::NotInLoadDomain => {
-                write!(formatter, "This node is not part of a LOA Domain")
+            Self::NotInLod => {
+                write!(formatter, "This node is not part of a local object domain")
             }
-            Self::LoadAlreadyExists => {
-                write!(formatter, "This node already belongs to a LOA Domain")
+            Self::LodAlreadyExists => {
+                write!(
+                    formatter,
+                    "This node already belongs to a local object domain"
+                )
             }
             Self::MissingPiece { id, index } => {
                 write!(formatter, "object {id} has no piece {index}")
@@ -320,16 +323,16 @@ impl ObjectStore {
         })
     }
 
-    /// Create new LOAD. Writes this node's LOA credentials once.
+    /// Create a local object domain (LOD). Writes this node's LOA credentials once.
     ///
     /// A second call fails. The returned bytes are the Ed25519 verifying key.
-    pub fn create_load(&self) -> Result<[u8; 32], StoreError> {
+    pub fn create_lod(&self) -> Result<[u8; 32], StoreError> {
         let mut slot = self
             .signing_seed
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if slot.is_some() || self.loa_key_path.is_file() {
-            return Err(StoreError::LoadAlreadyExists);
+            return Err(StoreError::LodAlreadyExists);
         }
         let mut seed = [0_u8; SIGNING_SEED_LEN];
         if let Err(error) = getrandom::getrandom(&mut seed) {
@@ -407,17 +410,17 @@ impl ObjectStore {
         self.signing_seed
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .ok_or(StoreError::NotInLoadDomain)
+            .ok_or(StoreError::NotInLod)
     }
 
-    /// A store opened in tests can sign. Create new LOAD when this directory has none.
+    /// A store opened in tests can sign. Create a local object domain (LOD) when this directory has none.
     #[cfg(test)]
-    pub fn open_with_load(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
+    pub fn open_with_lod(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let store = Self::open(root)?;
         if store.signing_seed().is_ok() {
             return Ok(store);
         }
-        store.create_load()?;
+        store.create_lod()?;
         Ok(store)
     }
 
@@ -964,7 +967,7 @@ fn install_local_loa(
     };
     let _ = fs::remove_file(&staging);
     if !created {
-        return Err(StoreError::LoadAlreadyExists);
+        return Err(StoreError::LodAlreadyExists);
     }
     if let Err(error) = write_public(&loa_public_path(private_path), public) {
         let _ = fs::remove_file(private_path);
@@ -1179,7 +1182,7 @@ fn verify_statement(
     mismatch: &str,
 ) -> Result<(), StoreError> {
     if keys.is_empty() {
-        return Err(StoreError::NotInLoadDomain);
+        return Err(StoreError::NotInLod);
     }
     let signature_bytes = hex_decode(signature_hex)
         .filter(|bytes| bytes.len() == 64)
@@ -1474,7 +1477,7 @@ mod tests {
     #[test]
     fn import_writes_data_and_manifest_and_repeats_the_same_id() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let store = ObjectStore::open_with_lod(root.path()).expect("store");
         let bytes = b"abc";
         let first = store
             .import_reader(Cursor::new(bytes), bytes.len() as u64, &Claims::none())
@@ -1544,7 +1547,10 @@ mod tests {
         let error = store
             .import_reader(Cursor::new(b"abc"), 3, &Claims::none())
             .expect_err("signing import");
-        assert_eq!(error.to_string(), "This node is not part of a LOA Domain");
+        assert_eq!(
+            error.to_string(),
+            "This node is not part of a local object domain"
+        );
 
         let bytes = b"abc";
         let id = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -1565,11 +1571,14 @@ mod tests {
             .expect("stored envelope");
         let stored = ObjectId::parse(id).expect("id");
         match store.ensure_transfer_documents(&stored) {
-            Err(error) => assert_eq!(error.to_string(), "This node is not part of a LOA Domain"),
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "This node is not part of a local object domain"
+            ),
             Ok(_) => panic!("transfer signature must require LOA credentials"),
         }
 
-        let public = store.create_load().expect("create load");
+        let public = store.create_lod().expect("create lod");
         assert_eq!(public.len(), 32);
         assert!(store.loa_key_path().is_file());
         assert_eq!(
@@ -1589,16 +1598,16 @@ mod tests {
         store
             .ensure_transfer_documents(&stored)
             .expect("signed after create");
-        let again = store.create_load().expect_err("second create");
+        let again = store.create_lod().expect_err("second create");
         assert_eq!(
             again.to_string(),
-            "This node already belongs to a LOA Domain"
+            "This node already belongs to a local object domain"
         );
         let reopened = ObjectStore::open(root.path()).expect("reopen");
-        let still = reopened.create_load().expect_err("create after reopen");
+        let still = reopened.create_lod().expect_err("create after reopen");
         assert_eq!(
             still.to_string(),
-            "This node already belongs to a LOA Domain"
+            "This node already belongs to a local object domain"
         );
     }
 
@@ -1628,7 +1637,7 @@ mod tests {
     #[test]
     fn an_offer_envelope_must_match_a_trusted_loa() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let store = ObjectStore::open_with_lod(root.path()).expect("store");
         let id = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         let object_id = ObjectId::parse(id).expect("id");
         let manifest = format!("object-id {id}\nlength 3\n");
@@ -1683,7 +1692,10 @@ mod tests {
         let missing = bare
             .store_object_documents(&object_id, &manifest, &envelope)
             .expect_err("no trusted key");
-        assert_eq!(missing.to_string(), "This node is not part of a LOA Domain");
+        assert_eq!(
+            missing.to_string(),
+            "This node is not part of a local object domain"
+        );
     }
 
     #[test]
@@ -1701,7 +1713,7 @@ mod tests {
     #[test]
     fn import_signs_the_claims_into_the_loa_envelope() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let store = ObjectStore::open_with_lod(root.path()).expect("store");
         let bytes = b"abc";
         let claims = Claims::parse([
             "board=heltec-v4-r8",
@@ -1824,7 +1836,7 @@ mod tests {
     #[test]
     fn open_data_returns_the_stored_bytes() {
         let root = tempfile::tempdir().expect("temp dir");
-        let store = ObjectStore::open_with_load(root.path()).expect("store");
+        let store = ObjectStore::open_with_lod(root.path()).expect("store");
         let id = store
             .import_reader(Cursor::new(b"abc"), 3, &Claims::none())
             .expect("import");

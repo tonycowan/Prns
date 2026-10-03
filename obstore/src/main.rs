@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 
 use obstore::config::load_stack;
 use obstore::protocol::{
-    bind_socket, fetch_object, import_admission, request_create_load, request_release,
+    bind_socket, fetch_object, import_admission, request_create_lod, request_release,
     request_transfer, request_who_has, serve_connection, socket_path, Admission, LocalListener,
 };
 use obstore::releases::{import_sets, FirmwareSet};
@@ -28,10 +28,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create new LOAD.
+    /// Create a local object domain (LOD).
     ///
     /// Generates this stack's LOA credentials once. Run it on one machine for each domain.
-    CreateLoad {
+    CreateLod {
         /// Directory that contains the stack config file.
         #[arg(long, value_name = "DIR")]
         config: PathBuf,
@@ -154,7 +154,7 @@ enum FirmwareSetArg {
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Serve { config } => serve(&config),
-        Command::CreateLoad { config, offline } => create_load(&config, offline),
+        Command::CreateLod { config, offline } => create_lod(&config, offline),
         Command::TrustLoa { config, public_key } => trust_loa(&config, &public_key),
         Command::Import {
             config,
@@ -195,7 +195,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn create_load(config_dir: &std::path::Path, offline: bool) -> ExitCode {
+fn create_lod(config_dir: &std::path::Path, offline: bool) -> ExitCode {
     if offline {
         let stack = match load_stack(config_dir) {
             Ok(stack) => stack,
@@ -211,7 +211,7 @@ fn create_load(config_dir: &std::path::Path, offline: bool) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match store.create_load() {
+        return match store.create_lod() {
             Ok(public_key) => {
                 println!("{}", obstore::store::hex_encode(&public_key));
                 ExitCode::SUCCESS
@@ -222,7 +222,7 @@ fn create_load(config_dir: &std::path::Path, offline: bool) -> ExitCode {
             }
         };
     }
-    match request_create_load(&socket_path(config_dir)) {
+    match request_create_lod(&socket_path(config_dir)) {
         Ok(public_key) => {
             println!("{public_key}");
             ExitCode::SUCCESS
