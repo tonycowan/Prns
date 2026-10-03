@@ -22446,6 +22446,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22461,6 +22462,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22476,6 +22478,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22491,6 +22494,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22509,6 +22513,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "rnx",
@@ -22529,6 +22534,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "rnx",
@@ -22549,6 +22555,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "rnx",
@@ -22566,6 +22573,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22581,6 +22589,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22596,6 +22605,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "shared-instance-rpc",
@@ -22610,6 +22620,7 @@
           "flash",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22625,6 +22636,7 @@
           "flash",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22638,6 +22650,7 @@
           "flash",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22651,6 +22664,7 @@
           "flash",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22664,6 +22678,7 @@
           "flash",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22677,6 +22692,7 @@
           "flash",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22690,6 +22706,7 @@
           "flash",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22706,6 +22723,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22722,6 +22740,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22738,6 +22757,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22752,6 +22772,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22764,6 +22785,7 @@
           "flash",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std",
@@ -22773,6 +22795,7 @@
           "alloc",
           "flash",
           "remote-control-path-table",
+          "remote-control-tcp-client",
           "resource-work-offload",
           "rns-management-wire",
           "std"
@@ -23460,6 +23483,7 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23469,6 +23493,7 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23478,6 +23503,7 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23487,6 +23513,7 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23498,6 +23525,7 @@
           "interface-discovery-archive",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23510,6 +23538,7 @@
           "interface-discovery-archive",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23522,6 +23551,7 @@
           "interface-discovery-archive",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23532,6 +23562,7 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23541,6 +23572,7 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23550,6 +23582,7 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "rns-management",
@@ -23560,6 +23593,7 @@
           "default",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "resource-bzip2",
           "std"
         ],
@@ -23568,6 +23602,7 @@
           "external-alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23577,6 +23612,7 @@
           "external-alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23586,6 +23622,7 @@
           "external-alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23595,6 +23632,7 @@
           "external-alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23604,6 +23642,7 @@
           "external-alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23613,6 +23652,7 @@
           "external-alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23622,6 +23662,7 @@
           "interface-discovery",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23631,6 +23672,7 @@
           "interface-discovery",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23640,6 +23682,7 @@
           "interface-discovery",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23648,6 +23691,7 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "remote-control-wifi-host",
           "resource-bzip2",
           "std"
@@ -23656,12 +23700,14 @@
           "alloc",
           "movable-frame-forwarding",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "resource-bzip2",
           "std"
         ],
         "wasm": [
           "alloc",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "resource-bzip2",
           "std"
         ]
@@ -23685,45 +23731,54 @@
         ],
         "controller-linux": [
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "controller-macos": [
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "controller-windows": [
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "daemon-linux": [
           "alloc",
           "log",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rnx"
         ],
         "daemon-macos": [
           "alloc",
           "log",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rnx"
         ],
         "daemon-windows": [
           "alloc",
           "log",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rnx"
         ],
         "desktop-linux": [
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "desktop-macos": [
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "desktop-windows": [
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "engine": [
           "remote-control-path-table"
@@ -23731,44 +23786,54 @@
         "esp32-c6": [
           "alloc",
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-heltec": [
           "alloc",
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-heltec-e290": [
           "alloc",
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-heltec-r8": [
           "alloc",
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-heltec-wireless-stick-lite-v3": [
           "alloc",
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-tbeam": [
           "alloc",
           "log",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "host-c-linux": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "host-c-macos": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "host-c-windows": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "ios": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "nrf52840": []
       },
@@ -23795,6 +23860,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "tracing"
         ],
@@ -23802,6 +23868,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "tracing"
         ],
@@ -23809,6 +23876,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "tracing"
         ],
@@ -23817,6 +23885,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "rnx",
           "tracing"
@@ -23826,6 +23895,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "rnx",
           "tracing"
@@ -23835,6 +23905,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "rnx",
           "tracing"
@@ -23843,6 +23914,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "tracing"
         ],
@@ -23850,6 +23922,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "tracing"
         ],
@@ -23857,6 +23930,7 @@
           "parallel-persistence",
           "parallel-resource-hash",
           "remote-control-path-table",
+          "remote-control-tcp-host",
           "rns-management",
           "tracing"
         ],
@@ -23864,45 +23938,55 @@
           "remote-control-path-table"
         ],
         "esp32-c6": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-heltec": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-heltec-e290": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-heltec-r8": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-heltec-wireless-stick-lite-v3": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "esp32-s3-tbeam": [
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "host-c-linux": [
           "interface-discovery",
           "parallel-persistence",
           "parallel-resource-hash",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "host-c-macos": [
           "interface-discovery",
           "parallel-persistence",
           "parallel-resource-hash",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "host-c-windows": [
           "interface-discovery",
           "parallel-persistence",
           "parallel-resource-hash",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "ios": [
           "parallel-persistence",
           "parallel-resource-hash",
-          "remote-control-path-table"
+          "remote-control-path-table",
+          "remote-control-tcp-host"
         ],
         "nrf52840": []
       },

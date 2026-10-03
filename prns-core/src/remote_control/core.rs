@@ -270,7 +270,9 @@ fn grant_effective_requests(
         let _inserted = requests.insert(RemoteControlRequestKind::DescribeNetworkTransport);
         let _inserted = requests.insert(RemoteControlRequestKind::SetNetworkTransport);
         let _inserted = requests.insert(RemoteControlRequestKind::InventoryPathTable);
+        #[cfg(feature = "remote-control-tcp-client")]
         let _inserted = requests.insert(RemoteControlRequestKind::DescribeTcpClient);
+        #[cfg(feature = "remote-control-tcp-client")]
         let _inserted = requests.insert(RemoteControlRequestKind::SetTcpClient);
         let _inserted = requests.insert(RemoteControlRequestKind::SetInterfaceMode);
         let _inserted = requests.insert(RemoteControlRequestKind::FirmwareUpdate);

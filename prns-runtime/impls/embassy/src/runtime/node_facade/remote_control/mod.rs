@@ -13,19 +13,20 @@ use crate::runtime::{
     RemoteControlActivateWifiCredentials, RemoteControlAnnounceSelf,
     RemoteControlAuthorizeController, RemoteControlCancelWifiCredentials,
     RemoteControlConfirmWifiCredentials, RemoteControlDescribe, RemoteControlDescribeBuild,
-    RemoteControlDescribeNetworkTransport, RemoteControlDescribePower,
-    RemoteControlDescribeTcpClient, RemoteControlError, RemoteControlInspectWifiTransaction,
-    RemoteControlInventoryControllers, RemoteControlInventoryInterfaceConfig,
-    RemoteControlInventoryInterfaceDiscoveryGroups, RemoteControlInventoryInterfacePeers,
-    RemoteControlInventoryInterfaces, RemoteControlReplaceInterfaceDiscoveryGroups,
-    RemoteControlRevokeController, RemoteControlSetDisplayAutoOff,
-    RemoteControlSetDisplayVisibility, RemoteControlSetEspRadioMode, RemoteControlSetGnssPower,
-    RemoteControlSetInterfaceGroup, RemoteControlSetInterfaceLoRaProfile,
-    RemoteControlSetInterfaceMode, RemoteControlSetInterfacePower,
-    RemoteControlSetInterfaceWifiStation, RemoteControlSetNetworkTransport,
-    RemoteControlSetStationUplink, RemoteControlSetSystemPower, RemoteControlSetTcpClient,
+    RemoteControlDescribeNetworkTransport, RemoteControlDescribePower, RemoteControlError,
+    RemoteControlInspectWifiTransaction, RemoteControlInventoryControllers,
+    RemoteControlInventoryInterfaceConfig, RemoteControlInventoryInterfaceDiscoveryGroups,
+    RemoteControlInventoryInterfacePeers, RemoteControlInventoryInterfaces,
+    RemoteControlReplaceInterfaceDiscoveryGroups, RemoteControlRevokeController,
+    RemoteControlSetDisplayAutoOff, RemoteControlSetDisplayVisibility,
+    RemoteControlSetEspRadioMode, RemoteControlSetGnssPower, RemoteControlSetInterfaceGroup,
+    RemoteControlSetInterfaceLoRaProfile, RemoteControlSetInterfaceMode,
+    RemoteControlSetInterfacePower, RemoteControlSetInterfaceWifiStation,
+    RemoteControlSetNetworkTransport, RemoteControlSetStationUplink, RemoteControlSetSystemPower,
     RemoteControlSleepRadios, RemoteControlStageWifiCredentials, RemoteControlWakeRadios,
 };
+#[cfg(feature = "remote-control-tcp-host")]
+use crate::runtime::{RemoteControlDescribeTcpClient, RemoteControlSetTcpClient};
 use crate::units::RttMillis;
 use prns_core::capabilities::power::PowerSnapshot;
 use prns_core::interfaces::{InterfaceId, InterfaceMode};
@@ -42,9 +43,12 @@ use prns_core::remote_control::{
     RemoteControlNetworkTransportOutcome, RemoteControlPeerPage, RemoteControlPowerOutcome,
     RemoteControlRequest, RemoteControlRequestSet, RemoteControlRevokeControllerOutcome,
     RemoteControlSleepOutcome, RemoteControlStationUplink, RemoteControlSystemPower,
-    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
     RemoteControlWifiCredentialRevision, RemoteControlWifiStageOutcome, RemoteControlWifiStation,
     RemoteControlWifiStationOutcome, RemoteControlWifiTransactionStatus,
+};
+#[cfg(feature = "remote-control-tcp-host")]
+use prns_core::remote_control::{
+    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
 };
 
 use super::PrnsNodeHandle;
@@ -299,6 +303,7 @@ impl<
         Ok((outcome, rtt))
     }
 
+    #[cfg(feature = "remote-control-tcp-host")]
     pub async fn describe_tcp_client(
         &self,
     ) -> Result<(RemoteControlTcpClientStatus, RttMillis), RemoteControlError> {
@@ -318,6 +323,7 @@ impl<
         Ok((status, rtt))
     }
 
+    #[cfg(feature = "remote-control-tcp-host")]
     pub async fn set_tcp_client(
         &self,
         config: RemoteControlTcpClientConfig,

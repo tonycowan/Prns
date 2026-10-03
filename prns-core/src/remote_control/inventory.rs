@@ -1747,6 +1747,13 @@ impl RemoteControlTcpClientOutcome {
         self as u8
     }
 
+    #[cfg_attr(
+        not(feature = "remote-control-tcp-client"),
+        allow(
+            dead_code,
+            reason = "TCP outcome decoding is linked only on boards that configure a TCP client"
+        )
+    )]
     pub(crate) fn from_wire(value: u8) -> Option<Self> {
         Self::ALL
             .into_iter()

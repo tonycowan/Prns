@@ -63,20 +63,21 @@ pub use remote_control::{
     RemoteControlAnnounceSelfFailure, RemoteControlAuthorizeController,
     RemoteControlCancelWifiCredentials, RemoteControlConfirmWifiCredentials, RemoteControlDescribe,
     RemoteControlDescribeBuild, RemoteControlDescribeNetworkTransport, RemoteControlDescribePower,
-    RemoteControlDescribeTcpClient, RemoteControlError, RemoteControlHostCommand,
-    RemoteControlHostCommandError, RemoteControlHostControls, RemoteControlHostResponse,
-    RemoteControlInspectWifiTransaction, RemoteControlInventoryControllers,
-    RemoteControlInventoryInterfaceConfig, RemoteControlInventoryInterfaceDiscoveryGroups,
-    RemoteControlInventoryInterfacePeers, RemoteControlInventoryInterfaces,
-    RemoteControlInventoryPathTable, RemoteControlReplaceInterfaceDiscoveryGroups,
-    RemoteControlRevokeController, RemoteControlSetDisplayAutoOff,
-    RemoteControlSetDisplayVisibility, RemoteControlSetEspRadioMode, RemoteControlSetGnssPower,
-    RemoteControlSetInterfaceGroup, RemoteControlSetInterfaceLoRaProfile,
-    RemoteControlSetInterfaceMode, RemoteControlSetInterfacePower,
-    RemoteControlSetInterfaceWifiStation, RemoteControlSetNetworkTransport,
-    RemoteControlSetStationUplink, RemoteControlSetSystemPower, RemoteControlSetTcpClient,
+    RemoteControlError, RemoteControlHostCommand, RemoteControlHostCommandError,
+    RemoteControlHostControls, RemoteControlHostResponse, RemoteControlInspectWifiTransaction,
+    RemoteControlInventoryControllers, RemoteControlInventoryInterfaceConfig,
+    RemoteControlInventoryInterfaceDiscoveryGroups, RemoteControlInventoryInterfacePeers,
+    RemoteControlInventoryInterfaces, RemoteControlInventoryPathTable,
+    RemoteControlReplaceInterfaceDiscoveryGroups, RemoteControlRevokeController,
+    RemoteControlSetDisplayAutoOff, RemoteControlSetDisplayVisibility,
+    RemoteControlSetEspRadioMode, RemoteControlSetGnssPower, RemoteControlSetInterfaceGroup,
+    RemoteControlSetInterfaceLoRaProfile, RemoteControlSetInterfaceMode,
+    RemoteControlSetInterfacePower, RemoteControlSetInterfaceWifiStation,
+    RemoteControlSetNetworkTransport, RemoteControlSetStationUplink, RemoteControlSetSystemPower,
     RemoteControlSleepRadios, RemoteControlStageWifiCredentials, RemoteControlWakeRadios,
 };
+#[cfg(feature = "remote-control-tcp-host")]
+pub use remote_control::{RemoteControlDescribeTcpClient, RemoteControlSetTcpClient};
 pub use remote_control_authorizations::{
     RemoteControlAuthorizationRestoreError, RemoteControlAuthorizationRestoreOutcome,
 };

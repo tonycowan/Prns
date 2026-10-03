@@ -4,11 +4,13 @@ use crate::engine::{EstablishLinkFailure, IdentifyFailure};
 use crate::identity::IdentityHash;
 use crate::interfaces::InterfaceId;
 use crate::routing::links::LinkId;
+#[cfg(feature = "remote-control-tcp-host")]
+use crate::runtime::RemoteControlDescribeTcpClient;
 use crate::runtime::{
     CloseRemoteControlTargetOutcome, ConnectRemoteControlTargetError, RemoteControlAnnounceSelf,
     RemoteControlDescribe, RemoteControlDescribeBuild, RemoteControlDescribeNetworkTransport,
-    RemoteControlDescribePower, RemoteControlDescribeTcpClient, RemoteControlInventoryInterfaces,
-    RemoteControlSleepRadios, RemoteControlTargetConnection, RemoteControlTargetConnectionControl,
+    RemoteControlDescribePower, RemoteControlInventoryInterfaces, RemoteControlSleepRadios,
+    RemoteControlTargetConnection, RemoteControlTargetConnectionControl,
     RemoteControlTargetConnectionTransport, RemoteControlTargetOperationError,
     RemoteControlWakeRadios, SendError,
 };
@@ -29,9 +31,12 @@ use prns_core::remote_control::{
     RemoteControlNetworkTransportOutcome, RemoteControlPeerPage, RemoteControlPowerOutcome,
     RemoteControlRequestKind, RemoteControlRequestSet, RemoteControlRevokeControllerOutcome,
     RemoteControlSleepOutcome, RemoteControlStationUplink, RemoteControlSystemPower,
-    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
     RemoteControlWifiCredentialRevision, RemoteControlWifiStageOutcome, RemoteControlWifiStation,
     RemoteControlWifiStationOutcome, RemoteControlWifiTransactionStatus,
+};
+#[cfg(feature = "remote-control-tcp-host")]
+use prns_core::remote_control::{
+    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
 };
 
 use super::{PrnsNodeHandle, RemoteControlHandle};
@@ -258,6 +263,7 @@ impl<
             .map_err(Into::into)
     }
 
+    #[cfg(feature = "remote-control-tcp-host")]
     pub async fn describe_tcp_client(
         &self,
     ) -> Result<(RemoteControlTcpClientStatus, RttMillis), RemoteControlTargetOperationError> {
@@ -269,6 +275,7 @@ impl<
             .map_err(Into::into)
     }
 
+    #[cfg(feature = "remote-control-tcp-host")]
     pub async fn set_tcp_client(
         &self,
         config: RemoteControlTcpClientConfig,

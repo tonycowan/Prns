@@ -23,12 +23,14 @@ use crate::remote_control::{
     RemoteControlRequestKind, RemoteControlRequestParseError, RemoteControlRequestSet,
     RemoteControlResponse, RemoteControlResponseKind, RemoteControlResponseParseError,
     RemoteControlRevokeControllerOutcome, RemoteControlSelfAnnouncement, RemoteControlSleepOutcome,
-    RemoteControlStationUplink, RemoteControlSystemPower, RemoteControlTcpClientConfig,
-    RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
-    RemoteControlWifiCredentialRevision, RemoteControlWifiStageOutcome, RemoteControlWifiStation,
-    RemoteControlWifiStationOutcome, RemoteControlWifiTransactionStatus,
-    RevokeRemoteControlControllerOutcome, SetRemoteControlControllerGrantOutcome,
-    REMOTE_CONTROL_REQUEST_ENDPOINT_ID,
+    RemoteControlStationUplink, RemoteControlSystemPower, RemoteControlWifiCredentialRevision,
+    RemoteControlWifiStageOutcome, RemoteControlWifiStation, RemoteControlWifiStationOutcome,
+    RemoteControlWifiTransactionStatus, RevokeRemoteControlControllerOutcome,
+    SetRemoteControlControllerGrantOutcome, REMOTE_CONTROL_REQUEST_ENDPOINT_ID,
+};
+#[cfg(feature = "remote-control-tcp-host")]
+use crate::remote_control::{
+    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
 };
 use crate::routing::links::request::REQUEST_WIRE_OVERHEAD;
 use crate::units::ByteLimit;
@@ -259,7 +261,9 @@ pub enum RemoteControlHostCommand {
     SetNetworkTransport {
         transport: RemoteControlNetworkTransport,
     },
+    #[cfg(feature = "remote-control-tcp-host")]
     DescribeTcpClient,
+    #[cfg(feature = "remote-control-tcp-host")]
     SetTcpClient {
         config: RemoteControlTcpClientConfig,
     },
@@ -317,7 +321,9 @@ impl RemoteControlHostCommand {
             Self::InspectWifiTransaction { .. } => RemoteControlRequestKind::InspectWifiTransaction,
             Self::DescribeNetworkTransport => RemoteControlRequestKind::DescribeNetworkTransport,
             Self::SetNetworkTransport { .. } => RemoteControlRequestKind::SetNetworkTransport,
+            #[cfg(feature = "remote-control-tcp-host")]
             Self::DescribeTcpClient => RemoteControlRequestKind::DescribeTcpClient,
+            #[cfg(feature = "remote-control-tcp-host")]
             Self::SetTcpClient { .. } => RemoteControlRequestKind::SetTcpClient,
         }
     }
@@ -353,7 +359,9 @@ pub enum RemoteControlHostResponse {
     InspectWifiTransaction(RemoteControlWifiTransactionStatus),
     DescribeNetworkTransport(RemoteControlNetworkTransport),
     SetNetworkTransport(RemoteControlNetworkTransportOutcome),
+    #[cfg(feature = "remote-control-tcp-host")]
     DescribeTcpClient(RemoteControlTcpClientStatus),
+    #[cfg(feature = "remote-control-tcp-host")]
     SetTcpClient(RemoteControlTcpClientOutcome),
 }
 
@@ -392,7 +400,9 @@ impl RemoteControlHostResponse {
             Self::InspectWifiTransaction(_) => RemoteControlRequestKind::InspectWifiTransaction,
             Self::DescribeNetworkTransport(_) => RemoteControlRequestKind::DescribeNetworkTransport,
             Self::SetNetworkTransport(_) => RemoteControlRequestKind::SetNetworkTransport,
+            #[cfg(feature = "remote-control-tcp-host")]
             Self::DescribeTcpClient(_) => RemoteControlRequestKind::DescribeTcpClient,
+            #[cfg(feature = "remote-control-tcp-host")]
             Self::SetTcpClient(_) => RemoteControlRequestKind::SetTcpClient,
         }
     }
@@ -456,7 +466,9 @@ impl RemoteControlHostResponse {
             Self::SetNetworkTransport(outcome) => {
                 RemoteControlResponse::SetNetworkTransport(outcome)
             }
+            #[cfg(feature = "remote-control-tcp-host")]
             Self::DescribeTcpClient(status) => RemoteControlResponse::DescribeTcpClient(status),
+            #[cfg(feature = "remote-control-tcp-host")]
             Self::SetTcpClient(outcome) => RemoteControlResponse::SetTcpClient(outcome),
         }
     }
@@ -1048,8 +1060,10 @@ impl RemoteControlDescribeNetworkTransport {
     }
 }
 
+#[cfg(feature = "remote-control-tcp-host")]
 pub struct RemoteControlDescribeTcpClient;
 
+#[cfg(feature = "remote-control-tcp-host")]
 impl RemoteControlDescribeTcpClient {
     pub const REQUEST: RemoteControlRequest = RemoteControlRequest::DescribeTcpClient;
     pub const RESPONSE_CAPACITY: usize = Self::REQUEST.maximum_response_encoded_len();
@@ -1076,8 +1090,10 @@ impl RemoteControlDescribeTcpClient {
     }
 }
 
+#[cfg(feature = "remote-control-tcp-host")]
 pub struct RemoteControlSetTcpClient;
 
+#[cfg(feature = "remote-control-tcp-host")]
 impl RemoteControlSetTcpClient {
     pub const RESPONSE_CAPACITY: usize =
         RemoteControlRequestKind::SetTcpClient.maximum_response_encoded_len();
@@ -1571,6 +1587,7 @@ impl RemoteControlRequestEndpoint {
                     RemoteControlHostCommand::SetNetworkTransport { transport },
                 ))
             }
+            #[cfg(feature = "remote-control-tcp-host")]
             Ok(RemoteControlRequest::DescribeTcpClient) => {
                 require_available(
                     available_requests,
@@ -1580,6 +1597,7 @@ impl RemoteControlRequestEndpoint {
                     RemoteControlHostCommand::DescribeTcpClient,
                 ))
             }
+            #[cfg(feature = "remote-control-tcp-host")]
             Ok(RemoteControlRequest::SetTcpClient { config }) => {
                 require_available(available_requests, RemoteControlRequestKind::SetTcpClient)?;
                 Ok(AdmittedRemoteControlOperation::Host(
