@@ -45,6 +45,7 @@ log = { version = "0.4", optional = true, default-features = false }
 
 [dev-dependencies]
 prns-core = { version = "=0.3.7", path = "../../../prns-core", default-features = false, features = ["std", "embassy-host", "test-support", "flash"] }
+prns-runtime = { version = "=0.3.7", path = "../../core", default-features = false, features = ["remote-control-tcp-host"] }
 embedded-storage = "0.3"
 critical-section = { version = "1", features = ["std"] }
 embassy-time = { version = "0.5", default-features = false, features = ["std", "generic-queue-8"] }
