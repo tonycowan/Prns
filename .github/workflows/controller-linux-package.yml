@@ -38,6 +38,10 @@ jobs:
 
       - name: Build hopspot-flash + stage firmware tree
         run: |
+          # Firmware cargo drops RUSTUP_TOOLCHAIN and uses the nRF directory
+          # toolchain file. That file says stable, which on ubuntu-latest is
+          # 1.98.1, and T-Echo SoftDevice v7 overflows there. It links on 1.97.1.
+          rustup override set --path personal-hopspot/embedded/nrf52840 1.97.1
           cargo build --release --locked -p hopspot-flash
           ./tools/prns run release.controller.firmware.stage -- \
             --out-dir target/controller-firmware-staging \
