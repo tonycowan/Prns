@@ -2,7 +2,7 @@
 
 prnsd hosts the object store, import, transfer, and release for a stack. The command line is `object-services` (`obstore/src/main.rs`). A debug build is `obstore/target/debug/object-services`. On Windows that file is `object-services.exe`.
 
-Every command takes `--config DIR`. `DIR/config` is the stack file. prnsd listens for those commands on `DIR/obstore.sock`. On Unix that path is a socket, mode 0600. On Windows the file contains `127.0.0.1:<port>` and the service listens on that loopback port. The message magic is `OBST` version 2. Run prnsd with that config. Do not also run `object-services serve`; it binds the same path.
+Every command takes `--config DIR`. `DIR/config` is the stack file. prnsd listens for those commands on `DIR/obstore.sock`. On Unix that path is a socket, mode 0600. On Windows the file contains `127.0.0.1:<port>` and the service listens on that loopback port. 
 
 ```text
 ./prnsd/target/release/prnsd run --config DIR
@@ -13,8 +13,6 @@ On Windows, build that exe once and start each stack from it:
 ```text
 prnsd\target\debug\prnsd.exe run --config DIR
 ```
-
-A later `cargo run` rebuilds `prnsd.exe`. Windows refuses to replace the exe while the first process has it open.
 
 When `[object-services]` is present and valid, prnsd prints the unique object-transfer address and the command socket:
 
@@ -29,10 +27,12 @@ If the heading is absent, prnsd skips the service. If the heading is present and
 
 The name is `reticulum` / `object-transfer`. The name is an input to the destination hash. The hash is the endpoint. The same name produces two hashes.
 
-| Address | How it is calculated | Who hears it |
-| --- | --- | --- |
-| Plain | Hash of the name alone. Every stack gets the same value. | Every object service, on every interface. |
-| Unique | Hash of that same name mixed with this stack's identity. This is the address prnsd prints, 32 hex characters. | That one stack. |
+
+| Address | How it is calculated                                                                                          | Who hears it                              |
+| ------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| Plain   | Hash of the name alone. Every stack gets the same value.                                                      | Every object service, on every interface. |
+| Unique  | Hash of that same name mixed with this stack's identity. This is the address prnsd prints, 32 hex characters. | That one stack.                           |
+
 
 The unique address comes from `DIR/storage/transport_identity` (64 bytes: X25519 secret, then Ed25519 seed). prnsd creates that file. The service does not.
 
@@ -52,17 +52,19 @@ The wire header of the plain packet stays a one-hop broadcast. It is not the flo
 
 A transfer, a remote catalog, a preview, a piece pull, a transfer-manifest reply, and a direct claim are aimed at one unique address. prnsd path-requests that address and opens a link. Transport can carry that path. The first bytes on the link are an `OBXF` version 2 message. The stack that opened the link sends a body larger than one link packet as a resource. The stack that accepted the link sends its reply as link packets, because the opener does not prove data that comes back.
 
-| Message | Address |
-| --- | --- |
-| `import`, `fetch`, `release`, `who-has`, `transfer` from the command line | Local `obstore.sock` only |
-| Release announcement | Plain |
-| Who-has | Plain |
-| Claim | Plain, and also a link to the requester's unique address |
-| Request for the transfer manifest | Plain |
-| Transfer-manifest reply | Link to the requester's unique address |
-| Transfer offer, and the pull of the manifest and pieces | Link to the destination's unique address |
-| Piece pull after a claim (`GIVE_PIECE`) | Link to the holder's unique address |
-| Remote catalog and preview | Link to the remote stack's unique address |
+
+| Message                                                                   | Address                                                  |
+| ------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `import`, `fetch`, `release`, `who-has`, `transfer` from the command line | Local `obstore.sock` only                                |
+| Release announcement                                                      | Plain                                                    |
+| Who-has                                                                   | Plain                                                    |
+| Claim                                                                     | Plain, and also a link to the requester's unique address |
+| Request for the transfer manifest                                         | Plain                                                    |
+| Transfer-manifest reply                                                   | Link to the requester's unique address                   |
+| Transfer offer, and the pull of the manifest and pieces                   | Link to the destination's unique address                 |
+| Piece pull after a claim (`GIVE_PIECE`)                                   | Link to the holder's unique address                      |
+| Remote catalog and preview                                                | Link to the remote stack's unique address                |
+
 
 ## Stack config
 
@@ -83,16 +85,18 @@ Paths in the config are relative to `DIR` unless they are absolute.
     minimum-bytes-per-second = 1000
 ```
 
-| Key | Meaning |
-| --- | --- |
-| `object-store-directory` | Where object bytes and envelopes are stored. Required. |
-| `object-transfer-directory` | Where release notices and who-has state are stored. Required. |
-| `cdn` | `Yes` fetches a release whose `CDN-group` claim is `all` or one of the configured groups. |
-| `cdn-group` | Repeatable group name, for example `site-a`. |
-| `auto-stage` | `Yes` fetches firmware whose `mode` claim is `auto-stage`. |
-| `auto-update` | `Yes` fetches firmware whose `mode` claim is `auto-update`. |
-| `board` | Board id that firmware claims must match, for example `heltec-v4`. |
-| `minimum-bytes-per-second` | Who-has floor. An offer slower than this is held while the search widens. `0`, the default, accepts any offer. |
+
+| Key                         | Meaning                                                                                                        |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `object-store-directory`    | Where object bytes and envelopes are stored. Required.                                                         |
+| `object-transfer-directory` | Where release notices and who-has state are stored. Required.                                                  |
+| `cdn`                       | `Yes` fetches a release whose `CDN-group` claim is `all` or one of the configured groups.                      |
+| `cdn-group`                 | Repeatable group name, for example `site-a`.                                                                   |
+| `auto-stage`                | `Yes` fetches firmware whose `mode` claim is `auto-stage`.                                                     |
+| `auto-update`               | `Yes` fetches firmware whose `mode` claim is `auto-update`.                                                    |
+| `board`                     | Board id that firmware claims must match, for example `heltec-v4`.                                             |
+| `minimum-bytes-per-second`  | Who-has floor. An offer slower than this is held while the search widens. `0`, the default, accepts any offer. |
+
 
 There is no destination key. The unique address is derived. prnsd does not read `<object-transfer-directory>/peers`.
 
@@ -165,16 +169,18 @@ object-services release --config DIR --object-id HEX [--hops N]
 object-services import-releases --config DIR [--set preview] [--set stable]
 ```
 
-| Command | Arguments | Result |
-| --- | --- | --- |
-| `create-lod` | `--offline` writes the files directly. Without it, prnsd must already be listening. | Creates a LOD. Writes `loa/local/private`, `loa/local/public`, and `loa/trusted/<64-hex>` once and prints the LOA public key. Fails when the private key is already present. |
-| `trust-loa` | `--public-key` is the Ed25519 verifying key, 64 hex. | Installs that key in `loa/trusted`. Creates `loa/local` when it is missing. The same key may be installed again. |
-| `import` | `--file` is the bytes to store. `--claims` is a comma-separated `name=value` list and requires `--as-owner`. `--envelope` is an already signed envelope file; `--authority` is the signer's Ed25519 verifying key (64 hex) or identity public key (128 hex, signing half is the last 32 bytes). `--claims` and `--envelope` cannot be combined. With neither, the bytes are stored with a manifest and no LOA envelope. | Prints the object id on stdout. |
-| `fetch` | `--object-id` is 64 hex. `--file` is the path to write. | Writes the stored `data` bytes. Checks the SHA-256 before replacing `--file`. |
-| `transfer` | `--destination` is the receiver's unique object-transfer address, 32 hex. | Offers the object over a link. The receiver pulls the manifest and pieces. The object must already have a signed LOA envelope. |
-| `who-has` | `--index` is the piece number in the local transfer manifest. | Prints the holder address, 32 hex. Searches hop rings `0` through `8` on the plain address. |
-| `release` | `--hops` defaults to `8` and cannot exceed `8`. | Announces the LOA envelope on the plain address. Each forward decrements the hop count. |
-| `import-releases` | `--set` repeats. Empty means preview, then stable. | Downloads signed firmware from `https://reticulum.rs/releases/`, stores it, and signs it with this stack's LOA. Prints each object id on stdout. A missing preview channel is a notice on stderr; the stable import continues. |
+
+| Command           | Arguments                                                                                                                                                                                                                                                                                                                                                                                                               | Result                                                                                                                                                                                                                         |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `create-lod`      | `--offline` writes the files directly. Without it, prnsd must already be listening.                                                                                                                                                                                                                                                                                                                                     | Creates a LOD. Writes `loa/local/private`, `loa/local/public`, and `loa/trusted/<64-hex>` once and prints the LOA public key. Fails when the private key is already present.                                                   |
+| `trust-loa`       | `--public-key` is the Ed25519 verifying key, 64 hex.                                                                                                                                                                                                                                                                                                                                                                    | Installs that key in `loa/trusted`. Creates `loa/local` when it is missing. The same key may be installed again.                                                                                                               |
+| `import`          | `--file` is the bytes to store. `--claims` is a comma-separated `name=value` list and requires `--as-owner`. `--envelope` is an already signed envelope file; `--authority` is the signer's Ed25519 verifying key (64 hex) or identity public key (128 hex, signing half is the last 32 bytes). `--claims` and `--envelope` cannot be combined. With neither, the bytes are stored with a manifest and no LOA envelope. | Prints the object id on stdout.                                                                                                                                                                                                |
+| `fetch`           | `--object-id` is 64 hex. `--file` is the path to write.                                                                                                                                                                                                                                                                                                                                                                 | Writes the stored `data` bytes. Checks the SHA-256 before replacing `--file`.                                                                                                                                                  |
+| `transfer`        | `--destination` is the receiver's unique object-transfer address, 32 hex.                                                                                                                                                                                                                                                                                                                                               | Offers the object over a link. The receiver pulls the manifest and pieces. The object must already have a signed LOA envelope.                                                                                                 |
+| `who-has`         | `--index` is the piece number in the local transfer manifest.                                                                                                                                                                                                                                                                                                                                                           | Prints the holder address, 32 hex. Searches hop rings `0` through `8` on the plain address.                                                                                                                                    |
+| `release`         | `--hops` defaults to `8` and cannot exceed `8`.                                                                                                                                                                                                                                                                                                                                                                         | Announces the LOA envelope on the plain address. Each forward decrements the hop count.                                                                                                                                        |
+| `import-releases` | `--set` repeats. Empty means preview, then stable.                                                                                                                                                                                                                                                                                                                                                                      | Downloads signed firmware from `https://reticulum.rs/releases/`, stores it, and signs it with this stack's LOA. Prints each object id on stdout. A missing preview channel is a notice on stderr; the stable import continues. |
+
 
 `import-releases` opens the object-store directory in this process and writes the firmware there. It stores two objects per board. The USB object is a zip of `target.json` and the board's files, with `flash-mode=usb`. The OTA object is the exact file that would be sent to the board, with `flash-mode=ota`. Those imports do not set a `mode` claim, so a later `release` of them does not match `auto-stage` or `auto-update` until that claim is present. Only the LOA stack can sign them, the one with `loa/local/private`.
 
@@ -217,7 +223,7 @@ offset 65536
 flash-mode ota
 ```
 
-### Inventory manifest
+### Object manifest
 
 ```text
 object-id 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
@@ -262,18 +268,20 @@ signature <128 hex characters>
 
 Sent on the plain address.
 
-| Field | Example |
-| --- | --- |
-| object id | `5891b5b5…f6be03` |
-| index | `0` |
-| piece hash | the 32 bytes named by `piece 0` |
-| piece size | `4096` |
-| piece length | `6` |
-| requester | the seeker's unique address |
-| hops | `0` on the first ring, then `1`, up to `8` |
-| bytes/second | `18446744073709551615` (`u64::MAX`) until a receiver lowers it |
-| identity | the seeker's X25519 public key and Ed25519 public key, 32 bytes each |
-| signature | Ed25519, 64 bytes |
+
+| Field        | Example                                                              |
+| ------------ | -------------------------------------------------------------------- |
+| object id    | `5891b5b5…f6be03`                                                    |
+| index        | `0`                                                                  |
+| piece hash   | the 32 bytes named by `piece 0`                                      |
+| piece size   | `4096`                                                               |
+| piece length | `6`                                                                  |
+| requester    | the seeker's unique address                                          |
+| hops         | `0` on the first ring, then `1`, up to `8`                           |
+| bytes/second | `18446744073709551615` (`u64::MAX`) until a receiver lowers it       |
+| identity     | the seeker's X25519 public key and Ed25519 public key, 32 bytes each |
+| signature    | Ed25519, 64 bytes                                                    |
+
 
 The signature covers `who-has`, the object id, the index, the piece hash, the piece size, the piece length, the requester address, and the two public keys. `hops` and `bytes/second` stay outside it, because each hop changes them. A node derives the object-transfer address from the public keys and checks the signature before it remembers the request, relays it, or opens a link. A request whose address does not match that identity, or whose signature does not match, is dropped.
 
@@ -289,16 +297,18 @@ The dedup key is the object id, the piece index, the requester address, and the 
 
 The answer to a who-has. `bytes/second` is the minimum the who-has had accumulated when the holder heard it. The holder waits a short random backoff, shorter when more hops are left, and stays quiet if it hears a claim for the same object id and index.
 
-| Field | Example |
-| --- | --- |
-| object id | same as the who-has |
-| index | `0` |
-| piece hash | same as the who-has |
-| requester | the seeker's unique address |
-| holder | the holder's unique address |
-| bytes/second | `1000000` |
-| identity | the holder's X25519 public key and Ed25519 public key, 32 bytes each |
-| signature | Ed25519, 64 bytes |
+
+| Field        | Example                                                              |
+| ------------ | -------------------------------------------------------------------- |
+| object id    | same as the who-has                                                  |
+| index        | `0`                                                                  |
+| piece hash   | same as the who-has                                                  |
+| requester    | the seeker's unique address                                          |
+| holder       | the holder's unique address                                          |
+| bytes/second | `1000000`                                                            |
+| identity     | the holder's X25519 public key and Ed25519 public key, 32 bytes each |
+| signature    | Ed25519, 64 bytes                                                    |
+
 
 The signature covers `claim`, the object id, the index, the piece hash, the requester address, the holder address, the rate, and the two public keys. A node derives the object-transfer address from the public keys and checks the signature before it records the claim. A claim that names another holder, or whose rate was changed after signing, is dropped. A holder can still sign a claim for a piece it does not have, or for a rate it cannot sustain. The piece hash check rejects any other bytes.
 
@@ -308,12 +318,14 @@ The claim is sent on the plain address, and the holder also opens a link to the 
 
 Sent on the plain address. The notice carries the origin stack's unique address and the LOA envelope. A node decides from that envelope. It does not ask for the transfer manifest before deciding.
 
-| Field | Example |
-| --- | --- |
-| object id | `5891b5b5…f6be03` |
-| origin | the announcing stack's unique address |
-| hops | `8` at the origin. Each forward stores and sends `hops - 1`. |
-| envelope | the LOA envelope text |
+
+| Field     | Example                                                      |
+| --------- | ------------------------------------------------------------ |
+| object id | `5891b5b5…f6be03`                                            |
+| origin    | the announcing stack's unique address                        |
+| hops      | `8` at the origin. Each forward stores and sends `hops - 1`. |
+| envelope  | the LOA envelope text                                        |
+
 
 Every node that receives a release with hops left forwards it, including a node that will not fetch. A node fetches only when it does not already have the object and the envelope matches its fetch policy:
 
@@ -360,6 +372,8 @@ sequenceDiagram
     A-->>B: 6 bytes hello newline
     B->>A: REQ_DONE
 ```
+
+
 
 The offer is a pull. A does not push the manifest or the pieces. B stores the inventory manifest and the LOA envelope from the offer before it asks for anything else. It checks the object envelope signature against a public key in `loa/trusted`. The signed bytes are the claims and the object id. It asks for the transfer manifest, checks `object-id`, `length`, and `piece-size 4096`, and checks the transfer envelope signature over the claims and that manifest before storing `transfer-manifest` and `LOA-transfer-envelope`. An envelope that does not verify is not stored. For piece `0` it checks the SHA-256 against `piece 0`, stores the bytes, and checks that the joined bytes hash to the object id. It writes `data` and removes `pieces/`. A later piece request reads `pieces/<index>` while that directory exists, and otherwise slices `data` at `index * piece-size`.
 
@@ -416,6 +430,8 @@ sequenceDiagram
     A-->>C: the piece bytes
 ```
 
+
+
 A sends hops `2` on the plain address. B receives `2`, forwards `1`, and does not fetch. C receives `1`, forwards `0`, and fetches because the envelope matches. The neighbor that receives `0` does not forward.
 
 C asks outward for the transfer manifest on the plain address. A hop count of `0` is answered only by a neighbor that has the manifest. B does not, so C sends the next ring. B relays that to A. A has the manifest, waits a short random backoff (at most 30 ms), and returns it on a link to C's unique address. Each ring waits 200 ms.
@@ -425,6 +441,23 @@ C then searches for piece `0` the same way. The who-has leaves C at `u64::MAX` b
 C opens a link to that holder and sends `GIVE_PIECE` with the object id, index `0`, the piece hash, piece size `4096`, and piece length `6`. A answers with the six bytes. C checks the hash, stores the piece, joins the pieces into `data`, and deletes the piece files. C now has the same object id A released.
 
 While pieces are still arriving, a node can serve a piece it has already stored. After `data` is written, that same piece is read back out of `data`.
+
+## On-device store
+
+A directory is one way to keep those records. An embedded device can keep a few fixed-size stores, one object in each. The store's capacity is its size. The object is the bytes up to its length. Bytes past that length stay in the store and stay out of the hash.
+
+On a device that updates in place, an OTA slot is the `data` of one of those stores. The running image is one object. A second slot, holding an image that is staged and not yet running, is a second object. The object id is the SHA-256 of the image bytes.
+
+The LOA signing seed stays with the authority. The device keeps the transfer envelope that authority signed for the image. It stores the transfer manifest beside that envelope, or rebuilds the manifest from the slot when a neighbor asks. Rebuilding walks the image in pieces of 4096 bytes, hashes each piece, and writes the same lines a directory store writes: `object-id`, `length`, `piece-size 4096`, and one `piece` line for each slice. The signature covers the claims followed by that manifest text, so the rebuilt text verifies when it is the manifest the LOA signed.
+
+```text
+fixed store
+  data                      The OTA slot. The object ends at the firmware length.
+  LOA-transfer-envelope     Kept as the LOA signed it.
+  transfer-manifest         Stored, or rebuilt from data.
+```
+
+A request for the transfer manifest returns that text. The asker checks it against the transfer envelope. A piece request reads the slot at `index * 4096` for 4096 bytes, or the shorter tail of the last piece. A who-has for a piece the slot contains is answered with a claim, and the device serves that piece. The image in the slot is the object other nodes fetch, so the device is a distribution point for its own firmware.
 
 ## Local stand-in
 
