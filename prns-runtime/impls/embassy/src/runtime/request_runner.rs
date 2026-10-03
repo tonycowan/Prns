@@ -58,6 +58,8 @@ enum RunnerResponse<const N: usize> {
     },
 }
 
+// The TCP client target is only present when that feature is enabled for a host test graph.
+#[allow(clippy::large_enum_variant)]
 enum PreparedRunnerRequest {
     RemoteControl(VerifiedAdmittedRemoteControlRequest),
     Application,
