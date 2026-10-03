@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 env:
-  RUSTUP_TOOLCHAIN: 1.96.0
+  RUSTUP_TOOLCHAIN: 1.97.1
 
 jobs:
   # ESP release toolchain install is Linux-only; build the Flash firmware tree here
@@ -22,7 +22,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.96.0
+          toolchain: 1.97.1
           targets: thumbv7em-none-eabihf,riscv32imac-unknown-none-elf
           components: llvm-tools-preview
 
@@ -49,6 +49,7 @@ jobs:
           test -f target/controller-firmware-staging/firmware/t-echo/target.json
           test -f target/controller-firmware-staging/firmware/mesh-tower-v2/target.json
           test -f target/controller-firmware-staging/firmware/rak4631/target.json
+          test -f target/controller-firmware-staging/firmware/rak10724/target.json
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -76,7 +77,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.96.0
+          toolchain: 1.97.1
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
@@ -119,6 +120,7 @@ jobs:
           test -f "$app/Contents/Resources/firmware/t-echo/target.json"
           test -f "$app/Contents/Resources/firmware/mesh-tower-v2/target.json"
           test -f "$app/Contents/Resources/firmware/rak4631/target.json"
+          test -f "$app/Contents/Resources/firmware/rak10724/target.json"
           test -f "target/controller-macos/PRNS-Controller-macos-${{ matrix.arch }}-unsigned.zip"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

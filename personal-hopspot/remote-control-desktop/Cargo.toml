@@ -28,11 +28,11 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 thiserror = "2"
 prns-flash-manifest = { path = "../../prns-flash-manifest" }
 prns-core = { path = "../../prns-core", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 getrandom = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 serialport = { version = "4.7", default-features = false }
 rfd = "0.17"
 zip = { version = "2", default-features = false, features = ["deflate"] }
