@@ -1889,6 +1889,7 @@ dependencies = [
 name = "personal-hopspot-core"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "embedded-graphics",
  "embedded-storage",
  "embedded-storage-async",

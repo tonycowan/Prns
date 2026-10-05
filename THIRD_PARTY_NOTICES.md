@@ -2,7 +2,7 @@
 
 This checked bundle covers the shipped and qualification Rust, JavaScript, and Android product graphs.
 It was generated with `cargo-about 0.9.1` by `./tools/prns repo notices generate`.
-Notice input fingerprint: `sha256:14e72364debad7b061b4224329f29f258eccdc7e9abb172560b0acf6372b122d`.
+Notice input fingerprint: `sha256:85107de0517c9977e5b60e6d9a8d27469e231a3242b391ba087cbf9780e8bc6f`.
 Each locked Rust manifest closure is fetched into a fresh isolated Cargo home before cargo-about reads its target-filtered packaged license material offline.
 Entries are deduplicated by SPDX identifier and canonical notice text; line endings, trailing space, and repeated blank lines are normalized without changing legal words.
 
@@ -5170,7 +5170,7 @@ License: MIT License
 
 Used by: `critical-section 1.2.0`, `static_cell 2.1.1`
 
-Release graphs: ESP32-C6, ESP32-S3 Heltec, ESP32-S3 Heltec E290, ESP32-S3 Heltec R8, ESP32-S3 Heltec Wireless Stick Lite V3, ESP32-S3 T-Beam, engine, nRF52840
+Release graphs: Android, ESP32-C6, ESP32-S3 Heltec, ESP32-S3 Heltec E290, ESP32-S3 Heltec R8, ESP32-S3 Heltec Wireless Stick Lite V3, ESP32-S3 T-Beam, WASM, desktop Linux, desktop Windows, desktop macOS, engine, iOS, nRF52840
 
 ```text
 Copyright (c) 2022 The critical-section authors
