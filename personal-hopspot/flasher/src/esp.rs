@@ -51,6 +51,7 @@ pub(crate) fn validate_erase_parts(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn flash(
     board: &BoardCatalogEntry,
     target: &PreparedEspTarget,
