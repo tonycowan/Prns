@@ -739,15 +739,17 @@ fn open_slot(bytes: &[u8; RECORD_LEN], key: &RemoteControlTargetSealingKey) -> S
     run_wifi_record(|| decode_slot(bytes, key))
 }
 
-static WIFI_RECORD_RUNNER: Mutex<RefCell<Option<fn(&mut dyn FnMut())>>> =
-    Mutex::new(RefCell::new(None));
+type WifiRecordJob = fn(&mut dyn FnMut());
+
+static WIFI_RECORD_RUNNER: Mutex<RefCell<Option<WifiRecordJob>>> = Mutex::new(RefCell::new(None));
 
 /// Runs each seal and open on `runner` instead of core 0's embassy poll stack.
 ///
 /// `decode_record` and `token_open` together are about 3 KiB, which is what
 /// crosses that stack's guard. With no runner installed, the call stays on the
+/// current stack. A runner that does not invoke its job also stays on the
 /// current stack.
-pub fn set_wifi_record_runner(runner: fn(&mut dyn FnMut())) {
+pub fn set_wifi_record_runner(runner: WifiRecordJob) {
     critical_section::with(|cs| {
         *WIFI_RECORD_RUNNER.borrow(cs).borrow_mut() = Some(runner);
     });
@@ -758,12 +760,15 @@ fn run_wifi_record<R>(mut body: impl FnMut() -> R) -> R {
     let Some(runner) = runner else {
         return body();
     };
-    let slot = RefCell::new(None);
+    let mut value = None;
     runner(&mut || {
-        *slot.borrow_mut() = Some(body());
+        value = Some(body());
     });
-    slot.into_inner()
-        .expect("the record runner calls its body once")
+    if let Some(value) = value {
+        value
+    } else {
+        body()
+    }
 }
 
 /// Own frame. Inlining this into the core-0 poll keeps HMAC-SHA256 and the

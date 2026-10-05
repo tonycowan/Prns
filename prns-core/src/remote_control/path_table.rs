@@ -171,7 +171,7 @@ impl RemoteControlPathInventory {
         #[cfg(not(feature = "remote-control-path-table"))]
         {
             let _ = (self, body);
-            return Err(RemoteControlMessageWriteError::BufferTooShort);
+            Err(RemoteControlMessageWriteError::BufferTooShort)
         }
         #[cfg(feature = "remote-control-path-table")]
         {
@@ -209,7 +209,7 @@ impl RemoteControlPathInventory {
         #[cfg(not(feature = "remote-control-path-table"))]
         {
             let _ = body;
-            return Err(RemoteControlResponseParseError::Malformed);
+            Err(RemoteControlResponseParseError::Malformed)
         }
         #[cfg(feature = "remote-control-path-table")]
         {
