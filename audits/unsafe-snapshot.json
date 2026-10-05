@@ -3877,7 +3877,8 @@
         "ios": [],
         "nrf52840": [
           "restore-state-bool"
-        ]
+        ],
+        "wasm": []
       },
       "name": "critical-section",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -21283,11 +21284,11 @@
       "name": "personal-hopspot-esp32",
       "source": "personal-hopspot/embedded/esp32",
       "unsafe": {
-        "blocks": 1013,
-        "externs": 779,
+        "blocks": 1017,
+        "externs": 782,
         "functions": 123,
         "impls": 39,
-        "tokens": 2087
+        "tokens": 2095
       },
       "version": "0.1.0"
     },
