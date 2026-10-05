@@ -762,7 +762,8 @@ fn run_wifi_record<R>(mut body: impl FnMut() -> R) -> R {
     runner(&mut || {
         *slot.borrow_mut() = Some(body());
     });
-    slot.into_inner().expect("the record runner calls its body once")
+    slot.into_inner()
+        .expect("the record runner calls its body once")
 }
 
 /// Own frame. Inlining this into the core-0 poll keeps HMAC-SHA256 and the

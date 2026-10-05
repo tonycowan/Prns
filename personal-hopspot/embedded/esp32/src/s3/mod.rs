@@ -662,10 +662,10 @@ fn request_radio_mode(mode: RadioMode) -> ! {
 
 mod firmware;
 // Left uninstalled so this boot opens the Wi-Fi record on core 0's own stack.
-#[allow(dead_code)]
-mod record_stack;
 #[cfg(feature = "firmware-update")]
 mod firmware_update_listener;
+#[allow(dead_code)]
+mod record_stack;
 
 fn boot_slot_profile() -> &'static personal_hopspot_memory::MemoryProfile {
     #[cfg(feature = "firmware-update")]
