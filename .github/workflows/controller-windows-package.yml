@@ -148,3 +148,46 @@ jobs:
           path: target/controller-windows/PRNS-Controller-windows-${{ matrix.arch }}-unsigned.zip
           if-no-files-found: error
           retention-days: 14
+
+  prnsd:
+    name: prnsd Windows (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: controller-windows-prnsd-${{ matrix.arch }}
+          workspaces: prnsd
+
+      - name: Build prnsd
+        shell: bash
+        run: cargo build --manifest-path prnsd/Cargo.toml --locked --release
+
+      - name: Stage prnsd
+        shell: bash
+        run: |
+          mkdir -p target/prnsd-controller
+          cp prnsd/target/release/prnsd.exe "target/prnsd-controller/prnsd-windows-${{ matrix.arch }}.exe"
+          test -s "target/prnsd-controller/prnsd-windows-${{ matrix.arch }}.exe"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prnsd-windows-${{ matrix.arch }}
+          path: target/prnsd-controller/prnsd-windows-${{ matrix.arch }}.exe
+          if-no-files-found: error
+          retention-days: 14

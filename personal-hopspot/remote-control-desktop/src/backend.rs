@@ -30,21 +30,22 @@ use personal_rns::node_introspection::{logical_interface_inventory, FrameAccount
 use personal_rns::prelude::*;
 use personal_rns::remote_control::{
     parse_controller_public_keys, parse_wifi_station_rssi_dbm, parse_wifi_station_ssid,
-    ReceiveRemoteControlControllerPairingOfferOutcome, RemoteControlAuthorizeControllerOutcome,
-    RemoteControlGroupOutcome, RemoteControlInterfaceCard, RemoteControlInterfaceConfigOutcome,
-    RemoteControlInterfaceContinuation, RemoteControlInterfaceEntry, RemoteControlInterfaceGroup,
-    RemoteControlInterfacePage, RemoteControlInterfacePeer, RemoteControlInterfacePeerPage,
-    RemoteControlInterfacePeersOutcome, RemoteControlInterfacePower, RemoteControlLoRaOutcome,
-    RemoteControlLoRaProfile, RemoteControlModeOutcome, RemoteControlNetworkTransport,
-    RemoteControlNetworkTransportOutcome, RemoteControlPairingEndpoint,
-    RemoteControlPairingInvitationCode, RemoteControlPathContinuation, RemoteControlPathEntry,
-    RemoteControlPathPage, RemoteControlPowerOutcome, RemoteControlRequestKind,
-    RemoteControlRequestSet, RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome,
-    RemoteControlTargetAccess, RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome,
-    RemoteControlTcpClientStatus, RemoteControlWifiStation, RemoteControlWifiStationOutcome,
-    FIRMWARE_UPDATE_APPLICATION_ASPECTS, REMOTE_CONTROL_APPLICATION_ASPECTS,
-    REMOTE_CONTROL_APPLICATION_NAME, REMOTE_CONTROL_PAIRING_APPLICATION_ASPECTS,
-    REMOTE_CONTROL_PAIRING_APPLICATION_NAME,
+    ReceiveRemoteControlControllerPairingOfferOutcome, RemoteControlApplyOutcome,
+    RemoteControlAuthorizeControllerOutcome, RemoteControlGroupOutcome, RemoteControlInterfaceCard,
+    RemoteControlInterfaceConfigOutcome, RemoteControlInterfaceContinuation,
+    RemoteControlInterfaceEntry, RemoteControlInterfaceGroup, RemoteControlInterfacePage,
+    RemoteControlInterfacePeer, RemoteControlInterfacePeerPage, RemoteControlInterfacePeersOutcome,
+    RemoteControlInterfacePower, RemoteControlLoRaOutcome, RemoteControlLoRaProfile,
+    RemoteControlModeOutcome, RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome,
+    RemoteControlPairingEndpoint, RemoteControlPairingInvitationCode,
+    RemoteControlPathContinuation, RemoteControlPathEntry, RemoteControlPathPage,
+    RemoteControlPowerOutcome, RemoteControlRequestKind, RemoteControlRequestSet,
+    RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome, RemoteControlTargetAccess,
+    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
+    RemoteControlWifiStageOutcome, RemoteControlWifiStation, FIRMWARE_UPDATE_APPLICATION_ASPECTS,
+    REMOTE_CONTROL_APPLICATION_ASPECTS, REMOTE_CONTROL_APPLICATION_NAME,
+    REMOTE_CONTROL_PAIRING_APPLICATION_ASPECTS, REMOTE_CONTROL_PAIRING_APPLICATION_NAME,
+    REMOTE_CONTROL_WIFI_CONFIRMATION_WINDOW_SECONDS,
 };
 use personal_rns::routing::announce::{derive_destination_hash, expand_name, DottedNameHash};
 use personal_rns::routing::NextHop;
@@ -2447,7 +2448,7 @@ impl RemoteControlBackend {
         ssid: &str,
         password: &str,
     ) -> Result<(), BackendError> {
-        let id = InterfaceId::new(
+        let _id = InterfaceId::new(
             parse_hex::<INTERFACE_ID_BYTES>(interface_id)
                 .map_err(|_| BackendError::InvalidInterfaceId(interface_id.to_string()))?,
         );
@@ -2457,22 +2458,84 @@ impl RemoteControlBackend {
                 detail: "SSID must be 1 to 32 UTF-8 bytes; password may be empty or up to 64 UTF-8 bytes".to_string(),
             }
         })?;
-        let remote = self.connect_target(target_id).await?;
-        let (outcome, _) = remote
-            .set_interface_wifi_station(id, station)
+        let mut remote = self.connect_target(target_id).await?;
+        let revision = match remote
+            .stage_wifi_credentials(station)
             .await
-            .map_err(wifi_station_exchange_error)?;
-        remote.close();
-        match outcome {
-            RemoteControlWifiStationOutcome::Applied => Ok(()),
-            RemoteControlWifiStationOutcome::UnknownInterface => Err(BackendError::Operation {
-                operation: "set interface Wi-Fi station",
-                detail: "the target does not know that Auto Wi-Fi interface".to_string(),
-            }),
-            RemoteControlWifiStationOutcome::Failed => Err(BackendError::Operation {
-                operation: "set interface Wi-Fi station",
-                detail: "the target has no live station radio to join. Flash Wi-Fi once so the board starts a station stack, then you can change SSID and password here".to_string(),
-            }),
+            .map_err(wifi_station_exchange_error)?
+        {
+            (RemoteControlWifiStageOutcome::Staged(revision), _) => revision,
+            (RemoteControlWifiStageOutcome::InvalidCredentials, _) => {
+                remote.close();
+                return Err(BackendError::Operation {
+                    operation: "set interface Wi-Fi station",
+                    detail: "the target rejected those credentials".to_string(),
+                });
+            }
+        };
+        if let Err(error) = remote.activate_wifi_credentials(revision).await {
+            let _ = remote.cancel_wifi_credentials(revision).await;
+            remote.close();
+            return Err(wifi_station_exchange_error(error));
+        }
+        // Activate returns before the station joins. Confirm only succeeds once
+        // that join is ready, inside the target's confirmation window.
+        let deadline = Instant::now()
+            + Duration::from_secs(u64::from(REMOTE_CONTROL_WIFI_CONFIRMATION_WINDOW_SECONDS));
+        let arm_deadline = Instant::now() + Duration::from_secs(5);
+        let mut armed = false;
+        loop {
+            if Instant::now() >= deadline {
+                let _ = remote.cancel_wifi_credentials(revision).await;
+                remote.close();
+                return Err(BackendError::Operation {
+                    operation: "set interface Wi-Fi station",
+                    detail: "the target did not confirm the new station before the confirmation window closed".to_string(),
+                });
+            }
+            match remote.confirm_wifi_credentials(revision).await {
+                Ok((RemoteControlApplyOutcome::Applied, _)) => {
+                    remote.close();
+                    return Ok(());
+                }
+                Ok((
+                    RemoteControlApplyOutcome::Scheduled | RemoteControlApplyOutcome::Unchanged,
+                    _,
+                )) => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(error) if wifi_confirm_waiting(&error) => {
+                    let waiting_for_join = matches!(
+                        wifi_protocol_error(&error),
+                        Some(RemoteControlProtocolError::Busy { .. })
+                    );
+                    let waiting_for_arm = matches!(
+                        wifi_protocol_error(&error),
+                        Some(RemoteControlProtocolError::ApplyFailed { .. })
+                    ) && !armed
+                        && Instant::now() < arm_deadline;
+                    if waiting_for_join {
+                        armed = true;
+                    }
+                    if waiting_for_join || waiting_for_arm {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    let _ = remote.cancel_wifi_credentials(revision).await;
+                    remote.close();
+                    return Err(wifi_station_exchange_error(error));
+                }
+                Err(error) if wifi_link_dropped(&error) => {
+                    remote.close();
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    remote = self.connect_target(target_id).await?;
+                }
+                Err(error) => {
+                    let _ = remote.cancel_wifi_credentials(revision).await;
+                    remote.close();
+                    return Err(wifi_station_exchange_error(error));
+                }
+            }
         }
     }
 
@@ -8364,16 +8427,59 @@ fn tcp_client_exchange_error(error: RemoteControlTargetOperationError) -> Backen
 
 fn wifi_station_exchange_error(error: RemoteControlTargetOperationError) -> BackendError {
     match error {
+        RemoteControlTargetOperationError::NotPermitted(kind) => BackendError::Operation {
+            operation: "set interface Wi-Fi station",
+            detail: format!(
+                "the stored grant does not allow {kind:?}. Pair this controller again so the grant includes staged Wi-Fi edits"
+            ),
+        },
         RemoteControlTargetOperationError::Exchange(RemoteControlError::Remote(
             RemoteControlProtocolError::UnknownRequestKind { found },
-        )) if found == RemoteControlRequestKind::SetInterfaceWifiStation.wire_value() => {
+        )) if found == RemoteControlRequestKind::StageWifiCredentials.wire_value()
+            || found == RemoteControlRequestKind::ActivateWifiCredentials.wire_value()
+            || found == RemoteControlRequestKind::ConfirmWifiCredentials.wire_value() =>
+        {
             BackendError::Operation {
                 operation: "set interface Wi-Fi station",
-                detail: "the target firmware does not recognize Wi-Fi station edits yet. Flash the current Hopspot build onto that board; an existing pair already has the grant".to_string(),
+                detail: "the target firmware does not accept staged Wi-Fi edits yet. Flash the current Hopspot build onto that board".to_string(),
             }
         }
+        RemoteControlTargetOperationError::Exchange(RemoteControlError::Remote(
+            RemoteControlProtocolError::PersistenceFailed { .. },
+        )) => BackendError::Operation {
+            operation: "set interface Wi-Fi station",
+            detail: "the target could not store the staged station. Its sealed Wi-Fi record did not open, so the change was not written".to_string(),
+        },
         error => operation("set interface Wi-Fi station", error),
     }
+}
+
+fn wifi_protocol_error(
+    error: &RemoteControlTargetOperationError,
+) -> Option<&RemoteControlProtocolError> {
+    match error {
+        RemoteControlTargetOperationError::Exchange(RemoteControlError::Remote(error)) => {
+            Some(error)
+        }
+        _ => None,
+    }
+}
+
+fn wifi_confirm_waiting(error: &RemoteControlTargetOperationError) -> bool {
+    matches!(
+        wifi_protocol_error(error),
+        Some(
+            RemoteControlProtocolError::Busy { .. }
+                | RemoteControlProtocolError::ApplyFailed { .. }
+        )
+    )
+}
+
+fn wifi_link_dropped(error: &RemoteControlTargetOperationError) -> bool {
+    matches!(
+        error,
+        RemoteControlTargetOperationError::Exchange(RemoteControlError::Request(_))
+    )
 }
 
 fn lora_profile_exchange_error(error: RemoteControlTargetOperationError) -> BackendError {

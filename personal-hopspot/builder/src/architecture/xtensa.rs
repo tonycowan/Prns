@@ -25,7 +25,17 @@ pub(super) static ADAPTER: Adapter = Adapter::new(
         configure_linker,
         linker_map_argument,
     ),
-    &["-C", "link-arg=-Tlinkall.x", "-C", "force-frame-pointers"],
+    // Compact SHA-256. The default software backend inlines a large HMAC frame
+    // into core 0's poll, and opening a sealed Wi-Fi record then crosses the
+    // stack guard. Kept in step with personal-hopspot/embedded/esp32/.cargo/config.toml.
+    &[
+        "-C",
+        "link-arg=-Tlinkall.x",
+        "-C",
+        "force-frame-pointers",
+        "--cfg",
+        "sha2_backend_soft=\"compact\"",
+    ],
     DisassemblerTool::new(
         DisassemblerFlavor::GnuObjdump,
         DISASSEMBLER_PROGRAM,

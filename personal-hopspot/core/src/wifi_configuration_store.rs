@@ -1,3 +1,6 @@
+use core::cell::RefCell;
+
+use critical_section::Mutex;
 use embedded_storage_async::nor_flash::NorFlash;
 use personal_rns::crypto::{sealed_len, token_open, token_seal, TokenKey, TokenOpenError};
 use personal_rns::identity::IdentityHash;
@@ -609,7 +612,10 @@ where
                 operation: WifiConfigurationFlashOperation::Read,
                 error,
             })?;
-        Ok([decode_slot(&first, key), decode_slot(&second, key)])
+        // One slot at a time, each on the side stack when the firmware installed one.
+        let first = open_slot(&first, key);
+        let second = open_slot(&second, key);
+        Ok([first, second])
     }
 
     fn validate_layout(&self) -> Result<(), WifiConfigurationStoreError<F::Error>> {
@@ -704,6 +710,15 @@ fn encode_record(
     iv: &[u8; IV_LEN],
     out: &mut [u8; RECORD_LEN],
 ) -> Result<(), ()> {
+    run_wifi_record(|| encode_record_in_place(state, key, iv, out))
+}
+
+fn encode_record_in_place(
+    state: &StoredState,
+    key: &RemoteControlTargetSealingKey,
+    iv: &[u8; IV_LEN],
+    out: &mut [u8; RECORD_LEN],
+) -> Result<(), ()> {
     out.fill(0xFF);
     out[..4].copy_from_slice(&MAGIC);
     out[4..6].copy_from_slice(&SCHEMA_VERSION.to_be_bytes());
@@ -720,6 +735,39 @@ fn encode_record(
     Ok(())
 }
 
+fn open_slot(bytes: &[u8; RECORD_LEN], key: &RemoteControlTargetSealingKey) -> Slot {
+    run_wifi_record(|| decode_slot(bytes, key))
+}
+
+static WIFI_RECORD_RUNNER: Mutex<RefCell<Option<fn(&mut dyn FnMut())>>> =
+    Mutex::new(RefCell::new(None));
+
+/// Runs each seal and open on `runner` instead of core 0's embassy poll stack.
+///
+/// `decode_record` and `token_open` together are about 3 KiB, which is what
+/// crosses that stack's guard. With no runner installed, the call stays on the
+/// current stack.
+pub fn set_wifi_record_runner(runner: fn(&mut dyn FnMut())) {
+    critical_section::with(|cs| {
+        *WIFI_RECORD_RUNNER.borrow(cs).borrow_mut() = Some(runner);
+    });
+}
+
+fn run_wifi_record<R>(mut body: impl FnMut() -> R) -> R {
+    let runner = critical_section::with(|cs| *WIFI_RECORD_RUNNER.borrow(cs).borrow());
+    let Some(runner) = runner else {
+        return body();
+    };
+    let slot = RefCell::new(None);
+    runner(&mut || {
+        *slot.borrow_mut() = Some(body());
+    });
+    slot.into_inner().expect("the record runner calls its body once")
+}
+
+/// Own frame. Inlining this into the core-0 poll keeps HMAC-SHA256 and the
+/// AES-256 schedule on the embassy stack, which crosses that stack's guard.
+#[inline(never)]
 fn decode_record(
     bytes: &[u8; RECORD_LEN],
     key: &RemoteControlTargetSealingKey,

@@ -23,6 +23,8 @@ pub(super) struct SparsePart {
     pub(super) bytes: Vec<u8>,
     /// Vacant FlashVault identity pages need a true NOR sector erase first.
     pub(super) erase_before_write: bool,
+    /// When non-zero, erase this many bytes at `offset` and do not write `bytes`.
+    pub(super) erase_only_len: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,17 +222,24 @@ impl EspSession for EspflashSession {
             operation_total: total,
             reported_bytes: None,
         };
-        // Explicitly sector-erase identity vault pages before FlashBegin so a
-        // vacant FlashVault slot is truly all-0xFF (NOR cannot set bits by write).
+        // Sector-erase identity pages and any operator-selected partitions before
+        // FlashBegin. NOR cannot set bits by write, so a vacant slot must be 0xFF.
         for part in parts {
-            if !part.erase_before_write {
+            let erase_len = if part.erase_only_len > 0 {
+                part.erase_only_len
+            } else if part.erase_before_write {
+                erase_span_bytes(part.bytes.len())
+            } else {
+                0
+            };
+            if erase_len == 0 {
                 continue;
             }
             if is_cancelled() {
                 return Err(SessionError::Cancelled);
             }
             flasher
-                .erase_region(part.offset, erase_span_bytes(part.bytes.len()))
+                .erase_region(part.offset, erase_len)
                 .map_err(map_write_error)?;
         }
         let mut target = chip.flash_target(SpiAttachParams::default(), use_stub, true, false);
@@ -238,6 +247,9 @@ impl EspSession for EspflashSession {
             .begin(flasher.connection())
             .map_err(map_write_error)?;
         for part in parts {
+            if part.erase_only_len > 0 || part.bytes.is_empty() {
+                continue;
+            }
             if is_cancelled() {
                 return Err(SessionError::Cancelled);
             }

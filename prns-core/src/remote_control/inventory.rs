@@ -1314,8 +1314,10 @@ pub fn parse_wifi_station_rssi_dbm(config: &str) -> Option<i16> {
     rssi.parse().ok()
 }
 
-/// DNS hostname limit shared with the embedded TCP client.
-pub const REMOTE_CONTROL_TCP_HOSTNAME_CAP: usize = 253;
+/// Hostname stored inline in the sealed Wi-Fi record. The DNS spec allows 253
+/// bytes, but this value is a `Copy` array on core 0's poll while that record
+/// is opened. 64 covers one label plus a short domain.
+pub const REMOTE_CONTROL_TCP_HOSTNAME_CAP: usize = 64;
 pub const REMOTE_CONTROL_TCP_DEFAULT_PORT: u16 = 4242;
 
 const TCP_ABSENT_TAG: u8 = 0;

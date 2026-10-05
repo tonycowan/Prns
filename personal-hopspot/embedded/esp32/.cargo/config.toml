@@ -8,7 +8,13 @@
 
 [target.xtensa-esp32s3-none-elf]
 runner = "espflash flash --monitor --after watchdog-reset"
-rustflags = ["-C", "link-arg=-Tlinkall.x", "-C", "force-frame-pointers"]
+rustflags = [
+    "-C", "link-arg=-Tlinkall.x",
+    "-C", "force-frame-pointers",
+    # Default software SHA-256 inlines a large HMAC frame into core 0's poll.
+    # Opening a sealed Wi-Fi record then writes the stack guard.
+    "--cfg", "sha2_backend_soft=\"compact\"",
+]
 
 [target.riscv32imac-unknown-none-elf]
 runner = "espflash flash --monitor"

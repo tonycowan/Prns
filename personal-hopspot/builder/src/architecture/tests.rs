@@ -63,7 +63,14 @@ fn adapters_define_target_and_linker_identity() {
             LinkerFlavor::GnuLd,
             "xtensa-esp32s3-elf-gcc",
             &["--version"][..],
-            &["-C", "link-arg=-Tlinkall.x", "-C", "force-frame-pointers"][..],
+            &[
+                "-C",
+                "link-arg=-Tlinkall.x",
+                "-C",
+                "force-frame-pointers",
+                "--cfg",
+                "sha2_backend_soft=\"compact\"",
+            ][..],
             DisassemblerFlavor::GnuObjdump,
             "xtensa-esp32s3-elf-objdump",
             StackFrameEvidence::DwarfDebugFrame,
@@ -221,9 +228,8 @@ fn existing_dwarf_evidence_does_not_change_esp_codegen() {
 #[test]
 fn esp_cargo_aliases_mirror_adapter_rustflags() {
     let config = include_str!("../../../embedded/esp32/.cargo/config.toml");
-    assert!(config.contains(
-        "rustflags = [\"-C\", \"link-arg=-Tlinkall.x\", \"-C\", \"force-frame-pointers\"]"
-    ));
+    assert!(config.contains("sha2_backend_soft=\\\"compact\\\""));
+    assert!(config.contains("\"-C\", \"force-frame-pointers\""));
     assert!(config.contains("rustflags = [\"-C\", \"link-arg=-Tlinkall.x\"]"));
 }
 

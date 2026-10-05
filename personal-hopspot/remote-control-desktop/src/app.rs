@@ -2036,6 +2036,7 @@ fn start_ota_flash(
             flash_status,
             flashing,
             flash_progress,
+            flash_forms,
         );
     }
 }
@@ -5010,6 +5011,7 @@ fn FlashSection(
                                                                     flash_status,
                                                                     flashing,
                                                                     flash_progress,
+                                                                    flash_forms,
                                                                 );
                                                             }
                                                         },
@@ -5464,6 +5466,43 @@ fn flash_options_form(
             if !board.supports_wifi && !board.has_lora {
                 p { class: "note", "This board has no flash-time station or LoRa options." }
             }
+            {
+                let erase_choices = crate::flash::erasable_partitions(&slug);
+                rsx! {
+                    if !erase_choices.is_empty() {
+                        p { class: "note", "Erase regions. Checked partitions are erased when this firmware is written. Leave them unchecked to keep what is already on the board." }
+                        for part in erase_choices {
+                            label {
+                                class: "flash-check",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: form.erase_parts.iter().any(|name| name == part.name),
+                                    disabled: busy,
+                                    onchange: {
+                                        let slug = slug.clone();
+                                        let part_name = part.name.to_string();
+                                        move |event| {
+                                            let mut next = flash_forms()
+                                                .get(&slug)
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            if event.checked() {
+                                                if !next.erase_parts.iter().any(|name| name == &part_name) {
+                                                    next.erase_parts.push(part_name.clone());
+                                                }
+                                            } else {
+                                                next.erase_parts.retain(|name| name != &part_name);
+                                            }
+                                            flash_forms.write().insert(slug.clone(), next);
+                                        }
+                                    },
+                                }
+                                "{part.label} ({part.name})"
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -5651,6 +5690,7 @@ fn start_flash(
     mut flash_status: Signal<String>,
     mut flashing: Signal<bool>,
     mut flash_progress: Signal<Option<FlashProgress>>,
+    mut flash_forms: Signal<HashMap<String, FlashDraft>>,
 ) {
     #[cfg(target_os = "android")]
     {
@@ -5670,6 +5710,7 @@ fn start_flash(
             flash_status,
             flashing,
             flash_progress,
+            flash_forms,
         );
     }
     #[cfg(not(target_os = "android"))]
@@ -5723,6 +5764,7 @@ fn start_flash(
                 let allow_list_key = allow_list_key.clone();
                 let progress_tx = progress_tx.clone();
                 let wifi = wifi.clone();
+                let erase_parts = form.erase_parts.clone();
                 move || -> Result<Option<crate::flash::Enrollment>, crate::flash::FlashError> {
                     let enrollment = if enrollable {
                         let _ = progress_tx.send(FlashProgress::running(
@@ -5744,6 +5786,7 @@ fn start_flash(
                         enrollment.as_ref().map(|item| item.vault_page.as_slice()),
                         enrollable,
                         &wifi,
+                        &erase_parts,
                         |progress| {
                             let _ = progress_tx.send(progress);
                         },
@@ -5827,6 +5870,9 @@ fn start_flash(
                         flash_progress.set(Some(progress.finish(FlashRunOutcome::Failed, detail)));
                     }
                 }
+            }
+            if let Some(draft) = flash_forms.write().get_mut(&slug) {
+                draft.erase_parts.clear();
             }
             flashing.set(false);
         });

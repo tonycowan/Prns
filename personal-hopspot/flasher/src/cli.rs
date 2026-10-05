@@ -111,6 +111,9 @@ pub(crate) enum CommandMode {
         /// Explicit mounted UF2 bootloader directory.
         #[arg(long, value_name = "DIR", hide = true)]
         mount: Option<PathBuf>,
+        /// Erase one preserved partition by its table name. Repeat for each region.
+        #[arg(long = "erase-part", value_name = "PART")]
+        erase_parts: Vec<String>,
         /// Remote Control identity vault page (4096 bytes) for ESP sparse flash.
         #[arg(long, value_name = "FILE", hide = true, requires = "rc_vault_offset")]
         rc_vault: Option<PathBuf>,
@@ -377,6 +380,26 @@ mod tests {
         assert_eq!(board.as_deref(), Some("heltec-v4-r8"));
         assert_eq!(channel.as_str(), "stable");
         assert!(json);
+    }
+
+    #[test]
+    fn flash_accepts_repeated_erase_parts() {
+        let parsed = Cli::try_parse_from([
+            "hopspot-flash",
+            "flash",
+            "heltec-v4-r8",
+            "--yes",
+            "--json",
+            "--erase-part",
+            "wifi_cfg",
+            "--erase-part",
+            "hopcfg",
+        ])
+        .expect("erase parts must parse");
+        let Some(CommandMode::Flash { erase_parts, .. }) = parsed.command else {
+            panic!("expected flash command");
+        };
+        assert_eq!(erase_parts, ["wifi_cfg", "hopcfg"]);
     }
 
     #[test]

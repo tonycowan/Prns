@@ -43,6 +43,14 @@ pub(crate) fn cancelled() -> bool {
     CANCELLED.load(Ordering::SeqCst)
 }
 
+pub(crate) fn validate_erase_parts(
+    board: &BoardCatalogEntry,
+    names: &[String],
+) -> Result<(), AppError> {
+    let _ = partition_erases(board, names)?;
+    Ok(())
+}
+
 pub(crate) fn flash(
     board: &BoardCatalogEntry,
     target: &PreparedEspTarget,
@@ -51,10 +59,12 @@ pub(crate) fn flash(
     monitor: bool,
     reporter: Reporter,
     rc_vault: Option<RcVaultWrite>,
+    erase_parts: &[String],
 ) -> Result<(), AppError> {
+    let erases = partition_erases(board, erase_parts)?;
     let selected = select_port(port_name)?;
     let expected = expected_device(board)?;
-    let plan = sparse_plan(board, target, provisioning, rc_vault.as_ref())?;
+    let plan = sparse_plan(board, target, provisioning, rc_vault.as_ref(), erases)?;
     let total = plan.iter().map(|part| part.bytes.len() as u64).sum::<u64>();
 
     reporter.phase(
@@ -63,7 +73,14 @@ pub(crate) fn flash(
         &format!("Opening {}…", selected.port_name),
     );
     let mut session = real_session(board, selected, SessionMode::Flash)?;
-    run_flash_session(&mut session, expected, &plan, reporter, &cancelled)?;
+    run_flash_session(
+        &mut session,
+        expected,
+        &plan,
+        reporter,
+        &cancelled,
+        erase_parts,
+    )?;
 
     if monitor {
         monitor_port(session.port_name(), reporter)?;
@@ -172,11 +189,59 @@ pub(crate) struct RcVaultWrite {
     pub(crate) bytes: Vec<u8>,
 }
 
+fn partition_erases(
+    board: &BoardCatalogEntry,
+    names: &[String],
+) -> Result<Vec<SparsePart>, AppError> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !matches!(board.transport, prns_flash_manifest::Transport::EspSerial) {
+        return Err(AppError::unsupported_operation(format!(
+            "{} has no named flash partitions to erase",
+            board.display_name
+        )));
+    }
+    let available = board.erasable_partitions();
+    let mut parts = Vec::new();
+    let mut seen = Vec::new();
+    for name in names {
+        if seen.iter().any(|seen: &String| seen == name) {
+            continue;
+        }
+        seen.push(name.clone());
+        let Some(part) = available.iter().find(|part| part.name == name) else {
+            return Err(AppError::configuration(format!(
+                "{name} is not an erasable partition on {}",
+                board.display_name
+            )));
+        };
+        if part.offset % FLASH_SECTOR_BYTES != 0
+            || part.size == 0
+            || part.size % FLASH_SECTOR_BYTES != 0
+        {
+            return Err(AppError::trust_manifest(format!(
+                "partition {name} is not aligned to a {FLASH_SECTOR_BYTES}-byte erase sector"
+            )));
+        }
+        parts.push(SparsePart {
+            offset: part.offset,
+            bytes: Vec::new(),
+            erase_before_write: false,
+            erase_only_len: part.size,
+        });
+    }
+    Ok(parts)
+}
+
+const FLASH_SECTOR_BYTES: u32 = 0x1000;
+
 fn sparse_plan(
     board: &BoardCatalogEntry,
     target: &PreparedEspTarget,
     provisioning: &ProvisioningAction,
     rc_vault: Option<&RcVaultWrite>,
+    erases: Vec<SparsePart>,
 ) -> Result<Vec<SparsePart>, AppError> {
     if matches!(provisioning, ProvisioningAction::ConfigureWithTcp { .. })
         && !target.supports_tcp_client_provisioning()
@@ -192,6 +257,7 @@ fn sparse_plan(
             offset: part.offset(),
             bytes: part.bytes().to_vec(),
             erase_before_write: false,
+            erase_only_len: 0,
         })
         .collect::<Vec<_>>();
     if let Some(config) = provisioning_image(provisioning)
@@ -205,6 +271,7 @@ fn sparse_plan(
             offset: slot.offset,
             bytes: config,
             erase_before_write: false,
+            erase_only_len: 0,
         });
     }
     if let Some(vault) = rc_vault {
@@ -212,6 +279,7 @@ fn sparse_plan(
             offset: vault.offset,
             bytes: vault.bytes.clone(),
             erase_before_write: true,
+            erase_only_len: 0,
         });
     }
     // A wired flash writes the application into ota_0. The bootloader follows otadata, which a
@@ -226,8 +294,10 @@ fn sparse_plan(
             offset,
             bytes: ota_0_selection(),
             erase_before_write: true,
+            erase_only_len: 0,
         });
     }
+    plan.extend(erases);
     plan.sort_by_key(|part| part.offset);
     if plan.is_empty() {
         return Err(AppError::trust_manifest("ESP sparse flash plan is empty"));
@@ -280,6 +350,7 @@ fn run_flash_session(
     plan: &[SparsePart],
     reporter: Reporter,
     is_cancelled: &dyn Fn() -> bool,
+    erase_parts: &[String],
 ) -> Result<DeviceIdentity, AppError> {
     let result = (|| {
         reporter.phase(
@@ -305,10 +376,17 @@ fn run_flash_session(
             return Err(AppError::Cancelled);
         }
         let total = plan.iter().map(|part| part.bytes.len() as u64).sum::<u64>();
+        let erase_sentence = if erase_parts.is_empty() {
+            String::new()
+        } else {
+            format!(" Erasing {} first.", erase_parts.join(", "))
+        };
         reporter.phase(
             Phase::Writing,
             Some(expected.board_slug),
-            &format!("Writing and verifying {total} bytes without a full-chip erase…"),
+            &format!(
+                "Writing and verifying {total} bytes without a full-chip erase.{erase_sentence}"
+            ),
         );
         session
             .write_and_verify(plan, expected.board_slug, reporter, is_cancelled)
@@ -823,16 +901,19 @@ mod port_tests {
                 offset: 0,
                 bytes: vec![1],
                 erase_before_write: false,
+                erase_only_len: 0,
             },
             SparsePart {
                 offset: 0x8000,
                 bytes: vec![2],
                 erase_before_write: false,
+                erase_only_len: 0,
             },
             SparsePart {
                 offset: 0x10000,
                 bytes: vec![3],
                 erase_before_write: false,
+                erase_only_len: 0,
             },
         ]
     }
@@ -842,6 +923,22 @@ mod port_tests {
             port_name: name.to_string(),
             port_type,
         }
+    }
+
+    #[test]
+    fn erase_parts_resolve_preserved_partitions_only() {
+        let catalog = prns_flash_manifest::board_catalog().expect("catalog");
+        let hv4 = catalog.board("heltec-v4-r8").expect("HV4 R8");
+        let erased = partition_erases(hv4, &["wifi_cfg".to_string(), "wifi_cfg".to_string()])
+            .expect("sealed Wi-Fi is erasable");
+        assert_eq!(erased.len(), 1);
+        assert_eq!(erased[0].offset, 0xFFE000);
+        assert_eq!(erased[0].erase_only_len, 0x2000);
+        assert!(erased[0].bytes.is_empty());
+        assert!(partition_erases(hv4, &["ota_0".to_string()]).is_err());
+        let echo = catalog.board("t-echo").expect("T-Echo");
+        assert!(partition_erases(echo, &["wifi_cfg".to_string()]).is_err());
+        assert!(partition_erases(echo, &[]).is_ok());
     }
 
     #[test]
@@ -935,6 +1032,7 @@ mod port_tests {
             &sparse_test_plan(),
             Reporter::human(),
             &|| false,
+            &[],
         )
         .expect("fake flash succeeds");
         assert_eq!(
@@ -972,6 +1070,7 @@ mod port_tests {
                 &sparse_test_plan(),
                 Reporter::human(),
                 &|| false,
+                &[],
             );
             match category {
                 "preflight" => assert!(matches!(result, Err(AppError::Preflight(_)))),
@@ -1001,6 +1100,7 @@ mod port_tests {
             &sparse_test_plan(),
             Reporter::human(),
             &|| false,
+            &[],
         );
         assert!(matches!(
             result,
@@ -1022,6 +1122,7 @@ mod port_tests {
             &sparse_test_plan(),
             Reporter::human(),
             &|| cancellation.get(),
+            &[],
         );
 
         assert!(matches!(result, Err(AppError::Cancelled)));
@@ -1035,14 +1136,26 @@ mod port_tests {
     fn retry_always_restarts_the_complete_sparse_plan() {
         let plan = sparse_test_plan();
         let mut failed = FakeSession::new(InjectFailure::Verify(1));
-        assert!(
-            run_flash_session(&mut failed, expected(), &plan, Reporter::human(), &|| false,)
-                .is_err()
-        );
+        assert!(run_flash_session(
+            &mut failed,
+            expected(),
+            &plan,
+            Reporter::human(),
+            &|| false,
+            &[],
+        )
+        .is_err());
 
         let mut retry = FakeSession::new(InjectFailure::None);
-        run_flash_session(&mut retry, expected(), &plan, Reporter::human(), &|| false)
-            .expect("full retry succeeds");
+        run_flash_session(
+            &mut retry,
+            expected(),
+            &plan,
+            Reporter::human(),
+            &|| false,
+            &[],
+        )
+        .expect("full retry succeeds");
         assert_eq!(retry.calls.get(2), Some(&FakeCall::Write(0)));
         assert_eq!(
             retry

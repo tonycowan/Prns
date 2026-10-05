@@ -621,6 +621,8 @@ pub struct FlashDraft {
     pub lora_region: Region,
     pub lora_preset: ModemPreset,
     pub enrol_for_management: bool,
+    /// Partition-table names to erase while flashing. Empty keeps every preserved region.
+    pub erase_parts: Vec<String>,
 }
 
 impl Default for FlashDraft {
@@ -636,6 +638,7 @@ impl Default for FlashDraft {
             lora_preset: ModemPreset::matching(DEFAULT_915_PROFILE.modulation())
                 .unwrap_or(ModemPreset::MediumFast),
             enrol_for_management: true,
+            erase_parts: Vec::new(),
         }
     }
 }
@@ -709,6 +712,39 @@ pub fn wifi_flash_plan(
         password: credentials.password,
         tcp_client,
     })
+}
+
+pub fn erasable_partitions(slug: &str) -> Vec<prns_flash_manifest::ErasablePartition> {
+    board_catalog()
+        .ok()
+        .and_then(|catalog| catalog.board(slug).map(|board| board.erasable_partitions()))
+        .unwrap_or_default()
+}
+
+fn reject_unknown_erase_parts(slug: &str, names: &[String]) -> Result<(), FlashError> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let known = erasable_partitions(slug);
+    if known.is_empty() {
+        return Err(FlashError::Message(format!(
+            "{slug} has no named partitions that can be erased during a flash"
+        )));
+    }
+    for name in names {
+        if !known.iter().any(|part| part.name == name) {
+            return Err(FlashError::Message(format!(
+                "{name} is not an erasable partition on {slug}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn apply_erase_parts(command: &mut Command, names: &[String]) {
+    for name in names {
+        command.arg("--erase-part").arg(name);
+    }
 }
 
 fn apply_wifi_plan(command: &mut Command, plan: &WifiFlashPlan) {
@@ -1002,6 +1038,7 @@ pub fn flash_enrolled_board(
     vault_page: Option<&[u8]>,
     enrollable: bool,
     wifi: &WifiFlashPlan,
+    erase_parts: &[String],
     on_progress: impl Fn(FlashProgress),
 ) -> Result<(), FlashError> {
     let local_build_escape = std::env::var_os("PRNS_CONTROLLER_FLASH_LOCAL_BUILD").is_some();
@@ -1067,8 +1104,10 @@ pub fn flash_enrolled_board(
             Ok::<_, FlashError>((path, offset))
         })
         .transpose()?;
+    reject_unknown_erase_parts(slug, erase_parts)?;
     let _hold = Uf2VolumeProbeHold::acquire();
     let mut command = hopspot_flash_command(invocation)?;
+    apply_erase_parts(&mut command, erase_parts);
     if let Some((path, offset)) = &vault_path {
         command
             .arg("--rc-vault")
@@ -2349,6 +2388,18 @@ mod tests {
         assert!(hv4.supports_wifi);
         assert!(hv4.supports_tcp);
         assert!(hv4.has_lora);
+    }
+
+    #[test]
+    fn flash_form_lists_preserved_partitions_and_erases_none_by_default() {
+        assert!(FlashDraft::default().erase_parts.is_empty());
+        let names = erasable_partitions("heltec-v4-r8")
+            .into_iter()
+            .map(|part| part.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "wifi_cfg"));
+        assert!(names.iter().any(|name| name == "hopcfg"));
+        assert!(erasable_partitions("t-echo").is_empty());
     }
 
     #[test]

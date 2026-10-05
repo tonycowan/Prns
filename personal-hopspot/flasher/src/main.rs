@@ -248,6 +248,7 @@ fn run(cli: Cli, reporter: Reporter) -> Result<(), AppError> {
             mount,
             rc_vault,
             rc_vault_offset,
+            erase_parts,
         }) => {
             let board = find_board(&catalog, &board)?;
             let interactive = !json && ui::interactive_terminal();
@@ -283,6 +284,7 @@ fn run(cli: Cli, reporter: Reporter) -> Result<(), AppError> {
                     developer_artifacts: developer_artifacts.as_deref(),
                     mount: mount.as_deref(),
                     rc_vault,
+                    erase_parts: &erase_parts,
                 },
                 reporter,
             )
@@ -303,6 +305,7 @@ struct FlashRequest<'a> {
     developer_artifacts: Option<&'a Path>,
     mount: Option<&'a Path>,
     rc_vault: Option<esp::RcVaultWrite>,
+    erase_parts: &'a [String],
 }
 
 fn execute_flash(
@@ -312,6 +315,7 @@ fn execute_flash(
     reporter: Reporter,
 ) -> Result<(), AppError> {
     esp::begin_cancellable_operation()?;
+    esp::validate_erase_parts(board, request.erase_parts)?;
     let (prepared, detected_uf2) = if request.local_build {
         let detected_uf2 = match board.transport {
             Transport::EspSerial => None,
@@ -402,6 +406,7 @@ fn execute_flash(
             request.monitor,
             reporter,
             request.rc_vault,
+            request.erase_parts,
         ),
         (Transport::Uf2MassStorage, PreparedTarget::Uf2(prepared)) => {
             if !matches!(request.provisioning, ProvisioningAction::Preserve) {
@@ -518,6 +523,7 @@ fn guided(catalog: &BoardCatalog, reporter: Reporter) -> Result<(), AppError> {
             developer_artifacts: None,
             mount: None,
             rc_vault: None,
+            erase_parts: &[],
         },
         reporter,
     )

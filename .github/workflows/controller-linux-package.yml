@@ -144,3 +144,44 @@ jobs:
           path: target/controller-linux/PRNS-Controller-linux-${{ matrix.arch }}-unsigned.tar.gz
           if-no-files-found: error
           retention-days: 14
+
+  prnsd:
+    name: prnsd Linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: controller-linux-prnsd-${{ matrix.arch }}
+          workspaces: prnsd
+
+      - name: Build prnsd
+        run: cargo build --manifest-path prnsd/Cargo.toml --locked --release
+
+      - name: Stage prnsd
+        run: |
+          mkdir -p target/prnsd-controller
+          cp prnsd/target/release/prnsd "target/prnsd-controller/prnsd-linux-${{ matrix.arch }}"
+          test -s "target/prnsd-controller/prnsd-linux-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prnsd-linux-${{ matrix.arch }}
+          path: target/prnsd-controller/prnsd-linux-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 14

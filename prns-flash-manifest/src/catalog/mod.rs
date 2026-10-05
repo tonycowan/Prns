@@ -4,7 +4,9 @@ use personal_hopspot_memory::RegionRole;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use memory::{MemoryProfileReference, MemoryProfileReferenceError, ResolvedMemoryProfile};
+pub use memory::{
+    ErasablePartition, MemoryProfileReference, MemoryProfileReferenceError, ResolvedMemoryProfile,
+};
 
 use crate::{
     AfterResetStrategy, BeforeResetStrategy, BoardId, ChipFamily, ImmutableArtifactPath,
@@ -58,6 +60,12 @@ impl BoardCatalogEntry {
             .as_ref()
             .and_then(|slot| slot.tcp_client.as_ref())
             .is_some()
+    }
+
+    /// Partitions a flash leaves in place unless the operator asks to erase them.
+    #[must_use]
+    pub fn erasable_partitions(&self) -> Vec<ErasablePartition> {
+        memory::erasable_partitions(self)
     }
 }
 
@@ -995,6 +1003,45 @@ fn invalid(board: &BoardCatalogEntry, message: &str) -> CatalogError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserved_partitions_are_the_erasable_set() -> Result<(), CatalogError> {
+        let catalog = board_catalog()?;
+        let hv4 = catalog
+            .board("heltec-v4-r8")
+            .expect("HV4 R8 is in the catalog");
+        let names = hv4
+            .erasable_partitions()
+            .iter()
+            .map(|part| part.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"wifi_cfg"));
+        assert!(names.contains(&"hopcfg"));
+        assert!(names.contains(&"prns_state"));
+        assert!(names.contains(&"remote_ctl_id"));
+        assert!(!names.contains(&"ota_0"));
+        assert!(!names.contains(&"otadata"));
+        let sealed = hv4
+            .erasable_partitions()
+            .into_iter()
+            .find(|part| part.name == "wifi_cfg")
+            .expect("sealed Wi-Fi partition");
+        assert_eq!(sealed.offset, 0xFFE000);
+        assert_eq!(sealed.size, 0x2000);
+        let xiao = catalog
+            .board("xiao-esp32-c6")
+            .expect("XIAO is in the catalog");
+        let xiao_names = xiao
+            .erasable_partitions()
+            .iter()
+            .map(|part| part.name)
+            .collect::<Vec<_>>();
+        assert!(xiao_names.contains(&"wifi_cfg"));
+        assert!(!xiao_names.contains(&"radio_cfg"));
+        let echo = catalog.board("t-echo").expect("T-Echo is in the catalog");
+        assert!(echo.erasable_partitions().is_empty());
+        Ok(())
+    }
 
     #[test]
     fn embedded_catalog_has_shipping_and_qualification_boards() -> Result<(), CatalogError> {

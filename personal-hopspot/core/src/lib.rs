@@ -100,9 +100,10 @@ pub use subg_configuration_store::{
     SubGConfigurationLoadNotice, SubGConfigurationStore, SubGConfigurationStoreError,
 };
 pub use wifi_configuration_store::{
-    LoadedWifiConfiguration, WifiConfigurationCommitOutcome, WifiConfigurationFlashOperation,
-    WifiConfigurationStatus, WifiConfigurationStore, WifiConfigurationStoreError,
-    WifiConfigurationTransactionPhase, WifiTcpConfiguration, WIFI_CONFIGURATION_SEALING_DOMAIN,
+    set_wifi_record_runner, LoadedWifiConfiguration, WifiConfigurationCommitOutcome,
+    WifiConfigurationFlashOperation, WifiConfigurationStatus, WifiConfigurationStore,
+    WifiConfigurationStoreError, WifiConfigurationTransactionPhase, WifiTcpConfiguration,
+    WIFI_CONFIGURATION_SEALING_DOMAIN,
 };
 
 use personal_rns::engine::{

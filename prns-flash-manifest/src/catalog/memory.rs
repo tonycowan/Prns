@@ -1,12 +1,15 @@
 use personal_hopspot_memory::{
-    memory_profile_named, AddressRange, AddressSpaceGeometry, AddressSpaceKind,
-    AddressSpaceKindLookupError, MemoryProfile, MemoryProfileId, ProcessorArchitecture, RegionRole,
-    RegionRoleLookupError, ValidationError,
+    esp_partition_table, memory_profile_named, AddressRange, AddressSpaceGeometry,
+    AddressSpaceKind, AddressSpaceKindLookupError, MemoryProfile, MemoryProfileId,
+    ProcessorArchitecture, RegionRetention, RegionRole, RegionRoleLookupError, ValidationError,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{EspBuild, NrfSerialDfuBuild, NrfSerialDfuCompatibility, Uf2BuildVariant};
+use super::{
+    BoardBuild, BoardCatalogEntry, EspBuild, NrfSerialDfuBuild, NrfSerialDfuCompatibility,
+    Uf2BuildVariant,
+};
 use crate::ApplicationAddressRange;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +76,66 @@ impl MemoryProfileReference {
                 profile.firmware.transport_envelope.range,
             )?,
         })
+    }
+}
+
+/// One preserved partition an operator can choose to erase during a flash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErasablePartition {
+    /// Partition-table name passed to the flasher, such as `wifi_cfg`.
+    pub name: &'static str,
+    /// Short label for the flash screen.
+    pub label: &'static str,
+    pub offset: u32,
+    pub size: u32,
+}
+
+pub(super) fn erasable_partitions(board: &BoardCatalogEntry) -> Vec<ErasablePartition> {
+    let BoardBuild::Esp(build) = &board.build else {
+        return Vec::new();
+    };
+    let Some(profile) = memory_profile_named(build.memory_profile.as_str()) else {
+        return Vec::new();
+    };
+    let Some(table) = esp_partition_table(profile.id) else {
+        return Vec::new();
+    };
+    let mut parts = Vec::new();
+    for binding in table.partitions {
+        let Some(region) = profile.region(binding.region) else {
+            continue;
+        };
+        if region.retention != RegionRetention::PreserveAcrossFirmwareUpdate {
+            continue;
+        }
+        let Ok(offset) = u32::try_from(region.range.start()) else {
+            continue;
+        };
+        let Ok(size) = u32::try_from(region.range.byte_len()) else {
+            continue;
+        };
+        parts.push(ErasablePartition {
+            name: binding.name,
+            label: erasable_partition_label(region.role),
+            offset,
+            size,
+        });
+    }
+    parts
+}
+
+fn erasable_partition_label(role: RegionRole) -> &'static str {
+    match role {
+        RegionRole::PlatformData => "NVS",
+        RegionRole::BleIdentity => "BLE identity",
+        RegionRole::Provisioning => "Provisioned Wi-Fi",
+        RegionRole::NodeIdentity => "Node identity",
+        RegionRole::PhyInitialization => "PHY calibration",
+        RegionRole::RemoteControlIdentity => "Remote Control identity",
+        RegionRole::RadioProfile => "Radio profile",
+        RegionRole::WifiConfiguration => "Sealed Wi-Fi",
+        RegionRole::Journal => "Learned state",
+        _ => "Preserved region",
     }
 }
 
