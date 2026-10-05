@@ -22,7 +22,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -1695,7 +1697,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -3412,7 +3416,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -5077,7 +5083,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -6455,7 +6463,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
