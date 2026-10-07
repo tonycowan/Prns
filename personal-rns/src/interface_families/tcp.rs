@@ -1,7 +1,8 @@
 #[cfg(feature = "tokio-host")]
 pub use prns_interfaces_tokio::tcp::{
-    tune, AddressFamilyPreference, ReconnectLimit, TcpClientInterface, TcpConnectionSettings,
-    TcpServer, TcpServerConnection, TcpServerStatus, TcpTunnelMode, CONNECT_TIMEOUT,
+    tune, AddressFamilyPreference, ReconnectLimit, TcpClientControl, TcpClientInterface,
+    TcpConnectionSettings, TcpServer, TcpServerConnection, TcpServerStatus, TcpTunnelMode,
+    CONNECT_TIMEOUT,
 };
 
 #[cfg(all(feature = "embassy-host", not(feature = "tokio-host")))]

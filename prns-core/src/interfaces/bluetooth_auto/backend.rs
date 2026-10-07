@@ -95,6 +95,20 @@ pub trait BleBackend<const MAX_PEERS: usize> {
     async fn next_event(&mut self) -> BleEvent<Self::Link>;
     async fn dial(&mut self, address: BleAddress) -> DialOutcome;
     async fn on_link_closed(&mut self, _address: BleAddress) {}
+
+    /// Completes when the bound radio can no longer be used and the supervisor should reopen it.
+    ///
+    /// Linux BlueZ names adapters `hci0`, `hci1`, and so on. A bluetoothd restart can drop the
+    /// object prnsd opened and bring the same radio back under a different name. Other platforms
+    /// leave this pending.
+    fn watch_adapter(&self) -> impl core::future::Future<Output = ()> + Send + 'static {
+        core::future::pending()
+    }
+
+    /// Open the replacement for an adapter [`watch_adapter`](Self::watch_adapter) reported lost.
+    async fn adopt_replacement_adapter(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[allow(async_fn_in_trait)]

@@ -11,6 +11,7 @@ mod managed_service;
 mod nnpages;
 mod observability;
 mod persistence;
+mod remote_control_pairing;
 mod services;
 mod shutdown;
 mod splash;
@@ -115,6 +116,13 @@ async fn run_command(command: cli::Command) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("prnsd nnpages: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        cli::Command::Pairing(args) => match remote_control_pairing::run_cli(args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("prnsd pairing: {error}");
                 ExitCode::FAILURE
             }
         },

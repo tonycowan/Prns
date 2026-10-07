@@ -396,7 +396,7 @@ pub struct PersistenceWorker {
 }
 
 impl PersistenceWorker {
-    pub(crate) fn remote_control_authorization_persistence(
+    pub fn remote_control_authorization_persistence(
         &self,
     ) -> RemoteControlAuthorizationPersistence {
         RemoteControlAuthorizationPersistence {

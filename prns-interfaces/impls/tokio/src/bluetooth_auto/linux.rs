@@ -19,7 +19,7 @@ use bluer::l2cap::{
 };
 use bluer::{
     Adapter, AdapterEvent, Address, AddressType, Device, DeviceEvent, DeviceProperty,
-    DiscoveryFilter, DiscoveryTransport, Session, Uuid,
+    DiscoveryFilter, DiscoveryTransport, ErrorKind, Session, SessionEvent, Uuid,
 };
 use futures_util::stream::{FuturesUnordered, SelectAll};
 use futures_util::{Stream, StreamExt};
@@ -596,6 +596,7 @@ impl ActiveLinkGenerations {
 }
 
 pub struct BluerBackend {
+    session: Session,
     adapter: Adapter,
     address: Address,
     address_type: AddressType,
@@ -647,11 +648,31 @@ impl BluerBackend {
     pub const MAX_PEERS: usize = 8;
 
     pub async fn open(psm: Psm, identity: BleIdentity) -> Result<Self, BluerError> {
+        Self::open_preferring(psm, identity, None).await
+    }
+
+    async fn open_preferring(
+        psm: Psm,
+        identity: BleIdentity,
+        preferred: Option<Address>,
+    ) -> Result<Self, BluerError> {
         let session = Session::new().await?;
-        let adapter = session.default_adapter().await?;
-        adapter.set_powered(true).await?;
+        let adapter = select_adapter(&session, preferred).await?;
         let address = adapter.address().await?;
         let address_type = adapter.address_type().await?;
+        if let Some(preferred) = preferred {
+            if address == preferred {
+                crate::diagnostic_log::info!(
+                    "bluetooth: BlueZ adapter {} is back at {address}",
+                    adapter.name()
+                );
+            } else {
+                crate::diagnostic_log::warn!(
+                    "bluetooth: previous adapter {preferred} is not back; using {} ({address})",
+                    adapter.name()
+                );
+            }
+        }
         let adapter_events = Box::pin(adapter.events().await?);
         let blocked = if eatt_is_risky() {
             crate::diagnostic_log::error!(
@@ -667,6 +688,7 @@ impl BluerBackend {
             None
         };
         let mut backend = Self {
+            session,
             adapter,
             address,
             address_type,
@@ -709,6 +731,10 @@ impl BluerBackend {
             let _ = backend.observe_device(address).await;
         }
         Ok(backend)
+    }
+
+    pub(super) fn adapter_label(&self) -> String {
+        format!("{} ({})", self.adapter.name(), self.address)
     }
 
     async fn observe_device(
@@ -1414,12 +1440,131 @@ async fn connect_link(adapter: Adapter, target: Address) -> Result<BluerLink, Bl
     })))
 }
 
+async fn select_adapter(
+    session: &Session,
+    preferred: Option<Address>,
+) -> Result<Adapter, BluerError> {
+    let names = session.adapter_names().await?;
+    let mut addresses = Vec::new();
+    if preferred.is_some() {
+        for name in &names {
+            let Ok(adapter) = session.adapter(name) else {
+                continue;
+            };
+            let Ok(address) = adapter.address().await else {
+                continue;
+            };
+            addresses.push((name.clone(), address.0));
+        }
+    }
+    let Some(name) = super::linux_adapter::choose_adapter_name(
+        &names,
+        preferred.map(|address| address.0),
+        &addresses,
+    ) else {
+        return session.default_adapter().await.map_err(Into::into);
+    };
+    let adapter = session.adapter(name)?;
+    adapter.set_powered(true).await?;
+    Ok(adapter)
+}
+
+async fn probe_bound_adapter(
+    session: &Session,
+    name: &str,
+    address: Address,
+) -> super::linux_adapter::AdapterProbe {
+    use super::linux_adapter::{classify_adapter_probe, AdapterProbe};
+
+    let names = match session.adapter_names().await {
+        Ok(names) => names,
+        Err(_) => return AdapterProbe::Gone,
+    };
+    let probed = match session.adapter(name) {
+        Ok(adapter) => match adapter.address().await {
+            Ok(live) => Some(live.0),
+            Err(error) if matches!(error.kind, ErrorKind::NotFound | ErrorKind::DoesNotExist) => {
+                None
+            }
+            Err(_) => return AdapterProbe::Present,
+        },
+        Err(_) => None,
+    };
+    classify_adapter_probe(name, address.0, &names, probed)
+}
+
+async fn watch_until_adapter_moves(session: Session, name: String, address: Address) {
+    use super::linux_adapter::{ProbeStreak, ADAPTER_PROBE_INTERVAL};
+
+    let mut events: Pin<Box<dyn Stream<Item = SessionEvent> + Send>> = match session.events().await
+    {
+        Ok(events) => Box::pin(events),
+        Err(error) => {
+            crate::diagnostic_log::warn!(
+                "bluetooth: BlueZ adapter events unavailable ({error}); probing {name}"
+            );
+            Box::pin(futures_util::stream::pending())
+        }
+    };
+    let mut probe = tokio::time::interval(ADAPTER_PROBE_INTERVAL);
+    probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    probe.tick().await;
+    let mut streak = ProbeStreak::default();
+    loop {
+        tokio::select! {
+            event = events.next() => match event {
+                Some(SessionEvent::AdapterRemoved(removed)) if removed == name => {
+                    crate::diagnostic_log::warn!(
+                        "bluetooth: BlueZ removed adapter {name} ({address}); reopening"
+                    );
+                    return;
+                }
+                None => {
+                    crate::diagnostic_log::warn!(
+                        "bluetooth: BlueZ session for {name} ended; reopening"
+                    );
+                    return;
+                }
+                Some(_) => {}
+            },
+            _ = probe.tick() => {
+                let (next, reopen) = streak.observe(probe_bound_adapter(&session, &name, address).await);
+                streak = next;
+                if reopen {
+                    crate::diagnostic_log::warn!(
+                        "bluetooth: BlueZ adapter {name} ({address}) is no longer the bound radio; reopening"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+}
+
 impl BleBackend<{ BluerBackend::MAX_PEERS }> for BluerBackend {
     type Error = BluerError;
     type Link = BluerLink;
 
     fn blocked(&self) -> Option<&'static str> {
         self.blocked
+    }
+
+    fn watch_adapter(&self) -> impl Future<Output = ()> + Send + 'static {
+        let session = self.session.clone();
+        let name = self.adapter.name().to_string();
+        let address = self.address;
+        async move { watch_until_adapter_moves(session, name, address).await }
+    }
+
+    async fn adopt_replacement_adapter(&mut self) -> Result<(), BluerError> {
+        let previous = self.adapter_label();
+        let fresh = Self::open_preferring(self.psm, self.identity, Some(self.address)).await?;
+        crate::diagnostic_log::info!(
+            "bluetooth: reopened BlueZ after {previous}, now {}",
+            fresh.adapter_label()
+        );
+        *self = fresh;
+        Ok(())
     }
 
     async fn set_radio_mode(&mut self, mode: RadioMode) -> Result<(), BluerError> {

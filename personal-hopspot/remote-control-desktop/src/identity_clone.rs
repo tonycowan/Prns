@@ -1,22 +1,27 @@
-//! Controller-app identity clone. Uses ordinary announce + a hop-0 link request
-//! (`AcceptDirect`) + one request endpoint. Not a prns-core pairing sibling.
+//! Controller-app identity clone. The offer is a single-hop plain packet, then a
+//! hop-0 link request (`AcceptDirect`) and one request endpoint. Not a prns-core
+//! pairing sibling.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use personal_rns::crypto::{sha256_chunks, Ed25519Signature};
 use personal_rns::identity::{
-    IdentityHash, PrivateIdentityMaterial, PublicIdentityMaterial, Zeroizing,
-    IDENTITY_PUBLIC_KEY_LEN, IDENTITY_SECRET_KEY_LEN,
+    IdentityHash, PrivateIdentityMaterial, PublicIdentityMaterial, IDENTITY_PUBLIC_KEY_LEN,
+    IDENTITY_SECRET_KEY_LEN,
 };
 use personal_rns::prelude::{Decline, RequestContext, RequestEndpoint, RequestEndpointPolicy};
-use personal_rns::routing::announce::{derive_destination_hash, expand_name};
+use personal_rns::routing::announce::{
+    derive_destination_hash, derive_plain_destination_hash, expand_name,
+};
 use personal_rns::wire::DestinationHash;
 
 use crate::backend::{InterfaceEntry, InterfacePower};
 
 pub const IDENTITY_CLONE_APP_NAME: &str = "prns";
 pub const IDENTITY_CLONE_ASPECTS: &[&str] = &["controller", "identity-clone"];
+/// Well-known plain address for the one-hop adoption offer. Not announced.
+pub const IDENTITY_CLONE_OFFER_ASPECTS: &[&str] = &["controller", "identity-clone", "offer"];
 pub const IDENTITY_CLONE_REQUEST_ENDPOINT_ID: &str = "/prns/controller/identity-clone";
 
 const ANNOUNCE_MAGIC: &[u8; 7] = b"PRNSCL2";
@@ -281,6 +286,13 @@ pub fn identity_clone_destination_hash(identity: IdentityHash) -> Option<Destina
     Some(derive_destination_hash(&identity, &name))
 }
 
+/// Address of the single-hop plain offer. Every controller registers it; the
+/// engine drops the packet if it has traveled more than one hop.
+pub fn identity_clone_offer_destination_hash() -> Option<DestinationHash> {
+    let name = expand_name(IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_OFFER_ASPECTS).ok()?;
+    Some(derive_plain_destination_hash(&name))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityCloneMessageKind {
     Hello = 1,
@@ -289,7 +301,14 @@ pub enum IdentityCloneMessageKind {
     Payload = 4,
     WaitingForSource = 5,
     Error = 6,
+    /// One slice of the operator copy. Stays inside a single link packet.
+    PayloadChunk = 7,
+    /// Adoptee has stored the operator copy.
+    Done = 8,
 }
+
+/// Small enough to fit a direct USB link packet without a resource transfer.
+pub const CLONE_PAYLOAD_CHUNK_LEN: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityCloneErrorCode {
@@ -300,7 +319,8 @@ pub enum IdentityCloneErrorCode {
 }
 
 const HELLO_LEN: usize = 1 + IDENTITY_PUBLIC_KEY_LEN + IDENTITY_CLONE_NONCE_LEN + SIGNATURE_LEN;
-const ACCEPT_LEN: usize = 1 + HASH_LEN + IDENTITY_CLONE_NONCE_LEN + SIGNATURE_LEN;
+const ACCEPT_BODY_LEN: usize = HASH_LEN + IDENTITY_CLONE_NONCE_LEN + SIGNATURE_LEN;
+const ACCEPT_LEN: usize = 1 + ACCEPT_BODY_LEN + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentityCloneHello {
@@ -368,6 +388,7 @@ pub struct IdentityCloneAccept {
     dest: IdentityHash,
     dest_nonce: [u8; IDENTITY_CLONE_NONCE_LEN],
     signature: Ed25519Signature,
+    offset: u32,
 }
 
 impl IdentityCloneAccept {
@@ -379,7 +400,19 @@ impl IdentityCloneAccept {
             dest: dest_secret.identity_hash(),
             dest_nonce: transcript.dest_nonce,
             signature: dest_secret.sign(&transcript.accept_material()),
+            offset: 0,
         }
+    }
+
+    #[must_use]
+    pub const fn at_offset(mut self, offset: u32) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    #[must_use]
+    pub const fn offset(self) -> u32 {
+        self.offset
     }
 
     pub fn verify(
@@ -402,8 +435,19 @@ impl IdentityCloneAccept {
         out[1..1 + HASH_LEN].copy_from_slice(self.dest.as_bytes());
         let nonce_at = 1 + HASH_LEN;
         out[nonce_at..nonce_at + IDENTITY_CLONE_NONCE_LEN].copy_from_slice(&self.dest_nonce);
-        out[nonce_at + IDENTITY_CLONE_NONCE_LEN..ACCEPT_LEN].copy_from_slice(&self.signature.0);
+        out[nonce_at + IDENTITY_CLONE_NONCE_LEN
+            ..nonce_at + IDENTITY_CLONE_NONCE_LEN + SIGNATURE_LEN]
+            .copy_from_slice(&self.signature.0);
+        let offset_at = nonce_at + IDENTITY_CLONE_NONCE_LEN + SIGNATURE_LEN;
+        out[offset_at..ACCEPT_LEN].copy_from_slice(&self.offset.to_le_bytes());
         Some(ACCEPT_LEN)
+    }
+
+    pub fn write_done(self, out: &mut [u8]) -> Option<usize> {
+        let len = self.write(out)?;
+        out.first_mut()
+            .map(|byte| *byte = IdentityCloneMessageKind::Done as u8)?;
+        Some(len)
     }
 }
 
@@ -421,6 +465,12 @@ pub enum IdentityCloneInbound<'a> {
     },
     WaitingForSource,
     Error(IdentityCloneErrorCode),
+    PayloadChunk {
+        offset: u32,
+        total: u32,
+        data: &'a [u8],
+    },
+    Done(IdentityCloneAccept),
 }
 
 pub fn parse_identity_clone_message(bytes: &[u8]) -> Option<IdentityCloneInbound<'_>> {
@@ -431,6 +481,11 @@ pub fn parse_identity_clone_message(bytes: &[u8]) -> Option<IdentityCloneInbound
         3 => parse_accept(rest),
         4 => parse_payload(rest),
         5 if rest.is_empty() => Some(IdentityCloneInbound::WaitingForSource),
+        7 => parse_payload_chunk(rest),
+        8 => parse_accept(rest).and_then(|inbound| match inbound {
+            IdentityCloneInbound::Accept(accept) => Some(IdentityCloneInbound::Done(accept)),
+            _ => None,
+        }),
         6 => {
             let (code, rest) = rest.split_first()?;
             if !rest.is_empty() {
@@ -476,12 +531,53 @@ fn parse_accept(rest: &[u8]) -> Option<IdentityCloneInbound<'_>> {
     let mut dest_nonce = [0u8; IDENTITY_CLONE_NONCE_LEN];
     dest_nonce.copy_from_slice(&rest[HASH_LEN..HASH_LEN + IDENTITY_CLONE_NONCE_LEN]);
     let mut signature = [0u8; SIGNATURE_LEN];
-    signature.copy_from_slice(&rest[HASH_LEN + IDENTITY_CLONE_NONCE_LEN..]);
+    let signature_at = HASH_LEN + IDENTITY_CLONE_NONCE_LEN;
+    signature.copy_from_slice(&rest[signature_at..signature_at + SIGNATURE_LEN]);
+    let mut offset_bytes = [0u8; 4];
+    offset_bytes.copy_from_slice(&rest[signature_at + SIGNATURE_LEN..]);
     Some(IdentityCloneInbound::Accept(IdentityCloneAccept {
         dest: IdentityHash::new(dest),
         dest_nonce,
         signature: Ed25519Signature(signature),
+        offset: u32::from_le_bytes(offset_bytes),
     }))
+}
+
+fn parse_payload_chunk(rest: &[u8]) -> Option<IdentityCloneInbound<'_>> {
+    if rest.len() < 8 {
+        return None;
+    }
+    let offset = u32::from_le_bytes(rest[..4].try_into().ok()?);
+    let total = u32::from_le_bytes(rest[4..8].try_into().ok()?);
+    Some(IdentityCloneInbound::PayloadChunk {
+        offset,
+        total,
+        data: &rest[8..],
+    })
+}
+
+pub fn write_payload_chunk(
+    offset: u32,
+    total: u32,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Option<usize> {
+    let start = usize::try_from(offset).ok()?;
+    let rest = payload.get(start..)?;
+    let data = if rest.len() > CLONE_PAYLOAD_CHUNK_LEN {
+        &rest[..CLONE_PAYLOAD_CHUNK_LEN]
+    } else {
+        rest
+    };
+    let len = 1 + 4 + 4 + data.len();
+    if out.len() < len {
+        return None;
+    }
+    out[0] = IdentityCloneMessageKind::PayloadChunk as u8;
+    out[1..5].copy_from_slice(&offset.to_le_bytes());
+    out[5..9].copy_from_slice(&total.to_le_bytes());
+    out[9..len].copy_from_slice(data);
+    Some(len)
 }
 
 fn parse_payload(rest: &[u8]) -> Option<IdentityCloneInbound<'_>> {
@@ -587,15 +683,15 @@ pub struct SourceCloneSession {
     pub transcript: Option<IdentityCloneTranscript>,
     pub accepted: bool,
     pub payload: Option<IdentityClonePayload>,
+    pub alias: String,
+    /// The adoptee stored the operator copy. The adopting app still has to
+    /// record the sibling; that happens off the request handler.
+    pub handoff_complete: bool,
     pub last_announce: Instant,
 }
 
 pub struct IdentityClonePayload {
-    pub operator_secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
-    pub accesses: Vec<u8>,
-    pub clock: u64,
-    pub siblings: Vec<PublicIdentityMaterial>,
-    pub labels: Vec<u8>,
+    pub encoded: Vec<u8>,
 }
 
 pub struct DestCloneSession {
@@ -610,6 +706,9 @@ pub struct DestCloneSession {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SiblingControllerView {
     pub instance_hash: String,
+    /// Set when other siblings find this one at a destination other than the identity hash.
+    pub sync_address: Option<String>,
+    pub last_synced: String,
     pub alias: String,
     pub heard: bool,
     pub is_self: bool,
@@ -691,42 +790,39 @@ impl RequestEndpoint<ControllerAppState> for IdentityClone {
                     drop(shared);
                     return respond_bytes(&mut context, written, &reply);
                 };
-                let sibling_bytes = payload
-                    .siblings
-                    .len()
-                    .saturating_mul(IDENTITY_PUBLIC_KEY_LEN);
-                let mut body = vec![
-                    0u8;
-                    1 + IDENTITY_SECRET_KEY_LEN
-                        + 4
-                        + payload.accesses.len()
-                        + 8
-                        + 1
-                        + sibling_bytes
-                        + payload.labels.len()
-                ];
-                let written = write_clone_payload(
-                    &payload.operator_secret,
-                    &payload.accesses,
-                    payload.clock,
-                    &payload.siblings,
-                    &payload.labels,
-                    &mut body,
-                );
-                if written.is_some() {
-                    shared.source = None;
-                    shared.notice = Some(
-                        "Operator identity delivered. The other install should quit and reopen."
-                            .to_string(),
-                    );
-                    shared.error = None;
-                }
+                let total = u32::try_from(payload.encoded.len()).unwrap_or(u32::MAX);
+                let mut chunk = vec![0u8; 9 + CLONE_PAYLOAD_CHUNK_LEN];
+                let Some(len) =
+                    write_payload_chunk(accept.offset(), total, &payload.encoded, &mut chunk)
+                else {
+                    drop(shared);
+                    return respond_error(&mut context, IdentityCloneErrorCode::Malformed);
+                };
                 drop(shared);
-                if let Some(len) = written {
-                    body.truncate(len);
-                    return context.respond(body);
+                chunk.truncate(len);
+                return context.respond(chunk);
+            }
+            Some(IdentityCloneInbound::Done(accept)) => {
+                let Some(source) = shared.source.as_mut() else {
+                    drop(shared);
+                    return respond_error(&mut context, IdentityCloneErrorCode::NotOffering);
+                };
+                let ready = source
+                    .peer_keys
+                    .as_ref()
+                    .zip(source.transcript)
+                    .is_some_and(|(keys, transcript)| accept.verify(keys, transcript));
+                if !ready || !source.accepted {
+                    drop(shared);
+                    return respond_error(&mut context, IdentityCloneErrorCode::SessionMismatch);
                 }
-                return respond_error(&mut context, IdentityCloneErrorCode::Malformed);
+                source.handoff_complete = true;
+                shared.notice = Some(
+                    "The other install has the Operator. It should quit and reopen.".to_string(),
+                );
+                shared.error = None;
+                drop(shared);
+                return context.respond([IdentityCloneMessageKind::Done as u8]);
             }
             Some(_) | None => {
                 drop(shared);
@@ -987,7 +1083,11 @@ mod tests {
                 kind: crate::roster_sync::RosterLabelKind::TargetName,
                 key: "aabbccddeeff00112233445566778899".to_string(),
                 value: Some("Heltec".to_string()),
-                clock: 4,
+                stamp: crate::roster_sync::LabelStamp {
+                    millis: 4,
+                    counter: 0,
+                    actor: personal_rns::identity::IdentityHash::new([0; 16]),
+                },
             }],
         )
         .unwrap();

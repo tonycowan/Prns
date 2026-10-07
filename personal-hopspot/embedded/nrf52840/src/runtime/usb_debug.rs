@@ -14,6 +14,11 @@ use embassy_usb::UsbDevice;
 const RING_BYTES: usize = 1024;
 const PACKET_BYTES: usize = 63;
 
+struct Console {
+    ring: Ring,
+    line: heapless::String<160>,
+}
+
 struct Ring {
     bytes: [u8; RING_BYTES],
     head: usize,
@@ -52,7 +57,11 @@ impl Ring {
     }
 }
 
-static RING: Mutex<CriticalSectionRawMutex, RefCell<Ring>> = Mutex::new(RefCell::new(Ring::new()));
+static CONSOLE: Mutex<CriticalSectionRawMutex, RefCell<Console>> =
+    Mutex::new(RefCell::new(Console {
+        ring: Ring::new(),
+        line: heapless::String::new(),
+    }));
 
 struct CdcLogger;
 
@@ -65,9 +74,12 @@ impl log::Log for CdcLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        let mut line = heapless::String::<160>::new();
-        let _ = write!(line, "[{}] {}\r\n", record.level(), record.args());
-        RING.lock(|ring| ring.borrow_mut().push(line.as_bytes()));
+        CONSOLE.lock(|console| {
+            let console = &mut *console.borrow_mut();
+            console.line.clear();
+            let _ = write!(console.line, "[{}] {}\r\n", record.level(), record.args());
+            console.ring.push(console.line.as_bytes());
+        });
     }
 
     fn flush(&self) {}
@@ -92,7 +104,7 @@ async fn drain<'d, D: Driver<'d>>(mut class: CdcAcmClass<'d, D>) {
         class.wait_connection().await;
         log::info!("usb-debug: host connected");
         loop {
-            let n = RING.lock(|ring| ring.borrow_mut().take(&mut packet));
+            let n = CONSOLE.lock(|console| console.borrow_mut().ring.take(&mut packet));
             if n == 0 {
                 Timer::after_millis(50).await;
                 continue;

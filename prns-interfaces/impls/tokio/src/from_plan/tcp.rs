@@ -13,10 +13,11 @@ use crate::tcp::{
     TcpTunnelMode,
 };
 
-use super::{AttachmentResult, InterfaceConstruction, RECONNECT_POLICY};
+use super::{AttachmentResult, InterfaceConstruction, PlanRuntimeContext, RECONNECT_POLICY};
 
 pub(super) fn stand_up_client(
     construction: InterfaceConstruction<'_>,
+    context: &PlanRuntimeContext,
     connection: &TcpDialPlan,
     framing: TcpWireFraming,
 ) -> AttachmentResult {
@@ -26,6 +27,11 @@ pub(super) fn stand_up_client(
         framing,
         connection_settings(connection),
     );
+    if let Some(controls) = context.interface_controls() {
+        controls(super::RegisteredInterfaceControl::TcpClient(
+            client.control(),
+        ));
+    }
     let attached = construction.attach(client);
     Ok(attached.id())
 }

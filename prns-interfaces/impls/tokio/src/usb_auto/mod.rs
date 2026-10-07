@@ -239,6 +239,18 @@ where
         let mut fallback = tokio::time::interval(FALLBACK_SCAN_INTERVAL);
 
         loop {
+            if !self.status.is_enabled() {
+                self.reconcile(
+                    &mut ports,
+                    &mut opening,
+                    &mut port_holdoffs,
+                    &mut pending_opens,
+                    last_confirmed_at,
+                )
+                .await;
+                self.status.wait_until_enabled().await;
+                continue;
+            }
             // The arrived key crosses the select so the seam is released before the inbound handoff borrows it.
             let arrived = tokio::select! {
                 _ = fallback.tick() => {
@@ -263,28 +275,7 @@ where
                         .await;
                     None
                 }
-                () = self.status.wait_until_disabled(), if self.status.is_enabled() => {
-                    self.reconcile(
-                        &mut ports,
-                        &mut opening,
-                        &mut port_holdoffs,
-                        &mut pending_opens,
-                        last_confirmed_at,
-                    )
-                        .await;
-                    None
-                }
-                () = self.status.wait_until_enabled(), if !self.status.is_enabled() => {
-                    self.reconcile(
-                        &mut ports,
-                        &mut opening,
-                        &mut port_holdoffs,
-                        &mut pending_opens,
-                        last_confirmed_at,
-                    )
-                        .await;
-                    None
-                }
+                () = self.status.wait_until_disabled() => None,
                 Some(event) = events_rx.recv() => {
                     match event {
                         PortEvent::Alive { candidate } => {

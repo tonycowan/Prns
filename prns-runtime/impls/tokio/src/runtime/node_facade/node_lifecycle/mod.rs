@@ -90,6 +90,9 @@ pub struct PrnsNode<St, R, F, S: StorageLayout> {
     pub(super) crypto_pool: CryptoPoolConfig,
     scheduler_policy: SchedulerPolicy,
     persistence: Option<persistence::NodePersistence>,
+    /// Grant store owned by the host's persistence worker. Used when the recipe
+    /// is `NoPersistence`, so a pairing commit can still land a controller grant.
+    remote_control_authorization: Option<persistence::RemoteControlAuthorizationPersistence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,7 +486,20 @@ where
             crypto_pool: CryptoPoolConfig::host_default(),
             scheduler_policy: SchedulerPolicy::production(),
             persistence: node_persistence,
+            remote_control_authorization: None,
         }
+    }
+
+    /// Use `persistence` for remote-control grant and target-access commits.
+    ///
+    /// The host already runs this store for routes and ratchets. Pairing reads
+    /// it when the recipe has no node persistence of its own. A recipe that
+    /// brings node persistence keeps that store instead.
+    pub fn set_remote_control_authorization_persistence(
+        &mut self,
+        persistence: persistence::RemoteControlAuthorizationPersistence,
+    ) {
+        self.remote_control_authorization = Some(persistence);
     }
 
     pub fn with_non_routing_identity(
@@ -733,6 +749,7 @@ where
         P: FnMut(&ProofRequest) -> bool,
         St: prns_runtime::runtime::RemoteControlHostControls,
     {
+        let external_authorization = self.remote_control_authorization.take();
         let restored = match self.persistence.take() {
             Some(node_persistence) => {
                 let report = node_persistence.restore(&mut self);
@@ -755,6 +772,7 @@ where
             crypto_pool,
             scheduler_policy,
             persistence: _,
+            remote_control_authorization: _,
         } = self;
         let AssembledNode {
             engine,
@@ -780,7 +798,7 @@ where
                         Some(persistence_restored_diagnostic(&report)),
                     )
                 }
-                None => (None, None, None, None),
+                None => (None, None, external_authorization, None),
             };
         let (remote_control_pairing_persistence, mut remote_control_pairing_persistence_rx) =
             remote_control_pairing_persistence_lane();

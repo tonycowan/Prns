@@ -1,6 +1,7 @@
 mod host;
 #[cfg(target_os = "linux")]
 mod linux;
+mod linux_adapter;
 mod runtime;
 
 pub use host::{

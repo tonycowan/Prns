@@ -25,6 +25,7 @@ mod path_table;
 mod service;
 
 pub use self::core::*;
+pub use crate::capabilities::power::PowerSnapshot;
 pub use bootstrap::*;
 pub use control::*;
 pub use endpoint::*;

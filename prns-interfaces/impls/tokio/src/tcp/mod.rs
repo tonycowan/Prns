@@ -5,7 +5,7 @@ mod connection;
 mod server;
 
 #[cfg(feature = "tcp")]
-pub use client::TcpClientInterface;
+pub use client::{TcpClientControl, TcpClientInterface};
 pub use connection::TcpTunnelMode;
 #[cfg(feature = "tcp")]
 pub use connection::{

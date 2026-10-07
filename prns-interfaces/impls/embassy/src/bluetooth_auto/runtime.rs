@@ -2,6 +2,8 @@ use ::core::cell::{Cell, RefCell};
 
 use embassy_futures::join::join_array;
 use embassy_futures::select::{select, select6, select_array, Either, Either6};
+#[cfg(feature = "log")]
+use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex};
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use embassy_sync::signal::Signal;
@@ -989,6 +991,11 @@ where
                     .await;
                 }
                 SupervisorStep::Backend(BleEvent::Inbound(link)) => {
+                    #[cfg(feature = "log")]
+                    {
+                        crate::diagnostic_log::info!("ble: inbound");
+                        yield_now().await;
+                    }
                     queue_handshake(
                         link,
                         Origin::Accepted,
@@ -1000,6 +1007,11 @@ where
                     .await;
                 }
                 SupervisorStep::Backend(BleEvent::LinkReady { link, origin, .. }) => {
+                    #[cfg(feature = "log")]
+                    {
+                        crate::diagnostic_log::info!("ble: link");
+                        yield_now().await;
+                    }
                     queue_handshake(
                         link,
                         origin,
@@ -1650,6 +1662,11 @@ async fn deliver_inbound<
     match received {
         Ok(0) => {}
         Ok(len) => {
+            #[cfg(feature = "log")]
+            {
+                crate::diagnostic_log::info!("ble: deliver {len}");
+                yield_now().await;
+            }
             if let Some(member) = members[index].as_ref() {
                 if fleet
                     .deliver_inbound(member.id, &inbufs[index][..len])

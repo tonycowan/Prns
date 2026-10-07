@@ -6,7 +6,10 @@ mod gatt_link;
 mod gatt_write;
 mod l2cap_lifecycle;
 mod peripheral;
+mod peripheral_write;
 
+#[cfg(test)]
+mod peripheral_write_tests;
 #[cfg(test)]
 mod tests;
 

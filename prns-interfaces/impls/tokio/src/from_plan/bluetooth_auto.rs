@@ -22,5 +22,10 @@ pub(super) fn stand_up(
         *plan.group_ids(),
     );
     let attached = construction.attach(interface);
+    if let Some(controls) = context.interface_controls() {
+        controls(super::RegisteredInterfaceControl::BluetoothAuto(
+            attached.status(),
+        ));
+    }
     Ok(attached.id())
 }

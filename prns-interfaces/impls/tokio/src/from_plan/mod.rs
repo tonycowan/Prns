@@ -226,11 +226,52 @@ impl From<getrandom::Error> for PlanFailure {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Live interface handle captured while a planned interface is attached.
+pub enum RegisteredInterfaceControl {
+    #[cfg(feature = "wifi-auto")]
+    AutoWifi {
+        id: InterfaceId,
+        status: crate::wifi_auto::AutoWifiStatus,
+    },
+    #[cfg(feature = "bluetooth-auto")]
+    BluetoothAuto(crate::bluetooth_auto::BluetoothAutoStatus),
+    #[cfg(feature = "tcp")]
+    TcpClient(crate::tcp::TcpClientControl),
+    #[cfg(feature = "usb")]
+    UsbAuto {
+        id: InterfaceId,
+        status: prns_runtime::manifold::driver::TokioInterfaceStatus,
+    },
+}
+
+/// Receives supervisor handles as planned interfaces attach.
+pub type InterfaceControlHook = Arc<dyn Fn(RegisteredInterfaceControl) + Send + Sync>;
+
+#[derive(Clone, Default)]
 pub struct PlanRuntimeContext {
     i2p_storage: Option<RnsI2pStorage>,
     ble_identity: Option<BleIdentity>,
+    interface_controls: Option<InterfaceControlHook>,
 }
+
+impl fmt::Debug for PlanRuntimeContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PlanRuntimeContext")
+            .field("i2p_storage", &self.i2p_storage)
+            .field("ble_identity", &self.ble_identity)
+            .field("interface_controls", &self.interface_controls.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for PlanRuntimeContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.i2p_storage == other.i2p_storage && self.ble_identity == other.ble_identity
+    }
+}
+
+impl Eq for PlanRuntimeContext {}
 
 impl PlanRuntimeContext {
     pub fn with_rns_i2p_storage(
@@ -240,12 +281,23 @@ impl PlanRuntimeContext {
         Self {
             i2p_storage: Some(RnsI2pStorage::new(storage_dir, transport_identity)),
             ble_identity: None,
+            interface_controls: None,
         }
     }
 
     pub fn with_ble_identity(mut self, identity: BleIdentity) -> Self {
         self.ble_identity = Some(identity);
         self
+    }
+
+    #[must_use]
+    pub fn with_interface_controls(mut self, controls: InterfaceControlHook) -> Self {
+        self.interface_controls = Some(controls);
+        self
+    }
+
+    pub(crate) fn interface_controls(&self) -> Option<&InterfaceControlHook> {
+        self.interface_controls.as_ref()
     }
 }
 
@@ -456,7 +508,7 @@ async fn stand_up<'a>(
         PlannedMedium::AutoWifi(planned) => {
             #[cfg(feature = "wifi-auto")]
             {
-                wifi_auto::stand_up(construction, planned)
+                wifi_auto::stand_up(construction, context, planned)
             }
             #[cfg(not(feature = "wifi-auto"))]
             {
@@ -470,7 +522,7 @@ async fn stand_up<'a>(
                 any(target_os = "linux", target_os = "macos", target_os = "windows")
             ))]
             {
-                usb_auto::stand_up(construction)
+                usb_auto::stand_up(construction, context)
             }
             #[cfg(not(all(
                 feature = "usb",
@@ -524,7 +576,7 @@ async fn stand_up<'a>(
         PlannedMedium::TcpClient {
             connection,
             framing,
-        } => tcp::stand_up_client(construction, connection, *framing),
+        } => tcp::stand_up_client(construction, context, connection, *framing),
         PlannedMedium::TcpServer { listener, framing } => {
             tcp::stand_up_server(construction, listener, *framing).await
         }

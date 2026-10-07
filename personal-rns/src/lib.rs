@@ -192,8 +192,8 @@ pub use prns_interfaces_tokio::interface_discovery::{
 pub use prns_interfaces_tokio::from_plan::config;
 #[cfg(all(feature = "config", feature = "tokio-host"))]
 pub use prns_interfaces_tokio::from_plan::{
-    attach_plan, attach_plan_with_context, FromPlan, PlanAttachments, PlanFailure, PlanOutcome,
-    PlanRuntimeContext,
+    attach_plan, attach_plan_with_context, FromPlan, InterfaceControlHook, PlanAttachments,
+    PlanFailure, PlanOutcome, PlanRuntimeContext, RegisteredInterfaceControl,
 };
 
 #[cfg(feature = "shared-instance")]

@@ -539,30 +539,35 @@ async fn run_platform_bluetooth(
         );
         return std::future::pending().await;
     };
-    match BluerBackend::open(psm, ble_identity).await {
-        Ok(backend) => {
-            let bluetooth = BluetoothAuto::<_, { BluerBackend::MAX_PEERS }>::with_status(
-                backend,
-                ble_identity,
-                Endpoint::BlueZ(BlueZHost::Linux),
-                LinkCapabilities {
-                    l2cap: Some(psm),
-                    link_mtu: BLE_HW_MTU as u16,
-                },
-                status,
-            )
-            .with_policy(policy);
-            crate::diagnostic_log::info!(
-                "bluetooth: supervising BlueZ/BlueR, control psm {CONTROL_PSM:#x}"
-            );
-            bluetooth.run(fleet).await;
-        }
-        Err(error) => {
-            status.mark_failed(Some("bluetoothd or adapter unavailable"));
-            crate::diagnostic_log::warn!(
-                "bluetooth disabled ({error:?}); check bluetoothd, adapter power, and BlueZ LE advertising/GATT support"
-            );
-            std::future::pending().await
+    loop {
+        match BluerBackend::open(psm, ble_identity).await {
+            Ok(backend) => {
+                let adapter = backend.adapter_label();
+                status.clear_failure();
+                let bluetooth = BluetoothAuto::<_, { BluerBackend::MAX_PEERS }>::with_status(
+                    backend,
+                    ble_identity,
+                    Endpoint::BlueZ(BlueZHost::Linux),
+                    LinkCapabilities {
+                        l2cap: Some(psm),
+                        link_mtu: BLE_HW_MTU as u16,
+                    },
+                    status,
+                )
+                .with_policy(policy);
+                crate::diagnostic_log::info!(
+                    "bluetooth: supervising BlueZ adapter {adapter}, control psm {CONTROL_PSM:#x}"
+                );
+                bluetooth.run(fleet).await;
+                return;
+            }
+            Err(error) => {
+                status.mark_failed(Some("bluetoothd or adapter unavailable"));
+                crate::diagnostic_log::warn!(
+                    "bluetooth waiting for a BlueZ adapter ({error:?}); check bluetoothd and adapter power"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
         }
     }
 }

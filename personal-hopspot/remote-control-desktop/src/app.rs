@@ -5,9 +5,10 @@ use dioxus::prelude::*;
 use crate::backend::{
     auto_wifi_peer_list_note, bluetooth_auto_peer_list_note, format_activity_age,
     format_connect_label, format_pairing_open_label, format_target_route, format_wall_clock_now,
-    interface_mode_label, radio_facts, target_label, BackendError, ControllerIdentity,
-    HeardAnnounce, InterfaceEntry, InterfacePower, PairingState, PathProbeReason, PathTableState,
-    RemoteControlAnnounceWait, RemoteControlBackend, TargetAccess, TargetStatus,
+    interface_mode_label, radio_facts, remote_control_address_hash, target_label, BackendError,
+    ControllerIdentity, HeardAnnounce, InterfaceEntry, InterfacePower, PairingState,
+    PathProbeReason, PathTableState, RemoteControlAnnounceWait, RemoteControlBackend, TargetAccess,
+    TargetStatus,
 };
 use crate::edits::{
     apply_draft_to_entry, apply_lora_preset, apply_lora_region, can_edit_group, can_edit_lora,
@@ -475,6 +476,7 @@ pub fn App() -> Element {
     let mut interfaces_by_target = use_signal(HashMap::<String, LoadedInterfaces>::new);
     let mut expanded_targets = use_signal(HashSet::<String>::new);
     let expanded_path_tables = use_signal(HashSet::<String>::new);
+    let path_filters = use_signal(HashMap::<String, String>::new);
     let path_hash_long = use_signal(HashSet::<String>::new);
     let expanded_interfaces = use_signal(HashSet::<String>::new);
     let drafts = use_signal(HashMap::<String, InterfaceDraft>::new);
@@ -494,6 +496,7 @@ pub fn App() -> Element {
     let mut sibling_aliases = use_signal(|| backend().sibling_aliases());
     let focused_sibling_alias = use_signal(|| None::<String>);
     let mut roster_gen = use_signal(|| 0u64);
+    let mut managed_list_gen = use_signal(|| 0u64);
     let interfaces_info = use_signal(|| false);
     let settings_info = use_signal(|| false);
     let nodes_info = use_signal(|| false);
@@ -513,6 +516,12 @@ pub fn App() -> Element {
 
     use_effect(move || {
         let backend = backend();
+        let replicator = backend.clone();
+        spawn(async move {
+            if replicator.is_connected() {
+                replicator.run_roster_replicator().await;
+            }
+        });
         spawn(async move {
             if !backend.is_connected() {
                 push_activity(activity_log, "Controller node failed to start.");
@@ -527,6 +536,9 @@ pub fn App() -> Element {
                 // roster/clone link attempts (those can stall several seconds).
                 match backend.local_interfaces() {
                     Ok(items) => {
+                        // Auto gateway and This controller are local aliases, not roster
+                        // facts, so they have to land in the field as soon as the peer appears.
+                        adopt_missing_aliases(peer_aliases, backend.peer_aliases());
                         interfaces_by_target
                             .write()
                             .insert(CONTROLLER_SCOPE.to_string(), LoadedInterfaces::ready(items));
@@ -550,7 +562,7 @@ pub fn App() -> Element {
                 }
                 // Labels are refreshed separately so a slow/contended alias map cannot
                 // block or empty the announce ring-buffer poll.
-                let next_labels = backend.announce_destination_labels();
+                let next_labels = backend.announce_destination_labels().await;
                 if next_labels != announce_labels() {
                     announce_labels.set(next_labels);
                 }
@@ -579,6 +591,18 @@ pub fn App() -> Element {
                     if next_siblings != sibling_aliases() {
                         sibling_aliases.set(next_siblings);
                     }
+                }
+                // Node rows are a snapshot. Reload them when a sync adds, drops,
+                // renames, or re-holds a managed node. Alias maps update above.
+                let list_gen = backend.managed_list_generation();
+                if list_gen != managed_list_gen() {
+                    managed_list_gen.set(list_gen);
+                    refresh_target_list_for_generation(
+                        backend.clone(),
+                        targets,
+                        list_gen,
+                        managed_list_gen,
+                    );
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
@@ -751,6 +775,7 @@ pub fn App() -> Element {
                                 state: controller_path_table(),
                                 expanded: expanded_path_tables().contains(CONTROLLER_SCOPE),
                                 path_hash_long,
+                                path_filters,
                             }
                         }
                         section { class: "card",
@@ -1161,6 +1186,7 @@ pub fn App() -> Element {
                                                                         state: target.path_table.clone(),
                                                                         expanded: expanded_path_tables().contains(&target.id),
                                                                         path_hash_long,
+                                                                        path_filters,
                                                                     }
                                                                 }
                                                                 hr { class: "whitelist-rule" }
@@ -1544,6 +1570,9 @@ fn ManagedTargetConfiguration(
                                 div { dt { "Battery" } dd { "{battery}" } }
                             }
                             div { dt { "RC identity hash" } dd { "{target.id}" } }
+                            if let Some(address) = remote_control_address_hash(&target.id) {
+                                div { dt { "RC address hash" } dd { "{address}" } }
+                            }
                             div {
                                 dt { "Path found at" }
                                 dd {
@@ -3182,17 +3211,16 @@ fn InterfaceAccordion(
                                                                                     class: "peer-alias",
                                                                                     r#type: "text",
                                                                                     placeholder: "Alias",
-                                                                                    value: "{peer_aliases().get(&peer.id).cloned().unwrap_or_default()}",
+                                                                                    value: "{displayed_peer_alias(peer_aliases().get(&peer.id).map(String::as_str), peer.alias.as_deref())}",
                                                                                     aria_label: format!("Alias for {}", peer.name),
                                                                                     oninput: {
                                                                                         let peer_id = peer.id.clone();
                                                                                         move |event| {
-                                                                                            let value = event.value();
-                                                                                            if value.is_empty() {
-                                                                                                peer_aliases.write().remove(&peer_id);
-                                                                                            } else {
-                                                                                                peer_aliases.write().insert(peer_id.clone(), value);
-                                                                                            }
+                                                                                            // Keep an empty string so a cleared field does not
+                                                                                            // fall back to the auto alias until blur commits it.
+                                                                                            peer_aliases
+                                                                                                .write()
+                                                                                                .insert(peer_id.clone(), event.value());
                                                                                         }
                                                                                     },
                                                                                     onblur: {
@@ -4085,6 +4113,22 @@ fn refresh_target_list(backend: RemoteControlBackend, mut targets: Signal<Vec<Ta
     });
 }
 
+fn refresh_target_list_for_generation(
+    backend: RemoteControlBackend,
+    mut targets: Signal<Vec<TargetAccess>>,
+    generation: u64,
+    current: Signal<u64>,
+) {
+    spawn(async move {
+        if let Ok(items) = backend.targets().await {
+            // A newer sync started its own reload. Keep that result.
+            if current() == generation {
+                targets.set(items);
+            }
+        }
+    });
+}
+
 fn refresh_one_interface(
     host: InterfaceHost,
     interface_id: String,
@@ -4185,6 +4229,18 @@ fn path_table_visible_rows(count: usize, expanded: bool) -> usize {
         PATH_TABLE_COLLAPSED_ROWS
     };
     count.min(cap)
+}
+
+fn path_row_matches(row: &crate::backend::PathTableRow, needle: &str) -> bool {
+    let contains = |field: &str| field.to_ascii_lowercase().contains(needle);
+    contains(&row.destination)
+        || contains(&row.destination_full)
+        || contains(&row.hops)
+        || contains(&row.via)
+        || contains(&row.via_full)
+        || contains(&row.interface)
+        || contains(&row.learned)
+        || contains(&row.expires)
 }
 
 #[allow(non_snake_case)]
@@ -4445,6 +4501,7 @@ fn PathTableBody(
     state: PathTableState,
     expanded: bool,
     mut path_hash_long: Signal<HashSet<String>>,
+    mut path_filters: Signal<HashMap<String, String>>,
 ) -> Element {
     match state {
         PathTableState::Idle => rsx! { p { class: "note", "Waiting for a path table." } },
@@ -4457,9 +4514,60 @@ fn PathTableBody(
             let via_long = modes.contains(&path_hash_key(&id, "via"));
             let destination_title = path_hash_title("Destination", destination_long);
             let via_title = path_hash_title("Via", via_long);
-            let visible = path_table_visible_rows(rows.len(), expanded);
-            let scroll_y = expanded && rows.len() > PATH_TABLE_EXPANDED_ROWS;
+            let filter = path_filters().get(&id).cloned().unwrap_or_default();
+            let needle = filter.trim().to_ascii_lowercase();
+            let filtering = !needle.is_empty();
+            let matched: Vec<usize> = if filtering {
+                rows.iter()
+                    .enumerate()
+                    .filter(|(_, row)| path_row_matches(row, &needle))
+                    .map(|(index, _)| index)
+                    .collect()
+            } else {
+                (0..rows.len()).collect()
+            };
+            let shown = matched.len();
+            let total = rows.len();
+            let visible = if filtering {
+                shown.min(PATH_TABLE_EXPANDED_ROWS)
+            } else {
+                path_table_visible_rows(total, expanded)
+            };
+            let scroll_y = if filtering {
+                shown > PATH_TABLE_EXPANDED_ROWS
+            } else {
+                expanded && total > PATH_TABLE_EXPANDED_ROWS
+            };
             rsx! {
+                div { class: "announce-toolbar",
+                    label {
+                        "Filter"
+                        input {
+                            r#type: "search",
+                            placeholder: "hash, alias, via, interface…",
+                            value: "{filter}",
+                            oninput: {
+                                let id = id.clone();
+                                move |event| {
+                                    let mut next = path_filters();
+                                    let value = event.value();
+                                    if value.is_empty() {
+                                        next.remove(&id);
+                                    } else {
+                                        next.insert(id.clone(), value);
+                                    }
+                                    path_filters.set(next);
+                                }
+                            },
+                        }
+                    }
+                }
+                if filtering {
+                    p { class: "announce-meta", "Showing {shown} of {total}." }
+                }
+                if filtering && shown == 0 {
+                    p { class: "note", "No paths match this filter." }
+                } else {
                 div {
                     class: if scroll_y { "path-scroll can-scroll-y" } else { "path-scroll" },
                     style: "--path-rows: {visible}",
@@ -4502,8 +4610,9 @@ fn PathTableBody(
                             span { "Learned" }
                             span { "Expires" }
                         }
-                        for row in rows.iter() {
+                        for index in matched.iter() {
                             {
+                                let row = &rows[*index];
                                 let destination = displayed_hash(
                                     &row.destination,
                                     &row.destination_full,
@@ -4511,7 +4620,7 @@ fn PathTableBody(
                                 );
                                 let via = displayed_via(&row.via, &row.via_full, via_long);
                                 rsx! {
-                                    div { class: "path-row", key: "{row.destination_full}",
+                                    div { class: "path-row", key: "{row.destination_full}:{index}",
                                         span { title: "{row.destination_full}", "{destination}" }
                                         span { "{row.hops}" }
                                         span { title: "{row.via_full}", "{via}" }
@@ -4523,6 +4632,7 @@ fn PathTableBody(
                             }
                         }
                     }
+                }
                 }
             }
         }
@@ -6384,6 +6494,12 @@ fn interface_key(target_id: &str, interface_id: &str) -> String {
     format!("{target_id}:{interface_id}")
 }
 
+/// Typed text wins. Otherwise show the auto-local alias already on the peer
+/// (`Auto gateway`, `This controller`) so the card is labeled on first paint.
+fn displayed_peer_alias(typed: Option<&str>, auto: Option<&str>) -> String {
+    typed.or(auto).unwrap_or("").to_string()
+}
+
 fn adopt_missing_aliases(
     aliases: Signal<HashMap<String, String>>,
     stored: HashMap<String, String>,
@@ -6872,6 +6988,12 @@ fn ControllerIdentityCard(
                     strong { "Sibling identity hash: " }
                     "{identity.instance_hash}"
                 }
+                if let Some(address) = identity.sync_address.as_deref() {
+                    p { class: "twisty-address",
+                        strong { "Sibling sync address: " }
+                        "{address}"
+                    }
+                }
                 if identity_info() {
                     p { class: "note", "Unique to this phone or computer. Even after being adopted, sibling Controllers maintain their unique Sibling identifiers. Node management data will sync between siblings using these unique identifiers." }
                     p { class: "note", "Sibling secret:" }
@@ -7013,7 +7135,7 @@ fn SiblingControllersPanel(
                             activity_log,
                         )}
                         h4 { "Adopt a sibling" }
-                        p { class: "note", "Adoption copies the Operator secret, managed nodes, pairing names, aliases, and sibling pins from this adopting Controller onto the other adoptee Controller. Does not copy Instance. Currently it works only over USB: stop BLE, Auto Wi-Fi, and TCP. Adoptee Controller initiates the process by pressing \"I am up for adoption\". The adopting Controller then presses \"Adopt\". Visually verify the six digit adoption code, then \"Approve\". Adoptee Controller must quit and reopen after adoption for the new Operator id to take effect." }
+                        p { class: "note", "Adoption copies the Operator secret, managed nodes, pairing names, aliases, and sibling pins from this adopting Controller onto the other adoptee Controller. Does not copy Instance. Currently it works only over USB: stop BLE, Auto Wi-Fi, and TCP. The adopting Controller sends a one-hop offer; it is not announced. Adoptee Controller initiates the process by pressing \"I am up for adoption\". The adopting Controller then presses \"Adopt\". Visually verify the six digit adoption code, then \"Approve\". Adoptee Controller must quit and reopen after adoption for the new Operator id to take effect." }
                         {clone_identity_controls(clone, backend, adopt_alias, activity_log)}
                     }
                 }
@@ -7082,7 +7204,7 @@ fn sibling_controller_list(
                             }
                         }
                     }
-                    p { class: "twisty-address", "{sibling.instance_hash}" }
+                    {sibling_identity_facts(sibling)}
                     if sibling.is_self {
                         div { class: "actions",
                             button {
@@ -7108,6 +7230,25 @@ fn sibling_controller_list(
                     }
                 }
             }
+        }
+    }
+}
+
+fn sibling_identity_facts(sibling: &crate::identity_clone::SiblingControllerView) -> Element {
+    rsx! {
+        p { class: "twisty-address",
+            strong { "Sibling identity hash: " }
+            "{sibling.instance_hash}"
+        }
+        if let Some(address) = sibling.sync_address.as_deref() {
+            p { class: "twisty-address",
+                strong { "Sibling sync address: " }
+                "{address}"
+            }
+        }
+        p { class: "twisty-address",
+            strong { "Last synced: " }
+            "{sibling.last_synced}"
         }
     }
 }
@@ -7172,7 +7313,7 @@ fn sibling_controller_editor(
                             }
                         }
                     }
-                    p { class: "twisty-address", "{sibling.instance_hash}" }
+                    {sibling_identity_facts(sibling)}
                     if sibling.is_self {
                         div { class: "actions",
                             button {
@@ -7354,12 +7495,12 @@ fn clone_identity_controls(
         if clone.dest_waiting && clone.incoming_source.is_none() {
             p { class: "note", "Waiting to be adopted. The other app should press Adopt." }
         } else if clone.dest_accepted {
-            p { class: "note", "Waiting for the other app to Approve." }
+            p { class: "note", "Approved on this app. Copying the Operator from the other controller." }
         } else if clone.source_accepted {
-            p { class: "note", "Adoption approved. Waiting for the other app to finish." }
+            p { class: "note", "Approved on this app. Waiting for the other controller to finish copying the Operator." }
         }
         div { class: "actions",
-            if clone.incoming_source.is_some() && !clone.dest_accepted {
+            if clone.incoming_digits.is_some() && !clone.dest_accepted {
                 button {
                     class: "button",
                     onclick: move |_| {
@@ -7549,8 +7690,41 @@ fn format_approve_failure(error: &impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::aliases_preserving;
+    use super::{aliases_preserving, displayed_peer_alias, path_row_matches};
+    use crate::backend::PathTableRow;
     use std::collections::HashMap;
+
+    #[test]
+    fn auto_gateway_alias_shows_before_the_field_is_typed() {
+        assert_eq!(
+            displayed_peer_alias(None, Some("Auto gateway")),
+            "Auto gateway"
+        );
+        assert_eq!(
+            displayed_peer_alias(Some("Router"), Some("Auto gateway")),
+            "Router"
+        );
+        assert_eq!(displayed_peer_alias(Some(""), Some("Auto gateway")), "");
+    }
+
+    #[test]
+    fn path_filter_matches_an_alias_inside_any_column() {
+        let row = PathTableRow {
+            destination: "bf7fbfea (Hv4A/RC)".into(),
+            destination_full: "bf7fbfea6f1da276bde9175c2544fa6d".into(),
+            hops: "2".into(),
+            via: "28352b3d (Hv4A/TP)".into(),
+            via_full: "28352b3d112233445566778899aabbcc".into(),
+            interface: "bluetooth-peer 12ea".into(),
+            learned: "09:04:37".into(),
+            expires: "in 5h".into(),
+        };
+        assert!(path_row_matches(&row, "hv4a/rc"));
+        assert!(path_row_matches(&row, "hv4a/tp"));
+        assert!(path_row_matches(&row, "2544fa6d"));
+        assert!(path_row_matches(&row, "12ea"));
+        assert!(!path_row_matches(&row, "sydney"));
+    }
 
     #[test]
     fn aliases_preserving_keeps_the_focused_typed_value() {

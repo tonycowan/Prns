@@ -1,6 +1,8 @@
 use std::string::String;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::watch;
+
 use crate::byte_stream::framing;
 use crate::reconnect::ReconnectPolicy;
 use crate::tcp::{connect, tune_for_tunnel, write_progress_timeout, TcpConnectionSettings};
@@ -20,6 +22,8 @@ pub struct TcpClientInterface {
     id: InterfaceId,
     /// Shared so an operator can redial a new host without tearing the interface down; the run loop reads it before every connect.
     target: Arc<Mutex<String>>,
+    /// Bumped by [`TcpClientControl::retarget`] so a live session drops and dials the new host.
+    target_epoch: Arc<watch::Sender<u64>>,
     channel_tag: std::vec::Vec<u8>,
     policy: EffectiveInterfacePolicy,
     connection: TcpConnectionSettings,
@@ -175,9 +179,11 @@ impl TcpClientInterface {
         connection: TcpConnectionSettings,
     ) -> Self {
         let channel_tag = channel_tag(&target, framing);
+        let (target_epoch, _) = watch::channel(0);
         Self {
             id,
             target: Arc::new(Mutex::new(target)),
+            target_epoch: Arc::new(target_epoch),
             channel_tag,
             policy,
             connection,
@@ -202,11 +208,47 @@ impl TcpClientInterface {
         Arc::clone(&self.target)
     }
 
+    /// Shared dial target and enable lever. The running interface keeps the same handles.
+    #[must_use]
+    pub fn control(&self) -> TcpClientControl {
+        TcpClientControl {
+            target: Arc::clone(&self.target),
+            target_epoch: Arc::clone(&self.target_epoch),
+            status: self.status.clone(),
+        }
+    }
+
     pub fn retarget(&self, target: impl Into<String>) {
-        *self
-            .target
-            .lock()
-            .expect("tcp client target mutex poisoned") = target.into();
+        self.control().retarget(target);
+    }
+}
+
+/// Live TCP client dial target. Cloning shares the running interface's target and status.
+#[derive(Clone)]
+pub struct TcpClientControl {
+    target: Arc<Mutex<String>>,
+    target_epoch: Arc<watch::Sender<u64>>,
+    status: TokioInterfaceStatus,
+}
+
+impl TcpClientControl {
+    #[must_use]
+    pub fn target(&self) -> Option<String> {
+        self.target.lock().ok().map(|target| target.clone())
+    }
+
+    #[must_use]
+    pub fn status(&self) -> TokioInterfaceStatus {
+        self.status.clone()
+    }
+
+    pub fn retarget(&self, target: impl Into<String>) {
+        let Ok(mut slot) = self.target.lock() else {
+            return;
+        };
+        *slot = target.into();
+        self.target_epoch
+            .send_modify(|epoch| *epoch = epoch.saturating_add(1));
     }
 }
 
@@ -243,12 +285,24 @@ impl Interface for TcpClientInterface {
         > = None;
         let mut reconnect_attempts = 0u32;
         let mut reconnect = self.connection.reconnect_policy.schedule();
+        let mut target_epoch = self.target_epoch.subscribe();
         loop {
+            self.status.wait_until_enabled().await;
             let target = self
                 .target
                 .lock()
                 .expect("tcp client target mutex poisoned")
                 .clone();
+            if target.is_empty() {
+                self.status.set_connection(ConnectionState::Disconnected);
+                let _ = target_epoch.borrow_and_update();
+                tokio::select! {
+                    _ = self.status.wait_until_disabled() => {}
+                    _ = target_epoch.changed() => {}
+                }
+                continue;
+            }
+            let _ = target_epoch.borrow_and_update();
             #[cfg(feature = "tracing")]
             let connected = tracing::Instrument::instrument(
                 connect(target.as_str(), self.connection),
@@ -281,44 +335,54 @@ impl Interface for TcpClientInterface {
                     started,
                 };
                 let write_progress_timeout = write_progress_timeout(self.connection.tunnel);
-                match self.framing {
-                    TcpWireFraming::Hdlc => {
-                        framing::serve_with_write_progress_timeout::<
-                            framing::HdlcFraming,
-                            { tcp::READ_BUF_LEN },
-                            { tcp::FRAMED_LEN },
-                            _,
-                            _,
-                        >(
-                            stream,
-                            buffers.get_or_insert_with(framing::FramedBuffers::new),
-                            &mut seam,
-                            &mut meters,
-                            write_progress_timeout,
-                        )
-                        .await;
-                    }
-                    TcpWireFraming::Kiss => {
-                        framing::serve_with_write_progress_timeout::<
-                            framing::KissFraming,
-                            { tcp::READ_BUF_LEN },
-                            { tcp::KISS_FRAMED_LEN },
-                            _,
-                            _,
-                        >(
-                            stream,
-                            kiss_buffers.get_or_insert_with(framing::FramedBuffers::new),
-                            &mut seam,
-                            &mut meters,
-                            write_progress_timeout,
-                        )
-                        .await;
-                    }
-                }
+                let session_status = self.status.clone();
+                let interrupted = tokio::select! {
+                    _ = async {
+                        match self.framing {
+                            TcpWireFraming::Hdlc => {
+                                framing::serve_with_write_progress_timeout::<
+                                    framing::HdlcFraming,
+                                    { tcp::READ_BUF_LEN },
+                                    { tcp::FRAMED_LEN },
+                                    _,
+                                    _,
+                                >(
+                                    stream,
+                                    buffers.get_or_insert_with(framing::FramedBuffers::new),
+                                    &mut seam,
+                                    &mut meters,
+                                    write_progress_timeout,
+                                )
+                                .await;
+                            }
+                            TcpWireFraming::Kiss => {
+                                framing::serve_with_write_progress_timeout::<
+                                    framing::KissFraming,
+                                    { tcp::READ_BUF_LEN },
+                                    { tcp::KISS_FRAMED_LEN },
+                                    _,
+                                    _,
+                                >(
+                                    stream,
+                                    kiss_buffers.get_or_insert_with(framing::FramedBuffers::new),
+                                    &mut seam,
+                                    &mut meters,
+                                    write_progress_timeout,
+                                )
+                                .await;
+                            }
+                        }
+                    } => false,
+                    _ = session_status.wait_until_disabled() => true,
+                    _ = target_epoch.changed() => true,
+                };
                 crate::diagnostic_log::debug!(
                     "tcp-client [{interface_origin}]: dropped {target}, retrying"
                 );
                 self.status.set_connection(ConnectionState::Disconnected);
+                if interrupted {
+                    continue;
+                }
                 reconnect_attempts = 0;
                 reconnect.record_connection_lifetime(connected_at.elapsed());
             } else {

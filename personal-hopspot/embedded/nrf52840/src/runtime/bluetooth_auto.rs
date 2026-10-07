@@ -894,7 +894,11 @@ impl BleSource for NrfBleSource {
     async fn recv_frame(&mut self, out: &mut [u8]) -> Result<usize, Closed> {
         match select(self.data_in.receive(), self.slot.wait_for_close()).await {
             Either::First(frame) => {
+                #[cfg(feature = "usb-debug-log")]
+                trace_ble_yield("recv", 0).await;
                 let frame = frame.lock().await;
+                #[cfg(feature = "usb-debug-log")]
+                trace_ble_yield("copy", frame.len()).await;
                 let len = frame.len().min(out.len());
                 out[..len].copy_from_slice(&frame[..len]);
                 Ok(len)
@@ -1037,6 +1041,20 @@ async fn notify_with_backpressure(
     }
 }
 
+fn trace_ble(label: &'static str, len: usize) {
+    #[cfg(feature = "usb-debug-log")]
+    log::info!("ble: {label} {len}");
+    #[cfg(not(feature = "usb-debug-log"))]
+    let _ = (label, len);
+}
+
+#[cfg(feature = "usb-debug-log")]
+async fn trace_ble_yield(label: &'static str, len: usize) {
+    trace_ble(label, len);
+    #[cfg(feature = "usb-debug-log")]
+    yield_now().await;
+}
+
 fn log_ble_failure(code: BleFailureCode) {
     #[cfg(feature = "usb-debug-log")]
     log::info!("ble: fail {} {}", code as u8, code.name());
@@ -1104,6 +1122,7 @@ fn process_unacknowledged_write(
     data_in_tx: &Sender<'static, Mtx, SharedFrameLease, DATA_TOKEN_DEPTH>,
     reassembler: &mut Reassembler<GATT_REASSEMBLY_CAP>,
 ) -> IngressAdmission {
+    trace_ble("wr", write.value().len());
     match write.target() {
         WriteTarget::Control => match slot.control_in.try_enqueue_wire(write.value()) {
             ControlOutboxAdmission::Enqueued => {
@@ -1126,6 +1145,7 @@ fn process_unacknowledged_write(
                 return IngressAdmission::Admitted;
             };
             if let Some(frame) = reassembler.absorb(&fragment) {
+                trace_ble("frame", frame.len());
                 return admit_inbound_frame(data_in_tx, frame);
             }
         }
@@ -1140,6 +1160,7 @@ fn process_unacknowledged_write(
                     return IngressAdmission::Admitted;
                 };
                 if let Some(frame) = reassembler.absorb(&fragment) {
+                    trace_ble("frame", frame.len());
                     return admit_inbound_frame(data_in_tx, frame);
                 }
             }
@@ -1154,6 +1175,8 @@ async fn process_acknowledged_writes(slot: &'static LinkChannels) {
     let mut reassembler: Reassembler<GATT_REASSEMBLY_CAP> = Reassembler::new();
     loop {
         let write = slot.acknowledged_writes.receive().await;
+        #[cfg(feature = "usb-debug-log")]
+        trace_ble_yield("ack", write.value().len()).await;
         let admitted = match write.target() {
             WriteTarget::Control => {
                 loop {
@@ -1253,6 +1276,8 @@ async fn l2cap_pump(
             if frame.len() < len {
                 continue;
             }
+            #[cfg(feature = "usb-debug-log")]
+            trace_ble_yield("l2cap", len).await;
             if admit_inbound_frame_with_backpressure(&data_in_tx, &frame[..len])
                 .await
                 .is_err()
@@ -1633,6 +1658,8 @@ pub(super) async fn serve_slot(
             } => {
                 let ConnectionSlotOwners { worker, link } = lease.activate();
                 slot.set_address(conn.peer_address().bytes());
+                #[cfg(feature = "usb-debug-log")]
+                trace_ble_yield("accept", 0).await;
                 tune_link(&mut conn);
                 serve_peripheral(l2cap, server, &conn, slot, hub, link, &worker).await;
             }

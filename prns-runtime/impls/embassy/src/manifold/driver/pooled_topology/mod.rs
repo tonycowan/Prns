@@ -296,6 +296,11 @@ pub(crate) async fn run_pooled<
                         // Fleet lanes have no descriptor of their own, so their per-member stamp
                         // remains authoritative instead.
                         let source = inbound_source(*lane_id, stamped_source, descriptors);
+                        #[cfg(feature = "log")]
+                        {
+                            log::info!("lane {}b", frame.len());
+                            yield_now().await;
+                        }
                         let mut unmasked = [0u8; EMBEDDED_MAX_WIRE_FRAME_LEN];
                         let bytes = match ifac_for(ifacs, *lane_id) {
                             Some(entry) => {
@@ -325,6 +330,13 @@ pub(crate) async fn run_pooled<
                             None => frame,
                         };
                         let now = host.now();
+                        #[cfg(feature = "log")]
+                        let rx_len = bytes.len();
+                        #[cfg(feature = "log")]
+                        {
+                            note_inbound(bytes, source);
+                            yield_now().await;
+                        }
                         let mut packet = ClassifiedInboundPacket::classify(InboundPacket {
                             arrived_at: now,
                             source_interface: source,
@@ -348,6 +360,8 @@ pub(crate) async fn run_pooled<
                                         &mut pacers,
                                         now,
                                         &mut |journaled| {
+                                            #[cfg(feature = "log")]
+                                            note_journaled(&journaled);
                                             persistence.observe(&journaled, now);
                                             on_journaled(journaled);
                                         },
@@ -356,6 +370,11 @@ pub(crate) async fn run_pooled<
                                 },
                             },
                         );
+                        #[cfg(feature = "log")]
+                        {
+                            log::info!("rx back {rx_len}b");
+                            yield_now().await;
+                        }
                         let completion_delta = fulfill_owed_work_inline(
                             owed_work,
                             &mut *engine,
@@ -368,10 +387,17 @@ pub(crate) async fn run_pooled<
                             now,
                             &mut should_prove,
                             &mut |journaled| {
+                                #[cfg(feature = "log")]
+                                note_journaled(&journaled);
                                 persistence.observe(&journaled, now);
                                 on_journaled(journaled);
                             },
                         );
+                        #[cfg(feature = "log")]
+                        {
+                            log::info!("owed back");
+                            yield_now().await;
+                        }
                         account_protocol_violation(
                             frame_accounting_statuses,
                             source,
@@ -685,6 +711,39 @@ pub(crate) async fn run_pooled<
                 store.signal_interface_counts_changed();
             }
         }
+    }
+}
+
+#[cfg(feature = "log")]
+fn note_inbound(bytes: &[u8], source: crate::interfaces::InterfaceId) {
+    let header = crate::wire::WirePacketHeader::parse(bytes)
+        .ok()
+        .map(|(header, _)| header);
+    let id = source.as_bytes();
+    log::info!(
+        "rx {}b {:?} {:?} {:02x}{:02x}{:02x}{:02x}",
+        bytes.len(),
+        header.map(|header| header.packet_type),
+        header.map(|header| header.context),
+        id[0],
+        id[1],
+        id[2],
+        id[3]
+    );
+}
+
+#[cfg(feature = "log")]
+fn note_journaled(journaled: &Journaled<'_>) {
+    match journaled {
+        Journaled::LinkEstablished(_) => log::info!("journal link-up"),
+        Journaled::RequestReceived { data, .. } => log::info!(
+            "journal request kind={:?} bytes={}",
+            data.get(1).copied(),
+            data.len()
+        ),
+        Journaled::LinkClosed { reason, .. } => log::info!("journal link-close {reason:?}"),
+        Journaled::Delivered(_) => log::info!("journal delivered"),
+        _ => {}
     }
 }
 

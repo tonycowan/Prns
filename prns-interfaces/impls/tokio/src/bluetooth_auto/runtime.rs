@@ -222,6 +222,7 @@ enum Step<L: BleLink> {
     Closed(BleIdentity, BleAddress),
     Disabled,
     DiscoveryGroups(DiscoveryGroupSet),
+    AdapterMoved,
 }
 
 pub struct BluetoothAuto<B, const MAX_PEERS: usize> {
@@ -338,7 +339,6 @@ impl BluetoothAutoStatus {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios", test))]
     pub(crate) fn clear_failure(&self) {
         self.shared.failed.store(false, Ordering::Relaxed);
         if let Ok(mut slot) = self.shared.failure_reason.lock() {
@@ -558,6 +558,8 @@ where
         status.mark_up();
         manager.start(&mut |action| pending.push(action));
         apply_radio::<B, MAX_PEERS>(&mut pending, &mut members, &mut backend).await;
+        let mut adapter_watch: Pin<Box<dyn Future<Output = ()> + Send>> =
+            Box::pin(backend.watch_adapter());
         loop {
             if !status.is_enabled() {
                 let _ = backend.set_advertising(AdvertisingMode::Off).await;
@@ -584,9 +586,47 @@ where
                 Some((identity, address)) = closed_rx.recv() => Step::Closed(identity, address),
                 () = status.wait_until_disabled() => Step::Disabled,
                 groups = status.wait_for_discovery_groups_change(&discovery_groups) => Step::DiscoveryGroups(groups),
+                () = &mut adapter_watch => Step::AdapterMoved,
             };
             match step {
                 Step::Disabled => {}
+                Step::AdapterMoved => {
+                    // The BlueZ object is already gone. Advertising and device removal go
+                    // through that object and can sit on a 120s D-Bus timeout, so drop the
+                    // peers locally and let the replacement backend discard the old session.
+                    for (_, member) in members.drain() {
+                        member.attached.teardown();
+                    }
+                    handshakes = FuturesUnordered::new();
+                    pending.clear();
+                    status.set_members(std::vec::Vec::new());
+                    status.mark_failed(Some("BlueZ adapter changed; reopening"));
+                    let reopened = match backend.adopt_replacement_adapter().await {
+                        Ok(()) => {
+                            status.clear_failure();
+                            true
+                        }
+                        Err(error) => {
+                            crate::diagnostic_log::warn!(
+                                "bluetooth: BlueZ adapter reopen failed: {error:?}"
+                            );
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            false
+                        }
+                    };
+                    adapter_watch = Box::pin(backend.watch_adapter());
+                    if reopened && status.is_enabled() {
+                        prepare_radio::<B, MAX_PEERS>(
+                            &mut backend,
+                            &mut local,
+                            configured_capabilities,
+                        )
+                        .await;
+                        manager = ConnectionPolicy::<MAX_PEERS, DIAL_TRACK>::new(local);
+                        manager.start(&mut |action| pending.push(action));
+                        apply_radio::<B, MAX_PEERS>(&mut pending, &mut members, &mut backend).await;
+                    }
+                }
                 Step::DiscoveryGroups(groups) => {
                     let _ = backend.set_advertising(AdvertisingMode::Off).await;
                     let _ = backend.set_scanning(ScanningMode::Off).await;

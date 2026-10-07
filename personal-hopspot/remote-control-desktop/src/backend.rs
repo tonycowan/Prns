@@ -30,22 +30,22 @@ use personal_rns::node_introspection::{logical_interface_inventory, FrameAccount
 use personal_rns::prelude::*;
 use personal_rns::remote_control::{
     parse_controller_public_keys, parse_wifi_station_rssi_dbm, parse_wifi_station_ssid,
-    ReceiveRemoteControlControllerPairingOfferOutcome, RemoteControlApplyOutcome,
-    RemoteControlAuthorizeControllerOutcome, RemoteControlGroupOutcome, RemoteControlInterfaceCard,
-    RemoteControlInterfaceConfigOutcome, RemoteControlInterfaceContinuation,
-    RemoteControlInterfaceEntry, RemoteControlInterfaceGroup, RemoteControlInterfacePage,
-    RemoteControlInterfacePeer, RemoteControlInterfacePeerPage, RemoteControlInterfacePeersOutcome,
-    RemoteControlInterfacePower, RemoteControlLoRaOutcome, RemoteControlLoRaProfile,
-    RemoteControlModeOutcome, RemoteControlNetworkTransport, RemoteControlNetworkTransportOutcome,
-    RemoteControlPairingEndpoint, RemoteControlPairingInvitationCode,
-    RemoteControlPathContinuation, RemoteControlPathEntry, RemoteControlPathPage,
-    RemoteControlPowerOutcome, RemoteControlRequestKind, RemoteControlRequestSet,
-    RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome, RemoteControlTargetAccess,
-    RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome, RemoteControlTcpClientStatus,
-    RemoteControlWifiStageOutcome, RemoteControlWifiStation, FIRMWARE_UPDATE_APPLICATION_ASPECTS,
-    REMOTE_CONTROL_APPLICATION_ASPECTS, REMOTE_CONTROL_APPLICATION_NAME,
-    REMOTE_CONTROL_PAIRING_APPLICATION_ASPECTS, REMOTE_CONTROL_PAIRING_APPLICATION_NAME,
-    REMOTE_CONTROL_WIFI_CONFIRMATION_WINDOW_SECONDS,
+    remote_control_destination_hash, ReceiveRemoteControlControllerPairingOfferOutcome,
+    RemoteControlApplyOutcome, RemoteControlAuthorizeControllerOutcome, RemoteControlGroupOutcome,
+    RemoteControlInterfaceCard, RemoteControlInterfaceConfigOutcome,
+    RemoteControlInterfaceContinuation, RemoteControlInterfaceEntry, RemoteControlInterfaceGroup,
+    RemoteControlInterfacePage, RemoteControlInterfacePeer, RemoteControlInterfacePeerPage,
+    RemoteControlInterfacePeersOutcome, RemoteControlInterfacePower, RemoteControlLoRaOutcome,
+    RemoteControlLoRaProfile, RemoteControlModeOutcome, RemoteControlNetworkTransport,
+    RemoteControlNetworkTransportOutcome, RemoteControlPairingEndpoint,
+    RemoteControlPairingInvitationCode, RemoteControlPathContinuation, RemoteControlPathEntry,
+    RemoteControlPathPage, RemoteControlPowerOutcome, RemoteControlRequestKind,
+    RemoteControlRequestSet, RemoteControlRevokeControllerOutcome, RemoteControlSleepOutcome,
+    RemoteControlTargetAccess, RemoteControlTcpClientConfig, RemoteControlTcpClientOutcome,
+    RemoteControlTcpClientStatus, RemoteControlWifiStageOutcome, RemoteControlWifiStation,
+    FIRMWARE_UPDATE_APPLICATION_ASPECTS, REMOTE_CONTROL_APPLICATION_ASPECTS,
+    REMOTE_CONTROL_APPLICATION_NAME, REMOTE_CONTROL_PAIRING_APPLICATION_ASPECTS,
+    REMOTE_CONTROL_PAIRING_APPLICATION_NAME, REMOTE_CONTROL_WIFI_CONFIRMATION_WINDOW_SECONDS,
 };
 use personal_rns::routing::announce::{derive_destination_hash, expand_name, DottedNameHash};
 use personal_rns::routing::NextHop;
@@ -66,25 +66,27 @@ use prns_ffi::bluetooth_auto::android::AndroidBleBackend;
 use tokio::sync::Notify;
 
 use crate::identity_clone::{
-    evaluate_clone_locality, identity_clone_destination_hash, parse_clone_siblings,
-    parse_identity_clone_message, usb_supervisor_link_is_up, CloneLocality, ControllerAppState,
+    evaluate_clone_locality, identity_clone_destination_hash,
+    identity_clone_offer_destination_hash, parse_clone_siblings, parse_identity_clone_message,
+    usb_supervisor_link_is_up, write_clone_payload, CloneLocality, ControllerAppState,
     DestCloneSession, IdentityClone, IdentityCloneAccept, IdentityCloneAnnounce,
     IdentityCloneHello, IdentityCloneInbound, IdentityClonePayload, IdentityCloneShared,
     IdentityCloneView, SourceCloneSession, IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_ASPECTS,
-    IDENTITY_CLONE_NONCE_LEN, IDENTITY_CLONE_REQUEST_ENDPOINT_ID,
+    IDENTITY_CLONE_NONCE_LEN, IDENTITY_CLONE_OFFER_ASPECTS, IDENTITY_CLONE_REQUEST_ENDPOINT_ID,
 };
 use crate::roster_sync::{
-    access_for, adopt_sibling, attention_for_target, decode_labels, encode_labels,
-    forget_sibling_locally, forget_target_locally, hydrate_accesses_from_snapshot,
-    import_seed_labels, load_replica, looking_instance, merge_roster, next_sibling_alias,
-    next_target_alias, note_local_label, note_local_upsert, parse_replica_reply,
-    peer_alias_is_syncable, peer_alias_link_is_local_only, peer_alias_value_is_syncable,
-    persist_replica, replica_forgets_target, replica_known_targets, replica_message, replica_path,
-    retract_unsyncable_peer_alias_values, roster_sync_destination_hash, sibling_alias_is_syncable,
-    strip_local_sibling_alias, write_pull, RosterDelta, RosterLabel, RosterLabelKind, RosterShared,
-    RosterSync, TargetAttention, AUTO_GATEWAY_ALIAS_LINK, AUTO_GATEWAY_PEER_ALIAS,
-    ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS, ROSTER_SYNC_REQUEST_ENDPOINT_ID,
-    THIS_CONTROLLER_ALIAS_LINK, THIS_CONTROLLER_PEER_ALIAS,
+    access_for, adopt_sibling, attention_for_target, bind_actor, decode_labels, decode_member_list,
+    encode_labels, encode_member_list, forget_sibling_locally, forget_target_locally,
+    hydrate_accesses_from_snapshot, import_seed_labels, load_replica, looking_instance,
+    merge_roster, next_sibling_alias, next_target_alias, note_local_label, note_local_upsert,
+    parse_replica_reply, peer_alias_is_syncable, peer_alias_link_is_local_only,
+    peer_alias_value_is_syncable, persist_replica, plan_changes_managed_nodes,
+    replica_forgets_target, replica_known_targets, replica_message, replica_path,
+    retract_unsyncable_peer_alias_values, roster_sync_address_hex, roster_sync_destination_hash,
+    sibling_alias_is_syncable, strip_local_sibling_alias, RosterDelta, RosterLabel,
+    RosterLabelKind, RosterShared, RosterSync, TargetAttention, AUTO_GATEWAY_ALIAS_LINK,
+    AUTO_GATEWAY_PEER_ALIAS, ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS,
+    ROSTER_SYNC_REQUEST_ENDPOINT_ID, THIS_CONTROLLER_ALIAS_LINK, THIS_CONTROLLER_PEER_ALIAS,
 };
 
 const IDENTITY_HASH_BYTES: usize = 16;
@@ -116,8 +118,9 @@ const INTERFACE_PAGE_LIMIT: usize = 16;
 const INVENTORY_RECOVERY_GAP: Duration = Duration::from_secs(2);
 const ACTIVITY_CONTROLLER_SCOPE: &str = "controller";
 const DEFAULT_TCP_TARGET: &str = "127.0.0.1:4242";
-#[allow(dead_code)] // automatic sibling sync is paused; Fetch Sibling Node Info pulls on demand
-const ROSTER_ANNOUNCE_GAP: Duration = Duration::from_secs(30);
+const ROSTER_WARM_GAP: Duration = Duration::from_secs(3);
+const ROSTER_COLD_BACKOFF_MAX: Duration = Duration::from_secs(30);
+const ROSTER_FETCH_WAIT: Duration = Duration::from_secs(20);
 const TARGET_MONITOR_TTL: Duration = Duration::from_secs(10 * 60);
 /// After Connect drops a route, prefer a direct BLE path when we already have that peer live.
 const DIRECT_PATH_GRACE: Duration = Duration::from_secs(4);
@@ -135,6 +138,8 @@ pub struct ControllerIdentity {
     pub allow_list_key: String,
     pub operator_secret_path: String,
     pub instance_hash: String,
+    /// Destination other siblings use to find this install. Absent when it matches the identity hash.
+    pub sync_address: Option<String>,
     pub instance_secret_path: String,
 }
 
@@ -567,11 +572,11 @@ impl RemoteControlBackend {
     }
 
     /// Destination-hash → alias map used to title announces (and path-table hashes).
-    pub fn announce_destination_labels(&self) -> HashMap<String, String> {
+    pub async fn announce_destination_labels(&self) -> HashMap<String, String> {
         let Ok(session) = self.session() else {
             return HashMap::new();
         };
-        known_path_node_labels(session)
+        path_table_labels(session).await
     }
 
     /// Short destination title. A known destination hash keeps its alias. Otherwise a
@@ -673,9 +678,19 @@ impl RemoteControlBackend {
                     .siblings
                     .iter()
                     .map(|keys| {
+                        let hash = keys.identity_hash();
+                        let instance_hash = encode_hex(hash.as_bytes());
+                        let last_synced = roster
+                            .last_synced_ms
+                            .get(&instance_hash)
+                            .copied()
+                            .map(format_announce_millis)
+                            .unwrap_or_else(|| "Not yet".to_string());
                         (
-                            encode_hex(keys.identity_hash().as_bytes()),
-                            roster.heard_sibling(keys.identity_hash()),
+                            instance_hash,
+                            roster.heard_sibling(hash),
+                            roster_sync_address_hex(hash),
+                            last_synced,
                         )
                     })
                     .collect::<Vec<_>>();
@@ -684,7 +699,7 @@ impl RemoteControlBackend {
                     session,
                     hashes
                         .iter()
-                        .map(|(hash, _)| hash.as_str())
+                        .map(|(hash, _, _, _)| hash.as_str())
                         .filter(|hash| sibling_alias_is_syncable(hash, &self_hash)),
                 );
                 let aliases = session
@@ -693,7 +708,7 @@ impl RemoteControlBackend {
                     .expect("sibling aliases mutex poisoned");
                 let mut siblings = hashes
                     .into_iter()
-                    .map(|(instance_hash, heard)| {
+                    .map(|(instance_hash, heard, sync_address, last_synced)| {
                         let is_self = instance_hash == self_hash;
                         crate::identity_clone::SiblingControllerView {
                             alias: aliases
@@ -701,6 +716,8 @@ impl RemoteControlBackend {
                                 .cloned()
                                 .unwrap_or_else(|| next_sibling_alias(&aliases)),
                             instance_hash,
+                            sync_address,
+                            last_synced,
                             heard,
                             is_self,
                         }
@@ -733,7 +750,10 @@ impl RemoteControlBackend {
                 .as_ref()
                 .and_then(|source| source.transcript)
                 .map(|transcript| transcript.confirmation_code().to_string()),
-            source_accepted: shared.source.as_ref().is_some_and(|source| source.accepted),
+            source_accepted: shared
+                .source
+                .as_ref()
+                .is_some_and(|source| source.accepted && !source.handoff_complete),
             in_progress: shared.in_progress(),
             siblings,
             notice: shared.notice.clone(),
@@ -781,30 +801,11 @@ impl RemoteControlBackend {
         let instance_material =
             personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
         let source_hash = instance_material.identity_hash();
-        let destination = identity_clone_destination_hash(source_hash)
-            .ok_or_else(|| BackendError::Clone("clone destination name is invalid".to_string()))?;
         let mut source_nonce = [0u8; IDENTITY_CLONE_NONCE_LEN];
         let mut entropy = OsRuntimeEntropy::try_new()
             .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         entropy.fill_random(&mut source_nonce);
-        let announce = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
-        let mut app_data = [0u8; 128];
-        let app_data_len = announce
-            .write(&mut app_data)
-            .ok_or_else(|| BackendError::Clone("clone announce is too large".to_string()))?;
-        let bytes = personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(
-            &app_data[..app_data_len],
-        )
-        .map_err(|_| BackendError::Clone("clone announce app data is too large".to_string()))?;
-        session
-            .handle
-            .announce_now(AnnounceNow {
-                destination,
-                target: AnnounceTarget::AllInterfaces,
-                app_data: AnnounceAppData::Data(bytes),
-            })
-            .await
-            .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
+        Self::send_clone_offer(session, &instance_material, source_nonce).await?;
         let mut shared = session
             .clone
             .lock()
@@ -816,10 +817,12 @@ impl RemoteControlBackend {
             transcript: None,
             accepted: false,
             payload: None,
+            alias: String::new(),
+            handoff_complete: false,
             last_announce: Instant::now(),
         });
         shared.notice = Some(
-            "Adoption announce sent on USB. The other app must already have pressed I am up for adoption."
+            "Adoption offer sent on USB. The other app must already have pressed I am up for adoption."
                 .to_string(),
         );
         shared.error = None;
@@ -827,6 +830,7 @@ impl RemoteControlBackend {
     }
 
     pub async fn advance_clone(&self) -> Result<(), BackendError> {
+        self.finish_clone_handoff();
         if let Err(error) = self.refresh_clone_source_announce().await {
             let Ok(session) = self.session() else {
                 return Err(error);
@@ -850,7 +854,7 @@ impl RemoteControlBackend {
 
     async fn refresh_clone_source_announce(&self) -> Result<(), BackendError> {
         let session = self.session()?;
-        let (destination, source_nonce) = {
+        let source_nonce = {
             let mut shared = session
                 .clone
                 .lock()
@@ -863,35 +867,51 @@ impl RemoteControlBackend {
                 return Ok(());
             }
             source.last_announce = Instant::now();
-            (
-                identity_clone_destination_hash(source.source_hash).ok_or_else(|| {
-                    BackendError::Clone("clone destination name is invalid".to_string())
-                })?,
-                source.source_nonce,
-            )
+            source.source_nonce
         };
         let instance = load_instance_secret(&session.identities_dir)?;
         let instance_material =
             personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
-        let announce = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
-        let mut app_data = [0u8; 128];
-        let app_data_len = announce
-            .write(&mut app_data)
-            .ok_or_else(|| BackendError::Clone("clone announce is too large".to_string()))?;
-        let bytes = personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(
-            &app_data[..app_data_len],
-        )
-        .map_err(|_| BackendError::Clone("clone announce app data is too large".to_string()))?;
+        Self::send_clone_offer(session, &instance_material, source_nonce).await
+    }
+
+    async fn send_clone_offer(
+        session: &ControllerSession,
+        instance_material: &personal_rns::identity::PrivateIdentityMaterial,
+        source_nonce: [u8; IDENTITY_CLONE_NONCE_LEN],
+    ) -> Result<(), BackendError> {
+        let offer = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
+        let mut bytes = [0u8; 128];
+        let len = offer
+            .write(&mut bytes)
+            .ok_or_else(|| BackendError::Clone("adoption offer is too large".to_string()))?;
+        let destination = identity_clone_offer_destination_hash()
+            .ok_or_else(|| BackendError::Clone("adoption offer address is invalid".to_string()))?;
         session
             .handle
-            .announce_now(AnnounceNow {
-                destination,
-                target: AnnounceTarget::AllInterfaces,
-                app_data: AnnounceAppData::Data(bytes),
-            })
+            .send_plain_packet(destination, &bytes[..len])
             .await
             .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         Ok(())
+    }
+
+    /// The adoption offer is a plain packet and does not create a path. The
+    /// approval link is still a direct link, so ask the peer for a one-hop
+    /// path reply. That reply is not rebroadcast.
+    async fn ensure_clone_link_route(
+        session: &ControllerSession,
+        destination: personal_rns::wire::DestinationHash,
+    ) -> Result<(), BackendError> {
+        session
+            .handle
+            .request_path(destination)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                BackendError::Clone(format!(
+                    "the adoption offer arrived, but the approval link has no route: {error:?}"
+                ))
+            })
     }
 
     async fn send_pending_clone_hello(&self) -> Result<(), BackendError> {
@@ -958,6 +978,9 @@ impl RemoteControlBackend {
         let hello_len = hello
             .write(&mut hello_bytes)
             .ok_or_else(|| BackendError::Clone("clone hello is too large".to_string()))?;
+        // The plain offer does not install a route. The approval link still
+        // needs one, so ask the adopter for a one-hop path reply before opening it.
+        Self::ensure_clone_link_route(&session, destination).await?;
         let link_id = session
             .handle
             .establish_link(destination)
@@ -1007,12 +1030,14 @@ impl RemoteControlBackend {
         }
         let session = self.session()?;
         let secret = load_controller_secret(&session.identities_dir)?;
-        let accesses = {
+        let members = {
             let roster = session
                 .roster
                 .lock()
                 .map_err(|_| BackendError::Clone("roster lock was poisoned".to_string()))?;
-            roster_accesses_snapshot(&roster.replica).map_err(|error| BackendError::Clone(error))?
+            encode_member_list(&roster.replica.members).ok_or_else(|| {
+                BackendError::Clone("the managed nodes could not be copied".to_string())
+            })?
         };
         let mut shared = session
             .clone
@@ -1036,19 +1061,6 @@ impl RemoteControlBackend {
             roster.replica.siblings.clone()
         };
         if let Some(dest_keys) = source.peer_keys {
-            adopt_sibling(
-                &mut session
-                    .roster
-                    .lock()
-                    .map_err(|_| BackendError::Clone("roster lock was poisoned".to_string()))?
-                    .replica,
-                dest_keys,
-            );
-            remember_sibling_alias(
-                session,
-                &encode_hex(dest_keys.identity_hash().as_bytes()),
-                alias,
-            );
             if !siblings
                 .iter()
                 .any(|sibling| sibling.identity_hash() == dest_keys.identity_hash())
@@ -1070,15 +1082,25 @@ impl RemoteControlBackend {
             )
         };
         persist_session_replica(session);
-        source.payload = Some(IdentityClonePayload {
-            operator_secret: secret,
-            accesses,
-            clock,
-            siblings,
-            labels,
-        });
+        let mut encoded = vec![
+            0u8;
+            1 + personal_rns::IDENTITY_SECRET_KEY_LEN
+                + 4
+                + members.len()
+                + 8
+                + 1
+                + siblings.len().saturating_mul(IDENTITY_PUBLIC_KEY_LEN)
+                + labels.len()
+        ];
+        let encoded_len =
+            write_clone_payload(&secret, &members, clock, &siblings, &labels, &mut encoded)
+                .ok_or_else(|| BackendError::Clone("the operator copy is too large".to_string()))?;
+        encoded.truncate(encoded_len);
+        source.alias = alias.trim().to_string();
+        source.payload = Some(IdentityClonePayload { encoded });
         source.accepted = true;
-        shared.notice = Some("You accepted. Waiting for the other app to Accept.".to_string());
+        shared.notice =
+            Some("Approved. Waiting for the other app to finish copying the Operator.".to_string());
         Ok(())
     }
 
@@ -1118,114 +1140,143 @@ impl RemoteControlBackend {
             dest.accepted = true;
             (dest.destination, dest.announce, transcript)
         };
-        let accept = IdentityCloneAccept::sign(&dest_material, transcript);
-        let mut accept_bytes = [0u8; 256];
-        let accept_len = accept
-            .write(&mut accept_bytes)
-            .ok_or_else(|| BackendError::Clone("clone accept is too large".to_string()))?;
+        {
+            let mut shared = session
+                .clone
+                .lock()
+                .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
+            shared.notice = Some(
+                "Approved on this app. Copying the Operator from the other controller.".to_string(),
+            );
+            shared.error = None;
+        }
+        let mut collected = Vec::new();
+        let mut offset = 0u32;
+        let mut waits = 0u32;
+        let copy = self
+            .pull_clone_payload(
+                &session,
+                destination,
+                &dest_material,
+                transcript,
+                &mut collected,
+                &mut offset,
+                &mut waits,
+            )
+            .await;
+        let (encoded, link_id) = match copy {
+            Ok(link_id) => (collected, link_id),
+            Err(error) => {
+                self.note_clone_failure(&session, &error);
+                return Err(error);
+            }
+        };
+        let applied = self.apply_cloned_payload(&session, announce, &encoded);
+        if let Err(error) = applied {
+            self.note_clone_failure(&session, &error);
+            return Err(error);
+        }
+        let done = IdentityCloneAccept::sign(&dest_material, transcript);
+        let mut done_bytes = [0u8; 256];
+        let Some(done_len) = done.write_done(&mut done_bytes) else {
+            let error =
+                BackendError::Clone("could not tell the other app the copy finished".to_string());
+            self.note_clone_failure(&session, &error);
+            return Err(error);
+        };
+        let mut told = false;
+        let mut last_error = None;
+        for _ in 0..5 {
+            match self
+                .clone_request_on(&session, link_id, &done_bytes[..done_len])
+                .await
+            {
+                Ok(reply)
+                    if !matches!(
+                        parse_identity_clone_message(&reply),
+                        Some(IdentityCloneInbound::Error(_))
+                    ) =>
+                {
+                    told = true;
+                    break;
+                }
+                Ok(_) => {
+                    last_error = Some(BackendError::Clone(
+                        "the other app rejected the finished copy".to_string(),
+                    ));
+                }
+                Err(error) => last_error = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if !told {
+            let error = last_error.unwrap_or_else(|| {
+                BackendError::Clone("the other app was not told that the copy finished".to_string())
+            });
+            self.note_clone_failure(&session, &error);
+            return Err(error);
+        }
+        self.publish_cloned_siblings(&session, &dest_material, announce, alias, &encoded);
+        self.finish_clone_dest(&session);
+        let _ = self.push_roster_to_siblings().await;
+        Ok(())
+    }
+
+    async fn pull_clone_payload(
+        &self,
+        session: &ControllerSession,
+        destination: personal_rns::wire::DestinationHash,
+        dest_material: &personal_rns::identity::PrivateIdentityMaterial,
+        transcript: crate::identity_clone::IdentityCloneTranscript,
+        collected: &mut Vec<u8>,
+        offset: &mut u32,
+        waits: &mut u32,
+    ) -> Result<personal_rns::routing::links::LinkId, BackendError> {
+        Self::ensure_clone_link_route(session, destination).await?;
         let link_id = session
             .handle
             .establish_link(destination)
             .await
             .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
-        for _ in 0..30 {
-            let (reply, _) = session
-                .handle
-                .request(
-                    link_id,
-                    RequestEndpointId::of(IDENTITY_CLONE_REQUEST_ENDPOINT_ID),
-                    &accept_bytes[..accept_len],
-                )
-                .await
-                .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
+        loop {
+            if *waits > 30 {
+                return Err(BackendError::Clone(
+                    "the other app did not finish sending the Operator".to_string(),
+                ));
+            }
+            let accept = IdentityCloneAccept::sign(dest_material, transcript).at_offset(*offset);
+            let mut accept_bytes = [0u8; 256];
+            let accept_len = accept
+                .write(&mut accept_bytes)
+                .ok_or_else(|| BackendError::Clone("clone accept is too large".to_string()))?;
+            let reply = self
+                .clone_request_on(session, link_id, &accept_bytes[..accept_len])
+                .await?;
             match parse_identity_clone_message(&reply) {
                 Some(IdentityCloneInbound::WaitingForSource) => {
+                    *waits = waits.saturating_add(1);
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-                Some(IdentityCloneInbound::Payload {
-                    secret,
-                    accesses,
-                    clock,
-                    siblings,
-                    labels,
+                Some(IdentityCloneInbound::Payload { .. }) => {
+                    collected.clear();
+                    collected.extend_from_slice(&reply);
+                    return Ok(link_id);
+                }
+                Some(IdentityCloneInbound::PayloadChunk {
+                    offset: got,
+                    total,
+                    data,
                 }) => {
-                    let siblings = parse_clone_siblings(siblings).ok_or_else(|| {
-                        BackendError::Clone("clone sibling list was malformed".to_string())
-                    })?;
-                    let clone_labels = decode_labels(labels).unwrap_or_default();
-                    adopt_cloned_identity(
-                        &session.identities_dir,
-                        &session.data_dir,
-                        secret,
-                        accesses,
-                    )?;
-                    let applied_labels = {
-                        let mut roster = session.roster.lock().map_err(|_| {
-                            BackendError::Clone("roster lock was poisoned".to_string())
-                        })?;
-                        roster.replica.clock = clock;
-                        adopt_sibling(&mut roster.replica, announce.source_keys());
-                        for sibling in &siblings {
-                            if sibling.identity_hash() != dest_material.identity_hash() {
-                                adopt_sibling(&mut roster.replica, *sibling);
-                            }
-                        }
-                        roster.note_heard_sibling(announce.source());
-                        if clone_labels.is_empty() {
-                            Vec::new()
-                        } else {
-                            let (merged, plan) = merge_roster(
-                                &roster.replica,
-                                &RosterDelta {
-                                    clock: roster.replica.clock,
-                                    signer: announce.source_keys(),
-                                    upserts: Vec::new(),
-                                    tombstones: Vec::new(),
-                                    siblings: Vec::new(),
-                                    labels: clone_labels,
-                                },
-                            );
-                            roster.replica = merged;
-                            plan.labels
-                        }
-                    };
-                    if !applied_labels.is_empty() {
-                        apply_roster_labels(session, &applied_labels);
+                    if got != *offset {
+                        return Err(BackendError::Clone(
+                            "the operator copy arrived out of order".to_string(),
+                        ));
                     }
-                    remember_sibling_alias(
-                        session,
-                        &encode_hex(announce.source().as_bytes()),
-                        alias,
-                    );
-                    let extra = siblings
-                        .iter()
-                        .filter(|sibling| sibling.identity_hash() != dest_material.identity_hash())
-                        .map(|sibling| encode_hex(sibling.identity_hash().as_bytes()))
-                        .collect::<Vec<_>>();
-                    ensure_missing_sibling_aliases(session, extra.iter().map(String::as_str));
-                    persist_session_replica(session);
-                    {
-                        let mut shared = session.clone.lock().map_err(|_| {
-                            BackendError::Clone("clone state lock was poisoned".to_string())
-                        })?;
-                        shared.notice = Some(
-                            "Operator identity adopted. Instance is unchanged. Quit and reopen this app so the live node uses the new Operator."
-                                .to_string(),
-                        );
-                        shared.dest_waiting = false;
-                        shared.dest = None;
-                        shared.error = None;
+                    collected.extend_from_slice(data);
+                    *offset = offset.saturating_add(u32::try_from(data.len()).unwrap_or(u32::MAX));
+                    if data.is_empty() || *offset >= total {
+                        return Ok(link_id);
                     }
-                    let _ = self
-                        .exchange_roster_with_siblings(
-                            RosterExchange::Pull,
-                            Some(&[announce.source()]),
-                            false,
-                        )
-                        .await;
-                    self.apply_pending_roster().await;
-                    persist_session_replica(session);
-                    return Ok(());
                 }
                 other => {
                     return Err(BackendError::Clone(format!(
@@ -1234,9 +1285,193 @@ impl RemoteControlBackend {
                 }
             }
         }
-        Err(BackendError::Clone(
-            "the source did not Accept in time".to_string(),
-        ))
+    }
+
+    async fn clone_request_on(
+        &self,
+        session: &ControllerSession,
+        link_id: personal_rns::routing::links::LinkId,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, BackendError> {
+        let (reply, _) = session
+            .handle
+            .request(
+                link_id,
+                RequestEndpointId::of(IDENTITY_CLONE_REQUEST_ENDPOINT_ID),
+                bytes,
+            )
+            .await
+            .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
+        Ok(reply)
+    }
+
+    fn apply_cloned_payload(
+        &self,
+        session: &ControllerSession,
+        announce: IdentityCloneAnnounce,
+        encoded: &[u8],
+    ) -> Result<(), BackendError> {
+        let IdentityCloneInbound::Payload {
+            secret,
+            accesses,
+            clock,
+            labels,
+            ..
+        } = parse_identity_clone_message(encoded)
+            .ok_or_else(|| BackendError::Clone("the operator copy was incomplete".to_string()))?
+        else {
+            return Err(BackendError::Clone(
+                "the operator copy was incomplete".to_string(),
+            ));
+        };
+        let clone_labels = decode_labels(labels).unwrap_or_default();
+        let members = if accesses.is_empty() {
+            Vec::new()
+        } else {
+            decode_member_list(accesses).ok_or_else(|| {
+                BackendError::Clone(
+                    "the managed nodes in the operator copy could not be read".to_string(),
+                )
+            })?
+        };
+        adopt_cloned_identity(&session.identities_dir, secret)?;
+        let applied_labels = {
+            let mut roster = session
+                .roster
+                .lock()
+                .map_err(|_| BackendError::Clone("roster lock was poisoned".to_string()))?;
+            roster.replica.clock = roster.replica.clock.max(clock);
+            roster.note_heard_sibling(announce.source());
+            if members.is_empty() && clone_labels.is_empty() {
+                Vec::new()
+            } else {
+                let (merged, plan) = merge_roster(
+                    &roster.replica,
+                    &RosterDelta {
+                        signer: announce.source_keys(),
+                        members,
+                        siblings: Vec::new(),
+                        labels: clone_labels,
+                        leases: Vec::new(),
+                    },
+                );
+                roster.replica = merged;
+                plan.labels
+            }
+        };
+        if !applied_labels.is_empty() {
+            apply_roster_labels(session, &applied_labels);
+        }
+        persist_session_replica(session);
+        if let Ok(mut shared) = session.clone.lock() {
+            shared.notice = Some(
+                "Operator copy is stored. Telling the other controller it arrived.".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn publish_cloned_siblings(
+        &self,
+        session: &ControllerSession,
+        dest_material: &personal_rns::identity::PrivateIdentityMaterial,
+        announce: IdentityCloneAnnounce,
+        alias: &str,
+        encoded: &[u8],
+    ) {
+        let Some(IdentityCloneInbound::Payload { siblings, .. }) =
+            parse_identity_clone_message(encoded)
+        else {
+            return;
+        };
+        let Some(siblings) = parse_clone_siblings(siblings) else {
+            return;
+        };
+        if let Ok(mut roster) = session.roster.lock() {
+            adopt_sibling(&mut roster.replica, announce.source_keys());
+            for sibling in &siblings {
+                if sibling.identity_hash() != dest_material.identity_hash() {
+                    adopt_sibling(&mut roster.replica, *sibling);
+                }
+            }
+        }
+        remember_sibling_alias(session, &encode_hex(announce.source().as_bytes()), alias);
+        let extra = siblings
+            .iter()
+            .filter(|sibling| sibling.identity_hash() != dest_material.identity_hash())
+            .map(|sibling| encode_hex(sibling.identity_hash().as_bytes()))
+            .collect::<Vec<_>>();
+        ensure_missing_sibling_aliases(session, extra.iter().map(String::as_str));
+        persist_session_replica(session);
+    }
+
+    fn finish_clone_dest(&self, session: &ControllerSession) {
+        if let Ok(mut shared) = session.clone.lock() {
+            shared.notice = Some(
+                "Operator identity adopted. Instance is unchanged. Quit and reopen this app so the live node uses the new Operator."
+                    .to_string(),
+            );
+            shared.dest_waiting = false;
+            shared.dest = None;
+            shared.error = None;
+        }
+    }
+
+    fn note_clone_failure(&self, session: &ControllerSession, error: &BackendError) {
+        if let Ok(mut shared) = session.clone.lock() {
+            if let Some(dest) = shared.dest.as_mut() {
+                dest.accepted = false;
+            }
+            shared.error = Some(error.to_string());
+        }
+    }
+
+    fn finish_clone_handoff(&self) {
+        let Ok(session) = self.session() else {
+            return;
+        };
+        let ready = {
+            let Ok(shared) = session.clone.lock() else {
+                return;
+            };
+            shared
+                .source
+                .as_ref()
+                .is_some_and(|source| source.handoff_complete)
+        };
+        if !ready {
+            return;
+        }
+        let (peer_keys, alias) = {
+            let Ok(mut shared) = session.clone.lock() else {
+                return;
+            };
+            let Some(source) = shared.source.as_mut() else {
+                return;
+            };
+            if !source.handoff_complete {
+                return;
+            }
+            source.handoff_complete = false;
+            let keys = source.peer_keys;
+            let alias = source.alias.clone();
+            shared.source = None;
+            shared.notice =
+                Some("The other install has the Operator. It should quit and reopen.".to_string());
+            shared.error = None;
+            (keys, alias)
+        };
+        if let Some(dest_keys) = peer_keys {
+            if let Ok(mut roster) = session.roster.lock() {
+                adopt_sibling(&mut roster.replica, dest_keys);
+            }
+            remember_sibling_alias(
+                session,
+                &encode_hex(dest_keys.identity_hash().as_bytes()),
+                &alias,
+            );
+            persist_session_replica(session);
+        }
     }
 
     pub fn stored_targets(&self) -> Vec<TargetAccess> {
@@ -1499,18 +1734,14 @@ impl RemoteControlBackend {
             .map(|roster| {
                 roster
                     .replica
-                    .labels
+                    .leases
                     .iter()
-                    .filter(|label| {
-                        label.kind == RosterLabelKind::TargetLooking
-                            && looking_instance(&roster.replica, &label.key).is_some_and(|holder| {
-                                holder.eq_ignore_ascii_case(
-                                    &session.controller_identity.instance_hash,
-                                )
-                            })
-                            && !live.contains(&label.key)
+                    .filter(|lease| {
+                        looking_instance(&roster.replica, &lease.target_id).is_some_and(|holder| {
+                            holder.eq_ignore_ascii_case(&session.controller_identity.instance_hash)
+                        }) && !live.contains(&lease.target_id)
                     })
-                    .map(|label| label.key.clone())
+                    .map(|lease| lease.target_id.clone())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -2156,6 +2387,14 @@ impl RemoteControlBackend {
             .unwrap_or(0)
     }
 
+    pub fn managed_list_generation(&self) -> u64 {
+        self.session()
+            .ok()
+            .and_then(|session| session.roster.lock().ok())
+            .map(|roster| roster.managed_list_generation)
+            .unwrap_or(0)
+    }
+
     fn record_local_label(&self, kind: RosterLabelKind, key: &str, value: Option<&str>) {
         let Ok(session) = self.session() else {
             return;
@@ -2183,7 +2422,7 @@ impl RemoteControlBackend {
                 .as_bytes()
                 .cmp(right.destination.as_bytes())
         });
-        let labels = known_path_node_labels(session);
+        let labels = path_table_labels_with_routes(session, &routes).await;
         let ble_aliases = known_ble_prefix_aliases(session);
         let peer_aliases = session
             .peer_aliases
@@ -2968,7 +3207,15 @@ impl RemoteControlBackend {
             .map(|aliases| aliases.clone())
             .unwrap_or_default();
         self.note_route_peer_for_target(target_id, &route);
-        Some(path_from_route(&route, &peer_aliases, &target_aliases))
+        let mut labels = known_path_node_labels(session);
+        note_observed_hop(session, &mut labels, route.via, route.interface);
+        publish_address_labels(session, &mut labels);
+        Some(path_from_route(
+            &route,
+            &peer_aliases,
+            &target_aliases,
+            &labels,
+        ))
     }
 
     fn has_live_direct_ble_peer(&self, target_id: &str) -> bool {
@@ -3455,6 +3702,10 @@ impl RemoteControlBackend {
             .map(|entry| remote_interface_entry(entry, None))
             .collect::<Vec<_>>();
         ensure_wifi_auto_tcp_client(&mut items);
+        let ble_prefix = self.remote_bluetooth_auto_prefix(target_id).await;
+        // Show the interface list before any later request. A path-table timeout is
+        // about 13s and must not hold this refresh.
+        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         let tcp_status = if items.iter().any(|item| item.kind == "auto-wifi") {
             remote
                 .describe_tcp_client()
@@ -3466,9 +3717,8 @@ impl RemoteControlBackend {
         };
         if let Some(status) = tcp_status.as_ref() {
             apply_tcp_client_status(&mut items, status);
+            self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         }
-        let ble_prefix = self.remote_bluetooth_auto_prefix(target_id).await;
-        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         for index in 0..items.len() {
             fetch_interface_config(&remote, &mut items[index]).await;
             // InventoryInterfaceConfig names the card but does not carry the TCP target.
@@ -3476,6 +3726,11 @@ impl RemoteControlBackend {
             if items[index].kind == "tcp-client" {
                 if let Some(status) = tcp_status.as_ref() {
                     apply_tcp_client_status_to_entry(&mut items[index], status);
+                    if let (Ok(session), Some(host)) =
+                        (self.session(), tcp_host_from_status(status))
+                    {
+                        remember_tcp_interface_host(session, &items[index].id, &host);
+                    }
                 }
             }
             self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
@@ -3484,23 +3739,6 @@ impl RemoteControlBackend {
             if let Some(text) = version.as_str().filter(|text| !text.is_empty()) {
                 self.session()?
                     .remember_build_version(target_id, text.to_owned());
-            }
-        }
-        self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
-        // Power is often declined, and that reply timeout is about 15s. Fetch the path
-        // table first so the panel does not sit on Loading until power gives up.
-        match self.read_path_table(&remote).await {
-            Ok(rows) => {
-                if let Ok(session) = self.session() {
-                    session.remember_path_table(target_id, PathTableState::Ready(rows));
-                }
-            }
-            Err(error) => {
-                eprintln!("inventory path table {target_id} failed: {error}");
-                if let Ok(session) = self.session() {
-                    session
-                        .remember_path_table(target_id, PathTableState::Failed(error.to_string()));
-                }
             }
         }
         self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
@@ -3555,6 +3793,22 @@ impl RemoteControlBackend {
                 eprintln!("inventory describe_network_transport {target_id} failed: {error:?}");
             }
         }
+        // The interface list is already on screen. This request times out in about 13s
+        // when a target does not answer, and that wait stays off the interface refresh.
+        match self.read_path_table(&remote).await {
+            Ok(rows) => {
+                if let Ok(session) = self.session() {
+                    session.remember_path_table(target_id, PathTableState::Ready(rows));
+                }
+            }
+            Err(error) => {
+                eprintln!("inventory path table {target_id} failed: {error}");
+                if let Ok(session) = self.session() {
+                    session
+                        .remember_path_table(target_id, PathTableState::Failed(error.to_string()));
+                }
+            }
+        }
         remote.close();
         self.present_inventory(target_id, &mut items, ble_prefix.as_deref(), report);
         Ok(items)
@@ -3589,41 +3843,41 @@ impl RemoteControlBackend {
         &self,
         remote: &RemoteControlTargetHandle<'_>,
     ) -> Result<Vec<PathTableRow>, BackendError> {
-        let (labels, ble_aliases, peer_aliases) = {
-            let session = self.session()?;
-            let peer_aliases = session
-                .peer_aliases
-                .lock()
-                .expect("peer aliases mutex poisoned")
-                .clone();
-            (
-                known_path_node_labels(session),
-                known_ble_prefix_aliases(session),
-                peer_aliases,
-            )
-        };
         let mut page = RemoteControlPathPage::First;
-        let mut rows = Vec::new();
+        let mut entries = Vec::new();
         for _ in 0..PATH_TABLE_PAGE_LIMIT {
             let (inventory, _) = remote
                 .inventory_path_table_page(page)
                 .await
                 .map_err(|error| operation("read path table", error))?;
-            for entry in inventory.entries() {
-                rows.push(path_table_row(entry, &labels, &ble_aliases, &peer_aliases));
-            }
+            entries.extend(inventory.entries().iter().copied());
             match inventory.continuation() {
-                RemoteControlPathContinuation::Complete => return Ok(rows),
+                RemoteControlPathContinuation::Complete => break,
                 RemoteControlPathContinuation::More(cursor) => {
                     if matches!(page, RemoteControlPathPage::After(previous) if previous == cursor)
                     {
-                        return Ok(rows);
+                        break;
                     }
                     page = RemoteControlPathPage::After(cursor);
                 }
             }
         }
-        Ok(rows)
+        let session = self.session()?;
+        let mut labels = path_table_labels(session).await;
+        for entry in &entries {
+            note_observed_hop(session, &mut labels, entry.via(), entry.interface());
+        }
+        publish_address_labels(session, &mut labels);
+        let ble_aliases = known_ble_prefix_aliases(session);
+        let peer_aliases = session
+            .peer_aliases
+            .lock()
+            .expect("peer aliases mutex poisoned")
+            .clone();
+        Ok(entries
+            .iter()
+            .map(|entry| path_table_row(entry, &labels, &ble_aliases, &peer_aliases))
+            .collect())
     }
 
     fn present_inventory<F>(
@@ -4036,99 +4290,193 @@ impl RemoteControlBackend {
         }
     }
 
-    /// Pull managed-node records from sibling controllers and merge them once.
+    /// Ask the replicator to exchange with every pinned sibling, including ones not yet heard.
     pub async fn fetch_sibling_node_info(&self) -> Result<(), BackendError> {
         let session = self.session()?;
-        self.apply_pending_roster().await;
-        let siblings = session
-            .roster
-            .lock()
-            .ok()
-            .map(|roster| {
-                roster
-                    .replica
-                    .siblings
-                    .iter()
-                    .map(|sibling| sibling.identity_hash())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if siblings.is_empty() {
-            return Ok(());
+        let start = {
+            let mut roster = session
+                .roster
+                .lock()
+                .map_err(|_| BackendError::Clone("roster lock was poisoned".to_string()))?;
+            if roster.replica.siblings.is_empty() {
+                return Ok(());
+            }
+            roster.force_sync = true;
+            roster.sync_notify.notify_one();
+            roster.sync_round
+        };
+        let deadline = tokio::time::Instant::now() + ROSTER_FETCH_WAIT;
+        while tokio::time::Instant::now() < deadline {
+            let advanced = session
+                .roster
+                .lock()
+                .ok()
+                .is_some_and(|roster| roster.sync_round != start);
+            if advanced {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        self.exchange_roster_with_siblings(RosterExchange::Pull, Some(&siblings), false)
-            .await?;
-        self.apply_pending_roster().await;
         Ok(())
     }
 
-    #[allow(dead_code)] // automatic sibling sync is paused; Fetch Sibling Node Info pulls on demand
-    pub async fn maintain_roster(&self) {
+    /// A stored roster route is kept. A missing one is requested before the link opens.
+    async fn ensure_roster_sync_route(
+        handle: &PrnsNodeHandle,
+        sibling: IdentityHash,
+        destination: personal_rns::wire::DestinationHash,
+    ) -> bool {
+        if handle.route(destination).await.is_some() {
+            return true;
+        }
+        let sibling_id = encode_hex(sibling.as_bytes());
+        eprintln!("roster sync: requesting path to {sibling_id}");
+        match handle.request_path(destination).await {
+            Ok(found) => {
+                eprintln!(
+                    "roster sync: path found to {sibling_id} hops={}",
+                    found.hops.0
+                );
+                true
+            }
+            Err(error) => {
+                eprintln!("roster sync: path request failed for {sibling_id}: {error:?}");
+                false
+            }
+        }
+    }
+
+    /// Sibling links live on this task. The UI poll and device RPCs never await them.
+    pub async fn run_roster_replicator(&self) {
         let Ok(session) = self.session() else {
             return;
         };
-        self.apply_pending_roster().await;
-        let cloning = session
-            .clone
-            .lock()
-            .ok()
-            .is_some_and(|shared| shared.in_progress());
-        if cloning {
-            return;
-        }
-        let has_siblings = session
-            .roster
-            .lock()
-            .ok()
-            .is_some_and(|roster| !roster.replica.siblings.is_empty());
-        if !has_siblings {
-            return;
-        }
-        let due = session
-            .last_roster_sync
-            .lock()
-            .ok()
-            .is_none_or(|last| last.is_none_or(|at| at.elapsed() >= ROSTER_ANNOUNCE_GAP));
-        if due {
-            if let Ok(mut last) = session.last_roster_sync.lock() {
-                *last = Some(Instant::now());
+        let notify = {
+            let Ok(roster) = session.roster.lock() else {
+                return;
+            };
+            Arc::clone(&roster.sync_notify)
+        };
+        let mut warm: Vec<(IdentityHash, personal_rns::routing::links::LinkId)> = Vec::new();
+        let mut backoff = ROSTER_WARM_GAP;
+        loop {
+            let wait = if warm.is_empty() {
+                backoff
+            } else {
+                ROSTER_WARM_GAP
+            };
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep(wait) => {}
             }
-        }
-        let pull_due = session
-            .roster
-            .lock()
-            .ok()
-            .map(|mut roster| roster.take_pull_due())
-            .unwrap_or_default();
-        if !pull_due.is_empty() {
-            let _ = self
-                .exchange_roster_with_siblings(RosterExchange::Pull, Some(&pull_due), true)
-                .await;
             self.apply_pending_roster().await;
-            return;
-        }
-        if !due {
-            return;
-        }
-        let unheard = session
-            .roster
-            .lock()
-            .ok()
-            .map(|roster| {
-                roster
-                    .replica
-                    .siblings
-                    .iter()
-                    .map(|sibling| sibling.identity_hash())
-                    .filter(|hash| !roster.heard_sibling(*hash))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if !unheard.is_empty() {
-            let _ = self
-                .exchange_roster_with_siblings(RosterExchange::Pull, Some(&unheard), false)
-                .await;
-            self.apply_pending_roster().await;
+            let cloning = session
+                .clone
+                .lock()
+                .ok()
+                .is_some_and(|shared| shared.in_progress());
+            if !cloning {
+                let (siblings, force) = session
+                    .roster
+                    .lock()
+                    .ok()
+                    .map(|mut roster| {
+                        let force = roster.force_sync;
+                        roster.force_sync = false;
+                        let self_hash = IdentityHash::new(
+                            parse_hex::<IDENTITY_HASH_BYTES>(
+                                &session.controller_identity.instance_hash,
+                            )
+                            .unwrap_or([0u8; IDENTITY_HASH_BYTES]),
+                        );
+                        let siblings = roster
+                            .replica
+                            .siblings
+                            .iter()
+                            .copied()
+                            .filter(|sibling| sibling.identity_hash() != self_hash)
+                            .collect::<Vec<_>>();
+                        (siblings, force)
+                    })
+                    .unwrap_or_default();
+                let mut dead = Vec::new();
+                for (hash, link_id) in &warm {
+                    if !siblings
+                        .iter()
+                        .any(|sibling| sibling.identity_hash() == *hash)
+                    {
+                        dead.push(*hash);
+                        continue;
+                    }
+                    if self.send_roster_on_link(*link_id).await {
+                        self.note_sibling_synced(*hash);
+                        backoff = ROSTER_WARM_GAP;
+                        self.apply_pending_roster().await;
+                    } else {
+                        dead.push(*hash);
+                    }
+                }
+                for hash in dead {
+                    if let Some(index) = warm.iter().position(|(id, _)| *id == hash) {
+                        let (_, link_id) = warm.remove(index);
+                        session.handle.close_link(link_id);
+                    }
+                }
+                let warm_ids = warm.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+                // One unlinked sibling per quiet round. Fetch Sibling still dials
+                // every pinned sibling in this round. Adoption does not install a
+                // roster route, and a restart forgets who was heard, so a pin is
+                // enough to look for the sibling.
+                let cold: Vec<_> = if force {
+                    siblings
+                        .iter()
+                        .copied()
+                        .filter(|sibling| !warm_ids.contains(&sibling.identity_hash()))
+                        .collect()
+                } else {
+                    siblings
+                        .iter()
+                        .copied()
+                        .find(|sibling| !warm_ids.contains(&sibling.identity_hash()))
+                        .into_iter()
+                        .collect()
+                };
+                for sibling in cold {
+                    let Some(destination) = roster_sync_destination_hash(sibling.identity_hash())
+                    else {
+                        continue;
+                    };
+                    if !Self::ensure_roster_sync_route(
+                        &session.handle,
+                        sibling.identity_hash(),
+                        destination,
+                    )
+                    .await
+                    {
+                        backoff = (backoff * 2).min(ROSTER_COLD_BACKOFF_MAX);
+                        continue;
+                    }
+                    match session.handle.establish_link(destination).await {
+                        Ok(link_id) => {
+                            backoff = ROSTER_WARM_GAP;
+                            if self.send_roster_on_link(link_id).await {
+                                self.note_sibling_synced(sibling.identity_hash());
+                                warm.push((sibling.identity_hash(), link_id));
+                                self.apply_pending_roster().await;
+                            } else {
+                                session.handle.close_link(link_id);
+                                backoff = (backoff * 2).min(ROSTER_COLD_BACKOFF_MAX);
+                            }
+                        }
+                        Err(_) => {
+                            backoff = (backoff * 2).min(ROSTER_COLD_BACKOFF_MAX);
+                        }
+                    }
+                }
+            }
+            if let Ok(mut roster) = session.roster.lock() {
+                roster.sync_round = roster.sync_round.saturating_add(1);
+            }
         }
     }
 
@@ -4140,48 +4488,120 @@ impl RemoteControlBackend {
             .roster
             .lock()
             .ok()
-            .and_then(|mut roster| roster.pending.take());
-        let Some(delta) = pending else {
+            .map(|mut roster| std::mem::take(&mut roster.pending))
+            .unwrap_or_default();
+        if pending.is_empty() {
             return;
-        };
-        let plan = {
+        }
+        let plans = {
             let Ok(mut roster) = session.roster.lock() else {
                 return;
             };
-            let (merged, plan) = merge_roster(&roster.replica, &delta);
-            roster.replica = merged;
-            roster.applied_generation = roster.applied_generation.saturating_add(1);
-            plan
+            let mut plans = Vec::with_capacity(pending.len());
+            for delta in pending {
+                let (merged, plan) = merge_roster(&roster.replica, &delta);
+                roster.replica = merged;
+                plans.push(plan);
+            }
+            let changed = plans.iter().any(|plan| {
+                !plan.upserts.is_empty()
+                    || !plan.forgets.is_empty()
+                    || !plan.labels.is_empty()
+                    || !plan.leases.is_empty()
+            });
+            if changed {
+                roster.applied_generation = roster.applied_generation.saturating_add(1);
+            }
+            if plans.iter().any(plan_changes_managed_nodes) {
+                roster.managed_list_generation = roster.managed_list_generation.saturating_add(1);
+            }
+            plans
         };
         persist_session_replica(session);
-        for hash in plan.forgets {
-            let id = encode_hex(hash.as_bytes());
-            session
-                .pairing
-                .lock()
-                .expect("pairing state mutex poisoned")
-                .forget_stored(&id);
-            session.forget_build_version(&id);
-            session.forget_battery(&id);
-            session.forget_network_transport(&id);
-            session.set_board_slug(&id, None);
-            remove_alias_map_key(&session.target_aliases, &session.target_aliases_path, &id);
+        for plan in &plans {
+            for hash in &plan.forgets {
+                let id = encode_hex(hash.as_bytes());
+                session
+                    .pairing
+                    .lock()
+                    .expect("pairing state mutex poisoned")
+                    .forget_stored(&id);
+                session.forget_build_version(&id);
+                session.forget_battery(&id);
+                session.forget_network_transport(&id);
+                session.set_board_slug(&id, None);
+                remove_alias_map_key(&session.target_aliases, &session.target_aliases_path, &id);
+            }
+            apply_roster_labels(session, &plan.labels);
+            for lease in &plan.leases {
+                if session.target_attention(&lease.target_id) == TargetAttention::HeldBySibling {
+                    if let Ok(mut until) = session.monitor_until.lock() {
+                        until.remove(&lease.target_id);
+                    }
+                    session.mark_reachable(&lease.target_id, TargetStatus::Offline);
+                }
+            }
         }
-        apply_roster_labels(session, &plan.labels);
     }
 
     async fn push_roster_to_siblings(&self) -> Result<(), BackendError> {
-        let cloning = self
-            .session()?
-            .clone
-            .lock()
-            .ok()
-            .is_some_and(|shared| shared.in_progress());
-        if cloning {
-            return Ok(());
+        let session = self.session()?;
+        if let Ok(roster) = session.roster.lock() {
+            roster.sync_notify.notify_one();
         }
-        self.exchange_roster_with_siblings(RosterExchange::Push, None, true)
+        Ok(())
+    }
+
+    fn note_sibling_synced(&self, peer: IdentityHash) {
+        let Ok(session) = self.session() else {
+            return;
+        };
+        let Ok(self_hash) =
+            parse_hex::<IDENTITY_HASH_BYTES>(&session.controller_identity.instance_hash)
+        else {
+            return;
+        };
+        let Ok(mut roster) = session.roster.lock() else {
+            return;
+        };
+        roster.note_roster_sync(peer, IdentityHash::new(self_hash));
+    }
+
+    async fn send_roster_on_link(&self, link_id: personal_rns::routing::links::LinkId) -> bool {
+        let Ok(session) = self.session() else {
+            return false;
+        };
+        let request = {
+            let Ok(roster) = session.roster.lock() else {
+                return false;
+            };
+            let Some(secret) = roster.instance_secret.as_ref() else {
+                return false;
+            };
+            let instance = personal_rns::identity::PrivateIdentityMaterial::from_bytes(**secret);
+            replica_message(&instance, &roster.replica)
+        };
+        let Some(request) = request else {
+            return false;
+        };
+        let Ok((reply, _)) = session
+            .handle
+            .request(
+                link_id,
+                RequestEndpointId::of(ROSTER_SYNC_REQUEST_ENDPOINT_ID),
+                &request,
+            )
             .await
+        else {
+            return false;
+        };
+        let Some(delta) = parse_replica_reply(&reply) else {
+            return false;
+        };
+        if let Ok(mut roster) = session.roster.lock() {
+            roster.pending.push(delta);
+        }
+        true
     }
 
     async fn announce_roster_destination(&self) -> Result<(), BackendError> {
@@ -4204,82 +4624,6 @@ impl RemoteControlBackend {
             .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         Ok(())
     }
-
-    async fn exchange_roster_with_siblings(
-        &self,
-        exchange: RosterExchange,
-        only: Option<&[IdentityHash]>,
-        require_heard: bool,
-    ) -> Result<(), BackendError> {
-        let session = self.session()?;
-        let (siblings, instance, replica) = {
-            let roster = session
-                .roster
-                .lock()
-                .map_err(|_| BackendError::Clone("roster lock was poisoned".to_string()))?;
-            let instance = roster
-                .instance_secret
-                .as_ref()
-                .map(|secret| personal_rns::identity::PrivateIdentityMaterial::from_bytes(**secret))
-                .ok_or_else(|| BackendError::Clone("instance secret is missing".to_string()))?;
-            let siblings = roster
-                .replica
-                .siblings
-                .iter()
-                .copied()
-                .filter(|sibling| !require_heard || roster.heard_sibling(sibling.identity_hash()))
-                .filter(|sibling| {
-                    only.is_none_or(|wanted| wanted.contains(&sibling.identity_hash()))
-                })
-                .collect::<Vec<_>>();
-            (siblings, instance, roster.replica.clone())
-        };
-        if siblings.is_empty() {
-            return Ok(());
-        }
-        let request = match exchange {
-            RosterExchange::Pull => {
-                let mut request = vec![0u8; 1 + IDENTITY_PUBLIC_KEY_LEN + 64];
-                let written = write_pull(&instance, &mut request).ok_or_else(|| {
-                    BackendError::Clone("roster message is too large".to_string())
-                })?;
-                request.truncate(written);
-                request
-            }
-            RosterExchange::Push => replica_message(&instance, &replica)
-                .ok_or_else(|| BackendError::Clone("roster message is too large".to_string()))?,
-        };
-        for sibling in siblings {
-            let Some(destination) = roster_sync_destination_hash(sibling.identity_hash()) else {
-                continue;
-            };
-            let Ok(link_id) = session.handle.establish_link(destination).await else {
-                continue;
-            };
-            let Ok((reply, _)) = session
-                .handle
-                .request(
-                    link_id,
-                    RequestEndpointId::of(ROSTER_SYNC_REQUEST_ENDPOINT_ID),
-                    &request,
-                )
-                .await
-            else {
-                continue;
-            };
-            if let Some(delta) = parse_replica_reply(&reply) {
-                if let Ok(mut roster) = session.roster.lock() {
-                    roster.pending = Some(delta);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-enum RosterExchange {
-    Pull,
-    Push,
 }
 
 struct ControllerSession {
@@ -4331,6 +4675,11 @@ struct ControllerSession {
     /// Targets whose Connect probe has dropped the hop and is waiting for a
     /// fresh path — hide stale announce/route in the Managed Nodes header.
     path_probe_pending: Mutex<HashSet<String>>,
+    /// Destination and transport hashes this controller can name, shared by every
+    /// path table and managed-node route line.
+    address_labels: Mutex<HashMap<String, String>>,
+    /// Interface id hex → dial host (`sydney.reticulum.au`) from a TCP client config.
+    tcp_interface_hosts: Mutex<HashMap<String, String>>,
     /// Latest `resume <offset>` offered by a firmware-update link.
     firmware_resume: Arc<Mutex<Option<(personal_rns::routing::links::LinkId, u64)>>>,
 }
@@ -4567,6 +4916,7 @@ impl ControllerSession {
                 .display()
                 .to_string(),
             instance_hash: encode_hex(instance_material.identity_hash().as_bytes()),
+            sync_address: roster_sync_address_hex(instance_material.identity_hash()),
             instance_secret_path: instance_identity_secret_path(&identities_dir)
                 .display()
                 .to_string(),
@@ -4614,6 +4964,7 @@ impl ControllerSession {
             instance_secret: Some(personal_rns::identity::Zeroizing::new(*instance_secret)),
             ..RosterShared::default()
         };
+        bind_actor(&mut roster_state.replica, instance_material.identity_hash());
         let instance_hex = encode_hex(instance_material.identity_hash().as_bytes());
         roster_state
             .replica
@@ -4718,10 +5069,15 @@ impl ControllerSession {
         let firmware_resume = Arc::new(Mutex::new(None));
         let firmware_resume_events = firmware_resume.clone();
         let announce_stream_for_events = announce_stream_events;
+        let local_instance_hash = instance_material.identity_hash();
         let node = PrnsNode::new(PrnsNodeRecipe {
             transport_identity: None,
             remote_control,
             pre_configured_destinations: [
+                PreConfiguredDestination::Plain {
+                    app_name: IDENTITY_CLONE_APP_NAME,
+                    aspects: IDENTITY_CLONE_OFFER_ASPECTS,
+                },
                 PreConfiguredDestination::Single {
                     app_name: IDENTITY_CLONE_APP_NAME,
                     aspects: IDENTITY_CLONE_ASPECTS,
@@ -4763,6 +5119,48 @@ impl ControllerSession {
             storage: GrowableHeap,
             request_endpoints: request_endpoints![IdentityClone, RosterSync],
             on_event: move |event, _state| match event {
+                PrnsEvent::Message(Message::Delivered(
+                    personal_rns::routing::delivery::Delivery::Plain(delivery),
+                )) => {
+                    let Some(offer_destination) = identity_clone_offer_destination_hash() else {
+                        return;
+                    };
+                    if delivery.destination != offer_destination {
+                        return;
+                    }
+                    if !clone_announce_is_usb_local(1, delivery.source_interface) {
+                        return;
+                    }
+                    let Some(announce) = IdentityCloneAnnounce::parse(delivery.payload) else {
+                        return;
+                    };
+                    if announce.source() == local_instance_hash {
+                        return;
+                    }
+                    let Some(destination) = identity_clone_destination_hash(announce.source())
+                    else {
+                        return;
+                    };
+                    let Ok(mut shared) = clone_events.lock() else {
+                        return;
+                    };
+                    if !shared.dest_waiting {
+                        return;
+                    }
+                    shared.dest = Some(DestCloneSession {
+                        announce,
+                        destination,
+                        dest_nonce: None,
+                        transcript: None,
+                        accepted: false,
+                        hello_in_flight: false,
+                    });
+                    shared.error = None;
+                    shared.notice = Some(
+                        "Heard a USB sibling adoption offer. Opening the approval link for the six-digit code."
+                            .to_string(),
+                    );
+                }
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard {
                     destination,
                     hops,
@@ -4788,37 +5186,6 @@ impl ControllerSession {
                             }
                         }
                     }
-                    if !clone_announce_is_usb_local(hops, source_interface) {
-                        return;
-                    }
-                    let Some(announce) = IdentityCloneAnnounce::parse(app_data) else {
-                        return;
-                    };
-                    let Some(expected) = identity_clone_destination_hash(announce.source()) else {
-                        return;
-                    };
-                    if expected != destination {
-                        return;
-                    }
-                    let Ok(mut shared) = clone_events.lock() else {
-                        return;
-                    };
-                    if !shared.dest_waiting {
-                        return;
-                    }
-                    shared.dest = Some(DestCloneSession {
-                        announce,
-                        destination,
-                        dest_nonce: None,
-                        transcript: None,
-                        accepted: false,
-                        hello_in_flight: false,
-                    });
-                    shared.error = None;
-                    shared.notice = Some(
-                        "Heard a USB sibling adoption. Confirm the six-digit adoption code, then Approve."
-                            .to_string(),
-                    );
                 }
                 PrnsEvent::Message(Message::RemoteControlPairingAvailable(observation)) => {
                     let id = encode_hex(observation.endpoint().destination_hash().as_bytes());
@@ -5092,6 +5459,8 @@ impl ControllerSession {
             last_roster_sync: Mutex::new(None),
             monitor_until: Mutex::new(HashMap::new()),
             path_probe_pending: Mutex::new(HashSet::new()),
+            address_labels: Mutex::new(HashMap::new()),
+            tcp_interface_hosts: Mutex::new(HashMap::new()),
             firmware_resume,
         })
     }
@@ -5667,9 +6036,7 @@ fn load_controller_secret(
 
 fn adopt_cloned_identity(
     identities_dir: &Path,
-    data_dir: &Path,
     secret: &[u8; personal_rns::IDENTITY_SECRET_KEY_LEN],
-    accesses: &[u8],
 ) -> Result<(), BackendError> {
     let mut vault = personal_rns::identity::vault::FileVault::new(identities_dir.to_path_buf());
     let label = personal_rns::identity::vault::IdentityLabel::new(CONTROLLER_IDENTITY_FILE)
@@ -5677,11 +6044,6 @@ fn adopt_cloned_identity(
     let stored = personal_rns::identity::Zeroizing::new(*secret);
     personal_rns::identity::vault::IdentityVault::store(&mut vault, &label, &stored)
         .map_err(|error| BackendError::Clone(error.to_string()))?;
-    if !accesses.is_empty() {
-        let mut replica = load_replica(&replica_path(data_dir));
-        let _ = hydrate_accesses_from_snapshot(&mut replica, accesses);
-        persist_replica(&replica_path(data_dir), &replica);
-    }
     Ok(())
 }
 
@@ -6227,6 +6589,14 @@ fn format_transfer_bytes(bytes: usize) -> String {
     }
 }
 
+/// Path-table address for a managed node's remote-control destination.
+/// `target_id` is the 32-character identity hash shown on the card.
+pub fn remote_control_address_hash(target_id: &str) -> Option<String> {
+    let bytes = parse_hex::<IDENTITY_HASH_BYTES>(target_id).ok()?;
+    let destination = remote_control_destination_hash(&IdentityHash::new(bytes));
+    Some(encode_hex(destination.as_bytes()))
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -6281,32 +6651,6 @@ fn session_controller_identity(
     let bytes =
         parse_hex::<IDENTITY_PUBLIC_KEY_LEN>(&session.controller_identity.allow_list_key).ok()?;
     parse_controller_public_keys(&bytes)
-}
-
-fn roster_accesses_snapshot(
-    replica: &crate::roster_sync::RosterReplica,
-) -> Result<Vec<u8>, String> {
-    use personal_rns::persistence::{
-        remote_control_target_accesses_snapshot_capacity,
-        write_remote_control_target_accesses_snapshot,
-    };
-    use personal_rns::remote_control::{
-        HeapRemoteControlTargetAccessTable, RemoteControlTargetAccessTable,
-    };
-    let mut table = HeapRemoteControlTargetAccessTable::default();
-    for upsert in &replica.upserts {
-        if replica_forgets_target(replica, upsert.access.target().identity_hash()) {
-            continue;
-        }
-        table
-            .set_target_access(crate::roster_sync::clone_access(&upsert.access))
-            .map_err(|_| "roster access table rejected a managed target".to_string())?;
-    }
-    let mut out = vec![0; remote_control_target_accesses_snapshot_capacity(table.len())];
-    let written = write_remote_control_target_accesses_snapshot(&table, &mut out)
-        .map_err(|error| format!("{error:?}"))?;
-    out.truncate(written);
-    Ok(out)
 }
 
 fn load_persisted_target_access_bytes(persist_dir: &Path) -> Vec<u8> {
@@ -8575,11 +8919,10 @@ fn control_announce_satisfies(
 fn known_path_node_labels(session: &ControllerSession) -> HashMap<String, String> {
     let instance = session.controller_identity.instance_hash.clone();
     let operator = session.controller_identity.operator_hash.clone();
-    let mut nodes = Vec::new();
-    nodes.push((instance.clone(), THIS_CONTROLLER_PEER_ALIAS.to_string()));
-    if !operator.eq_ignore_ascii_case(&instance) {
-        nodes.push((operator, THIS_CONTROLLER_PEER_ALIAS.to_string()));
-    }
+    let mut remote_control_nodes = Vec::new();
+    let mut instance_nodes = Vec::new();
+    instance_nodes.push((instance.clone(), THIS_CONTROLLER_PEER_ALIAS.to_string()));
+    remote_control_nodes.push((operator, THIS_CONTROLLER_PEER_ALIAS.to_string()));
 
     let sibling_aliases = match session.sibling_aliases.lock() {
         Ok(guard) => guard.clone(),
@@ -8612,7 +8955,7 @@ fn known_path_node_labels(session: &ControllerSession) -> HashMap<String, String
             sibling_names.insert(hash.clone(), next);
         }
         if let Some(alias) = stored_alias(sibling_names.get(hash).map(String::as_str)) {
-            nodes.push((hash.clone(), alias));
+            instance_nodes.push((hash.clone(), alias));
         }
     }
 
@@ -8650,7 +8993,7 @@ fn known_path_node_labels(session: &ControllerSession) -> HashMap<String, String
         let alias = stored_alias(target_aliases.get(&id).map(String::as_str))
             .or_else(|| stored_alias(target_names.get(&id).map(String::as_str)));
         if let Some(alias) = alias {
-            nodes.push((id, alias));
+            remote_control_nodes.push((id, alias));
         }
     }
 
@@ -8662,11 +9005,15 @@ fn known_path_node_labels(session: &ControllerSession) -> HashMap<String, String
     manager_ids.sort();
     for id in manager_ids {
         if let Some(alias) = stored_alias(manager_aliases.get(&id).map(String::as_str)) {
-            nodes.push((id, alias));
+            remote_control_nodes.push((id, alias));
         }
     }
 
-    label_known_nodes(nodes)
+    let mut labels = label_known_nodes(remote_control_nodes);
+    for (identity_hex, alias) in instance_nodes {
+        remember_controller_node(&mut labels, &identity_hex, &alias);
+    }
+    labels
 }
 
 fn label_known_nodes(nodes: Vec<(String, String)>) -> HashMap<String, String> {
@@ -8677,10 +9024,67 @@ fn label_known_nodes(nodes: Vec<(String, String)>) -> HashMap<String, String> {
     labels
 }
 
-/// Index an identity and the destinations derived from it, so a path-table hash can
-/// be named without replacing the hash. That covers the identity itself, the
-/// remote-control address, and the install address.
+/// Index a remote-control identity and the addresses derived from it.
+/// The identity hash itself, the remote-control address, and the install address
+/// then show this node's alias in either path-table column.
 fn remember_known_node(labels: &mut HashMap<String, String>, identity_hex: &str, alias: &str) {
+    remember_derived_addresses(labels, identity_hex, alias, "", RC_NODE_DESTINATIONS);
+}
+
+/// Index a controller instance. Roster sync and identity clone are derived from it.
+fn remember_instance_node(labels: &mut HashMap<String, String>, identity_hex: &str, alias: &str) {
+    remember_derived_addresses(labels, identity_hex, alias, "", INSTANCE_NODE_DESTINATIONS);
+}
+
+/// A sibling controller, and this install's instance, get every derived address
+/// the annotation table knows how to name: roster sync, identity clone, remote
+/// control, install, and the transport applications.
+fn remember_controller_node(labels: &mut HashMap<String, String>, identity_hex: &str, alias: &str) {
+    remember_instance_node(labels, identity_hex, alias);
+    remember_destination_family(labels, identity_hex, alias, RC_NODE_DESTINATIONS);
+    remember_destination_family(labels, identity_hex, alias, TRANSPORT_NODE_DESTINATIONS);
+}
+
+/// Index a transport identity. The identity hash is `alias/TP`. Application
+/// addresses derived from it keep the plain alias.
+fn remember_transport_node(labels: &mut HashMap<String, String>, identity_hex: &str, alias: &str) {
+    remember_derived_addresses(
+        labels,
+        identity_hex,
+        alias,
+        "/TP",
+        TRANSPORT_NODE_DESTINATIONS,
+    );
+}
+
+fn remember_derived_addresses(
+    labels: &mut HashMap<String, String>,
+    identity_hex: &str,
+    alias: &str,
+    identity_suffix: &str,
+    destinations: &[(&str, &[&str], &str)],
+) {
+    let Some(alias) = stored_alias(Some(alias)) else {
+        return;
+    };
+    if parse_hex::<IDENTITY_HASH_BYTES>(identity_hex.trim()).is_err() {
+        return;
+    }
+    let identity_label = if identity_suffix.is_empty() {
+        alias.clone()
+    } else {
+        format!("{alias}{identity_suffix}")
+    };
+    insert_known_label(labels, identity_hex, &identity_label);
+    remember_destination_family(labels, identity_hex, &alias, destinations);
+}
+
+fn remember_destination_family(
+    labels: &mut HashMap<String, String>,
+    identity_hex: &str,
+    alias: &str,
+    destinations: &[(&str, &[&str], &str)],
+) {
     let Some(alias) = stored_alias(Some(alias)) else {
         return;
     };
@@ -8688,8 +9092,7 @@ fn remember_known_node(labels: &mut HashMap<String, String>, identity_hex: &str,
         return;
     };
     let identity = IdentityHash::new(bytes);
-    insert_known_label(labels, identity_hex, &alias);
-    for (app_name, aspects, suffix) in KNOWN_NODE_DESTINATIONS {
+    for (app_name, aspects, suffix) in destinations {
         let Ok(name) = expand_name(app_name, aspects) else {
             continue;
         };
@@ -8709,10 +9112,431 @@ fn insert_known_label(labels: &mut HashMap<String, String>, hash: &str, alias: &
         .or_insert_with(|| alias.to_string());
 }
 
-/// App names whose destination hash is derived from a node identity and can show up
-/// in another node's path table. The suffix distinguishes the remote-control and
-/// install addresses from the identity. Order does not matter; the first alias wins.
-const KNOWN_NODE_DESTINATIONS: &[(&str, &[&str], &str)] = &[
+/// Keep every hash this controller has learned, and fold earlier ones into `labels`.
+fn publish_address_labels(session: &ControllerSession, labels: &mut HashMap<String, String>) {
+    let Ok(mut known) = session.address_labels.lock() else {
+        return;
+    };
+    for (hash, label) in labels.iter() {
+        known.entry(hash.clone()).or_insert_with(|| label.clone());
+    }
+    for (hash, label) in known.iter() {
+        labels.entry(hash.clone()).or_insert_with(|| label.clone());
+    }
+}
+
+/// A hop on an interface that belongs to one managed node names that node's
+/// transport identity. Later rows reuse the same hash through [`annotate_known_hash`].
+#[cfg(test)]
+fn note_hop_transport(
+    labels: &mut HashMap<String, String>,
+    aliases: &HashMap<String, String>,
+    via: NextHop,
+    owner_target_id: Option<String>,
+) {
+    let NextHop::Via(transport) = via else {
+        return;
+    };
+    let Some(target_id) = owner_target_id else {
+        return;
+    };
+    let Some(alias) = aliases.get(&target_id.trim().to_ascii_lowercase()) else {
+        return;
+    };
+    remember_transport_node(labels, &encode_hex(transport.as_bytes()), alias);
+}
+
+/// A path hop's next-hop hash belongs to whoever owns that interface.
+/// A TCP client names the dial host instead of a node alias.
+fn note_observed_hop(
+    session: &ControllerSession,
+    labels: &mut HashMap<String, String>,
+    via: NextHop,
+    interface: InterfaceId,
+) {
+    let NextHop::Via(transport) = via else {
+        return;
+    };
+    let hash = encode_hex(transport.as_bytes());
+    if interface.kind() == Some(InterfaceKind::TcpClient) {
+        if let Some(host) = tcp_host_for_interface(session, interface) {
+            insert_known_label(labels, &hash, &host);
+        }
+        return;
+    }
+    if let Some(alias) = entity_alias_for_interface(session, interface) {
+        remember_transport_node(labels, &hash, &alias);
+    }
+}
+
+fn note_heard_announces(
+    session: &ControllerSession,
+    labels: &mut HashMap<String, String>,
+    heard: &[HeardAnnounce],
+    signers: &HashMap<String, String>,
+) {
+    for row in heard {
+        let destination = row.destination.trim().to_ascii_lowercase();
+        if destination.is_empty() {
+            continue;
+        }
+        if let Some(signer) = signers.get(&destination) {
+            if let Some(existing) = labels.get(signer).cloned() {
+                let alias = base_entity_alias(&existing).to_string();
+                label_announce_destination(labels, &destination, &alias, &row.name_hash);
+            }
+        }
+        if row.hops > 1 {
+            continue;
+        }
+        let Ok(bytes) = parse_hex::<INTERFACE_ID_BYTES>(&row.interface_id) else {
+            continue;
+        };
+        let interface = InterfaceId::new(bytes);
+        if let Some(alias) = entity_alias_for_interface(session, interface) {
+            label_announce_destination(labels, &destination, &alias, &row.name_hash);
+            if transport_announce_name(&row.name_hash) {
+                if let Some(signer) = signers.get(&destination) {
+                    remember_transport_node(labels, signer, &alias);
+                }
+            }
+            continue;
+        }
+        if let Some(host) = tcp_host_for_interface(session, interface) {
+            insert_known_label(labels, &destination, &host);
+        }
+    }
+}
+
+fn label_announce_destination(
+    labels: &mut HashMap<String, String>,
+    destination: &str,
+    alias: &str,
+    name_hash: &str,
+) {
+    let suffix = announce_annotation_suffix(name_hash);
+    let labeled = if suffix.is_empty() {
+        alias.to_string()
+    } else {
+        format!("{alias}{suffix}")
+    };
+    insert_known_label(labels, destination, &labeled);
+}
+
+fn announce_annotation_suffix(name_hash: &str) -> &'static str {
+    match known_announce_names()
+        .get(&name_hash.trim().to_ascii_lowercase())
+        .copied()
+    {
+        Some("reticulum.remote.control") => "/RC",
+        Some("reticulum.remote.ota") => "/OTA",
+        _ => "",
+    }
+}
+
+fn base_entity_alias(label: &str) -> &str {
+    label.split('/').next().unwrap_or(label)
+}
+
+fn entity_alias_for_interface(
+    session: &ControllerSession,
+    interface: InterfaceId,
+) -> Option<String> {
+    if let Some(target_id) = target_id_for_interface(session, interface) {
+        let aliases = managed_node_aliases(session);
+        if let Some(alias) = aliases.get(&target_id.trim().to_ascii_lowercase()) {
+            return Some(alias.clone());
+        }
+    }
+    if let Some(alias) = alias_from_link_local_maps(session, interface) {
+        return Some(alias);
+    }
+    let key = encode_hex(interface.as_bytes());
+    let peers = session.peer_aliases.lock().ok()?;
+    stored_alias(peers.get(&key).map(String::as_str))
+}
+
+fn alias_from_link_local_maps(
+    session: &ControllerSession,
+    interface: InterfaceId,
+) -> Option<String> {
+    if interface.kind() != Some(InterfaceKind::WifiPeer) {
+        return None;
+    }
+    let peer = encode_hex(interface.as_bytes());
+    let targets = session.target_wifi_ll.lock().ok()?;
+    let aliases = managed_node_aliases(session);
+    for (ll, target_id) in targets.iter() {
+        let Some(addr) = parse_ipv6_fact(ll) else {
+            continue;
+        };
+        if wifi_peer_id_from_link_local(addr).as_deref() == Some(peer.as_str()) {
+            if let Some(alias) = aliases.get(&target_id.trim().to_ascii_lowercase()) {
+                return Some(alias.clone());
+            }
+        }
+    }
+    drop(targets);
+    let siblings = session.sibling_wifi_ll.lock().ok()?;
+    let sibling_aliases = session.sibling_aliases.lock().ok()?;
+    for (instance, ll) in siblings.iter() {
+        let Some(addr) = parse_ipv6_fact(ll) else {
+            continue;
+        };
+        if wifi_peer_id_from_link_local(addr).as_deref() != Some(peer.as_str()) {
+            continue;
+        }
+        if let Some(alias) = stored_alias(sibling_aliases.get(instance).map(String::as_str)) {
+            return Some(alias);
+        }
+    }
+    None
+}
+
+fn tcp_host_for_interface(session: &ControllerSession, interface: InterfaceId) -> Option<String> {
+    if interface.kind() != Some(InterfaceKind::TcpClient) {
+        return None;
+    }
+    if interface == session.tcp_id {
+        let dial = session.tcp_dial.lock().ok()?;
+        return tcp_host_label(&dial);
+    }
+    let key = encode_hex(interface.as_bytes());
+    session.tcp_interface_hosts.lock().ok()?.get(&key).cloned()
+}
+
+fn tcp_host_from_status(status: &RemoteControlTcpClientStatus) -> Option<String> {
+    match &status.config {
+        RemoteControlTcpClientConfig::Target(target) => {
+            let mut text = String::new();
+            target.write_endpoint(&mut text).ok()?;
+            tcp_host_label(&text)
+        }
+        RemoteControlTcpClientConfig::Clear => None,
+    }
+}
+
+fn tcp_host_label(target: &str) -> Option<String> {
+    let target = target.trim();
+    if target.is_empty() || target == "TCP dial" {
+        return None;
+    }
+    if let Some((host, _)) = split_host_port(target) {
+        let host = host.trim_matches(['[', ']']);
+        if host.is_empty() {
+            return None;
+        }
+        return Some(host.to_string());
+    }
+    if tcp_endpoint_part(target) {
+        Some(target.to_string())
+    } else {
+        None
+    }
+}
+
+fn remember_tcp_interface_host(session: &ControllerSession, interface_id: &str, host: &str) {
+    let key = interface_id.trim().to_ascii_lowercase();
+    let host = host.trim();
+    if key.is_empty() || host.is_empty() {
+        return;
+    }
+    if let Ok(mut known) = session.tcp_interface_hosts.lock() {
+        known.insert(key, host.to_string());
+    }
+}
+
+async fn path_table_labels(session: &ControllerSession) -> HashMap<String, String> {
+    let routes = NodeIntrospection::routes(&session.handle).await;
+    path_table_labels_with_routes(session, &routes).await
+}
+
+async fn path_table_labels_with_routes(
+    session: &ControllerSession,
+    routes: &[RouteSnapshot],
+) -> HashMap<String, String> {
+    let mut labels = known_path_node_labels(session);
+    let snapshots = session.handle.destination_identities().await;
+    let heard = session
+        .announce_stream
+        .lock()
+        .map(|stream| stream.snapshot())
+        .unwrap_or_default();
+    let heard_identities = snapshots
+        .iter()
+        .map(|row| (row.identity, row.destination))
+        .collect::<Vec<_>>();
+    learn_transport_labels(
+        &mut labels,
+        &managed_node_aliases(session),
+        &heard_identities,
+        &transport_destination_owners(session, routes, &heard),
+    );
+    let signers = snapshots
+        .iter()
+        .map(|row| {
+            (
+                encode_hex(row.destination.as_bytes()),
+                encode_hex(row.identity.as_bytes()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    note_heard_announces(session, &mut labels, &heard, &signers);
+    for route in routes {
+        note_observed_hop(session, &mut labels, route.via, route.interface);
+    }
+    publish_address_labels(session, &mut labels);
+    labels
+}
+
+fn managed_node_aliases(session: &ControllerSession) -> HashMap<String, String> {
+    let target_aliases = match session.target_aliases.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => HashMap::new(),
+    };
+    let target_names = session
+        .pairing
+        .lock()
+        .ok()
+        .map(|pairing| pairing.target_names.clone())
+        .unwrap_or_default();
+    let mut aliases = HashMap::new();
+    let mut ids = target_aliases
+        .keys()
+        .cloned()
+        .chain(target_names.keys().cloned())
+        .collect::<Vec<_>>();
+    ids.sort();
+    for id in ids {
+        let Some(alias) = stored_alias(target_aliases.get(&id).map(String::as_str))
+            .or_else(|| stored_alias(target_names.get(&id).map(String::as_str)))
+        else {
+            continue;
+        };
+        aliases
+            .entry(id.trim().to_ascii_lowercase())
+            .or_insert(alias);
+    }
+    aliases
+}
+
+/// Remote-control identity of the managed node that owns a transport destination,
+/// when a one-hop observation on that node's interface heard it.
+fn transport_destination_owners(
+    session: &ControllerSession,
+    routes: &[RouteSnapshot],
+    heard: &[HeardAnnounce],
+) -> HashMap<String, String> {
+    let mut owners = HashMap::new();
+    for route in routes {
+        if !matches!(route.via, NextHop::Direct) {
+            continue;
+        }
+        let Some(target_id) = target_id_for_interface(session, route.interface) else {
+            continue;
+        };
+        owners
+            .entry(encode_hex(route.destination.as_bytes()))
+            .or_insert(target_id);
+    }
+    for row in heard {
+        if row.hops > 1 || !transport_announce_name(&row.name_hash) {
+            continue;
+        }
+        let Ok(bytes) = parse_hex::<INTERFACE_ID_BYTES>(&row.interface_id) else {
+            continue;
+        };
+        let Some(target_id) = target_id_for_interface(session, InterfaceId::new(bytes)) else {
+            continue;
+        };
+        owners
+            .entry(row.destination.trim().to_ascii_lowercase())
+            .or_insert(target_id);
+    }
+    owners
+}
+
+fn transport_announce_name(name_hash_hex: &str) -> bool {
+    known_announce_names()
+        .get(name_hash_hex.trim())
+        .is_some_and(|name| {
+            matches!(
+                *name,
+                "lxmf.delivery"
+                    | "nomadnetwork.node"
+                    | "rnstransport.probe"
+                    | "rnstransport.remote.management"
+            )
+        })
+}
+
+fn target_id_for_interface(session: &ControllerSession, interface: InterfaceId) -> Option<String> {
+    let peer_id = encode_hex(interface.as_bytes());
+    if let Some(target_id) = session
+        .target_peer_ids
+        .lock()
+        .ok()
+        .and_then(|known| known.get(&peer_id).cloned())
+    {
+        return Some(target_id);
+    }
+    if interface.kind() != Some(InterfaceKind::BluetoothPeer) {
+        return None;
+    }
+    let prefix = appearance_prefix(interface).to_ascii_lowercase();
+    let prefixes = session.target_ble_prefixes.lock().ok()?;
+    let mut found = None;
+    for (target_id, known) in prefixes.iter() {
+        if !known.eq_ignore_ascii_case(&prefix) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(target_id.clone());
+    }
+    found
+}
+
+/// When a heard announce was signed by a transport identity, label that identity
+/// and every address derived from it with the managed node's alias.
+fn learn_transport_labels(
+    labels: &mut HashMap<String, String>,
+    rc_aliases: &HashMap<String, String>,
+    heard: &[(IdentityHash, DestinationHash)],
+    destination_owners: &HashMap<String, String>,
+) {
+    for (identity, destination) in heard {
+        if !identity_announced_transport_destination(identity, destination) {
+            continue;
+        }
+        let identity_hex = encode_hex(identity.as_bytes());
+        let alias = rc_aliases.get(&identity_hex).cloned().or_else(|| {
+            let owner = destination_owners.get(&encode_hex(destination.as_bytes()))?;
+            rc_aliases.get(&owner.trim().to_ascii_lowercase()).cloned()
+        });
+        if let Some(alias) = alias {
+            remember_transport_node(labels, &identity_hex, &alias);
+        }
+    }
+}
+
+fn identity_announced_transport_destination(
+    identity: &IdentityHash,
+    destination: &DestinationHash,
+) -> bool {
+    TRANSPORT_NODE_DESTINATIONS
+        .iter()
+        .any(|(app_name, aspects, _)| {
+            expand_name(app_name, aspects)
+                .ok()
+                .is_some_and(|name| derive_destination_hash(identity, &name) == *destination)
+        })
+}
+
+/// Addresses derived from a node's remote-control identity. The suffix distinguishes
+/// them from the identity hash, which is labeled with the alias alone.
+const RC_NODE_DESTINATIONS: &[(&str, &[&str], &str)] = &[
     (
         REMOTE_CONTROL_APPLICATION_NAME,
         REMOTE_CONTROL_APPLICATION_ASPECTS,
@@ -8723,8 +9547,17 @@ const KNOWN_NODE_DESTINATIONS: &[(&str, &[&str], &str)] = &[
         FIRMWARE_UPDATE_APPLICATION_ASPECTS,
         "/OTA",
     ),
+];
+
+/// Addresses derived from a controller instance hash.
+const INSTANCE_NODE_DESTINATIONS: &[(&str, &[&str], &str)] = &[
     (ROSTER_SYNC_APP_NAME, ROSTER_SYNC_ASPECTS, ""),
     (IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_ASPECTS, ""),
+];
+
+/// Addresses derived from a node's transport identity. The identity hash itself is
+/// also labeled, because that is the value in a path table's Via column.
+const TRANSPORT_NODE_DESTINATIONS: &[(&str, &[&str], &str)] = &[
     ("lxmf", &["delivery"], ""),
     ("nomadnetwork", &["node"], ""),
     ("rnstransport", &["probe"], ""),
@@ -8903,6 +9736,8 @@ fn format_path_via(via: NextHop, labels: &HashMap<String, String>) -> (String, S
         NextHop::Direct => ("direct".to_string(), String::new()),
         NextHop::Via(transport) => {
             let full = encode_hex(transport.as_bytes());
+            // Same map as the destination column: a transport identity, a
+            // remote-control address, or any other derived address.
             (format!("via {}", annotate_known_hash(&full, labels)), full)
         }
     }
@@ -8952,10 +9787,17 @@ fn path_from_route(
     route: &RouteSnapshot,
     peer_aliases: &HashMap<String, String>,
     target_aliases: &HashMap<String, String>,
+    labels: &HashMap<String, String>,
 ) -> TargetPath {
     TargetPath {
         hops: route.hops,
-        via: format_next_hop(route.via, route.interface, peer_aliases, target_aliases),
+        via: format_next_hop(
+            route.via,
+            route.interface,
+            peer_aliases,
+            target_aliases,
+            labels,
+        ),
         interface: format_interface(route.interface),
         announced_at: format_announce_millis(route.learned_at.0),
     }
@@ -8995,12 +9837,13 @@ fn format_next_hop(
     interface: InterfaceId,
     peer_aliases: &HashMap<String, String>,
     target_aliases: &HashMap<String, String>,
+    labels: &HashMap<String, String>,
 ) -> String {
     match via {
         NextHop::Direct => "direct".to_string(),
         NextHop::Via(transport) => format!(
             "via {}",
-            via_hop_label(transport, interface, peer_aliases, target_aliases)
+            via_hop_label(transport, interface, peer_aliases, target_aliases, labels)
         ),
     }
 }
@@ -9012,9 +9855,13 @@ fn via_hop_label(
     interface: InterfaceId,
     peer_aliases: &HashMap<String, String>,
     target_aliases: &HashMap<String, String>,
+    labels: &HashMap<String, String>,
 ) -> String {
     let interface_hex = encode_hex(interface.as_bytes());
     let transport_hex = encode_hex(transport.as_bytes());
+    if labels.contains_key(&transport_hex.to_ascii_lowercase()) {
+        return annotate_known_hash(&transport_hex, labels);
+    }
     if let Some(alias) = stored_alias(peer_aliases.get(&interface_hex).map(String::as_str)) {
         return alias;
     }
@@ -9245,21 +10092,23 @@ mod tests {
         ensure_wifi_auto_tcp_client, format_activity_age, format_announce_millis,
         format_connect_label, format_hop_count, format_interface, format_managed_node_battery,
         format_next_hop, format_pairing_open_label, format_target_announce, format_target_route,
-        format_utc_millis, generic_bluetooth_auto_title, instance_identity_secret_path,
-        interface_peer, interface_peer_from_wire, interface_power_from_connection,
-        inventory_recovery_continues, label_known_nodes, labeled_local_peer,
-        load_persisted_tcp_target, local_interface_config, local_interface_entry,
-        managed_targets_from_disk, monitor_remaining_at, normalize_stored_wifi_ll,
+        format_utc_millis, generic_bluetooth_auto_title, insert_known_label,
+        instance_identity_secret_path, interface_peer, interface_peer_from_wire,
+        interface_power_from_connection, inventory_recovery_continues, label_announce_destination,
+        label_known_nodes, labeled_local_peer, learn_transport_labels, load_persisted_tcp_target,
+        local_interface_config, local_interface_entry, managed_targets_from_disk,
+        monitor_remaining_at, normalize_stored_wifi_ll, note_hop_transport,
         operator_interface_kind, operator_local_kind, parse_invitation_code, parse_target_names,
         parse_tcp_dial_target, path_is_better_than, path_is_direct_ble, path_table_row,
         peer_is_auto_gateway, peer_is_this_controller_bluetooth, peer_is_this_controller_wifi,
-        peer_label, persist_tcp_target, radio_facts, remember_known_node, remote_interface_entry,
-        render_target_names, resolve_controller_tcp_target, resolve_paired_target_hash,
-        route_interface_kind, short_id, should_forget_control_route,
-        should_wait_for_control_announce, stored_alias, target_label, BackendError, InterfaceEntry,
-        InterfaceFact, InterfacePower, PeerHealth, RemoteControlAnnounceWait, TargetPath,
-        TargetStatus, CONTROLLER_IDENTITY_FILE, DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE,
-        MANAGER_ALIASES_FILE, TARGET_MONITOR_TTL, THIS_CONTROLLER_PEER_ALIAS,
+        peer_label, persist_tcp_target, radio_facts, remember_controller_node, remember_known_node,
+        remember_transport_node, remote_interface_entry, render_target_names,
+        resolve_controller_tcp_target, resolve_paired_target_hash, route_interface_kind, short_id,
+        should_forget_control_route, should_wait_for_control_announce, stored_alias, target_label,
+        tcp_host_label, BackendError, InterfaceEntry, InterfaceFact, InterfacePower, PeerHealth,
+        RemoteControlAnnounceWait, TargetPath, TargetStatus, CONTROLLER_IDENTITY_FILE,
+        DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE, MANAGER_ALIASES_FILE, TARGET_MONITOR_TTL,
+        THIS_CONTROLLER_PEER_ALIAS,
     };
     use personal_rns::identity::IdentityHash;
     use personal_rns::interfaces::bluetooth_auto::BleIdentity;
@@ -10702,6 +11551,7 @@ mod tests {
                 NextHop::Via(transport),
                 peer,
                 &HashMap::new(),
+                &HashMap::new(),
                 &HashMap::new()
             ),
             format!("via {}", peer_label(peer))
@@ -10714,24 +11564,44 @@ mod tests {
                 NextHop::Via(transport),
                 peer,
                 &peer_aliases,
+                &HashMap::new(),
                 &HashMap::new()
             ),
             "via HV4A-peer"
         );
 
         let mut target_aliases = HashMap::new();
-        target_aliases.insert(transport_id, "HV4A".to_string());
+        target_aliases.insert(transport_id.clone(), "HV4A".to_string());
         assert_eq!(
             format_next_hop(
                 NextHop::Via(transport),
                 peer,
                 &HashMap::new(),
-                &target_aliases
+                &target_aliases,
+                &HashMap::new()
             ),
             "via HV4A"
         );
+        let mut labels = HashMap::new();
+        remember_transport_node(&mut labels, &transport_id, "Hv4A");
         assert_eq!(
-            format_next_hop(NextHop::Direct, peer, &HashMap::new(), &HashMap::new()),
+            format_next_hop(
+                NextHop::Via(transport),
+                peer,
+                &peer_aliases,
+                &target_aliases,
+                &labels
+            ),
+            format!("via {} (Hv4A/TP)", short_id(&transport_id))
+        );
+        assert_eq!(
+            format_next_hop(
+                NextHop::Direct,
+                peer,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             "direct"
         );
     }
@@ -10823,6 +11693,286 @@ mod tests {
         assert_eq!(direct.destination, "38317e86");
         assert_eq!(direct.via, "direct");
         assert!(direct.via_full.is_empty());
+    }
+
+    #[test]
+    fn path_table_labels_transport_addresses_in_destination_and_via() {
+        let remote_control = [0x6a; 16];
+        let transport = [0xbf; 16];
+        let remote_control_hex = encode_hex(&remote_control);
+        let transport_hex = encode_hex(&transport);
+        let mut labels = HashMap::new();
+        remember_known_node(&mut labels, &remote_control_hex, "Hv4A");
+        let remote_control_identity = IdentityHash::new(remote_control);
+        let transport_identity = IdentityHash::new(transport);
+        let node_name = personal_rns::routing::announce::expand_name("nomadnetwork", &["node"])
+            .expect("nomadnetwork.node");
+        let node_destination = personal_rns::routing::announce::derive_destination_hash(
+            &transport_identity,
+            &node_name,
+        );
+        let node_hex = encode_hex(node_destination.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&node_hex, &labels),
+            short_id(&node_hex),
+            "a transport address is not derived from the remote-control identity"
+        );
+
+        let mut aliases = HashMap::new();
+        aliases.insert(remote_control_hex.clone(), "Hv4A".to_string());
+        let mut owners = HashMap::new();
+        owners.insert(node_hex.clone(), remote_control_hex.clone());
+        learn_transport_labels(
+            &mut labels,
+            &aliases,
+            &[(transport_identity, node_destination)],
+            &owners,
+        );
+        assert_eq!(
+            annotate_known_hash(&node_hex, &labels),
+            format!("{} (Hv4A)", short_id(&node_hex))
+        );
+        assert_eq!(
+            annotate_known_hash(&transport_hex, &labels),
+            format!("{} (Hv4A/TP)", short_id(&transport_hex))
+        );
+        let from_remote_control = personal_rns::routing::announce::derive_destination_hash(
+            &remote_control_identity,
+            &node_name,
+        );
+        let from_remote_control_hex = encode_hex(from_remote_control.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&from_remote_control_hex, &labels),
+            short_id(&from_remote_control_hex)
+        );
+
+        let interface = InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, b"wifi");
+        let row = path_table_row(
+            &RemoteControlPathEntry::new(
+                node_destination,
+                2,
+                NextHop::Via(personal_rns::TransportId::new(transport)),
+                interface,
+                0,
+                0,
+            ),
+            &labels,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(row.destination, format!("{} (Hv4A)", short_id(&node_hex)));
+        assert_eq!(
+            row.via,
+            format!("via {} (Hv4A/TP)", short_id(&transport_hex))
+        );
+
+        let control =
+            personal_rns::remote_control::remote_control_destination_hash(&remote_control_identity);
+        let control_hex = encode_hex(control.as_bytes());
+        let via_control = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0x44; 16]),
+                2,
+                NextHop::Via(personal_rns::TransportId::new(*control.as_bytes())),
+                interface,
+                0,
+                0,
+            ),
+            &labels,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            via_control.via,
+            format!("via {} (Hv4A/RC)", short_id(&control_hex))
+        );
+        let install = personal_rns::remote_control::firmware_update_destination_hash(
+            &remote_control_identity,
+        );
+        let install_hex = encode_hex(install.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&install_hex, &labels),
+            format!("{} (Hv4A/OTA)", short_id(&install_hex))
+        );
+
+        let mut same_identity = HashMap::new();
+        remember_known_node(&mut same_identity, &remote_control_hex, "Hv4A");
+        let shared_node = personal_rns::routing::announce::derive_destination_hash(
+            &remote_control_identity,
+            &node_name,
+        );
+        learn_transport_labels(
+            &mut same_identity,
+            &aliases,
+            &[(remote_control_identity, shared_node)],
+            &HashMap::new(),
+        );
+        let shared_hex = encode_hex(shared_node.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&shared_hex, &same_identity),
+            format!("{} (Hv4A)", short_id(&shared_hex))
+        );
+    }
+
+    #[test]
+    fn a_transport_hop_learned_on_one_interface_labels_the_same_hash_everywhere() {
+        let transport = [0x28, 0x35, 0x2b, 0x3d, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let transport_id = personal_rns::TransportId::new(transport);
+        let transport_hex = encode_hex(&transport);
+        let target_id = "6ae2a226312dbd693ed876ec4a37c24c";
+        let mut aliases = HashMap::new();
+        aliases.insert(target_id.to_string(), "Hv4A".to_string());
+        let mut labels = HashMap::new();
+        note_hop_transport(
+            &mut labels,
+            &aliases,
+            NextHop::Via(transport_id),
+            Some(target_id.to_string()),
+        );
+        let ble = InterfaceId::from_channel_tag(InterfaceKind::BluetoothPeer, b"hv4a");
+        let lora = InterfaceId::from_channel_tag(InterfaceKind::LoRa, b"lora");
+        let on_ble = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0xa1; 16]),
+                2,
+                NextHop::Via(transport_id),
+                ble,
+                0,
+                0,
+            ),
+            &labels,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let on_lora = path_table_row(
+            &RemoteControlPathEntry::new(
+                DestinationHash::new([0xc8; 16]),
+                4,
+                NextHop::Via(transport_id),
+                lora,
+                0,
+                0,
+            ),
+            &labels,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let annotated = format!("via {} (Hv4A/TP)", short_id(&transport_hex));
+        assert_eq!(on_ble.via, annotated);
+        assert_eq!(on_lora.via, annotated);
+        assert_eq!(
+            format_next_hop(
+                NextHop::Via(transport_id),
+                lora,
+                &HashMap::new(),
+                &HashMap::new(),
+                &labels
+            ),
+            annotated
+        );
+    }
+
+    #[test]
+    fn a_sibling_controller_derives_the_same_address_set_as_a_managed_node() {
+        let identity = [0x53; 16];
+        let identity_hex = encode_hex(&identity);
+        let identity_hash = IdentityHash::new(identity);
+        let mut labels = HashMap::new();
+        remember_controller_node(&mut labels, &identity_hex, "Sibling 1");
+        assert_eq!(
+            annotate_known_hash(&identity_hex, &labels),
+            format!("{} (Sibling 1)", short_id(&identity_hex))
+        );
+        let control = personal_rns::remote_control::remote_control_destination_hash(&identity_hash);
+        let control_hex = encode_hex(control.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&control_hex, &labels),
+            format!("{} (Sibling 1/RC)", short_id(&control_hex))
+        );
+        let install =
+            personal_rns::remote_control::firmware_update_destination_hash(&identity_hash);
+        let install_hex = encode_hex(install.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&install_hex, &labels),
+            format!("{} (Sibling 1/OTA)", short_id(&install_hex))
+        );
+        let roster = crate::roster_sync::roster_sync_destination_hash(identity_hash)
+            .expect("roster sync name");
+        let roster_hex = encode_hex(roster.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&roster_hex, &labels),
+            format!("{} (Sibling 1)", short_id(&roster_hex))
+        );
+        let node_name = personal_rns::routing::announce::expand_name("nomadnetwork", &["node"])
+            .expect("nomadnetwork.node");
+        let node =
+            personal_rns::routing::announce::derive_destination_hash(&identity_hash, &node_name);
+        let node_hex = encode_hex(node.as_bytes());
+        assert_eq!(
+            annotate_known_hash(&node_hex, &labels),
+            format!("{} (Sibling 1)", short_id(&node_hex))
+        );
+        assert!(
+            !annotate_known_hash(&identity_hex, &labels).contains("/TP"),
+            "the instance hash stays the sibling alias"
+        );
+    }
+
+    #[test]
+    fn a_tcp_client_hop_is_labeled_with_the_dial_host() {
+        let via = encode_hex(&[0x28, 0x35, 0x2b, 0x3d, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut labels = HashMap::new();
+        let host = tcp_host_label("sydney.reticulum.au:4242").expect("host");
+        insert_known_label(&mut labels, &via, &host);
+        assert_eq!(
+            annotate_known_hash(&via, &labels),
+            format!("{} (sydney.reticulum.au)", short_id(&via))
+        );
+        assert!(!labels.values().any(|label| label.contains("/TP")));
+    }
+
+    #[test]
+    fn an_announce_on_a_known_peer_labels_that_destination() {
+        let destination = encode_hex(&[0xc8, 0xa6, 0x0f, 0xca, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let rc_name = personal_rns::routing::announce::expand_name(
+            personal_rns::remote_control::REMOTE_CONTROL_APPLICATION_NAME,
+            personal_rns::remote_control::REMOTE_CONTROL_APPLICATION_ASPECTS,
+        )
+        .expect("remote control name");
+        let name_hash = encode_hex(rc_name.as_bytes());
+        let mut labels = HashMap::new();
+        label_announce_destination(&mut labels, &destination, "Hv4A", &name_hash);
+        assert_eq!(
+            annotate_known_hash(&destination, &labels),
+            format!("{} (Hv4A/RC)", short_id(&destination))
+        );
+
+        let node_name = personal_rns::routing::announce::expand_name("nomadnetwork", &["node"])
+            .expect("nomadnetwork.node");
+        let node = encode_hex(&[0x11; 16]);
+        label_announce_destination(
+            &mut labels,
+            &node,
+            "Hv4A",
+            &encode_hex(node_name.as_bytes()),
+        );
+        assert_eq!(
+            annotate_known_hash(&node, &labels),
+            format!("{} (Hv4A)", short_id(&node))
+        );
+    }
+
+    #[test]
+    fn a_known_node_label_is_kept_when_a_tcp_host_is_learned_later() {
+        let via = encode_hex(&[0x28; 16]);
+        let mut labels = HashMap::new();
+        remember_transport_node(&mut labels, &via, "Hv4A");
+        let host = tcp_host_label("sydney.reticulum.au:4242").expect("host");
+        insert_known_label(&mut labels, &via, &host);
+        assert_eq!(
+            annotate_known_hash(&via, &labels),
+            format!("{} (Hv4A/TP)", short_id(&via))
+        );
     }
 
     #[test]

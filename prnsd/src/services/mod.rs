@@ -7,9 +7,12 @@ use personal_rns::runtime::{PrnsEvent, PrnsNode, PrnsNodeHandle};
 use personal_rns::storage::StorageLayout;
 
 mod blackhole_exchange;
+mod interface_controls;
 mod management_announcements;
 mod node_page;
 mod probe_responder;
+mod remote_control_host;
+mod remote_control_inventory;
 mod remote_management;
 mod request_routes;
 mod request_state;
@@ -19,6 +22,7 @@ const MANAGEMENT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
 pub(crate) use blackhole_exchange::{
     spawn_updater as spawn_blackhole_updater, BlackholeUpdateTask, ListRoute,
 };
+pub(crate) use interface_controls::DaemonInterfaceControls;
 pub(crate) use management_announcements::{
     announce_for, AnnouncedDestination, AnnouncementSchedule, ManagementAnnounceTask,
 };
@@ -42,6 +46,19 @@ impl ManagementDestinations {
 
     pub(crate) fn node_page_destination(&self) -> Option<personal_rns::wire::DestinationHash> {
         self.nnpages.as_ref().map(|destination| destination.hash)
+    }
+
+    pub(crate) fn with_remote_control_endpoint(
+        mut self,
+        hash: personal_rns::wire::DestinationHash,
+    ) -> Self {
+        self.announced.push(AnnouncedDestination {
+            hash,
+            available_when: None,
+            name_file: None,
+            schedule: AnnouncementSchedule::ImmediateThenFixed(Duration::from_secs(60)),
+        });
+        self
     }
 }
 

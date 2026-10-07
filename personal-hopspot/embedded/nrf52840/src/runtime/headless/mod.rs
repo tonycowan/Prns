@@ -633,7 +633,7 @@ pub async fn run(spawner: Spawner) -> ! {
     .await;
     #[cfg(feature = "board-mesh-tower-v2")]
     spawner.spawn(board::publish_root_test_file(sd_card).expect("sd card task fits"));
-    #[cfg(feature = "board-mesh-tower-v2")]
+    #[cfg(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log"))]
     spawner.spawn(board::console_tick().expect("console tick task fits"));
     #[cfg(feature = "board-mesh-tower-v2")]
     spawner.spawn(board::report_battery(battery).expect("battery task fits"));

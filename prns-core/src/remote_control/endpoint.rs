@@ -40,10 +40,7 @@ impl RemoteControlEndpoint {
 impl From<&RemoteControlTargetIdentity> for RemoteControlEndpoint {
     fn from(target_identity: &RemoteControlTargetIdentity) -> Self {
         Self {
-            destination_hash: derive_destination_hash(
-                &target_identity.identity_hash(),
-                &REMOTE_CONTROL_DOTTED_NAME_HASH,
-            ),
+            destination_hash: remote_control_destination_hash(&target_identity.identity_hash()),
         }
     }
 }
@@ -51,10 +48,7 @@ impl From<&RemoteControlTargetIdentity> for RemoteControlEndpoint {
 impl From<&RemoteControlControllerIdentity> for RemoteControlEndpoint {
     fn from(controller_identity: &RemoteControlControllerIdentity) -> Self {
         Self {
-            destination_hash: derive_destination_hash(
-                &controller_identity.identity_hash(),
-                &REMOTE_CONTROL_DOTTED_NAME_HASH,
-            ),
+            destination_hash: remote_control_destination_hash(&controller_identity.identity_hash()),
         }
     }
 }
@@ -76,6 +70,15 @@ impl RemoteControlTargetIdentity {
     pub fn firmware_update_destination(&self) -> DestinationHash {
         firmware_update_destination_hash(&self.identity_hash())
     }
+}
+
+/// Destination address a path table uses for this node's remote-control service.
+/// It is derived from the identity hash and is not the identity hash itself.
+#[must_use]
+pub fn remote_control_destination_hash(
+    identity: &crate::identity::IdentityHash,
+) -> DestinationHash {
+    derive_destination_hash(identity, &REMOTE_CONTROL_DOTTED_NAME_HASH)
 }
 
 #[must_use]
@@ -132,6 +135,10 @@ mod tests {
             signing: IdentitySigningPublicKey::new(Ed25519PublicKey([0x42; Ed25519PublicKey::LEN])),
         });
 
+        assert_eq!(
+            target_identity.endpoint().destination_hash(),
+            remote_control_destination_hash(&target_identity.identity_hash()),
+        );
         assert_eq!(
             target_identity.endpoint().destination_hash(),
             DestinationHash::new([

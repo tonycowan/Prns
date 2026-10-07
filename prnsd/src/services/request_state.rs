@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use personal_rns::identity::IdentityHash;
@@ -6,9 +7,11 @@ use personal_rns::runtime::PrnsNodeHandle;
 
 use crate::nnpages::NnPagesCatalog;
 use personal_rns::runtime::{
-    NoRemoteControlHostControls, RemoteControlHostCommand, RemoteControlHostCommandError,
-    RemoteControlHostControls, RemoteControlHostResponse,
+    RemoteControlHostCommand, RemoteControlHostCommandError, RemoteControlHostControls,
+    RemoteControlHostResponse,
 };
+
+use super::interface_controls::DaemonInterfaceControls;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportStatusIdentity {
@@ -23,6 +26,7 @@ pub struct DaemonRequestState {
     transport: Option<TransportStatusIdentity>,
     started: Instant,
     nnpages: NnPagesCatalog,
+    controls: Arc<DaemonInterfaceControls>,
 }
 
 impl DaemonRequestState {
@@ -31,13 +35,19 @@ impl DaemonRequestState {
         transport: Option<TransportStatusIdentity>,
         started: Instant,
         nnpages: NnPagesCatalog,
+        controls: Arc<DaemonInterfaceControls>,
     ) -> Self {
         Self {
             handle,
             transport,
             started,
             nnpages,
+            controls,
         }
+    }
+
+    pub(super) fn controls(&self) -> &DaemonInterfaceControls {
+        &self.controls
     }
 
     pub fn handle(&self) -> &PrnsNodeHandle {
@@ -63,8 +73,6 @@ impl RemoteControlHostControls for DaemonRequestState {
         &self,
         command: RemoteControlHostCommand,
     ) -> Result<RemoteControlHostResponse, RemoteControlHostCommandError> {
-        NoRemoteControlHostControls
-            .execute_remote_control(command)
-            .await
+        super::remote_control_host::execute(self, command).await
     }
 }

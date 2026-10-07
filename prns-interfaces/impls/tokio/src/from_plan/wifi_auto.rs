@@ -2,10 +2,11 @@ use prns_config::AutoInterfacePlan;
 
 use crate::wifi_auto::{AutoWifi, AutoWifiDevicePolicy, AutoWifiSettings};
 
-use super::{AttachmentResult, InterfaceConstruction};
+use super::{AttachmentResult, InterfaceConstruction, PlanRuntimeContext};
 
 pub(super) fn stand_up(
     interface_construction: InterfaceConstruction<'_>,
+    context: &PlanRuntimeContext,
     auto_interface_plan: &AutoInterfacePlan,
 ) -> AttachmentResult {
     let auto_wifi_settings =
@@ -25,7 +26,14 @@ pub(super) fn stand_up(
         }
         None => auto_wifi,
     };
+    let status = auto_wifi.status();
     let attached_auto_wifi = interface_construction.attach(auto_wifi);
+    if let Some(controls) = context.interface_controls() {
+        controls(super::RegisteredInterfaceControl::AutoWifi {
+            id: attached_auto_wifi.id(),
+            status,
+        });
+    }
     Ok(attached_auto_wifi.id())
 }
 
