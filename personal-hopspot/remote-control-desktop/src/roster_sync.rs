@@ -41,6 +41,8 @@ pub const AUTO_GATEWAY_ALIAS_LINK: &str = "__auto_gateway__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RosterMessageKind {
+    /// Inbound kind byte 1. The library accepts pulls; only tests write them.
+    #[cfg(test)]
     Pull = 1,
     Replica = 2,
     Error = 3,
@@ -1349,6 +1351,7 @@ fn parse_hex<const N: usize>(input: &str) -> Result<[u8; N], ()> {
     Ok(out)
 }
 
+#[cfg(test)]
 pub fn write_pull(signer: &PrivateIdentityMaterial, out: &mut [u8]) -> Option<usize> {
     let required = 1 + IDENTITY_PUBLIC_KEY_LEN + SIGNATURE_LEN;
     if out.len() < required {
