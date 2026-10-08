@@ -22,7 +22,14 @@ mod message;
 mod pagination;
 mod pairing;
 mod path_table;
+mod radio;
 mod service;
+mod stream;
+
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
+pub use radio::*;
 
 pub use self::core::*;
 pub use crate::capabilities::power::PowerSnapshot;
@@ -37,6 +44,7 @@ pub use pagination::*;
 pub use pairing::*;
 pub use path_table::*;
 pub use service::*;
+pub use stream::*;
 
 #[cfg(test)]
 mod tests;

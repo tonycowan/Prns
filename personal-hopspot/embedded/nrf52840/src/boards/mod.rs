@@ -11,9 +11,11 @@ use prns_core::entropy::{EntropySource, RuntimeEntropy};
     feature = "board-t096",
     feature = "board-t114",
     feature = "board-t1000e",
+    feature = "board-sensecap-solar-node",
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724"),
+    feature = "board-wio-tracker-l1"
 ))]
 mod status_led;
 
@@ -24,30 +26,73 @@ mod status_led;
 ))]
 mod button;
 
-#[cfg(any(feature = "board-t096", feature = "board-t114"))]
+#[cfg(any(
+    feature = "board-t096",
+    feature = "board-t114",
+    feature = "board-wio-tracker-l1"
+))]
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum DisplayIoError {
+    #[cfg(any(feature = "board-t096", feature = "board-t114"))]
     Spi,
+    #[cfg(feature = "board-wio-tracker-l1")]
+    I2c,
     NotInitialized,
 }
 
 #[cfg(any(feature = "board-t096", feature = "board-t114"))]
 mod tft;
 
-pub(crate) type RemoteControlIdentityBootstrapError =
-    RemoteControlNodeIdentityBootstrapError<FlashVaultError<NvmcError>>;
+pub(crate) enum RemoteControlIdentityBootstrapError {
+    Identity(RemoteControlNodeIdentityBootstrapError<FlashVaultError<NvmcError>>),
+    FactoryGrant(FlashVaultError<NvmcError>),
+}
+
+impl core::fmt::Debug for RemoteControlIdentityBootstrapError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Identity(error) => formatter.debug_tuple("Identity").field(error).finish(),
+            Self::FactoryGrant(error) => {
+                formatter.debug_tuple("FactoryGrant").field(error).finish()
+            }
+        }
+    }
+}
+
+pub(crate) struct RemoteControlIdentityLoad {
+    pub(crate) bootstrap: RemoteControlNodeIdentityBootstrap,
+    pub(crate) factory_grant: Option<RemoteControlControllerGrant>,
+}
+
+pub(crate) fn initial_controller_grants(
+    factory_grant: Option<RemoteControlControllerGrant>,
+    storage: &mut Option<[RemoteControlControllerGrant; 1]>,
+) -> RemoteControlInitialControllerGrants<'_> {
+    let Some(grant) = factory_grant else {
+        return RemoteControlInitialControllerGrants::Nobody;
+    };
+    let grants = storage.insert([grant]);
+    RemoteControlInitialControllerGrants::Grants(
+        RemoteControlControllerGrants::try_from(grants.as_slice())
+            .expect("one factory controller grant is a valid initial grant set"),
+    )
+}
 
 pub(crate) struct RemoteControlIdentityFlash {
     offset: u32,
 }
 
-pub(crate) struct RemoteControlIdentityLoad {
-    pub bootstrap: RemoteControlNodeIdentityBootstrap,
-    pub factory_grant: Option<RemoteControlControllerGrant>,
-}
-
 impl RemoteControlIdentityFlash {
+    #[cfg(not(any(feature = "board-rak4631", feature = "board-rak10724")))]
     pub(crate) const fn at(offset: u32) -> Self {
+        Self { offset }
+    }
+
+    /// Use when a recovery UF2 replaces an application without erasing the page newly assigned to
+    /// the Remote Control identity vault. This recovers only a structurally corrupt load; storage,
+    /// verification, and identity-pair failures remain fatal and preserve the page for diagnosis.
+    #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+    pub(crate) const fn at_with_stale_application_page_recovery(offset: u32) -> Self {
         Self { offset }
     }
 
@@ -58,23 +103,29 @@ impl RemoteControlIdentityFlash {
     ) -> Result<RemoteControlIdentityLoad, RemoteControlIdentityBootstrapError> {
         let mut vault =
             FlashVault::<_, REMOTE_CONTROL_IDENTITY_VAULT_SLOTS>::new(nvmc, self.offset);
-        let bootstrap =
-            match RemoteControlNodeIdentityBootstrap::load_or_generate_with_runtime_entropy(
+        let bootstrap = RemoteControlNodeIdentityBootstrap::load_or_generate_with_runtime_entropy(
+            &mut vault, entropy,
+        );
+        #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+        let bootstrap = if matches!(
+            bootstrap,
+            Err(RemoteControlNodeIdentityBootstrapError::ControllerLoad(
+                FlashVaultError::Corrupt
+            ))
+        ) {
+            vault
+                .erase_all()
+                .map_err(RemoteControlNodeIdentityBootstrapError::ControllerStore)
+                .map_err(RemoteControlIdentityBootstrapError::Identity)?;
+            RemoteControlNodeIdentityBootstrap::load_or_generate_with_runtime_entropy(
                 &mut vault, entropy,
-            ) {
-                Ok(bootstrap) => bootstrap,
-                Err(_) => {
-                    // Leftover factory/Meshtastic bytes in this page make load() return Corrupt,
-                    // which used to panic via expect() before USB came up.
-                    vault
-                        .erase_all()
-                        .map_err(RemoteControlNodeIdentityBootstrapError::ControllerStore)?;
-                    RemoteControlNodeIdentityBootstrap::load_or_generate_with_runtime_entropy(
-                        &mut vault, entropy,
-                    )?
-                }
-            };
-        let factory_grant = load_factory_controller_grant(&vault).ok().flatten();
+            )
+        } else {
+            bootstrap
+        };
+        let bootstrap = bootstrap.map_err(RemoteControlIdentityBootstrapError::Identity)?;
+        let factory_grant = load_factory_controller_grant(&vault)
+            .map_err(RemoteControlIdentityBootstrapError::FactoryGrant)?;
         Ok(RemoteControlIdentityLoad {
             bootstrap,
             factory_grant,
@@ -82,33 +133,16 @@ impl RemoteControlIdentityFlash {
     }
 }
 
-pub(crate) fn initial_controller_grants(
-    factory_grant: Option<RemoteControlControllerGrant>,
-    storage: &mut Option<[RemoteControlControllerGrant; 1]>,
-) -> RemoteControlInitialControllerGrants<'_> {
-    let Some(grant) = factory_grant else {
-        return RemoteControlInitialControllerGrants::Nobody;
-    };
-    *storage = Some([grant]);
-    let Some(grants) = storage.as_ref() else {
-        return RemoteControlInitialControllerGrants::Nobody;
-    };
-    match RemoteControlControllerGrants::try_from(grants.as_slice()) {
-        Ok(grants) => RemoteControlInitialControllerGrants::Grants(grants),
-        Err(_) => RemoteControlInitialControllerGrants::Nobody,
-    }
-}
-
 #[cfg(feature = "board-mesh-pocket")]
 pub(crate) mod mesh_pocket;
 #[cfg(feature = "board-mesh-tower-v2")]
 pub(crate) mod mesh_tower_v2;
-#[cfg(feature = "board-rak10724")]
-pub(crate) mod rak10724;
-#[cfg(feature = "board-rak4631")]
-pub(crate) mod rak4631;
+#[cfg(feature = "board-muzi-base-duo")]
+pub(crate) mod muzi_base_duo;
 #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
 pub(crate) mod rak_vbat;
+#[cfg(feature = "board-rak4631")]
+pub(crate) mod rak4631;
 #[cfg(feature = "board-t096")]
 pub(crate) mod t096;
 #[cfg(feature = "board-t1000e")]
@@ -117,6 +151,8 @@ pub(crate) mod t1000e;
 pub(crate) mod t114;
 #[cfg(feature = "board-t-echo")]
 pub(crate) mod t_echo;
+#[cfg(feature = "board-wio-tracker-l1")]
+pub(crate) mod wio_tracker_l1;
 
 #[cfg(all(
     feature = "board-mesh-pocket",
@@ -125,8 +161,11 @@ pub(crate) mod t_echo;
     not(feature = "board-t114"),
     not(feature = "board-t1000e"),
     not(feature = "board-mesh-tower-v2"),
+    not(feature = "board-muzi-base-duo"),
     not(feature = "board-rak4631"),
-    not(feature = "board-rak10724")
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node"),
+    not(feature = "board-wio-tracker-l1")
 ))]
 pub(crate) use mesh_pocket as selected;
 
@@ -137,21 +176,27 @@ pub(crate) use mesh_pocket as selected;
     not(feature = "board-t114"),
     not(feature = "board-mesh-pocket"),
     not(feature = "board-t1000e"),
+    not(feature = "board-muzi-base-duo"),
     not(feature = "board-rak4631"),
-    not(feature = "board-rak10724")
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node"),
+    not(feature = "board-wio-tracker-l1")
 ))]
 pub(crate) use mesh_tower_v2 as selected;
 #[cfg(all(
-    feature = "board-rak10724",
+    feature = "board-muzi-base-duo",
     not(feature = "board-t-echo"),
     not(feature = "board-t096"),
     not(feature = "board-t114"),
     not(feature = "board-mesh-pocket"),
     not(feature = "board-t1000e"),
     not(feature = "board-mesh-tower-v2"),
-    not(feature = "board-rak4631")
+    not(feature = "board-rak4631"),
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node"),
+    not(feature = "board-wio-tracker-l1")
 ))]
-pub(crate) use rak10724 as selected;
+pub(crate) use muzi_base_duo as selected;
 #[cfg(all(
     feature = "board-rak4631",
     not(feature = "board-t-echo"),
@@ -160,7 +205,10 @@ pub(crate) use rak10724 as selected;
     not(feature = "board-mesh-pocket"),
     not(feature = "board-t1000e"),
     not(feature = "board-mesh-tower-v2"),
-    not(feature = "board-rak10724")
+    not(feature = "board-muzi-base-duo"),
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node"),
+    not(feature = "board-wio-tracker-l1")
 ))]
 pub(crate) use rak4631 as selected;
 #[cfg(all(
@@ -170,8 +218,11 @@ pub(crate) use rak4631 as selected;
     not(feature = "board-mesh-pocket"),
     not(feature = "board-t1000e"),
     not(feature = "board-mesh-tower-v2"),
+    not(feature = "board-muzi-base-duo"),
     not(feature = "board-rak4631"),
-    not(feature = "board-rak10724")
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node"),
+    not(feature = "board-wio-tracker-l1")
 ))]
 #[allow(unused_imports)] // Reserved for the runtime once the bring-up boundary is cleared.
 pub(crate) use t096 as selected;
@@ -182,8 +233,11 @@ pub(crate) use t096 as selected;
     not(feature = "board-t114"),
     not(feature = "board-mesh-pocket"),
     not(feature = "board-mesh-tower-v2"),
+    not(feature = "board-muzi-base-duo"),
     not(feature = "board-rak4631"),
-    not(feature = "board-rak10724")
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node"),
+    not(feature = "board-wio-tracker-l1")
 ))]
 pub(crate) use t1000e as selected;
 #[cfg(all(
@@ -193,8 +247,11 @@ pub(crate) use t1000e as selected;
     not(feature = "board-mesh-pocket"),
     not(feature = "board-t1000e"),
     not(feature = "board-mesh-tower-v2"),
+    not(feature = "board-muzi-base-duo"),
     not(feature = "board-rak4631"),
-    not(feature = "board-rak10724")
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node"),
+    not(feature = "board-wio-tracker-l1")
 ))]
 pub(crate) use t114 as selected;
 #[cfg(all(
@@ -204,7 +261,34 @@ pub(crate) use t114 as selected;
     not(feature = "board-mesh-pocket"),
     not(feature = "board-t1000e"),
     not(feature = "board-mesh-tower-v2"),
+    not(feature = "board-muzi-base-duo"),
     not(feature = "board-rak4631"),
-    not(feature = "board-rak10724")
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node"),
+    not(feature = "board-wio-tracker-l1")
 ))]
 pub(crate) use t_echo as selected;
+#[cfg(all(
+    feature = "board-wio-tracker-l1",
+    not(feature = "board-t-echo"),
+    not(feature = "board-t096"),
+    not(feature = "board-t114"),
+    not(feature = "board-mesh-pocket"),
+    not(feature = "board-t1000e"),
+    not(feature = "board-mesh-tower-v2"),
+    not(feature = "board-muzi-base-duo"),
+    not(feature = "board-rak4631"),
+    not(feature = "board-rak10724"),
+    not(feature = "board-sensecap-solar-node")
+))]
+pub(crate) use wio_tracker_l1 as selected;
+
+#[cfg(feature = "board-sensecap-solar-node")]
+pub(crate) mod sensecap_solar_node;
+#[cfg(feature = "board-sensecap-solar-node")]
+pub(crate) use sensecap_solar_node as selected;
+
+#[cfg(feature = "board-rak10724")]
+pub(crate) mod rak10724;
+#[cfg(feature = "board-rak10724")]
+pub(crate) use rak10724 as selected;

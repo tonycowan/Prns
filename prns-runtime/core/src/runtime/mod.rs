@@ -60,21 +60,25 @@ pub use node::{
 };
 pub use remote_control::{
     NoRemoteControlHostControls, RemoteControlActivateWifiCredentials, RemoteControlAnnounceSelf,
-    RemoteControlAnnounceSelfFailure, RemoteControlAuthorizeController,
-    RemoteControlCancelWifiCredentials, RemoteControlConfirmWifiCredentials, RemoteControlDescribe,
-    RemoteControlDescribeBuild, RemoteControlDescribeNetworkTransport, RemoteControlDescribePower,
-    RemoteControlError, RemoteControlHostCommand, RemoteControlHostCommandError,
-    RemoteControlHostControls, RemoteControlHostResponse, RemoteControlInspectWifiTransaction,
+    RemoteControlAnnounceSelfFailure, RemoteControlAppMessageExchange, RemoteControlAppMessages,
+    RemoteControlAuthorizeController, RemoteControlCancelWifiCredentials,
+    RemoteControlConfigureRadio, RemoteControlConfirmWifiCredentials, RemoteControlDescribe,
+    RemoteControlDescribeBuild, RemoteControlDescribeNetworkTransport, RemoteControlDescribeNodeName,
+    RemoteControlDescribePower, RemoteControlError, RemoteControlHostCommand,
+    RemoteControlHostCommandError, RemoteControlHostControls, RemoteControlHostResponse,
+    RemoteControlInspectRadio, RemoteControlInspectWifiTransaction,
     RemoteControlInventoryControllers, RemoteControlInventoryInterfaceConfig,
     RemoteControlInventoryInterfaceDiscoveryGroups, RemoteControlInventoryInterfacePeers,
-    RemoteControlInventoryInterfaces, RemoteControlInventoryPathTable,
+    RemoteControlInventoryInterfaces, RemoteControlInventoryPathTable, RemoteControlNodeControls,
+    RemoteControlNodeSetup,
     RemoteControlReplaceInterfaceDiscoveryGroups, RemoteControlRevokeController,
     RemoteControlSetDisplayAutoOff, RemoteControlSetDisplayVisibility,
     RemoteControlSetEspRadioMode, RemoteControlSetGnssPower, RemoteControlSetInterfaceGroup,
     RemoteControlSetInterfaceLoRaProfile, RemoteControlSetInterfaceMode,
     RemoteControlSetInterfacePower, RemoteControlSetInterfaceWifiStation,
-    RemoteControlSetNetworkTransport, RemoteControlSetStationUplink, RemoteControlSetSystemPower,
-    RemoteControlSleepRadios, RemoteControlStageWifiCredentials, RemoteControlWakeRadios,
+    RemoteControlSetNetworkTransport, RemoteControlSetNodeName, RemoteControlSetStationUplink,
+    RemoteControlSetSystemPower, RemoteControlSleepRadios, RemoteControlStageWifiCredentials,
+    RemoteControlSupportedHost, RemoteControlWakeRadios, RemoteControlWatchInterfaces,
 };
 #[cfg(feature = "remote-control-tcp-host")]
 pub use remote_control::{RemoteControlDescribeTcpClient, RemoteControlSetTcpClient};
@@ -120,7 +124,7 @@ pub use remote_control_target_connection::{
 
 #[doc(hidden)]
 pub mod placement {
-    pub use super::node::assemble_node_in_place;
+    pub use super::node::{assemble_node_in_place, assemble_node_with_interface_watch};
     pub use super::remote_control::{
         admit_remote_control_request, admit_verified_remote_control_request,
         dispatch_admitted_remote_control_request, dispatch_remote_control_request,

@@ -1089,7 +1089,7 @@ mod doctor_tests {
             .into_iter()
             .map(|board| board.slug.as_str())
             .collect::<Vec<_>>(),
-            ["t-beam-supreme"]
+            ["t-beam-supreme", "heltec-v3", "xiao-esp32s3-wio-sx1262"]
         );
         assert_eq!(
             indistinguishable_esp_boards(
@@ -1099,7 +1099,23 @@ mod doctor_tests {
             .into_iter()
             .map(|board| board.slug.as_str())
             .collect::<Vec<_>>(),
-            ["heltec-wireless-stick-lite-v3"]
+            [
+                "heltec-wireless-stick-lite-v3",
+                "heltec-v3",
+                "xiao-esp32s3-wio-sx1262"
+            ]
+        );
+
+        assert_eq!(
+            indistinguishable_esp_boards(&catalog, catalog.board("heltec-v3").expect("Heltec V3"))
+                .into_iter()
+                .map(|board| board.slug.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "heltec-wireless-stick-lite-v3",
+                "t-beam-supreme",
+                "xiao-esp32s3-wio-sx1262"
+            ]
         );
 
         let mut two_board_catalog = catalog.clone();

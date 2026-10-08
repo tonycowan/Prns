@@ -20,7 +20,7 @@ use personal_rns::{
 
 use crate::s3::{
     self, BoardFace, Esp32S3Board, NoGnss, RetainedBoardDisplay, S3BoardHardware,
-    S3InterfaceHardware, S3ManifoldHardware,
+    S3InterfaceHardware, S3ManifoldHardware, S3UsbHardware,
 };
 
 use self::display::{retained_policy, DisplaySpi, E290Display};
@@ -38,6 +38,8 @@ impl Esp32S3Board for HeltecE290Board {
     const USB_INTERFACE_ID: InterfaceId = USB_INTERFACE_ID;
     const MEMORY_PROFILE: &'static personal_hopspot_memory::MemoryProfile =
         &personal_hopspot_memory::HELTEC_E290;
+    #[cfg(feature = "remote-control-pairing")]
+    const REMOTE_CONTROL_PAIRING: bool = true;
     type Display = RetainedBoardDisplay<E290Display>;
     type Battery = screen::NoBattery;
     type Gnss = NoGnss;
@@ -133,7 +135,7 @@ impl Esp32S3Board for HeltecE290Board {
             },
             gnss: NoGnss,
             interface_hardware: S3InterfaceHardware {
-                usb_device: p.USB_DEVICE,
+                usb: S3UsbHardware::SerialJtag(p.USB_DEVICE),
                 lora_radio,
                 wifi: p.WIFI,
                 bluetooth: p.BT,

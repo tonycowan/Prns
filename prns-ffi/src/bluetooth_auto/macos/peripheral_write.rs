@@ -46,14 +46,6 @@ pub(super) struct WriteSession<C> {
     pub(super) data_tx: GattInboundSender,
 }
 
-impl<C> WriteSession<C> {
-    pub(super) fn data_receiver_closed(&self) -> bool {
-        // The control receiver is handshake-only and closes when a link settles. The data
-        // receiver is retained by the attached member for the full lifetime of this role.
-        self.data_tx.is_closed()
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum WriteTarget {
     Control,
@@ -76,48 +68,6 @@ pub(super) enum WriteError {
     InvalidOffset,
     InvalidValueLength,
     WriteNotPermitted,
-}
-
-pub(super) trait LinkPermit<L> {
-    fn deliver(self, link: L);
-}
-
-pub(super) trait LinkInbox<L>: Clone {
-    type Permit: LinkPermit<L>;
-
-    fn try_reserve_link(&self) -> Result<Self::Permit, ()>;
-}
-
-impl<L> LinkPermit<L> for mpsc::OwnedPermit<L> {
-    fn deliver(self, link: L) {
-        self.send(link);
-    }
-}
-
-impl<L> LinkInbox<L> for mpsc::Sender<L> {
-    type Permit = mpsc::OwnedPermit<L>;
-
-    fn try_reserve_link(&self) -> Result<Self::Permit, ()> {
-        self.clone().try_reserve_owned().map_err(|_| ())
-    }
-}
-
-impl<L> LinkPermit<L> for mpsc::UnboundedSender<L> {
-    fn deliver(self, link: L) {
-        let _ = self.send(link);
-    }
-}
-
-impl<L> LinkInbox<L> for mpsc::UnboundedSender<L> {
-    type Permit = Self;
-
-    fn try_reserve_link(&self) -> Result<Self::Permit, ()> {
-        if self.is_closed() {
-            Err(())
-        } else {
-            Ok(self.clone())
-        }
-    }
 }
 
 enum ReservedWrite {
@@ -149,22 +99,19 @@ pub(super) fn respond_to_write_batch<R>(
     }
 }
 
-pub(super) fn admit_write_batch<C: Clone, L, I>(
+pub(super) fn admit_write_batch<C: Clone, L>(
     radio_enabled: bool,
     requests: impl IntoIterator<Item = Result<WriteRequest<C>, WriteError>>,
     sessions: &mut HashMap<CoreBluetoothPeerId, WriteSession<C>>,
     session_capacity: usize,
-    inbound: &I,
+    inbound: &mpsc::Sender<L>,
     mut make_link: impl FnMut(
         &WriteRequest<C>,
         InboundProfile,
         mpsc::Receiver<Control>,
         GattInboundReceiver,
     ) -> L,
-) -> Result<(), WriteError>
-where
-    I: LinkInbox<L>,
-{
+) -> Result<(), WriteError> {
     if !radio_enabled {
         return Err(WriteError::InsufficientResources);
     }
@@ -217,7 +164,8 @@ where
                 return Err(WriteError::InsufficientResources);
             }
             let permit = inbound
-                .try_reserve_link()
+                .clone()
+                .try_reserve_owned()
                 .map_err(|_| WriteError::InsufficientResources)?;
             let (control_tx, control_rx) = mpsc::channel(8);
             let (data_tx, data_rx) = gatt_inbound_channel();
@@ -264,7 +212,7 @@ where
     // Publish new links last, with their initial input already queued. No staged receiver or
     // session escapes on a refused batch.
     for (permit, link) in new_links {
-        permit.deliver(link);
+        permit.send(link);
     }
     Ok(())
 }

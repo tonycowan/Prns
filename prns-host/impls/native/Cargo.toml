@@ -1,6 +1,6 @@
 [package]
 name = "prns-host-native"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/KenAKAFrosty/Prns"
@@ -36,6 +36,7 @@ personal-rns = { path = "../../../personal-rns", default-features = false, featu
     "parallel-resource-hash",
 ] }
 prns-host = { path = "../../core" }
+prns-host-snapshot = { path = "../snapshot" }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "sync",

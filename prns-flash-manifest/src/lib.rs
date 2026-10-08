@@ -1,4 +1,5 @@
 //! Shared release contract for the Personal Hopspot web and CLI flashers.
+#![forbid(unsafe_code)]
 
 #![forbid(unsafe_code)]
 
@@ -30,7 +31,7 @@ pub use domain::{
     Uf2BoardIdMatch, Uf2BoardIdMatchKind, Uf2Compatibility, Uf2MountLabel, Uf2Part, Uf2Target,
     Uf2Variant, UsbVidPid, ValidatedChannelDescriptor, ValidatedFlashManifest,
     ValidatedNrfSerialDfuCompatibility, ValidatedNrfSerialDfuSerialTransport,
-    ValidatedOfflineKeySigningInfo, ValidatedReleaseInfo,
+    ValidatedOfflineKeySigningInfo, ValidatedReleaseInfo, WebUsbControlRequest,
 };
 pub use esp::{validate_esp_sparse_image, EspPartViolation, EspSparseImageError};
 pub use manifest::{

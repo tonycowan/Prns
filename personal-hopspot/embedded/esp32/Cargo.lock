@@ -1762,6 +1762,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hopspot-heltec-v3"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "esp-hal",
+ "esp-rtos",
+ "personal-hopspot-esp32",
+]
+
+[[package]]
 name = "hopspot-heltec-v4"
 version = "0.1.0"
 dependencies = [
@@ -1803,6 +1813,16 @@ dependencies = [
 
 [[package]]
 name = "hopspot-xiao-esp32-c6"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "esp-hal",
+ "esp-rtos",
+ "personal-hopspot-esp32",
+]
+
+[[package]]
+name = "hopspot-xiao-esp32s3-wio-sx1262"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",
@@ -2483,7 +2503,9 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-hal-async",
  "embedded-hal-bus",
+ "embedded-io 0.6.1",
  "embedded-io 0.7.1",
+ "embedded-io-async 0.6.1",
  "embedded-io-async 0.7.0",
  "embedded-storage",
  "embedded-storage-async",
@@ -2533,7 +2555,7 @@ version = "0.1.0"
 
 [[package]]
 name = "personal-rns"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "cfg-if",
  "prns-core",
@@ -2646,7 +2668,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "prns-core"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aes",
  "allocator-api2",
@@ -2672,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "prns-ffi"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "cfg-if",
  "dispatch2",
@@ -2683,6 +2705,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-io-kit",
+ "portable-atomic",
  "prns-core",
  "tokio",
  "windows",
@@ -2690,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "prns-interfaces-embassy"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "bt-hci",
  "cfg-if",
@@ -2716,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "prns-interfaces-tokio"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "bluer",
  "cfg-if",
@@ -2736,11 +2759,11 @@ dependencies = [
 
 [[package]]
 name = "prns-macros"
-version = "0.3.7"
+version = "0.3.8"
 
 [[package]]
 name = "prns-runtime"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "bzip2",
  "cfg-if",
@@ -2751,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "prns-runtime-embassy"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "critical-section",
  "embassy-futures",
@@ -2768,12 +2791,13 @@ dependencies = [
 
 [[package]]
 name = "prns-runtime-tokio"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "heapless 0.8.0",
  "nix 0.31.3",
+ "portable-atomic",
  "prns-core",
  "prns-runtime",
  "rtrb",

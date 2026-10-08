@@ -455,6 +455,12 @@ pub enum Journaled<'a> {
         attempt_id: crate::remote_control::RemoteControlPairingAttemptId,
     },
 
+    /// The target pairing attempt crossed its deadline after its authorization was durably stored,
+    /// so that authorization must be rolled back instead of completing the pairing exchange.
+    RemoteControlTargetPairingExpiredDuringAuthorization {
+        attempt_id: crate::remote_control::RemoteControlPairingAttemptId,
+    },
+
     RemoteControlControllerPairingConfirmationRequired(
         crate::remote_control::RemoteControlControllerPairingAttemptView<'a>,
     ),
@@ -464,6 +470,10 @@ pub enum Journaled<'a> {
     ),
 
     RemoteControlControllerPairingAuthorizationPersisted {
+        attempt_id: crate::remote_control::RemoteControlPairingAttemptId,
+    },
+
+    RemoteControlControllerPairingAuthorizationPersistenceFailed {
         attempt_id: crate::remote_control::RemoteControlPairingAttemptId,
     },
 
@@ -522,6 +532,8 @@ pub enum Journaled<'a> {
 
     /// One verified segment of a split response resource; the receive gate refuses out-of-order chains, so these concatenate in arrival order.
     /// The request settles as `Settlement::SendRequest` when the final segment assembles, not through a [`Journaled::ResponseReceived`].
+    /// Chunks are provisional until that settlement succeeds. A later failure invalidates
+    /// the response; consumers must not publish the accumulated prefix as a successful value.
     ResponseSegmentReceived {
         command_id: CommandId,
         link_id: LinkId,

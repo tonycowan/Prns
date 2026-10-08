@@ -48,14 +48,42 @@ use super::interface_status::account_protocol_violation;
 use super::packet_phy::retain_packet_phy;
 use super::EmbassyInterfaceStatus;
 
+// Use one callback type for ingress and command continuations so their large
+// inline-work dispatcher is shared in firmware instead of monomorphized twice.
+fn persist_and_notify<'a, S: StorageLayout>(
+    persistence: &'a mut impl ManifoldPersistence<S>,
+    on_journaled: &'a mut impl FnMut(Journaled<'_>),
+    now: crate::engine::InstantMillis,
+) -> impl FnMut(Journaled<'_>) + 'a {
+    move |journaled| {
+        persistence.observe(&journaled, now);
+        on_journaled(journaled);
+    }
+}
+
 const RNS_PATH_TABLE_MAX_ENTRIES: usize = 8;
 pub const RNS_PATH_TABLE_RESPONSE_BYTES: usize = RESPONSE_WIRE_OVERHEAD
     + 1
     + RNS_PATH_TABLE_MAX_ENTRIES * RNS_PATH_TABLE_MAX_ENCODED_ENTRY_BYTES;
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum InterfacePublicationOutcome {
+    Published,
+    UnknownInterface,
+    IdentityConflict,
+}
+
 /// Changes the live descriptor set without reallocating the fixed lane pool.
 #[repr(C)]
-pub enum InterfaceLifecycle {
+pub enum InterfaceLifecycle<'a> {
+    Publish {
+        old_id: InterfaceId,
+        descriptor: InterfaceDescriptor,
+        completion: &'a embassy_sync::signal::Signal<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            InterfacePublicationOutcome,
+        >,
+    },
     Add {
         descriptor: InterfaceDescriptor,
     },
@@ -93,6 +121,45 @@ fn clamp_to_embedded_ceiling(mut descriptor: InterfaceDescriptor) -> InterfaceDe
         descriptor.hardware_mtu = Some(mtu.min(EMBEDDED_MAX_LINK_MTU));
     }
     descriptor
+}
+
+fn publish_interface<const LANES: usize, const INTERFACES: usize>(
+    old_id: InterfaceId,
+    descriptor: InterfaceDescriptor,
+    descriptors: &mut HeaplessVec<InterfaceDescriptor, INTERFACES>,
+    egress: &mut PooledEgress<LANES>,
+    inbound: &mut HeaplessVec<(InterfaceId, &'static mut dyn ManifoldLaneReader), LANES>,
+    ifacs: &mut HeaplessVec<InterfaceIfac, LANES>,
+    pacers: &mut HeaplessVec<InterfacePacer, LANES>,
+) -> InterfacePublicationOutcome {
+    let Some(slot) = descriptors
+        .iter()
+        .position(|existing| existing.id == old_id)
+    else {
+        return InterfacePublicationOutcome::UnknownInterface;
+    };
+    let Some(old_lane) = egress.lane_for(old_id) else {
+        return InterfacePublicationOutcome::UnknownInterface;
+    };
+    let new_id = descriptor.id;
+    if old_id != new_id && descriptors.iter().any(|existing| existing.id == new_id) {
+        return InterfacePublicationOutcome::IdentityConflict;
+    }
+    let descriptor = clamp_to_embedded_ceiling(descriptor);
+    descriptors[slot] = descriptor;
+    egress.retag(old_id, new_id);
+    if let Some(entry) = inbound.iter_mut().find(|(id, _)| *id == old_id) {
+        entry.0 = new_id;
+    }
+    if let Some(entry) = ifacs.iter_mut().find(|entry| entry.id == old_id) {
+        entry.id = new_id;
+    }
+    if let Some(pos) = pacers.iter().position(|pacer| pacer.id == old_lane) {
+        // A shared fleet lane retains its lane identity; a dedicated lane takes the new id.
+        let new_lane = if old_lane == old_id { new_id } else { old_lane };
+        pacers[pos] = InterfacePacer::from_descriptor(new_lane, &descriptor);
+    }
+    InterfacePublicationOutcome::Published
 }
 
 fn inbound_source(
@@ -181,6 +248,7 @@ fn remote_control_path_inventory<S: StorageLayout>(
 /// Borrowed lanes and channels for one pooled-topology manifold run.
 pub struct PooledWiring<
     'run,
+    'publication,
     M: RawMutex + 'static,
     const LANE_COUNT: usize,
     const INTERFACE_CAPACITY: usize,
@@ -199,7 +267,7 @@ pub struct PooledWiring<
     pub commands: Receiver<'run, M, IssuedCommand, COMMANDS>,
     pub resource_responses: Receiver<'run, M, ResourceResponse<RESPONSE_BYTES>, 1>,
     pub path_page_reply: &'run Signal<M, RemoteControlPathInventory>,
-    pub lifecycle: Receiver<'run, M, InterfaceLifecycle, LIFECYCLE>,
+    pub lifecycle: Receiver<'run, M, InterfaceLifecycle<'publication>, LIFECYCLE>,
 }
 
 /// Runs a mutable descriptor set over a fixed lane pool; `LANE_COUNT` bounds pacers.
@@ -218,6 +286,7 @@ pub(crate) async fn run_pooled<
     engine: &mut EngineState<S>,
     host: &mut H,
     wiring: PooledWiring<
+        '_,
         '_,
         M,
         LANE_COUNT,
@@ -344,7 +413,9 @@ pub(crate) async fn run_pooled<
                         });
                         retain_packet_phy(store, &mut packet, packet_phy);
                         let mut owed_work = InlineOwedWorkQueue::new();
-                        let report = engine.ingest_classified_into_report(
+                        let report = engine.ingest_classified_into_report_with_request_diagnostics::<
+                            { cfg!(feature = "log") }, _, _, _, _,
+                        >(
                             packet,
                             IngestIo {
                                 interfaces: AttachedInterfaces::new(&*descriptors),
@@ -359,12 +430,7 @@ pub(crate) async fn run_pooled<
                                         ifacs,
                                         &mut pacers,
                                         now,
-                                        &mut |journaled| {
-                                            #[cfg(feature = "log")]
-                                            note_journaled(&journaled);
-                                            persistence.observe(&journaled, now);
-                                            on_journaled(journaled);
-                                        },
+                                        &mut persist_and_notify(persistence, &mut on_journaled, now),
                                         &mut owed_work,
                                     )
                                 },
@@ -386,12 +452,7 @@ pub(crate) async fn run_pooled<
                             frame_accounting_statuses,
                             now,
                             &mut should_prove,
-                            &mut |journaled| {
-                                #[cfg(feature = "log")]
-                                note_journaled(&journaled);
-                                persistence.observe(&journaled, now);
-                                on_journaled(journaled);
-                            },
+                            &mut persist_and_notify(persistence, &mut on_journaled, now),
                         );
                         #[cfg(feature = "log")]
                         {
@@ -403,9 +464,13 @@ pub(crate) async fn run_pooled<
                             source,
                             report.protocol_violation,
                         );
+                        #[cfg(feature = "log")]
+                        if let Some(request) = report.request {
+                            log::debug!(target: "prns::request", "request ingress: {request:?}");
+                        }
                         lane.release();
                         let mut step_delta = report.wake_schedules;
-                        step_delta.merge(completion_delta);
+                        step_delta.compose(completion_delta);
                         merge_wake_schedules_delta(
                             &mut wake_schedules,
                             step_delta,
@@ -431,10 +496,7 @@ pub(crate) async fn run_pooled<
                                 ifacs,
                                 &mut pacers,
                                 now,
-                                &mut |journaled| {
-                                    persistence.observe(&journaled, now);
-                                    on_journaled(journaled);
-                                },
+                                &mut persist_and_notify(persistence, &mut on_journaled, now),
                                 &mut owed_work,
                             )
                         },
@@ -479,10 +541,7 @@ pub(crate) async fn run_pooled<
                                     ifacs,
                                     &mut pacers,
                                     now,
-                                    &mut |journaled| {
-                                        persistence.observe(&journaled, now);
-                                        on_journaled(journaled);
-                                    },
+                                    &mut persist_and_notify(persistence, &mut on_journaled, now),
                                 )
                             },
                         )
@@ -499,10 +558,7 @@ pub(crate) async fn run_pooled<
                     frame_accounting_statuses,
                     now,
                     &mut should_prove,
-                    &mut |journaled| {
-                        persistence.observe(&journaled, now);
-                        on_journaled(journaled);
-                    },
+                    &mut persist_and_notify(persistence, &mut on_journaled, now),
                 ));
                 merge_wake_schedules_delta(
                     &mut wake_schedules,
@@ -526,10 +582,7 @@ pub(crate) async fn run_pooled<
                             ifacs,
                             &mut pacers,
                             now,
-                            &mut |journaled| {
-                                persistence.observe(&journaled, now);
-                                on_journaled(journaled);
-                            },
+                            &mut persist_and_notify(persistence, &mut on_journaled, now),
                         )
                     },
                 );
@@ -545,6 +598,26 @@ pub(crate) async fn run_pooled<
                 flush_due_pacers(&mut pacers, now, &mut *egress, ifacs);
             }
             Either6::Fifth(message) => match message {
+                InterfaceLifecycle::Publish {
+                    old_id,
+                    descriptor,
+                    completion,
+                } => {
+                    let outcome = publish_interface(
+                        old_id,
+                        descriptor,
+                        descriptors,
+                        egress,
+                        inbound,
+                        ifacs,
+                        &mut pacers,
+                    );
+                    if outcome == InterfacePublicationOutcome::Published {
+                        wake_schedules =
+                            engine.wake_schedules(AttachedInterfaces::new(&*descriptors));
+                    }
+                    completion.signal(outcome);
+                }
                 InterfaceLifecycle::Add { descriptor } => {
                     let descriptor =
                         adopt_stored_mode(store, clamp_to_embedded_ceiling(descriptor));
@@ -608,10 +681,7 @@ pub(crate) async fn run_pooled<
                                 ifacs,
                                 &mut pacers,
                                 now,
-                                &mut |journaled| {
-                                    persistence.observe(&journaled, now);
-                                    on_journaled(journaled);
-                                },
+                                &mut persist_and_notify(persistence, &mut on_journaled, now),
                             )
                         },
                     );
@@ -639,31 +709,17 @@ pub(crate) async fn run_pooled<
                     new_id,
                     descriptor,
                 } => {
-                    let descriptor =
-                        adopt_stored_mode(store, clamp_to_embedded_ceiling(descriptor));
-                    let present = descriptors
-                        .iter()
-                        .position(|existing| existing.id == old_id);
-                    let collides = descriptors.iter().any(|existing| existing.id == new_id);
-                    if let (Some(slot), false) = (present, collides) {
-                        let old_lane = egress.lane_for(old_id);
-                        descriptors[slot] = descriptor;
-                        egress.retag(old_id, new_id);
-                        if let Some(entry) = inbound.iter_mut().find(|(id, _)| *id == old_id) {
-                            entry.0 = new_id;
-                        }
-                        if let Some(entry) = ifacs.iter_mut().find(|entry| entry.id == old_id) {
-                            entry.id = new_id;
-                        }
-                        if let (Some(old_lane), Some(new_lane)) =
-                            (old_lane, egress.lane_for(new_id))
-                        {
-                            if let Some(pos) = pacers.iter().position(|pacer| pacer.id == old_lane)
-                            {
-                                pacers[pos] =
-                                    InterfacePacer::from_descriptor(new_lane, &descriptor);
-                            }
-                        }
+                    if descriptor.id == new_id
+                        && publish_interface(
+                            old_id,
+                            descriptor,
+                            descriptors,
+                            egress,
+                            inbound,
+                            ifacs,
+                            &mut pacers,
+                        ) == InterfacePublicationOutcome::Published
+                    {
                         wake_schedules =
                             engine.wake_schedules(AttachedInterfaces::new(&*descriptors));
                     }

@@ -460,7 +460,7 @@ pub(super) async fn run(
     let open_pairing_for_events = Arc::clone(&open_pairing_state);
     let mut prns = PrnsNode::new_with_handle(move |handle| PrnsNodeRecipe {
         transport_identity: transport_secret,
-        remote_control,
+        remote_control: remote_control.into(),
         pre_configured_destinations: std::iter::empty(),
         app_state: services::DaemonRequestState::new(
             handle,

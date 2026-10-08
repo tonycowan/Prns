@@ -62,18 +62,8 @@ const STARTUP_NOTICE_DURATION: hopspot::display::DisplayDuration =
         Ok(duration) => duration,
         Err(_) => panic!("the startup notice duration is nonzero"),
     };
-#[cfg(not(feature = "usb-debug-log"))]
 const USB_CONFIG_DESCRIPTOR_BYTES: usize = 64;
-#[cfg(feature = "usb-debug-log")]
-const USB_CONFIG_DESCRIPTOR_BYTES: usize = 256;
-#[cfg(not(feature = "usb-debug-log"))]
 const USB_BOS_DESCRIPTOR_BYTES: usize = 64;
-#[cfg(feature = "usb-debug-log")]
-const USB_BOS_DESCRIPTOR_BYTES: usize = 128;
-#[cfg(not(feature = "usb-debug-log"))]
-const USB_MSOS_DESCRIPTOR_BYTES: usize = WEBUSB_AUTO_MSOS_DESCRIPTOR_BYTES;
-#[cfg(feature = "usb-debug-log")]
-const USB_MSOS_DESCRIPTOR_BYTES: usize = WEBUSB_AUTO_MSOS_DESCRIPTOR_BYTES + 192;
 
 fn show_notice(
     state: &mut hopspot::UiState,
@@ -112,31 +102,30 @@ async fn manifold_task(
 
 #[allow(clippy::too_many_lines)]
 pub async fn run(spawner: Spawner) -> ! {
-    #[cfg(feature = "usb-debug-log")]
-    super::usb_debug::init();
-    let (
-        (node_bootstrap, remote_control_bootstrap, factory_grant, ble_bootstrap, entropy),
-        early_hardware,
-    ) = Board::initialize_identities(|nvmc, rng| {
-        let mut entropy = seed_from_hal(rng);
-        let node_bootstrap = board::bootstrap_node_identity(nvmc, &mut entropy);
-        let loaded = board::REMOTE_CONTROL_IDENTITY_FLASH
-            .load_or_generate(nvmc, &mut entropy)
-            .expect("RemoteControl identity bootstrap failed");
-        let ble_bootstrap = board::bootstrap_ble_identity(nvmc, &mut entropy);
-        (
-            node_bootstrap,
-            loaded.bootstrap,
-            loaded.factory_grant,
-            ble_bootstrap,
-            entropy,
-        )
-    });
+    let ((node_bootstrap, remote_control_bootstrap, ble_bootstrap, entropy), early_hardware) =
+        Board::initialize_identities(|nvmc, rng| {
+            let mut entropy = seed_from_hal(rng);
+            let node_bootstrap = board::bootstrap_node_identity(nvmc, &mut entropy);
+            let remote_control_bootstrap = board::REMOTE_CONTROL_IDENTITY_FLASH
+                .load_or_generate(nvmc, &mut entropy)
+                .expect("RemoteControl identity bootstrap failed");
+            let ble_bootstrap = board::bootstrap_ble_identity(nvmc, &mut entropy);
+            (
+                node_bootstrap,
+                remote_control_bootstrap,
+                ble_bootstrap,
+                entropy,
+            )
+        });
     let identity_startup_notice =
         board::identity_startup_notice(node_bootstrap.persistence(), ble_bootstrap.persistence());
     let node_identity = node_bootstrap.into_identity();
+    let crate::boards::RemoteControlIdentityLoad {
+        bootstrap,
+        factory_grant,
+    } = remote_control_bootstrap;
     let (remote_control_identity_secrets, _remote_control_identity_origins) =
-        remote_control_bootstrap.into_parts();
+        bootstrap.into_parts();
     let ble_identity = Some(ble_bootstrap.into_identity());
 
     let EarlyHardware {
@@ -155,37 +144,28 @@ pub async fn run(spawner: Spawner) -> ! {
     usb_config.max_packet_size_0 = 64;
     static CONFIG_DESC: StaticCell<[u8; USB_CONFIG_DESCRIPTOR_BYTES]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; USB_BOS_DESCRIPTOR_BYTES]> = StaticCell::new();
-    static MSOS_DESC: StaticCell<[u8; USB_MSOS_DESCRIPTOR_BYTES]> = StaticCell::new();
+    static MSOS_DESC: StaticCell<[u8; WEBUSB_AUTO_MSOS_DESCRIPTOR_BYTES]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; WEBUSB_AUTO_CONTROL_BUFFER_BYTES]> = StaticCell::new();
     let mut builder = Builder::new(
         usb_driver,
         usb_config,
         CONFIG_DESC.init([0; USB_CONFIG_DESCRIPTOR_BYTES]),
         BOS_DESC.init([0; USB_BOS_DESCRIPTOR_BYTES]),
-        MSOS_DESC.init([0; USB_MSOS_DESCRIPTOR_BYTES]),
+        MSOS_DESC.init([0; WEBUSB_AUTO_MSOS_DESCRIPTOR_BYTES]),
         CONTROL_BUF.init([0; WEBUSB_AUTO_CONTROL_BUFFER_BYTES]),
     );
     builder.msos_descriptor(embassy_usb::msos::windows_version::WIN8_1, 0x20);
     static USB_STATE: StaticCell<WebUsbAutoState> = StaticCell::new();
     let class = WebUsbAutoClass::new(
         &mut builder,
-        USB_STATE.init(WebUsbAutoState::new(super::bootloader_entry::webusb_entry())),
+        USB_STATE.init(
+            WebUsbAutoState::new(super::bootloader_entry::webusb_entry())
+                .with_controller_enrollment(super::controller_enrollment::webusb_enrollment(
+                    &remote_control_identity_secrets,
+                )),
+        ),
         WEBUSB_AUTO_PACKET_SIZE,
-        cfg!(feature = "usb-debug-log"),
     );
-    #[cfg(feature = "usb-debug-log")]
-    let cdc = {
-        use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
-        static CDC_STATE: StaticCell<State<'static>> = StaticCell::new();
-        CdcAcmClass::new(
-            &mut builder,
-            CDC_STATE.init(State::new()),
-            WEBUSB_AUTO_PACKET_SIZE,
-        )
-    };
-    #[cfg(feature = "usb-debug-log")]
-    let usb = builder.build();
-    #[cfg(not(feature = "usb-debug-log"))]
     let mut usb = builder.build();
 
     let entropy = prepare_softdevice_runtime_entropy(entropy);
@@ -244,12 +224,12 @@ pub async fn run(spawner: Spawner) -> ! {
     )
     .destination_hashes()
     .expect("the hopspot destination names are valid");
+    super::node_name::set_destinations(destination_hashes);
     let node_page_destination = destination_hashes.node_page;
     static FACTORY_GRANT_STORAGE: StaticCell<Option<[RemoteControlControllerGrant; 1]>> =
         StaticCell::new();
-    let factory_grant_storage = FACTORY_GRANT_STORAGE.init(None);
     let initial_controller_grants =
-        crate::boards::initial_controller_grants(factory_grant, factory_grant_storage);
+        crate::boards::initial_controller_grants(factory_grant, FACTORY_GRANT_STORAGE.init(None));
     let remote_control = RemoteControlService::with_capabilities(
         remote_control_identity_secrets,
         initial_controller_grants,
@@ -324,7 +304,11 @@ pub async fn run(spawner: Spawner) -> ! {
     let remote_control_handle = REMOTE_CONTROL_COMMANDS.handle();
     let recipe = PrnsNodeRecipe {
         transport_identity: Some(transport_secret),
-        remote_control,
+        remote_control: personal_rns::runtime::RemoteControlNodeSetup::new(remote_control)
+            .with_controls(personal_rns::runtime::RemoteControlSupportedHost::new(
+                remote_control_handle,
+                super::remote_control::capabilities().requests(),
+            )),
         pre_configured_destinations: hopspot::HopspotDestinationSet::new(
             destination_secret,
             ANNOUNCE_APP_DATA,
@@ -367,9 +351,6 @@ pub async fn run(spawner: Spawner) -> ! {
             (supervisor, fleet)
         });
 
-    #[cfg(feature = "usb-debug-log")]
-    let usb_fut = super::usb_debug::run(usb, cdc);
-    #[cfg(not(feature = "usb-debug-log"))]
     let usb_fut = usb.run();
 
     let heartbeat = async {
@@ -383,6 +364,7 @@ pub async fn run(spawner: Spawner) -> ! {
 
     let ui_handle = PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION);
     let render = async move {
+        super::node_name::restore().await;
         let mut battery_probe = battery;
         let mut display = display.into_runtime(board::retained_policy());
         let mut ui_state = hopspot::UiState::new(hopspot::UiConfiguration {
@@ -571,9 +553,6 @@ pub async fn run(spawner: Spawner) -> ! {
                     let (token, command) = pending.into_parts();
                     let result = execute_hopspot_command!(snapshots, battery, command);
                     REMOTE_CONTROL_COMMANDS.complete(token, result);
-                    hopspot::apply_pending_network_transport(|cmd| {
-                        let _ = ui_handle.issue(cmd);
-                    });
                     refresh_urgency = hopspot::display::PresentationUrgency::Immediate;
                 }
                 Either5::First(first_event) => {
@@ -772,7 +751,10 @@ pub async fn run(spawner: Spawner) -> ! {
         usb_dev.run(usb_seam),
         heartbeat,
         board::drive_controls(controls),
-        super::bootloader_entry::wait(),
+        embassy_futures::join::join(
+            super::bootloader_entry::wait(),
+            super::controller_enrollment::run(PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION)),
+        ),
     );
     let ble_plane = async move {
         if let Some(groups) =

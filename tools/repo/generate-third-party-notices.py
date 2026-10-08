@@ -30,6 +30,16 @@ GRAPHS = (
     ("controller Linux", "personal-hopspot/remote-control-desktop/Cargo.toml", "x86_64-unknown-linux-gnu"),
     ("controller macOS", "personal-hopspot/remote-control-desktop/Cargo.toml", "aarch64-apple-darwin"),
     ("controller Windows", "personal-hopspot/remote-control-desktop/Cargo.toml", "x86_64-pc-windows-msvc"),
+    (
+        "HaLoW headless",
+        "personal-hopspot/headless/Cargo.toml",
+        "mipsel-unknown-linux-musl",
+    ),
+    (
+        "HaLoW appliance manager",
+        "personal-hopspot/appliance/Cargo.toml",
+        "mipsel-unknown-linux-musl",
+    ),
     ("Android", "personal-hopspot/mobile/android/rust/Cargo.toml", "aarch64-linux-android"),
     ("iOS", "personal-hopspot/mobile/ios/rust/Cargo.toml", "aarch64-apple-ios"),
     ("Node addon Linux", "prns-napi/Cargo.toml", "x86_64-unknown-linux-gnu"),
@@ -49,6 +59,16 @@ GRAPHS = (
     (
         "ESP32-S3 Heltec E290",
         "personal-hopspot/embedded/esp32/boards/heltec-e290/Cargo.toml",
+        "xtensa-esp32s3-none-elf",
+    ),
+    (
+        "ESP32-S3 Heltec V3",
+        "personal-hopspot/embedded/esp32/boards/heltec-v3/Cargo.toml",
+        "xtensa-esp32s3-none-elf",
+    ),
+    (
+        "ESP32-S3 XIAO Wio-SX1262",
+        "personal-hopspot/embedded/esp32/boards/xiao-esp32s3-wio-sx1262/Cargo.toml",
         "xtensa-esp32s3-none-elf",
     ),
     (
@@ -164,15 +184,25 @@ def notice_input_paths() -> tuple[Path, ...]:
         if "node_modules" not in Path(relative).parts
     )
     paths.update(ROOT / relative for _, _, relative, _ in VENDORED)
-    for pattern in ("Cargo.toml", "Cargo.lock"):
-        paths.update(
-            path
-            for path in ROOT.rglob(pattern)
-            if not any(
-                part in {".git", "node_modules", "target", "vendor"}
-                for part in path.relative_to(ROOT).parts
-            )
+    tracked = subprocess.run(
+        ["git", "ls-files", "--cached", "--full-name", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if tracked.returncode:
+        raise RuntimeError("cannot enumerate tracked notice inputs")
+    paths.update(
+        ROOT / relative
+        for encoded in tracked.stdout.split(b"\0")
+        if encoded
+        for relative in (Path(os.fsdecode(encoded)),)
+        if relative.name in {"Cargo.toml", "Cargo.lock"}
+        and not any(
+            part in {".git", "node_modules", "target", "vendor"}
+            for part in relative.parts
         )
+    )
     return tuple(sorted(paths, key=lambda path: path.relative_to(ROOT).as_posix()))
 
 

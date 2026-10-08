@@ -21,6 +21,8 @@ use cards::{draw_card_peek, draw_card_with_selection, draw_footer, draw_global_r
 use glyphs::draw_title_bar;
 use gnss::draw_gnss_panel;
 use layout::*;
+#[cfg(feature = "remote-control-pairing")]
+use menus::draw_remote_control_pairing;
 use menus::groups::draw_group_editor;
 use menus::subg::draw_subg_editor;
 use menus::{
@@ -46,6 +48,22 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(
 
     if let Some(notice) = state.notice() {
         draw_notice(display, notice);
+        return;
+    }
+
+    #[cfg(feature = "lora-2g4")]
+    if let UiMode::RadioEditor(editor) = state.mode {
+        use embedded_graphics::mono_font::{iso_8859_1::FONT_5X8, MonoTextStyle};
+        use embedded_graphics::text::{Baseline, Text};
+        for (row, line) in editor.lines().iter().enumerate() {
+            let _ = Text::with_baseline(
+                line,
+                Point::new(4, 22 + row as i32 * 12),
+                MonoTextStyle::new(&FONT_5X8, BinaryColor::On),
+                Baseline::Top,
+            )
+            .draw(display);
+        }
         return;
     }
 
@@ -77,6 +95,12 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(
 
     if let UiMode::ConfirmSubGClear { confirm } = state.mode {
         draw_subg_clear_confirm(display, confirm);
+        return;
+    }
+
+    #[cfg(feature = "remote-control-pairing")]
+    if let UiMode::RemoteControlPairing { .. } = state.mode {
+        draw_remote_control_pairing(display, state);
         return;
     }
 

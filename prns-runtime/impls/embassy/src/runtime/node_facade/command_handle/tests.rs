@@ -448,6 +448,30 @@ fn an_unclaimed_settlement_moves_to_the_application_route() {
 }
 
 #[test]
+fn controller_pairing_persistence_failure_moves_to_the_application_route() {
+    let commands = Channel::<CriticalSectionRawMutex, IssuedCommand, 1>::new();
+    let completions = Pool::<0>::new();
+    let handle = super::PrnsNodeHandle::new(commands.sender(), &completions);
+    let attempt_id = super::super::test_remote_control_pairing_attempt(0xA4);
+    let mut observed = None;
+
+    let route = handle.route_journaled(
+        Journaled::RemoteControlControllerPairingAuthorizationPersistenceFailed { attempt_id },
+        |journaled| {
+            if let Journaled::RemoteControlControllerPairingAuthorizationPersistenceFailed {
+                attempt_id,
+            } = journaled
+            {
+                observed = Some(attempt_id);
+            }
+        },
+    );
+
+    assert!(matches!(route, JournalRoute::Application));
+    assert_eq!(observed, Some(attempt_id));
+}
+
+#[test]
 fn a_cancelled_request_releases_its_slot_and_routes_late_delivery_to_the_application() {
     let pool = CompletionPool::<CriticalSectionRawMutex, 0, 1, 4>::new();
     let id = CommandId(0);
@@ -800,6 +824,75 @@ fn bounded_request_concatenates_segments_and_preserves_failures() {
         ));
     }));
     assert_eq!(result, Err(SendError::Failed(SendRequestFailure::Timeout)),);
+}
+
+#[test]
+fn failed_split_response_discards_buffered_chunks_and_reuses_the_bounded_slot() {
+    let commands = Channel::<CriticalSectionRawMutex, IssuedCommand, 1>::new();
+    let completions = CompletionPool::<CriticalSectionRawMutex, 0, 1, 8>::new();
+    let handle = super::PrnsNodeHandle::new(commands.sender(), &completions);
+    let link_id = LinkId::new([0x32; 16]);
+    let failure = SendRequestFailure::ResponseTransferFailed(
+        crate::routing::links::resources::ResourceFailureCause::TransferCorrupt,
+    );
+    let success = PacketReceiptDelivered {
+        rtt: RttMillis::new(17),
+        evidence: DeliveryEvidence::Response,
+    };
+    for settled in [Err(failure), Ok(success)] {
+        let (result, ()) = block_on(join(
+            handle.request(link_id, RequestPathHash::of("/segmented"), &[]),
+            async {
+                let issued = commands.receiver().receive().await;
+                assert!(matches!(
+                    handle.route_journaled(
+                        Journaled::ResponseSegmentReceived {
+                            command_id: issued.id,
+                            link_id,
+                            request_id: RequestId([0x54; 16]),
+                            segment_index: 1,
+                            total_segments: 2,
+                            data: b"prefix",
+                        },
+                        |_| panic!("awaited chunks stay private")
+                    ),
+                    JournalRoute::Awaiter
+                ));
+                if settled.is_ok() {
+                    assert!(matches!(
+                        handle.route_journaled(
+                            Journaled::ResponseSegmentReceived {
+                                command_id: issued.id,
+                                link_id,
+                                request_id: RequestId([0x54; 16]),
+                                segment_index: 2,
+                                total_segments: 2,
+                                data: b"!",
+                            },
+                            |_| panic!("awaited chunks stay private")
+                        ),
+                        JournalRoute::Awaiter
+                    ));
+                }
+                assert!(matches!(
+                    handle.route_journaled(
+                        Journaled::CommandSettled {
+                            id: issued.id,
+                            settlement: Settlement::SendRequest(settled),
+                        },
+                        |_| panic!("awaited settlement stays private")
+                    ),
+                    JournalRoute::Awaiter
+                ));
+            },
+        ));
+        assert_eq!(
+            result.map(|(bytes, rtt)| (bytes.as_slice().to_vec(), rtt)),
+            settled
+                .map(|receipt| (b"prefix!".to_vec(), receipt.rtt))
+                .map_err(SendError::Failed)
+        );
+    }
 }
 
 #[test]

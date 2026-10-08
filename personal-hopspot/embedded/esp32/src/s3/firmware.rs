@@ -2,12 +2,48 @@ use super::*;
 use personal_hopspot_core::display::{
     DisplayDuration, DisplayVisibility, MonotonicMillis, PresentationUrgency,
 };
-use personal_rns::remote_control::{RemoteControlSelfAnnouncement, RemoteControlService};
+#[cfg(feature = "remote-control-pairing")]
+use personal_rns::engine::{OpenRemoteControlPairing, RemoteControlTargetPairingApproval};
+use personal_rns::remote_control::{
+    RemoteControlInitialControllerGrants, RemoteControlSelfAnnouncement, RemoteControlService,
+};
+#[cfg(feature = "remote-control-pairing")]
+use personal_rns::remote_control::{
+    RemoteControlPairingAttemptTimeout, RemoteControlPairingExpiresAfter,
+    RemoteControlPairingPublicAppDataBytes,
+};
+
+#[cfg(feature = "remote-control-pairing")]
+const REMOTE_CONTROL_PAIRING_WINDOW_MILLIS: u64 = 120_000;
+#[cfg(feature = "remote-control-pairing")]
+const REMOTE_CONTROL_PAIRING_ATTEMPT_MILLIS: u64 = 60_000;
+
+enum RenderLoopEvent {
+    Button(screen::InputEvent),
+    Tick,
+    InterfacesChanged,
+    RemoteControlCommand(screen::PendingHopspotCommand),
+    #[cfg(feature = "remote-control-pairing")]
+    RemoteControlChanged,
+}
 
 use crate::memory::EspFirmwareMemory;
 
 fn display_now() -> MonotonicMillis {
     MonotonicMillis::new(embassy_time::Instant::now().as_millis())
+}
+
+fn issue_node_page_announce(
+    handle: &Handle,
+    destination: personal_rns::wire::DestinationHash,
+) -> bool {
+    handle
+        .issue(PrnsCommand::AnnounceNow(AnnounceNow {
+            destination,
+            target: AnnounceTarget::AllInterfaces,
+            app_data: AnnounceAppData::Registered,
+        }))
+        .is_some()
 }
 
 const NOTICE_DURATION: DisplayDuration = match DisplayDuration::from_millis(NOTICE_MS) {
@@ -38,13 +74,29 @@ where
 {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let p = esp_hal::init(config);
+    // `bringup` restores identities and prepares runtime state. On an S3
+    // without PSRAM, that work must already use the internal allocator.
+    if B::INTERNAL_SRAM_ONLY {
+        crate::storage::use_internal_sram_allocations();
+    }
     let bringup = B::bringup(p).await;
-    // Pin into esp_alloc's global external heap, not `PsramAlloc`. On Heltec V4-R8, `PsramAlloc` is
+    // Pin into the board-selected heap, not `PsramAlloc`. On Heltec V4-R8, `PsramAlloc` is
     // the private bump that `reinit_private_psram_heap` resets inside `run_core` before the LoRa
     // queue lands — pinning here would place the live future (OLED/I2C state) in that window and
     // get overwritten, which zeroed I2C Config.frequency after radio bring-up.
-    allocator_api2::boxed::Box::pin_in(run_core::<B>(spawner, bringup), esp_alloc::ExternalMemory)
+    if B::INTERNAL_SRAM_ONLY {
+        allocator_api2::boxed::Box::pin_in(
+            run_core::<B>(spawner, bringup),
+            esp_alloc::InternalMemory,
+        )
         .await;
+    } else {
+        allocator_api2::boxed::Box::pin_in(
+            run_core::<B>(spawner, bringup),
+            esp_alloc::ExternalMemory,
+        )
+        .await;
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -76,7 +128,7 @@ pub(super) async fn run_core<B: Esp32S3Board>(
     let mut battery_source = battery;
     let gnss = hardware.gnss;
     let S3InterfaceHardware {
-        usb_device,
+        usb,
         #[cfg(feature = "lora")]
         lora_radio,
         wifi: wifi_hardware,
@@ -159,8 +211,13 @@ pub(super) async fn run_core<B: Esp32S3Board>(
             None
         }
     });
-    let station_configured = initial_wifi_station.is_some();
-    let radio_mode = boot_radio_mode(station_configured);
+    let network_enabled = !B::INTERNAL_SRAM_ONLY;
+    let station_configured = network_enabled && initial_wifi_station.is_some();
+    let radio_mode = if network_enabled {
+        boot_radio_mode(station_configured)
+    } else {
+        RadioMode::Ble
+    };
     log::info!(
         "wifi-config source={wifi_config_source:?} station={} ssid_len={} tcp={}",
         station_configured,
@@ -246,13 +303,18 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         mac_octets,
         initial_wifi_station,
         radio_mode == RadioMode::AccessPoint,
+        network_enabled,
     );
     boot_stage(BootPhase::WifiReady);
-    log::info!(
-        "Wi-Fi initialized station={} network_stack={}",
-        wifi.is_some(),
-        tcp_stack.is_some()
-    );
+    if network_enabled {
+        log::info!(
+            "Wi-Fi initialized station={} network_stack={}",
+            wifi.is_some(),
+            tcp_stack.is_some()
+        );
+    } else {
+        log::info!("V3 profile active: LoRa + BLE + USB; Wi-Fi Auto, ESP-NOW, and TCP disabled");
+    }
     let identity_startup_notice =
         crate::identity::startup_notice(node_bootstrap.persistence(), ble_bootstrap.persistence());
     let node_identity = node_bootstrap.into_identity();
@@ -265,6 +327,13 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         .firmware_update_destination();
     #[cfg(feature = "firmware-update")]
     super::firmware_update_listener::set_destination(ota_destination);
+    #[cfg(feature = "remote-control-pairing")]
+    let stable_target_destination = remote_control_identity_secrets
+        .identities()
+        .target()
+        .endpoint()
+        .destination_hash();
+    #[cfg_attr(not(feature = "firmware-update"), allow(unused_mut))]
     let mut remote_control = RemoteControlService::with_capabilities(
         remote_control_identity_secrets,
         crate::identity::factory_or_fallback_grants(factory_grant),
@@ -275,6 +344,14 @@ pub(super) async fn run_core<B: Esp32S3Board>(
     {
         remote_control = remote_control.with_firmware_update_destination();
     }
+    #[cfg(feature = "remote-control-pairing")]
+    let remote_control_pairing_permissions =
+        screen::full_remote_control_pairing_permissions(&remote_control.available_requests())
+            .expect("RemoteControl supports at least Describe");
+    #[cfg(feature = "remote-control-pairing")]
+    let remote_control_pairing_public_app_data =
+        RemoteControlPairingPublicAppDataBytes::try_from(B::NODE_ANNOUNCE_APP_DATA)
+            .expect("the board's product name fits pairing public app data");
     let destinations = personal_hopspot_core::HopspotDestinationSet::new(
         destination_secret,
         B::ANNOUNCE_APP_DATA,
@@ -315,14 +392,18 @@ pub(super) async fn run_core<B: Esp32S3Board>(
     let remote_control_handle = REMOTE_CONTROL_COMMANDS.handle();
     let recipe = PrnsNodeRecipe {
         transport_identity: Some(transport_secret),
-        remote_control,
+        remote_control: personal_rns::runtime::RemoteControlNodeSetup::new(remote_control)
+            .with_controls(personal_rns::runtime::RemoteControlSupportedHost::new(
+                remote_control_handle,
+                remote_control::capabilities::<B>().requests(),
+            )),
         pre_configured_destinations: destinations.into_preconfigured_destinations(),
         app_state: remote_control_handle,
         storage: EngineStorageType::default(),
         request_endpoints: screen::node_pages::NodePageRoutes,
         interfaces: personal_rns::runtime::ManuallyAttached,
         persistence: crate::persistence::s3(shared_flash, &memory),
-        on_event: ignore_events as for<'a> fn(PrnsEvent<'a>, &RemoteControlHandle),
+        on_event: firmware_on_event as for<'a> fn(PrnsEvent<'a>, &RemoteControlHandle),
     };
 
     #[cfg(feature = "lora")]
@@ -331,9 +412,9 @@ pub(super) async fn run_core<B: Esp32S3Board>(
     let tcp_cfg = tcp_built.as_ref().map(|(t, _, _)| t.descriptor());
     let has_wifi = wifi.is_some();
 
-    let usb_outbound = crate::storage::allocate_manifold_outbound::<EMBEDDED_MAX_WIRE_FRAME_LEN>(
-        OUTBOUND_BURST_DEPTH,
-    );
+    let usb_outbound = crate::storage::allocate_manifold_outbound::<
+        { personal_rns::interfaces::usb_auto::MAX_DATA_BYTES },
+    >(OUTBOUND_BURST_DEPTH);
     let usb_lane = manifold_lanes
         .claim_accounted_interface_with_outbound_buffer(
             &USB_MANIFOLD_LANE,
@@ -416,6 +497,8 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         handle,
     );
     let entropy = runtime_entropy();
+    #[cfg(feature = "remote-control-pairing")]
+    set_remote_control_clock(timebase.now());
     let host = EmbassyHost::new_with_timebase(timebase, entropy);
 
     let core1_stack = mk_static!(CpuStack<CORE1_STACK_BYTES>, CpuStack::new());
@@ -433,19 +516,36 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         EXECUTOR
             .init(esp_rtos::embassy::Executor::new())
             .run(|spawner| {
-                let run = crate::storage::allocate_psram(manifold_run(node, persistence));
-                let run: core::pin::Pin<&'static mut dyn core::future::Future<Output = ()>> =
+                #[cfg(feature = "sram-storage")]
+                spawner
+                    .spawn(sram_manifold_task(node, persistence).expect("SRAM manifold task fits"));
+                #[cfg(not(feature = "sram-storage"))]
+                {
+                    let run = crate::storage::allocate_psram(manifold_run(node, persistence));
+                    let run: core::pin::Pin<&'static mut dyn core::future::Future<Output = ()>> =
                     // SAFETY: `allocate_psram` leaks this allocation, so it cannot move or be freed.
                     unsafe { core::pin::Pin::new_unchecked(run) };
-                spawner.spawn(manifold_task(run).expect("manifold task fits"));
+                    spawner.spawn(manifold_task(run).expect("manifold task fits"));
+                }
                 spawner.spawn(core_one_liveness_task().expect("core-one liveness task fits"));
             })
     });
     boot_stage(BootPhase::CoreOneStartReady);
 
-    let (usb_rx, usb_tx) = UsbSerialJtag::new(usb_device).into_async().split();
     let usb_seam = usb_lane.into_seam(NOTIFY.sender(), entropy);
-    spawner.spawn(usb_device_task(usb_rx, usb_tx, usb_seam, usb_status).expect("usb task fits"));
+    match usb {
+        S3UsbHardware::SerialJtag(usb_device) => {
+            let (usb_rx, usb_tx) = UsbSerialJtag::new(usb_device).into_async().split();
+            spawner.spawn(
+                usb_device_task(usb_rx, usb_tx, usb_seam, usb_status).expect("usb task fits"),
+            );
+        }
+        S3UsbHardware::Uart { rx, tx } => {
+            spawner.spawn(
+                usb_uart_device_task(rx, tx, usb_seam, usb_status).expect("USB UART task fits"),
+            );
+        }
+    }
 
     #[cfg(feature = "lora")]
     let lora_seam = lora_lane.into_seam(NOTIFY.sender(), entropy);
@@ -472,6 +572,14 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         });
 
     spawner.spawn(button_task(button).expect("button task fits"));
+    #[cfg(feature = "remote-control-pairing")]
+    if B::REMOTE_CONTROL_PAIRING {
+        spawner.spawn(
+            stable_target_announcer_task(handle, node_page_destination, stable_target_destination)
+                .expect("stable target announcer task fits"),
+        );
+        spawner.spawn(pairing_close_task(handle).expect("pairing close task fits"));
+    }
 
     let wifi_status = wifi.as_ref().map(|(interface, _)| interface.status());
     let wifi_id = wifi_status.as_ref().map(|status| {
@@ -520,6 +628,12 @@ pub(super) async fn run_core<B: Esp32S3Board>(
             shared_instance_config_export: screen::SharedInstanceConfigExport::Unavailable,
             gnss: B::Gnss::AVAILABILITY,
             discovery_groups: screen::DiscoveryGroupEditorAvailability::Available,
+            #[cfg(feature = "remote-control-pairing")]
+            remote_control_pairing: if B::REMOTE_CONTROL_PAIRING {
+                screen::RemoteControlPairingAvailability::Available
+            } else {
+                screen::RemoteControlPairingAvailability::Unavailable
+            },
         });
         let startup_notice = identity_startup_notice.or(subg_startup_notice);
         let mut pending_startup_notice = identity_startup_notice
@@ -633,6 +747,9 @@ pub(super) async fn run_core<B: Esp32S3Board>(
                 );
             }
 
+            // Applying a channel-changing profile retags the running interface and updates
+            // its status ID. Read that live ID for card classification instead of retaining
+            // the boot-time ID, otherwise LoRa disappears from the home screen until reset.
             let snapshots = build_snapshots(
                 usb_status,
                 wifi_status.as_ref(),
@@ -644,6 +761,15 @@ pub(super) async fn run_core<B: Esp32S3Board>(
             let subg_card_configuration = Some(working_subg_configuration);
             #[cfg(not(feature = "lora"))]
             let subg_card_configuration = None;
+            #[cfg(feature = "remote-control-pairing")]
+            publish_transmit_egress_ready(
+                B::REMOTE_CONTROL_PAIRING
+                    && snapshots
+                        .iter()
+                        .any(|snapshot| snapshot.connection.is_online()),
+            );
+            #[cfg(feature = "remote-control-pairing")]
+            ui_state.sync_remote_control(current_remote_control_state(), remote_control_now());
             let tcp_card_config = wifi_config.tcp_client.as_ref();
             let mut cards = build_cards(
                 &snapshots,
@@ -761,7 +887,24 @@ pub(super) async fn run_core<B: Esp32S3Board>(
                 settle_after_draw = false;
             }
 
-            match select4(
+            #[cfg(feature = "remote-control-pairing")]
+            let loop_event = match select5(
+                BUTTON_EVENTS.receive(),
+                render_tick.next(),
+                INTERFACE_STORE.changed(),
+                REMOTE_CONTROL_COMMANDS.receive(),
+                REMOTE_CONTROL_UI_WAKE.wait(),
+            )
+            .await
+            {
+                Either5::First(event) => RenderLoopEvent::Button(event),
+                Either5::Second(()) => RenderLoopEvent::Tick,
+                Either5::Third(()) => RenderLoopEvent::InterfacesChanged,
+                Either5::Fourth(pending) => RenderLoopEvent::RemoteControlCommand(pending),
+                Either5::Fifth(()) => RenderLoopEvent::RemoteControlChanged,
+            };
+            #[cfg(not(feature = "remote-control-pairing"))]
+            let loop_event = match select4(
                 BUTTON_EVENTS.receive(),
                 render_tick.next(),
                 INTERFACE_STORE.changed(),
@@ -769,7 +912,14 @@ pub(super) async fn run_core<B: Esp32S3Board>(
             )
             .await
             {
-                Either4::Fourth(pending) => {
+                Either4::First(event) => RenderLoopEvent::Button(event),
+                Either4::Second(()) => RenderLoopEvent::Tick,
+                Either4::Third(()) => RenderLoopEvent::InterfacesChanged,
+                Either4::Fourth(pending) => RenderLoopEvent::RemoteControlCommand(pending),
+            };
+
+            match loop_event {
+                RenderLoopEvent::RemoteControlCommand(pending) => {
                     let (token, command) = pending.into_parts();
                     let result = execute_hopspot_command!(snapshots, command);
                     REMOTE_CONTROL_COMMANDS.complete(token, result);
@@ -778,16 +928,20 @@ pub(super) async fn run_core<B: Esp32S3Board>(
                     });
                     presentation_urgency = PresentationUrgency::Immediate;
                 }
-                Either4::Third(()) => {
+                #[cfg(feature = "remote-control-pairing")]
+                RenderLoopEvent::RemoteControlChanged => {
+                    presentation_urgency = PresentationUrgency::Immediate;
+                }
+                RenderLoopEvent::InterfacesChanged => {
                     settle_after_draw = true;
                     presentation_urgency = PresentationUrgency::Telemetry;
                 }
-                Either4::Second(()) => {
+                RenderLoopEvent::Tick => {
                     ticks_to_battery_sample = ticks_to_battery_sample.saturating_sub(1);
                     ticks_to_battery_display = ticks_to_battery_display.saturating_sub(1);
                     presentation_urgency = PresentationUrgency::Telemetry;
                 }
-                Either4::First(first_event) => {
+                RenderLoopEvent::Button(first_event) => {
                     let mut next_event = Some(first_event);
                     for index in 0..BUTTON_EVENT_CAPACITY {
                         let Some(event) = next_event.take() else {
@@ -919,17 +1073,181 @@ pub(super) async fn run_core<B: Esp32S3Board>(
                                         screen::UiNotice::Announcing,
                                         NOTICE_DURATION,
                                     );
-                                    let node_queued =
-                                        handle.issue(PrnsCommand::AnnounceNow(AnnounceNow {
-                                            destination: node_page_destination,
-                                            target: AnnounceTarget::AllInterfaces,
-                                            app_data: AnnounceAppData::Registered,
-                                        }));
+                                    #[cfg(feature = "remote-control-pairing")]
+                                    {
+                                        if B::REMOTE_CONTROL_PAIRING {
+                                            request_manual_announcements();
+                                        } else {
+                                            let node_queued = issue_node_page_announce(
+                                                &handle,
+                                                node_page_destination,
+                                            );
+                                            log::info!(
+                                                "announce-ui destination=node queued={node_queued}"
+                                            );
+                                        }
+                                    }
+                                    #[cfg(not(feature = "remote-control-pairing"))]
+                                    {
+                                        let node_queued = issue_node_page_announce(
+                                            &handle,
+                                            node_page_destination,
+                                        );
+                                        log::info!(
+                                            "announce-ui destination=node queued={node_queued}"
+                                        );
+                                    }
                                     boot_stage(BootPhase::AnnounceNodeIssueReturned);
-                                    log::info!(
-                                        "announce-ui destination=node queued={}",
-                                        node_queued.is_some()
+                                    #[cfg(feature = "remote-control-pairing")]
+                                    if B::REMOTE_CONTROL_PAIRING {
+                                        log::info!(
+                                            "announce-ui destination=node+remote queued=true"
+                                        );
+                                    }
+                                }
+                                #[cfg(feature = "remote-control-pairing")]
+                                screen::UiAction::OpenRemoteControlPairing => {
+                                    let _ = update_remote_control_state(
+                                        screen::RemoteControlTargetPairingState::begin_opening,
                                     );
+                                    let open = OpenRemoteControlPairing {
+                                        target: AnnounceTarget::AllInterfaces,
+                                        expires_after: RemoteControlPairingExpiresAfter::try_from(
+                                            personal_rns::units::DurationMillis(
+                                                REMOTE_CONTROL_PAIRING_WINDOW_MILLIS,
+                                            ),
+                                        )
+                                        .expect("the pairing window is valid"),
+                                        attempt_timeout:
+                                            RemoteControlPairingAttemptTimeout::try_from(
+                                                personal_rns::units::DurationMillis(
+                                                    REMOTE_CONTROL_PAIRING_ATTEMPT_MILLIS,
+                                                ),
+                                            )
+                                            .expect("the pairing attempt timeout is valid"),
+                                        permissions: remote_control_pairing_permissions.clone(),
+                                        public_app_data:
+                                            remote_control_pairing_public_app_data.clone(),
+                                    };
+                                    match handle.open_remote_control_pairing(open).await {
+                                        Ok(opened) => {
+                                            log::info!(
+                                                "remote-control pairing opened endpoint={:?} expires_at={}",
+                                                opened.endpoint.destination_hash(),
+                                                opened.expires_at.0
+                                            );
+                                            let invitation_code = opened.invitation_code.value();
+                                            let expires_at = opened.expires_at;
+                                            let _ = update_remote_control_state(|state| {
+                                                state.opened(invitation_code, expires_at)
+                                            });
+                                        }
+                                        Err(error) => {
+                                            log::error!(
+                                                "remote-control pairing open failed: {error:?}"
+                                            );
+                                            let _ = update_remote_control_state(|state| {
+                                                state.operation_failed(
+                                                    None,
+                                                    screen::RemoteControlTargetPairingFailure::Open,
+                                                )
+                                            });
+                                        }
+                                    }
+                                }
+                                #[cfg(feature = "remote-control-pairing")]
+                                screen::UiAction::CloseRemoteControlPairing => {
+                                    match handle.close_remote_control_pairing().await {
+                                        Ok(outcome) => {
+                                            log::info!(
+                                                "remote-control pairing close settled: {outcome:?}"
+                                            );
+                                            let _ = update_remote_control_state(
+                                                screen::RemoteControlTargetPairingState::cancelled,
+                                            );
+                                        }
+                                        Err(error) => {
+                                            log::error!(
+                                                "remote-control pairing close failed: {error:?}"
+                                            );
+                                            let _ = update_remote_control_state(|state| {
+                                                state.operation_failed(
+                                                    state.attempt_id(),
+                                                    screen::RemoteControlTargetPairingFailure::Close,
+                                                )
+                                            });
+                                            ui_state.remote_control_pairing_close_failed();
+                                        }
+                                    }
+                                }
+                                #[cfg(feature = "remote-control-pairing")]
+                                screen::UiAction::ApproveRemoteControlTargetPairing(attempt_id) => {
+                                    match handle
+                                        .approve_remote_control_target_pairing(
+                                            personal_rns::engine::ApproveRemoteControlTargetPairing {
+                                                attempt_id,
+                                            },
+                                        )
+                                        .await
+                                    {
+                                        Ok(RemoteControlTargetPairingApproval::AwaitingControllerCommit {
+                                            attempt_id,
+                                        }) => {
+                                            let _ = update_remote_control_state(|state| {
+                                                state.awaiting_controller_commit(attempt_id)
+                                            });
+                                        }
+                                        Ok(RemoteControlTargetPairingApproval::AuthorizationOwed {
+                                            attempt_id,
+                                            ..
+                                        }) => {
+                                            let _ = update_remote_control_state(|state| {
+                                                state.authorizing(attempt_id)
+                                            });
+                                        }
+                                        Err(error) => {
+                                            log::error!(
+                                                "remote-control target approval failed: {error:?}"
+                                            );
+                                            let _ = update_remote_control_state(|state| {
+                                                state.operation_failed(
+                                                    Some(attempt_id),
+                                                    screen::RemoteControlTargetPairingFailure::Approval,
+                                                )
+                                            });
+                                        }
+                                    }
+                                }
+                                #[cfg(feature = "remote-control-pairing")]
+                                screen::UiAction::RejectRemoteControlTargetPairing(attempt_id) => {
+                                    match handle
+                                        .reject_remote_control_target_pairing(
+                                            personal_rns::engine::RejectRemoteControlTargetPairing {
+                                                attempt_id,
+                                            },
+                                        )
+                                        .await
+                                    {
+                                        Ok(rejection) => {
+                                            log::info!(
+                                                "remote-control target pairing rejected: {rejection:?}"
+                                            );
+                                            let _ = update_remote_control_state(|state| {
+                                                state.rejected(attempt_id)
+                                            });
+                                        }
+                                        Err(error) => {
+                                            log::error!(
+                                                "remote-control target rejection failed: {error:?}"
+                                            );
+                                            let _ = update_remote_control_state(|state| {
+                                                state.operation_failed(
+                                                    Some(attempt_id),
+                                                    screen::RemoteControlTargetPairingFailure::Rejection,
+                                                )
+                                            });
+                                        }
+                                    }
                                 }
                                 screen::UiAction::ToggleSelectedInterface => {
                                     if let Some(card) = ui_state.selected_card(content.cards) {
@@ -1211,9 +1529,89 @@ async fn gnss_task(run: core::pin::Pin<&'static mut dyn core::future::Future<Out
     run.await
 }
 
+#[cfg(feature = "remote-control-pairing")]
+#[embassy_executor::task]
+async fn stable_target_announcer_task(
+    handle: Handle,
+    node_page_destination: personal_rns::wire::DestinationHash,
+    stable_target_destination: personal_rns::wire::DestinationHash,
+) -> ! {
+    loop {
+        let now = Instant::now().as_millis();
+        if let Some(action) = poll_stable_target_announcement(now) {
+            let (destination, kind) = match action {
+                screen::StableTargetAnnouncementAction::AutomaticStableTarget { .. } => {
+                    (stable_target_destination, "automatic-stable")
+                }
+                screen::StableTargetAnnouncementAction::ManualNodePage => {
+                    (node_page_destination, "manual-node")
+                }
+                screen::StableTargetAnnouncementAction::ManualStableTarget => {
+                    (stable_target_destination, "manual-stable")
+                }
+            };
+            let result = handle
+                .announce_now(AnnounceNow {
+                    destination,
+                    target: AnnounceTarget::AllInterfaces,
+                    app_data: AnnounceAppData::Registered,
+                })
+                .await;
+            match &result {
+                Ok(()) => log::info!(
+                    "announce settled kind={kind} destination={destination:?} outcome=sent"
+                ),
+                Err(error) => log::error!(
+                    "announce settled kind={kind} destination={destination:?} outcome=failed error={error:?}"
+                ),
+            }
+            let settled = settle_stable_target_announcement(action, result.is_ok());
+            debug_assert!(settled, "the serialized announce action remains in flight");
+            continue;
+        }
+
+        if let Some(deadline) = next_stable_target_announcement_deadline_millis() {
+            let deadline = Instant::try_from_millis(deadline).unwrap_or(Instant::MAX);
+            match select(STABLE_TARGET_ANNOUNCER_WAKE.wait(), Timer::at(deadline)).await {
+                Either::First(()) | Either::Second(()) => {}
+            }
+        } else {
+            STABLE_TARGET_ANNOUNCER_WAKE.wait().await;
+        }
+    }
+}
+
+#[cfg(feature = "remote-control-pairing")]
+#[embassy_executor::task]
+async fn pairing_close_task(handle: Handle) -> ! {
+    loop {
+        PAIRING_CLOSE_WAKE.wait().await;
+        if !PAIRING_CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
+            continue;
+        }
+        match handle.close_remote_control_pairing().await {
+            Ok(outcome) => {
+                log::warn!("remote-control pairing failed closed: {outcome:?}");
+            }
+            Err(error) => {
+                log::error!("remote-control pairing fail-close command failed: {error:?}");
+            }
+        }
+    }
+}
+
 #[embassy_executor::task]
 async fn manifold_task(run: core::pin::Pin<&'static mut dyn core::future::Future<Output = ()>>) {
     run.await
+}
+
+#[cfg(feature = "sram-storage")]
+#[embassy_executor::task]
+async fn sram_manifold_task(
+    node: &'static mut S3Node,
+    persistence: &'static mut crate::persistence::S3Persistence,
+) {
+    manifold_run(node, persistence).await
 }
 
 async fn manifold_run(
@@ -1221,7 +1619,14 @@ async fn manifold_run(
     persistence: &'static mut crate::persistence::S3Persistence,
 ) {
     boot_stage(BootPhase::PersistenceRestoreBegin);
+    #[cfg(feature = "remote-control-pairing")]
+    let report = node.restore_embedded_persistence(persistence).await;
+    #[cfg(not(feature = "remote-control-pairing"))]
     let _ = node.restore_embedded_persistence(persistence).await;
+    #[cfg(feature = "remote-control-pairing")]
+    {
+        set_remote_control_clock(report.logical_start);
+    }
     boot_stage(BootPhase::PersistenceRestoreComplete);
     node.run_manifold_with_persistence_and_interface_store(&INTERFACE_STORE, persistence)
         .await

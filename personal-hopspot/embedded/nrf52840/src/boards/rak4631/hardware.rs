@@ -32,7 +32,7 @@ type Rak4631SpiDevice = ExclusiveDevice<Spim<'static>, Output<'static>, Delay>;
 type Rak4631Radio =
     Sx126x<Rak4631SpiDevice, Input<'static>, Input<'static>, Output<'static>, Delay>;
 
-pub(crate) type Rak4631LoraInterface = LoRaInterface<'static, Rak4631Radio>;
+pub(crate) type Rak4631LoraInterface = LoRaInterface<'static, 'static, Rak4631Radio>;
 
 type Rak4631UsbDriver = Driver<'static, &'static SoftwareVbusDetect>;
 
@@ -95,6 +95,8 @@ impl Rak4631Board {
         let radio_power_en = Output::new(peripherals.P1_05, Level::High, OutputDrive::Standard);
         let peripheral_power = Output::new(peripherals.P1_02, Level::High, OutputDrive::Standard);
         let blue_led = Output::new(peripherals.P1_04, Level::Low, OutputDrive::Standard);
+        // RAK's board support waits for the switched SX1262 rail before touching the radio.
+        Timer::after_millis(10).await;
         HELD_IO.lock(|held| {
             *held.borrow_mut() = Some(HeldIo {
                 _radio_power_en: radio_power_en,

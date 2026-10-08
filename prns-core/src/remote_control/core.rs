@@ -14,6 +14,11 @@ pub struct RemoteControlStorageRequirements {
 }
 
 impl RemoteControlStorageRequirements {
+    /// Peak storage owned by an available service while a pairing window is open.
+    ///
+    /// The service keeps its controller and target identities, target and pairing-availability
+    /// destinations, and target request handler for its entire lifetime. Opening a pairing window
+    /// adds one provisional identity, destination, and request handler until the window closes.
     pub const AVAILABLE: Self = Self {
         held_identities: 3,
         upstream_app_destinations: 3,
@@ -165,6 +170,27 @@ impl RemoteControlNodeIdentitySecrets {
                     ),
                 ))
             })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn duplicate_for_fixture(&self) -> Self {
+        fn duplicate(parts: &IdentityParts) -> IdentityParts {
+            IdentityParts {
+                encryption_secret: parts.encryption_secret.cloned(),
+                signing_secret: parts.signing_secret.cloned(),
+                encryption_public: parts.encryption_public,
+                signing_public: parts.signing_public,
+                hash: parts.hash,
+            }
+        }
+        Self {
+            controller: RemoteControlControllerIdentitySecret {
+                parts: duplicate(&self.controller.parts),
+            },
+            target: RemoteControlTargetIdentitySecret {
+                parts: duplicate(&self.target.parts),
+            },
+        }
     }
 
     pub(crate) fn into_parts(self) -> (IdentityParts, IdentityParts) {

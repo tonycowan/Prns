@@ -324,6 +324,7 @@ fn send_request_failure(failure: SendRequestFailure) -> CommandFailure {
         SendRequestFailure::ResponseTransferFailed(cause) => response_transfer_failure(cause),
         SendRequestFailure::ResponseTooLarge => CommandFailure::ResponseTooLarge,
         SendRequestFailure::ResourceCapacity => CommandFailure::ResourceTableFull,
+        SendRequestFailure::RequestTransferFailed(inner) => resource_failure(inner),
     }
 }
 

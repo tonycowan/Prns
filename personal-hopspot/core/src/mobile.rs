@@ -206,8 +206,15 @@ impl MobileActionCode {
     #[must_use]
     pub const fn encode(action: UiAction) -> Self {
         match action {
+            #[cfg(feature = "lora-2g4")]
+            UiAction::SetLoRaConfiguration(_) => Self::None,
             UiAction::Announce => Self::Announce,
             UiAction::CopySharedInstanceConfig => Self::CopySharedInstanceConfig,
+            #[cfg(feature = "remote-control-pairing")]
+            UiAction::OpenRemoteControlPairing
+            | UiAction::CloseRemoteControlPairing
+            | UiAction::ApproveRemoteControlTargetPairing(_)
+            | UiAction::RejectRemoteControlTargetPairing(_) => Self::None,
             UiAction::None
             | UiAction::BlankDisplay
             | UiAction::ToggleDisplayAutoOff

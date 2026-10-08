@@ -9,15 +9,18 @@ use static_cell::{ConstStaticCell, StaticCell};
 use personal_hopspot_core as hopspot;
 use personal_rns::engine::IssuedCommand;
 use personal_rns::interfaces::lora::{AirtimePolicy, LORA_MAX_PAYLOAD};
-#[cfg(not(any(feature = "board-t096", feature = "board-t114")))]
-use personal_rns::interfaces::subghz::regions::us915::Us915;
-#[cfg(not(any(feature = "board-t096", feature = "board-t114")))]
+#[cfg(not(any(
+    feature = "board-t096",
+    feature = "board-t114",
+    feature = "board-wio-tracker-l1",
+    feature = "board-muzi-base-duo"
+)))]
 use personal_rns::interfaces::subghz::SubGConfigurationState;
 use personal_rns::interfaces::usb_auto::{WEBUSB_PRODUCT_ID, WEBUSB_VENDOR_ID};
 use personal_rns::interfaces::{ConnectionState, InterfaceId};
 use personal_rns::lora::{LoRaControl, LoRaInterface, LoRaInterfaceInput, LoRaSpectrumStatus};
 use personal_rns::manifold::embassy::{EmbassyHost, EmbassyInterfaceStatus, InterfaceLifecycle};
-use personal_rns::manifold::interface_seam::{Interface, EMBEDDED_MAX_WIRE_FRAME_LEN};
+use personal_rns::manifold::interface_seam::Interface;
 use personal_rns::remote_control::{
     RemoteControlControllerGrant, RemoteControlSelfAnnouncement, RemoteControlService,
 };
@@ -38,82 +41,89 @@ use board::{
     USB_INTERFACE_ID, USB_MANUFACTURER, USB_PRODUCT, USB_SERIAL_NUMBER,
 };
 
-#[cfg(feature = "board-t1000e")]
+#[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
 use super::entropy::install_hal_runtime_entropy;
 #[cfg(any(
     feature = "board-t096",
+    feature = "board-wio-tracker-l1",
     feature = "board-t114",
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 use super::entropy::install_softdevice_runtime_entropy;
 #[cfg(any(
     feature = "board-t096",
+    feature = "board-wio-tracker-l1",
     feature = "board-t114",
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 use super::entropy::prepare_softdevice_runtime_entropy;
 use super::entropy::{runtime_entropy, seed_from_hal};
 
 #[cfg(any(
     feature = "board-t096",
+    feature = "board-wio-tracker-l1",
     feature = "board-t114",
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 mod bluetooth;
-#[cfg(any(feature = "board-t096", feature = "board-t114"))]
+#[cfg(any(
+    feature = "board-t096",
+    feature = "board-t114",
+    feature = "board-wio-tracker-l1"
+))]
 mod remote_control;
 #[cfg(any(
-    feature = "board-t1000e",
+    any(feature = "board-t1000e", feature = "board-sensecap-solar-node"),
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 #[path = "remote_control_headless.rs"]
 mod remote_control;
 #[cfg(any(
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
-#[path = "mesh_tower_v2.rs"]
+#[path = "button_announce.rs"]
 mod selected;
-#[cfg(any(feature = "board-t096", feature = "board-t114"))]
+#[cfg(any(
+    feature = "board-t096",
+    feature = "board-t114",
+    feature = "board-wio-tracker-l1"
+))]
 #[path = "display.rs"]
+mod selected;
+#[cfg(feature = "board-sensecap-solar-node")]
+#[path = "sensecap_solar_node.rs"]
 mod selected;
 #[cfg(feature = "board-t1000e")]
 #[path = "t1000e.rs"]
 mod selected;
 
-#[cfg(not(feature = "usb-debug-log"))]
 const USB_CONFIG_DESCRIPTOR_BYTES: usize = 64;
-#[cfg(feature = "usb-debug-log")]
-const USB_CONFIG_DESCRIPTOR_BYTES: usize = 256;
-#[cfg(not(feature = "usb-debug-log"))]
 const USB_BOS_DESCRIPTOR_BYTES: usize = 64;
-#[cfg(feature = "usb-debug-log")]
-const USB_BOS_DESCRIPTOR_BYTES: usize = 128;
-#[cfg(not(feature = "usb-debug-log"))]
-const USB_MSOS_DESCRIPTOR_BYTES: usize = WEBUSB_AUTO_MSOS_DESCRIPTOR_BYTES;
-#[cfg(feature = "usb-debug-log")]
-const USB_MSOS_DESCRIPTOR_BYTES: usize = WEBUSB_AUTO_MSOS_DESCRIPTOR_BYTES + 192;
 const WINDOWS_MSOS_VENDOR_CODE: u8 = 0x20;
 const INTERFACE_CAPACITY: usize = selected::INTERFACE_CAPACITY;
 const LANE_COUNT: usize = selected::LANE_COUNT;
 const LANE_DEPTH: usize = 1;
+use super::node_name;
+
 const LORA_TX_QUEUE_BYTES: usize = 1024;
 const LORA_OUTBOUND_DEPTH: usize = Storage::MAX_OUTGOING_RESOURCE_REACTION_FRAMES;
 #[cfg(any(
     feature = "board-t096",
+    feature = "board-wio-tracker-l1",
     feature = "board-t114",
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 const BLE_OUTBOUND_DEPTH: usize = Storage::MAX_OUTGOING_RESOURCE_REACTION_FRAMES;
 const NOTIFY_CAP: usize = minimum_manifold_notification_capacity(LANE_COUNT, LANE_DEPTH);
@@ -131,10 +141,11 @@ const PACKET_PHY_INDEX_BUCKETS: usize =
 
 #[cfg(any(
     feature = "board-t096",
+    feature = "board-wio-tracker-l1",
     feature = "board-t114",
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 const _: () = assert!(Storage::LINK_SESSIONS > bluetooth::MEMBERS);
 
@@ -161,13 +172,21 @@ type Node = PrnsNode<
     COMMANDS_CAP,
     LIFECYCLE_CAP,
     COMPLETIONS_CAP,
+    4,
+    { personal_rns::engine::MAX_SEND_REQUEST_DATA_LEN },
+    0,
+    0,
+    personal_rns::runtime::RemoteControlNodeControls<
+        personal_rns::runtime::RemoteControlSupportedHost<AppState>,
+        personal_rns::runtime::NoRemoteControlHostControls,
+    >,
 >;
 type ManifoldLanes = ManifoldLaneSet<Mtx, LANE_COUNT, NOTIFY_CAP>;
 
 static NOTIFY: Channel<Mtx, InterfaceId, NOTIFY_CAP> = Channel::new();
-static COMMANDS: Channel<Mtx, IssuedCommand, COMMANDS_CAP> = Channel::new();
+pub(super) static COMMANDS: Channel<Mtx, IssuedCommand, COMMANDS_CAP> = Channel::new();
 static LIFECYCLE: Channel<Mtx, InterfaceLifecycle, LIFECYCLE_CAP> = Channel::new();
-static COMPLETION: CompletionPool<Mtx, COMPLETIONS_CAP> = CompletionPool::new();
+pub(super) static COMPLETION: CompletionPool<Mtx, COMPLETIONS_CAP> = CompletionPool::new();
 static INTERFACE_STORE: InterfaceStore = EmbassyInterfaceStore::new();
 static REMOTE_CONTROL_COMMANDS: hopspot::HopspotCommandMailbox<REMOTE_CONTROL_COMMAND_DEPTH> =
     hopspot::HopspotCommandMailbox::new();
@@ -179,10 +198,11 @@ static LORA_MANIFOLD_LANE: StaticManifoldLane<
 > = StaticManifoldLane::new();
 #[cfg(any(
     feature = "board-t096",
+    feature = "board-wio-tracker-l1",
     feature = "board-t114",
     feature = "board-mesh-tower-v2",
-    feature = "board-rak4631",
-    feature = "board-rak10724"
+    feature = "board-muzi-base-duo",
+    any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 static BLE_MANIFOLD_LANE: StaticManifoldLane<
     Mtx,
@@ -190,8 +210,12 @@ static BLE_MANIFOLD_LANE: StaticManifoldLane<
     LANE_DEPTH,
     BLE_OUTBOUND_DEPTH,
 > = StaticManifoldLane::new();
-static USB_MANIFOLD_LANE: StaticManifoldLane<Mtx, EMBEDDED_MAX_WIRE_FRAME_LEN, LANE_DEPTH> =
-    StaticManifoldLane::new();
+static USB_MANIFOLD_LANE: StaticManifoldLane<
+    Mtx,
+    { personal_rns::interfaces::usb_auto::MAX_DATA_BYTES },
+    LANE_DEPTH,
+    { personal_rns::interfaces::usb_auto::DEVICE_MIN_OUTBOUND_FRAMES },
+> = StaticManifoldLane::new();
 
 #[embassy_executor::task]
 async fn manifold_task(
@@ -205,20 +229,37 @@ async fn manifold_task(
 
 #[allow(clippy::too_many_lines)]
 pub async fn run(spawner: Spawner) -> ! {
-    #[cfg(feature = "usb-debug-log")]
-    super::usb_debug::init();
-    #[cfg(feature = "board-t1000e")]
-    let ((node_bootstrap, remote_control_bootstrap, factory_grant, entropy), hardware) =
+    #[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
+    let ((node_bootstrap, remote_control_bootstrap, entropy), hardware) =
         Board::initialize(|nvmc, rng| {
             let mut entropy = seed_from_hal(rng);
             let node_bootstrap = board::bootstrap_node_identity(nvmc, &mut entropy);
-            let loaded = board::REMOTE_CONTROL_IDENTITY_FLASH
+            let remote_control_bootstrap = board::REMOTE_CONTROL_IDENTITY_FLASH
                 .load_or_generate(nvmc, &mut entropy)
                 .expect("RemoteControl identity bootstrap failed");
+            (node_bootstrap, remote_control_bootstrap, entropy)
+        })
+        .await;
+    #[cfg(any(
+        feature = "board-t096",
+        feature = "board-wio-tracker-l1",
+        feature = "board-t114",
+        feature = "board-mesh-tower-v2",
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
+    ))]
+    let ((node_bootstrap, remote_control_bootstrap, ble_bootstrap, entropy), hardware) =
+        Board::initialize(|nvmc, rng| {
+            let mut entropy = seed_from_hal(rng);
+            let node_bootstrap = board::bootstrap_node_identity(nvmc, &mut entropy);
+            let remote_control_bootstrap = board::REMOTE_CONTROL_IDENTITY_FLASH
+                .load_or_generate(nvmc, &mut entropy)
+                .expect("RemoteControl identity bootstrap failed");
+            let ble_bootstrap = board::bootstrap_ble_identity(nvmc, &mut entropy);
             (
                 node_bootstrap,
-                loaded.bootstrap,
-                loaded.factory_grant,
+                remote_control_bootstrap,
+                ble_bootstrap,
                 entropy,
             )
         })
@@ -226,44 +267,27 @@ pub async fn run(spawner: Spawner) -> ! {
     #[cfg(any(
         feature = "board-t096",
         feature = "board-t114",
-        feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-wio-tracker-l1"
     ))]
-    let (
-        (node_bootstrap, remote_control_bootstrap, factory_grant, ble_bootstrap, entropy),
-        hardware,
-    ) = Board::initialize(|nvmc, rng| {
-        let mut entropy = seed_from_hal(rng);
-        let node_bootstrap = board::bootstrap_node_identity(nvmc, &mut entropy);
-        let loaded = board::REMOTE_CONTROL_IDENTITY_FLASH
-            .load_or_generate(nvmc, &mut entropy)
-            .expect("RemoteControl identity bootstrap failed");
-        let ble_bootstrap = board::bootstrap_ble_identity(nvmc, &mut entropy);
-        (
-            node_bootstrap,
-            loaded.bootstrap,
-            loaded.factory_grant,
-            ble_bootstrap,
-            entropy,
-        )
-    })
-    .await;
-    #[cfg(any(feature = "board-t096", feature = "board-t114"))]
     let identity_startup_notice =
         board::identity_startup_notice(node_bootstrap.persistence(), ble_bootstrap.persistence());
     let node_identity = node_bootstrap.into_identity();
+    let crate::boards::RemoteControlIdentityLoad {
+        bootstrap,
+        factory_grant,
+    } = remote_control_bootstrap;
     let (remote_control_identity_secrets, _remote_control_identity_origins) =
-        remote_control_bootstrap.into_parts();
+        bootstrap.into_parts();
     #[cfg(any(
         feature = "board-t096",
+        feature = "board-wio-tracker-l1",
         feature = "board-t114",
         feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
     let ble_identity = Some(ble_bootstrap.into_identity());
-    #[cfg(feature = "board-t096")]
+    #[cfg(any(feature = "board-t096", feature = "board-wio-tracker-l1"))]
     let Hardware {
         usb: usb_driver,
         vbus,
@@ -284,7 +308,7 @@ pub async fn run(spawner: Spawner) -> ! {
         button,
         mut status_led,
     } = hardware;
-    #[cfg(feature = "board-t1000e")]
+    #[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
     let Hardware {
         flash,
         usb: usb_driver,
@@ -292,26 +316,19 @@ pub async fn run(spawner: Spawner) -> ! {
         mut status_led,
         gnss,
     } = hardware;
-    #[cfg(feature = "board-t1000e")]
+    #[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
     install_hal_runtime_entropy(entropy);
-    #[cfg(feature = "board-mesh-tower-v2")]
+    #[cfg(any(
+        feature = "board-mesh-tower-v2",
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
+    ))]
     let Hardware {
         usb: usb_driver,
         vbus,
         radio,
         mut status_led,
         button,
-        sd: sd_card,
-        battery,
-    } = hardware;
-    #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
-    let Hardware {
-        usb: usb_driver,
-        vbus,
-        radio,
-        mut status_led,
-        button,
-        battery,
     } = hardware;
 
     let mut usb_config = UsbConfig::new(WEBUSB_VENDOR_ID, WEBUSB_PRODUCT_ID);
@@ -321,14 +338,14 @@ pub async fn run(spawner: Spawner) -> ! {
     usb_config.max_packet_size_0 = 64;
     static CONFIG_DESC: StaticCell<[u8; USB_CONFIG_DESCRIPTOR_BYTES]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; USB_BOS_DESCRIPTOR_BYTES]> = StaticCell::new();
-    static MSOS_DESC: StaticCell<[u8; USB_MSOS_DESCRIPTOR_BYTES]> = StaticCell::new();
+    static MSOS_DESC: StaticCell<[u8; WEBUSB_AUTO_MSOS_DESCRIPTOR_BYTES]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; WEBUSB_AUTO_CONTROL_BUFFER_BYTES]> = StaticCell::new();
     let mut builder = Builder::new(
         usb_driver,
         usb_config,
         CONFIG_DESC.init([0; USB_CONFIG_DESCRIPTOR_BYTES]),
         BOS_DESC.init([0; USB_BOS_DESCRIPTOR_BYTES]),
-        MSOS_DESC.init([0; USB_MSOS_DESCRIPTOR_BYTES]),
+        MSOS_DESC.init([0; WEBUSB_AUTO_MSOS_DESCRIPTOR_BYTES]),
         CONTROL_BUF.init([0; WEBUSB_AUTO_CONTROL_BUFFER_BYTES]),
     );
     builder.msos_descriptor(
@@ -338,88 +355,78 @@ pub async fn run(spawner: Spawner) -> ! {
     static USB_STATE: StaticCell<WebUsbAutoState> = StaticCell::new();
     let class = WebUsbAutoClass::new(
         &mut builder,
-        USB_STATE.init(WebUsbAutoState::new(super::bootloader_entry::webusb_entry())),
+        USB_STATE.init(
+            WebUsbAutoState::new(super::bootloader_entry::webusb_entry())
+                .with_controller_enrollment(super::controller_enrollment::webusb_enrollment(
+                    &remote_control_identity_secrets,
+                )),
+        ),
         WEBUSB_AUTO_PACKET_SIZE,
-        cfg!(feature = "usb-debug-log"),
     );
-    #[cfg(feature = "usb-debug-log")]
-    let cdc = {
-        use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
-        static CDC_STATE: StaticCell<State<'static>> = StaticCell::new();
-        CdcAcmClass::new(
-            &mut builder,
-            CDC_STATE.init(State::new()),
-            WEBUSB_AUTO_PACKET_SIZE,
-        )
-    };
-    #[cfg(feature = "usb-debug-log")]
-    let usb = builder.build();
-    #[cfg(not(feature = "usb-debug-log"))]
     let mut usb = builder.build();
 
     #[cfg(any(
         feature = "board-t096",
+        feature = "board-wio-tracker-l1",
         feature = "board-t114",
         feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
     let entropy = prepare_softdevice_runtime_entropy(entropy);
     #[cfg(any(
         feature = "board-t096",
+        feature = "board-wio-tracker-l1",
         feature = "board-t114",
         feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
     let sd = bluetooth::enable(spawner, vbus, ble_identity);
-    // softdevice_task and GATT slots are spawned, not running. Embassy will not
-    // schedule them until this task awaits. T096/T114 get that yield from radio
-    // profile flash; RAK/MeshTower skip it and would otherwise keep USB VBUS SoC
-    // events and BLE setup queued through node init.
-    #[cfg(any(
-        feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
-    ))]
+    // The SoftDevice task and GATT workers are spawned above, but they cannot run until this
+    // executor task yields. RAK4631 reaches this point without an intervening asynchronous flash
+    // load, so settle S140 before consuming its entropy/flash services or starting USB.
+    #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
     Timer::after_millis(100).await;
     #[cfg(any(
         feature = "board-t096",
+        feature = "board-wio-tracker-l1",
         feature = "board-t114",
         feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
     install_softdevice_runtime_entropy(entropy, sd);
 
     #[cfg(any(
         feature = "board-t096",
+        feature = "board-wio-tracker-l1",
         feature = "board-t114",
         feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
     let shared_flash = super::learned_state::take_flash(sd);
-    #[cfg(feature = "board-t1000e")]
+    #[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
     let shared_flash = super::learned_state::take_flash(flash);
     let persistence = super::learned_state::new(shared_flash);
 
     let transport_secret = node_identity.transport_secret();
     let destination_secret = node_identity.into_destination_secret();
-    let node_page_destination = hopspot::HopspotDestinationSet::new(
+    let destination_hashes = hopspot::HopspotDestinationSet::new(
         destination_secret.clone(),
         ANNOUNCE_APP_DATA,
         NODE_ANNOUNCE_APP_DATA,
     )
     .destination_hashes()
-    .expect("the hopspot destination names are valid")
-    .node_page;
+    .expect("the hopspot destination names are valid");
+    node_name::set_destinations(destination_hashes);
+    let node_page_destination = destination_hashes.node_page;
     let self_announcement = RemoteControlSelfAnnouncement::Destination(node_page_destination);
     static FACTORY_GRANT_STORAGE: StaticCell<Option<[RemoteControlControllerGrant; 1]>> =
         StaticCell::new();
-    let factory_grant_storage = FACTORY_GRANT_STORAGE.init(None);
     let initial_controller_grants =
-        crate::boards::initial_controller_grants(factory_grant, factory_grant_storage);
+        crate::boards::initial_controller_grants(factory_grant, FACTORY_GRANT_STORAGE.init(None));
     let remote_control = RemoteControlService::with_capabilities(
         remote_control_identity_secrets,
         initial_controller_grants,
@@ -427,12 +434,49 @@ pub async fn run(spawner: Spawner) -> ! {
         remote_control::capabilities(),
     );
     let mut manifold_lanes = ManifoldLanes::new();
-    #[cfg(any(feature = "board-t096", feature = "board-t114"))]
+    #[cfg(any(
+        feature = "board-t096",
+        feature = "board-t114",
+        feature = "board-wio-tracker-l1"
+    ))]
     let loaded_subg_configuration = selected::load_subg_configuration(shared_flash).await;
-    #[cfg(any(feature = "board-t096", feature = "board-t114"))]
+    #[cfg(any(
+        feature = "board-t096",
+        feature = "board-t114",
+        feature = "board-wio-tracker-l1"
+    ))]
     let subg_configuration = loaded_subg_configuration.state;
-    #[cfg(not(any(feature = "board-t096", feature = "board-t114")))]
-    let subg_configuration = SubGConfigurationState::Configured(Us915::auto_lora());
+    #[cfg(not(any(
+        feature = "board-t096",
+        feature = "board-t114",
+        feature = "board-wio-tracker-l1",
+        feature = "board-muzi-base-duo"
+    )))]
+    let (subg_configuration, subg_configuration_store) = {
+        let mut store =
+            hopspot::SubGConfigurationStore::new(shared_flash, board::RADIO_PROFILE_PAGES);
+        let state = match store.load().await {
+            Ok(loaded) => loaded.state,
+            Err(_) => SubGConfigurationState::Unconfigured,
+        };
+        (state, store)
+    };
+    #[cfg(feature = "board-muzi-base-duo")]
+    let mut radio_store = personal_hopspot_core::SubGConfigurationStore::new(
+        shared_flash,
+        board::RADIO_PROFILE_PAGES,
+    );
+    #[cfg(feature = "board-muzi-base-duo")]
+    let (subg_configuration, radio_service) = match radio_store.load_radio().await {
+        Ok(loaded) => (
+            loaded.state,
+            hopspot::LoRaConfigurationService::new(loaded.state),
+        ),
+        Err(_) => (
+            personal_rns::interfaces::lora::LoRaConfigurationState::Unconfigured,
+            hopspot::LoRaConfigurationService::unresolved(),
+        ),
+    };
     static LORA_STATUS: StaticCell<EmbassyInterfaceStatus> = StaticCell::new();
     let lora_status: &'static EmbassyInterfaceStatus =
         LORA_STATUS.init(EmbassyInterfaceStatus::new_accounted(
@@ -478,10 +522,11 @@ pub async fn run(spawner: Spawner) -> ! {
         .expect("LoRa lane is available");
     #[cfg(any(
         feature = "board-t096",
+        feature = "board-wio-tracker-l1",
         feature = "board-t114",
         feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
     let ble_supervisor_lane = ble_identity.as_ref().map(|_| {
         manifold_lanes
@@ -508,7 +553,11 @@ pub async fn run(spawner: Spawner) -> ! {
     let app_state = REMOTE_CONTROL_COMMANDS.handle();
     let recipe = PrnsNodeRecipe {
         transport_identity: Some(transport_secret),
-        remote_control,
+        remote_control: personal_rns::runtime::RemoteControlNodeSetup::new(remote_control)
+            .with_controls(personal_rns::runtime::RemoteControlSupportedHost::new(
+                app_state,
+                remote_control::capabilities().requests(),
+            )),
         pre_configured_destinations: hopspot::HopspotDestinationSet::new(
             destination_secret,
             ANNOUNCE_APP_DATA,
@@ -528,34 +577,23 @@ pub async fn run(spawner: Spawner) -> ! {
     static PERSISTENCE: StaticCell<super::learned_state::BoardPersistence> = StaticCell::new();
     let persistence = PERSISTENCE.init(persistence);
     spawner.spawn(manifold_task(node, persistence).expect("manifold task fits"));
+    #[cfg(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log"))]
+    spawner.spawn(board::console_tick().expect("console tick task fits"));
     let lora_seam = lora_lane.into_seam(NOTIFY.sender(), entropy);
     let usb_seam = usb_lane.into_seam(NOTIFY.sender(), entropy);
     #[cfg(any(
         feature = "board-t096",
+        feature = "board-wio-tracker-l1",
         feature = "board-t114",
         feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
     let bluetooth = bluetooth::prepare(ble_identity, ble_supervisor_lane);
     let heartbeat = async move {
         #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
-        let mut battery = battery;
-        #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
-        let mut battery_gauge = hopspot::BatteryGauge::lipo();
-        #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
         status_led.boot_splash().await;
         loop {
-            #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
-            {
-                let millivolts = battery.sample_millivolts().await;
-                hopspot::publish_power_snapshot(battery_gauge.update(
-                    Some(millivolts),
-                    hopspot::ExternalPowerState::from_presence(
-                        super::bluetooth_auto::usb_vbus_present(),
-                    ),
-                ));
-            }
             status_led.illuminate();
             let timing = selected::heartbeat_timing();
             Timer::after(timing.illuminated()).await;
@@ -564,17 +602,16 @@ pub async fn run(spawner: Spawner) -> ! {
             selected::maintain().await;
         }
     };
-    #[cfg(feature = "usb-debug-log")]
-    let usb_bus = super::usb_debug::run(usb, cdc);
-    #[cfg(not(feature = "usb-debug-log"))]
-    let usb_bus = usb.run();
     let io = join4(
-        usb_bus,
+        usb.run(),
         usb_device.run(usb_seam),
         heartbeat,
-        super::bootloader_entry::wait(),
+        embassy_futures::join::join(
+            super::bootloader_entry::wait(),
+            super::controller_enrollment::run(PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION)),
+        ),
     );
-    #[cfg(feature = "board-t096")]
+    #[cfg(any(feature = "board-t096", feature = "board-wio-tracker-l1"))]
     {
         let face = selected::face(selected::FaceInput {
             display,
@@ -623,30 +660,47 @@ pub async fn run(spawner: Spawner) -> ! {
         )
         .await;
     }
-    #[cfg(feature = "board-t1000e")]
+    #[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
     selected::run(
         io,
         lora.run(lora_seam),
-        remote_control::run_headless(lora_status, usb_status, lora_controller, subg_configuration),
+        remote_control::run_headless(
+            lora_status,
+            usb_status,
+            lora_controller,
+            subg_configuration.into(),
+            #[cfg(not(feature = "board-muzi-base-duo"))]
+            subg_configuration_store,
+            #[cfg(feature = "board-muzi-base-duo")]
+            radio_store,
+            #[cfg(feature = "board-muzi-base-duo")]
+            radio_service,
+        ),
         gnss,
+        node_page_destination,
     )
     .await;
-    #[cfg(feature = "board-mesh-tower-v2")]
-    spawner.spawn(board::publish_root_test_file(sd_card).expect("sd card task fits"));
-    #[cfg(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log"))]
-    spawner.spawn(board::console_tick().expect("console tick task fits"));
-    #[cfg(feature = "board-mesh-tower-v2")]
-    spawner.spawn(board::report_battery(battery).expect("battery task fits"));
     #[cfg(any(
         feature = "board-mesh-tower-v2",
-        feature = "board-rak4631",
-        feature = "board-rak10724"
+        feature = "board-muzi-base-duo",
+        any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
     selected::run(
         io,
         lora.run(lora_seam),
         bluetooth::run(sd, bluetooth),
-        remote_control::run_headless(lora_status, usb_status, lora_controller, subg_configuration),
+        remote_control::run_headless(
+            lora_status,
+            usb_status,
+            lora_controller,
+            subg_configuration.into(),
+            #[cfg(not(feature = "board-muzi-base-duo"))]
+            subg_configuration_store,
+            #[cfg(feature = "board-muzi-base-duo")]
+            radio_store,
+            #[cfg(feature = "board-muzi-base-duo")]
+            radio_service,
+        ),
         button,
         node_page_destination,
     )
@@ -655,3 +709,6 @@ pub async fn run(spawner: Spawner) -> ! {
 }
 
 fn ignore_events(_event: PrnsEvent<'_>, _state: &AppState) {}
+
+#[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
+mod node_page_announce;
