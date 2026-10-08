@@ -62,9 +62,9 @@ impl BatteryProbe {
 
 pub(crate) async fn report(mut probe: BatteryProbe) {
     loop {
-        Timer::after(REPORT_DELAY).await;
         let snapshot = observe(&mut probe).await;
         personal_hopspot_core::publish_power_snapshot(snapshot);
+        Timer::after(REPORT_DELAY).await;
     }
 }
 

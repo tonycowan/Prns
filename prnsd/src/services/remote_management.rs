@@ -12,8 +12,8 @@ use personal_rns::runtime::request_endpoints::{
     Decline, RequestContext, RequestEndpoint, RequestEndpointPolicy, RequestEndpointSet,
 };
 use personal_rns::runtime::{
-    ConfigurePreconfiguredDestinationError, PreConfiguredDestination, PrnsEvent, PrnsNode,
-    RegisterRequestEndpointError, ServeMyRequestEndpoints,
+    ConfigurePreconfiguredDestinationError, PreConfiguredDestination, PrnsEvent,
+    RegisterRequestEndpointError, RemoteControlHostControls, ServeMyRequestEndpoints,
 };
 use personal_rns::storage::StorageLayout;
 use personal_rns::wire::DestinationHash;
@@ -88,8 +88,8 @@ pub enum ActivationError {
     },
 }
 
-pub fn activate<R, F, S>(
-    node: &mut PrnsNode<DaemonRequestState, R, F, S>,
+pub fn activate<R, F, S, C>(
+    node: &mut super::DaemonNode<R, F, S, C>,
     identity: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
     allowed: &[IdentityHash],
 ) -> Result<DestinationHash, ActivationError>
@@ -97,6 +97,7 @@ where
     R: RequestEndpointSet<DaemonRequestState>,
     F: FnMut(PrnsEvent<'_>, &DaemonRequestState),
     S: StorageLayout,
+    C: RemoteControlHostControls,
 {
     let destination = node
         .register_preconfigured_destination(PreConfiguredDestination::Single {

@@ -59,6 +59,135 @@ fn encode_uf2_payload(data: &[u8], base: u32, family_id: u32) -> Vec<u8> {
     out
 }
 
+fn reject_regions_the_bootloader_cannot_write(
+    entry: &BoardCatalogEntry,
+    softdevice: &prns_flash_manifest::SoftdeviceIdentity,
+    board_id: &str,
+    erase_parts: &[String],
+    write_lora: bool,
+) -> Result<(), AppError> {
+    let Some(end) = prns_flash_manifest::uf2_write_end_for_board_id(board_id) else {
+        return Ok(());
+    };
+    let BoardBuild::Uf2(build) = &entry.build else {
+        return Err(AppError::unsupported_operation(
+            "only a UF2 board can erase preserved pages or write a LoRa profile in the image",
+        ));
+    };
+    let regions =
+        prns_flash_manifest::uf2_preserved_regions(build, softdevice).ok_or_else(|| {
+            AppError::arguments(
+                "this bootloader's SoftDevice has no preserved-page map for the selected board",
+            )
+        })?;
+    let mut blocked = Vec::new();
+    for name in erase_parts {
+        let Some(part) = regions.iter().find(|part| part.name == name) else {
+            return Err(AppError::arguments(format!(
+                "{name} is not an erasable region on this SoftDevice"
+            )));
+        };
+        if part.offset.saturating_add(part.size) > end {
+            blocked.push(format!("{name} at {:#x}", part.offset));
+        }
+    }
+    if write_lora {
+        let Some(radio) = regions.iter().find(|part| part.name == "radio-profile") else {
+            return Err(AppError::arguments(
+                "this SoftDevice has no radio-profile pages to write",
+            ));
+        };
+        if radio.offset.saturating_add(radio.size) > end {
+            blocked.push(format!("radio-profile at {:#x}", radio.offset));
+        }
+    }
+    if blocked.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::arguments(format!(
+        "{} {} past the end of the flash this bootloader will write ({end:#x}). The update was not copied. Leave {} unchecked; a block past that end makes the bootloader abort and stay mounted",
+        blocked.join(", "),
+        if blocked.len() == 1 { "is" } else { "are" },
+        if blocked.len() == 1 { "it" } else { "them" },
+    )))
+}
+
+#[cfg(test)]
+fn readback_end(bytes: &[u8]) -> Option<u32> {
+    let mut end = None;
+    if bytes.is_empty() || !bytes.len().is_multiple_of(UF2_BLOCK) {
+        return None;
+    }
+    for block in bytes.chunks_exact(UF2_BLOCK) {
+        if uf2_word(block, 0) != UF2_MAGIC_START0
+            || uf2_word(block, 4) != UF2_MAGIC_START1
+            || uf2_word(block, UF2_BLOCK - 4) != UF2_MAGIC_END
+        {
+            return None;
+        }
+        let address = uf2_word(block, 12);
+        let payload = uf2_word(block, 16);
+        let block_end = address.checked_add(payload)?;
+        end = Some(end.map_or(block_end, |current: u32| current.max(block_end)));
+    }
+    end
+}
+
+fn append_uf2_maintenance(
+    entry: &BoardCatalogEntry,
+    softdevice: &prns_flash_manifest::SoftdeviceIdentity,
+    family_id: u32,
+    mut firmware: Vec<u8>,
+    erase_parts: &[String],
+    lora_config: Option<&str>,
+) -> Result<Vec<u8>, AppError> {
+    if erase_parts.is_empty() && lora_config.is_none() {
+        return Ok(firmware);
+    }
+    let BoardBuild::Uf2(build) = &entry.build else {
+        return Err(AppError::unsupported_operation(
+            "only a UF2 board can erase preserved pages or write a LoRa profile in the image",
+        ));
+    };
+    let regions =
+        prns_flash_manifest::uf2_preserved_regions(build, softdevice).ok_or_else(|| {
+            AppError::arguments(
+                "this bootloader's SoftDevice has no preserved-page map for the selected board",
+            )
+        })?;
+    for name in erase_parts {
+        let Some(part) = regions.iter().find(|part| part.name == name) else {
+            return Err(AppError::arguments(format!(
+                "{name} is not an erasable region on this SoftDevice"
+            )));
+        };
+        let Some(len) = usize::try_from(part.size).ok().filter(|len| *len > 0) else {
+            return Err(AppError::arguments(format!(
+                "{name} is not a page-sized erasable region"
+            )));
+        };
+        let blank = vec![0xFF; len];
+        firmware = extend_uf2_with_region(&firmware, &blank, part.offset, family_id)?;
+    }
+    if let Some(text) = lora_config {
+        let image = personal_hopspot_core::radio_profile_flash_image_from_inventory(text)
+            .ok_or_else(|| AppError::arguments("LoRa config is not a valid profile"))?;
+        let radio = regions
+            .iter()
+            .find(|part| part.name == "radio-profile")
+            .ok_or_else(|| {
+                AppError::arguments("this SoftDevice has no radio-profile pages to write")
+            })?;
+        if usize::try_from(radio.size).ok() != Some(image.len()) {
+            return Err(AppError::arguments(
+                "radio-profile is not the two pages a LoRa profile image fills",
+            ));
+        }
+        firmware = extend_uf2_with_region(&firmware, &image, radio.offset, family_id)?;
+    }
+    Ok(firmware)
+}
+
 fn extend_uf2_with_region(
     existing: &[u8],
     data: &[u8],
@@ -196,6 +325,8 @@ pub(crate) fn flash(
     target: &PreparedUf2Target,
     device: DetectedUf2Device,
     rc_vault: Option<&crate::esp::RcVaultWrite>,
+    erase_parts: &[String],
+    lora_config: Option<&str>,
     reporter: Reporter,
 ) -> Result<(), AppError> {
     let board = CatalogedUf2Board::try_from_entry(entry)?;
@@ -204,6 +335,8 @@ pub(crate) fn flash(
             "prepared UF2 compatibility does not match the detected bootloader foundation",
         ));
     }
+    let board_id = device.identity().board_id().to_string();
+    let softdevice = device.softdevice().clone();
     let mount = device.mount;
     let baseline_usb = matching_prns_application_usb_ids(board.application_usb)?;
 
@@ -213,15 +346,32 @@ pub(crate) fn flash(
         Some(board.slug()),
         &format!("Copying verified UF2 to {}…", destination.display()),
     );
-    let firmware = match rc_vault {
-        Some(vault) => extend_uf2_with_region(
-            target.part().bytes(),
+    if !erase_parts.is_empty() || lora_config.is_some() {
+        reject_regions_the_bootloader_cannot_write(
+            entry,
+            &softdevice,
+            &board_id,
+            erase_parts,
+            lora_config.is_some(),
+        )?;
+    }
+    let mut firmware = target.part().bytes().to_vec();
+    firmware = append_uf2_maintenance(
+        entry,
+        &softdevice,
+        target.compatibility().family_id(),
+        firmware,
+        erase_parts,
+        lora_config,
+    )?;
+    if let Some(vault) = rc_vault {
+        firmware = extend_uf2_with_region(
+            &firmware,
             &vault.bytes,
             vault.offset,
             target.compatibility().family_id(),
-        )?,
-        None => target.part().bytes().to_vec(),
-    };
+        )?;
+    }
     let copy_outcome = copy_uf2(&destination, &mount, &firmware, &board, reporter)?;
 
     if matches!(copy_outcome, Uf2CopyOutcome::Synchronized) {
@@ -728,6 +878,28 @@ mod tests {
 
     fn cataloged_uf2(entry: &BoardCatalogEntry) -> CatalogedUf2Board<'_> {
         CatalogedUf2Board::try_from_entry(entry).expect("cataloged UF2 board")
+    }
+
+    #[test]
+    fn readback_end_stops_where_the_bootloader_stops_exposing_flash() {
+        let readback = encode_uf2_payload(&[0xFF; 0xA000], 0x000E_0000, 0x239a_0071);
+        assert_eq!(readback_end(&readback), Some(0x000E_A000));
+        assert!(prns_flash_manifest::read_uf2_window(&readback, 0x000E_9000, 0x1000).is_some());
+        assert!(prns_flash_manifest::read_uf2_window(&readback, 0x000E_A000, 0x1000).is_none());
+        assert!(prns_flash_manifest::read_uf2_window(&readback, 0x000E_B000, 0x1000).is_none());
+    }
+
+    #[test]
+    fn a_blank_page_covers_every_byte_of_the_flash_page() {
+        let encoded = encode_uf2_payload(&[0xFF; 4096], 0x000E_0000, 0xada5_2840);
+        assert_eq!(encoded.len(), 16 * UF2_BLOCK);
+        for (index, block) in encoded.chunks_exact(UF2_BLOCK).enumerate() {
+            assert_eq!(
+                uf2_word(block, 12),
+                0x000E_0000 + u32::try_from(index).expect("block index") * 256
+            );
+            assert!(block[32..32 + UF2_PAYLOAD].iter().all(|byte| *byte == 0xFF));
+        }
     }
 
     #[test]

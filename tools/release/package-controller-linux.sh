@@ -189,6 +189,7 @@ if [[ -n "$firmware_from" ]]; then
 fi
 bash "$root/tools/release/embed-controller-firmware.sh" "${embed_args[@]}"
 test -f "$dest_dir/firmware/bundle.json"
+test -f "$dest_dir/firmware/heltec-v3/target.json"
 test -f "$dest_dir/firmware/heltec-v4/target.json"
 test -f "$dest_dir/firmware/heltec-v4-r8/target.json"
 test -f "$dest_dir/firmware/t-echo/target.json"

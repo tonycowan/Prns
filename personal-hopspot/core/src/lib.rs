@@ -91,9 +91,9 @@ pub use remote_control_executor::{
 pub use remote_control_inventory::{
     bluetooth_auto_interface_name, decorate_hopspot_radio_card,
     decorate_hopspot_remote_control_card, hopspot_remote_control_build_version,
-    queue_interface_mode_change,
-    remote_control_interface_config_from_snapshots, remote_control_interface_peers_from_snapshots,
-    remote_control_inventory_from_snapshots, singleton_discovery_group,
+    queue_interface_mode_change, remote_control_interface_config_from_snapshots,
+    remote_control_interface_peers_from_snapshots, remote_control_inventory_from_snapshots,
+    singleton_discovery_group,
 };
 pub use remote_node_name::apply_remote_node_name;
 pub use remote_subg_configuration::apply_remote_subg_configuration;
@@ -112,9 +112,11 @@ pub use screen::{
 pub use screen::{display, face_64x128};
 pub use soft_ap::SoftApLeaseTable;
 pub use subg_configuration_store::{
-    LoadedLoRaConfiguration, LoadedSubGConfiguration, SubGConfigurationCommitOutcome,
-    SubGConfigurationFlashOperation, SubGConfigurationLoadNotice, SubGConfigurationStore,
-    SubGConfigurationStoreError,
+    flash_image_holds_lora_profile, radio_profile_flash_image,
+    radio_profile_flash_image_from_inventory, LoadedLoRaConfiguration, LoadedSubGConfiguration,
+    SubGConfigurationCommitOutcome, SubGConfigurationFlashOperation, SubGConfigurationLoadNotice,
+    SubGConfigurationStore, SubGConfigurationStoreError, RADIO_PROFILE_FLASH_IMAGE_LEN,
+    RADIO_PROFILE_PAGE_LEN,
 };
 pub use wifi_configuration_store::{
     set_wifi_record_runner, LoadedWifiConfiguration, WifiConfigurationCommitOutcome,

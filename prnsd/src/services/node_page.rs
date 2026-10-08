@@ -9,8 +9,8 @@ use personal_rns::routing::request_handlers::RequestPolicy;
 use personal_rns::routing::{LinkRequestPolicy, ProofStrategy};
 use personal_rns::runtime::request_endpoints::RequestEndpointSet;
 use personal_rns::runtime::{
-    ConfigurePreconfiguredDestinationError, PreConfiguredDestination, PrnsEvent, PrnsNode,
-    ServeMyRequestEndpoints,
+    ConfigurePreconfiguredDestinationError, PreConfiguredDestination, PrnsEvent,
+    RemoteControlHostControls, ServeMyRequestEndpoints,
 };
 use personal_rns::storage::StorageLayout;
 use personal_rns::wire::DestinationHash;
@@ -34,8 +34,8 @@ pub(crate) struct NodePageDestination {
     pub(crate) index_path: PathBuf,
 }
 
-pub(crate) fn activate<R, F, S>(
-    node: &mut PrnsNode<DaemonRequestState, R, F, S>,
+pub(crate) fn activate<R, F, S, C>(
+    node: &mut super::DaemonNode<R, F, S, C>,
     identity: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
     catalog: &NnPagesCatalog,
 ) -> Result<NodePageDestination, ConfigurePreconfiguredDestinationError>
@@ -43,6 +43,7 @@ where
     R: RequestEndpointSet<DaemonRequestState>,
     F: FnMut(PrnsEvent<'_>, &DaemonRequestState),
     S: StorageLayout,
+    C: RemoteControlHostControls,
 {
     let destination =
         node.register_preconfigured_destination(PreConfiguredDestination::Single {

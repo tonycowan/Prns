@@ -40,17 +40,33 @@ fn live_stat_formatters_stay_compact() {
 }
 
 #[test]
-fn compact_number_draws_decimal_as_single_pixel() {
-    let mut display = MockDisplay::new();
-    display.set_allow_overdraw(true);
+fn compact_number_draws_digits_not_the_missing_glyph() {
+    let mut digit = MockDisplay::new();
+    digit.set_allow_overdraw(true);
+    draw_compact_number(&mut digit, "1", Point::new(0, 0), BinaryColor::On);
 
-    draw_compact_number(&mut display, "1.2K/s", Point::new(0, 0), BinaryColor::On);
+    let mut missing = MockDisplay::new();
+    missing.set_allow_overdraw(true);
+    draw_compact_number(&mut missing, "?", Point::new(0, 0), BinaryColor::On);
 
-    assert_eq!(compact_numeric_width("1.2K/s"), 25);
-    assert_eq!(display.get_pixel(Point::new(5, 6)), Some(BinaryColor::On));
-    assert_eq!(display.get_pixel(Point::new(6, 6)), None);
-    assert_eq!(display.get_pixel(Point::new(19, 2)), Some(BinaryColor::On));
-    assert_eq!(display.get_pixel(Point::new(18, 3)), Some(BinaryColor::On));
-    assert_eq!(display.get_pixel(Point::new(17, 4)), Some(BinaryColor::On));
-    assert_eq!(display.get_pixel(Point::new(19, 3)), None);
+    let mut quantity = MockDisplay::new();
+    quantity.set_allow_overdraw(true);
+    draw_compact_number(&mut quantity, "1.2K", Point::new(0, 0), BinaryColor::On);
+
+    assert_eq!(compact_numeric_width("1.2K"), 20);
+    let mut digit_differs_from_missing = false;
+    let mut quantity_starts_with_digit = true;
+    for y in 0..8 {
+        for x in 0..5 {
+            let digit_pixel = digit.get_pixel(Point::new(x, y));
+            if digit_pixel != missing.get_pixel(Point::new(x, y)) {
+                digit_differs_from_missing = true;
+            }
+            if quantity.get_pixel(Point::new(x, y)) != digit_pixel {
+                quantity_starts_with_digit = false;
+            }
+        }
+    }
+    assert!(digit_differs_from_missing);
+    assert!(quantity_starts_with_digit);
 }

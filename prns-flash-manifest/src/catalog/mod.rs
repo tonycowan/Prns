@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use memory::{
-    ErasablePartition, MemoryProfileReference, MemoryProfileReferenceError, ResolvedMemoryProfile,
+    uf2_preserved_regions, uf2_write_end_for_board_id, ErasablePartition, MemoryProfileReference,
+    MemoryProfileReferenceError, ResolvedMemoryProfile, HT_N5262_BOOTLOADER_WRITE_END,
 };
 
 use crate::{
@@ -730,26 +731,6 @@ const MESH_POCKET_10000_UF2_RECIPE: PinnedUf2Recipe = PinnedUf2Recipe {
     }],
 };
 
-const MESH_TOWER_V2_UF2_RECIPE: PinnedUf2Recipe = PinnedUf2Recipe {
-    preparation_profile: PreparationProfile::T114Uf2,
-    package: "t-echo",
-    binary: "heltec-mesh-tower-v2",
-    board_feature: "board-mesh-tower-v2",
-    manufacturer: "Stay Personal",
-    product: "Personal Hopspot (Heltec MeshTower V2)",
-    serial_number: "PERSONAL-RNS-MTWR-HOP",
-    variants: &[PinnedUf2Variant {
-        softdevice_family: "s140",
-        softdevice_version: "6.1.1",
-        fwid: "0x00b6",
-        memory_profile: "mesh-tower-v2",
-        family_id: "0xada52840",
-        application_link: Uf2ApplicationLink::SoftdeviceS140V6,
-        target_directory: "target/mesh-tower-v2",
-        filename: "heltec-mesh-tower-v2-s140-6.1.1.uf2",
-    }],
-};
-
 const T096_UF2_RECIPE: PinnedUf2Recipe = PinnedUf2Recipe {
     preparation_profile: PreparationProfile::T096Uf2,
     package: "t-echo",
@@ -895,7 +876,6 @@ fn pinned_uf2_recipe(slug: &str) -> Option<&'static PinnedUf2Recipe> {
         "t-echo" => Some(&T_ECHO_UF2_RECIPE),
         "mesh-pocket-5000" => Some(&MESH_POCKET_5000_UF2_RECIPE),
         "mesh-pocket-10000" => Some(&MESH_POCKET_10000_UF2_RECIPE),
-        "mesh-tower-v2" => Some(&MESH_TOWER_V2_UF2_RECIPE),
         "t096" => Some(&T096_UF2_RECIPE),
         "t114" => Some(&T114_UF2_RECIPE),
         "seeed-wio-tracker-l1" => Some(&WIO_TRACKER_L1_UF2_RECIPE),
@@ -1100,6 +1080,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mesh_tower_lists_preserved_pages_and_keeps_the_bootloader() {
+        let catalog = board_catalog().expect("catalog");
+        let board = catalog.board("mesh-tower-v2").expect("mesh tower");
+        let parts = board.erasable_partitions();
+        let radio = parts
+            .iter()
+            .find(|part| part.name == "radio-profile")
+            .expect("radio profile");
+        assert_eq!(radio.offset, 0x000E_0000);
+        assert_eq!(radio.size, 0x2000);
+        for name in [
+            "journal",
+            "application-data-reserved",
+            "remote-control-identity",
+        ] {
+            assert!(parts.iter().any(|part| part.name == name), "{name}");
+        }
+        for name in [
+            "firmware",
+            "platform-firmware",
+            "recovery-bootloader",
+            "ble-identity",
+            "node-identity",
+        ] {
+            assert!(parts.iter().all(|part| part.name != name), "{name}");
+        }
+    }
+
+    #[test]
     fn solar_recovery_identities_are_finite_and_cannot_overlap_other_products() {
         let mut catalog = board_catalog().expect("catalog");
         let solar = catalog
@@ -1140,7 +1149,6 @@ mod tests {
     }
 
     #[test]
-    fn embedded_catalog_has_all_release_ready_boards() -> Result<(), CatalogError> {
     fn preserved_partitions_are_the_erasable_set() -> Result<(), CatalogError> {
         let catalog = board_catalog()?;
         let hv4 = catalog
@@ -1292,10 +1300,8 @@ mod tests {
                 ("t114", None, None),
                 ("mesh-pocket-5000", None, None),
                 ("mesh-pocket-10000", None, None),
-                ("mesh-tower-v2", None, None),
                 ("t096", None, None),
                 ("rak4631", None, None),
-                ("rak10724", None, None),
                 ("t1000-e", None, None),
                 ("mesh-tower-v2", None, None),
                 ("muzi-base-duo", None, None),
@@ -1386,10 +1392,8 @@ mod tests {
                     "mesh-pocket-10000",
                     "thumbv7em-none-eabihf"
                 ),
-                ("mesh-tower-v2", "mesh-tower-v2", "thumbv7em-none-eabihf"),
                 ("t096", "t096", "thumbv7em-none-eabihf"),
                 ("rak4631", "rak4631", "thumbv7em-none-eabihf"),
-                ("rak10724", "rak10724", "thumbv7em-none-eabihf"),
                 ("t1000-e", "t1000-e", "thumbv7em-none-eabihf"),
                 ("mesh-tower-v2", "mesh-tower-v2", "thumbv7em-none-eabihf"),
                 ("muzi-base-duo", "muzi-base-duo", "thumbv7em-none-eabihf"),
@@ -1607,19 +1611,19 @@ mod tests {
     }
 
     #[test]
-    fn rak10724_qualification_contract_matches_the_hardware_receipt() -> Result<(), CatalogError> {
+    fn rak10724_shipping_contract_matches_the_hardware_receipt() -> Result<(), CatalogError> {
         let catalog = board_catalog()?;
         let board = catalog
             .board("rak10724")
             .ok_or_else(|| CatalogError::InvalidBoard {
                 board: "rak10724".to_string(),
-                message: "missing qualification target".to_string(),
+                message: "missing shipping target".to_string(),
             })?;
         let BoardBuild::Uf2(build) = &board.build else {
             return Err(invalid(board, "expected a UF2 build"));
         };
 
-        assert_eq!(board.availability, BoardAvailability::Qualification);
+        assert_eq!(board.availability, BoardAvailability::Shipping);
         assert_eq!(board.preparation_profile, "rak10724-uf2");
         assert_eq!(build.package, "t-echo");
         assert_eq!(build.binary, "rak10724");
@@ -1654,7 +1658,7 @@ mod tests {
             .expect("RAK10724 memory profile")
             .transport_envelope();
         assert_eq!(application.start(), 0x0002_6000);
-        assert_eq!(application.end_exclusive(), 0x000e_2000);
+        assert_eq!(application.end_exclusive(), 0x000e_0000);
         assert_eq!(variant.family_id, "0xada52840");
         assert_eq!(
             variant.application_link,

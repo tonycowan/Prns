@@ -4,20 +4,21 @@ use personal_rns::routing::links::resources::ResourceStrategy;
 use personal_rns::routing::{LinkRequestPolicy, ProofStrategy};
 use personal_rns::runtime::request_endpoints::RequestEndpointSet;
 use personal_rns::runtime::{
-    ConfigurePreconfiguredDestinationError, PreConfiguredDestination, PrnsEvent, PrnsNode,
-    ServeMyRequestEndpoints,
+    ConfigurePreconfiguredDestinationError, OsEntropySource, PreConfiguredDestination, PrnsEvent,
+    PrnsNode, RemoteControlHostControls, ServeMyRequestEndpoints,
 };
 use personal_rns::storage::StorageLayout;
 use personal_rns::wire::DestinationHash;
 
-pub fn activate<St, R, F, S>(
-    node: &mut PrnsNode<St, R, F, S>,
+pub fn activate<St, R, F, S, C>(
+    node: &mut PrnsNode<St, R, F, S, OsEntropySource, C>,
     identity: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
 ) -> Result<DestinationHash, ConfigurePreconfiguredDestinationError>
 where
     R: RequestEndpointSet<St>,
     F: FnMut(PrnsEvent<'_>, &St),
     S: StorageLayout,
+    C: RemoteControlHostControls,
 {
     node.register_preconfigured_destination(PreConfiguredDestination::Single {
         app_name: "rnstransport",

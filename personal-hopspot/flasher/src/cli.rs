@@ -114,6 +114,9 @@ pub(crate) enum CommandMode {
         /// Erase one preserved partition by its table name. Repeat for each region.
         #[arg(long = "erase-part", value_name = "PART")]
         erase_parts: Vec<String>,
+        /// Write this LoRa inventory profile (`L,...`) into the board's radio-profile pages.
+        #[arg(long, value_name = "PROFILE", hide = true)]
+        lora_config: Option<String>,
         /// Remote Control identity vault page (4096 bytes) for ESP sparse flash.
         #[arg(long, value_name = "FILE", hide = true, requires = "rc_vault_offset")]
         rc_vault: Option<PathBuf>,
@@ -400,6 +403,24 @@ mod tests {
             panic!("expected flash command");
         };
         assert_eq!(erase_parts, ["wifi_cfg", "hopcfg"]);
+    }
+
+    #[test]
+    fn flash_accepts_a_lora_inventory_profile() {
+        let parsed = Cli::try_parse_from([
+            "hopspot-flash",
+            "flash",
+            "mesh-tower-v2",
+            "--yes",
+            "--json",
+            "--lora-config",
+            "L,US,915000,7,125,5,20,8",
+        ])
+        .expect("lora config must parse");
+        let Some(CommandMode::Flash { lora_config, .. }) = parsed.command else {
+            panic!("expected flash command");
+        };
+        assert_eq!(lora_config.as_deref(), Some("L,US,915000,7,125,5,20,8"));
     }
 
     #[test]

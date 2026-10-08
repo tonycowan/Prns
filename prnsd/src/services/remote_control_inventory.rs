@@ -187,11 +187,12 @@ fn remote_control_peer_for_supervisor(
     }
 }
 
-fn rate_bytes_per_sec(snapshot: &InterfaceSnapshot) -> u32 {
-    snapshot
+fn rate_bytes_per_sec(snapshot: &InterfaceSnapshot) -> Option<std::num::NonZeroU32> {
+    let bytes_per_sec = snapshot
         .transfer_rates
         .map(|rates| rates.rx_bps.saturating_add(rates.tx_bps) / 8)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    std::num::NonZeroU32::new(bytes_per_sec)
 }
 
 #[cfg(test)]

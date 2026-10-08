@@ -4,12 +4,11 @@ use embedded_graphics::mono_font::iso_8859_1::FONT_5X8;
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::Rectangle;
 use embedded_graphics::text::{Baseline, Text};
 use heapless::String as HString;
 
-use super::layout::*;
-use super::primitives::fill;
+#[cfg(test)]
+use super::layout::NUMBER_GLYPH_WIDTH;
 
 enum CompactQuantity {
     Count,
@@ -90,19 +89,10 @@ pub(in crate::screen) fn fmt_activity_age(age_secs: Option<u32>) -> HString<8> {
 
 #[cfg(test)]
 pub(in crate::screen) fn compact_numeric_width(text: &str) -> i32 {
-    text.chars()
-        .map(|ch| {
-            if ch == '.' {
-                COMPACT_DECIMAL_WIDTH
-            } else if ch == '/' {
-                COMPACT_SLASH_WIDTH
-            } else {
-                NUMBER_GLYPH_WIDTH
-            }
-        })
-        .sum()
+    text.chars().count() as i32 * NUMBER_GLYPH_WIDTH
 }
 
+/// One text run, same as the status words on the card. Per-glyph draws were falling back to `?`.
 pub(in crate::screen) fn draw_compact_number<D: DrawTarget<Color = BinaryColor>>(
     display: &mut D,
     text: &str,
@@ -110,33 +100,5 @@ pub(in crate::screen) fn draw_compact_number<D: DrawTarget<Color = BinaryColor>>
     color: BinaryColor,
 ) {
     let style = MonoTextStyle::new(&FONT_5X8, color);
-    let mut x = point.x;
-    for ch in text.chars() {
-        if ch == '.' {
-            let _ = Rectangle::new(Point::new(x, point.y + COMPACT_DECIMAL_Y), Size::new(1, 1))
-                .into_styled(fill(color))
-                .draw(display);
-            x += COMPACT_DECIMAL_WIDTH;
-            continue;
-        }
-
-        if ch == '/' {
-            for (dx, dy) in [(2, 0), (1, 1), (0, 2)] {
-                let _ = Rectangle::new(
-                    Point::new(x + dx, point.y + COMPACT_SLASH_Y + dy),
-                    Size::new(1, 1),
-                )
-                .into_styled(fill(color))
-                .draw(display);
-            }
-            x += COMPACT_SLASH_WIDTH;
-            continue;
-        }
-
-        let mut glyph: HString<2> = HString::new();
-        let _ = glyph.push(ch);
-        let _ =
-            Text::with_baseline(&glyph, Point::new(x, point.y), style, Baseline::Top).draw(display);
-        x += NUMBER_GLYPH_WIDTH;
-    }
+    let _ = Text::with_baseline(text, point, style, Baseline::Top).draw(display);
 }

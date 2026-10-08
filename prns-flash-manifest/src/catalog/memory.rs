@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use super::{
     BoardBuild, BoardCatalogEntry, EspBuild, NrfSerialDfuBuild, NrfSerialDfuCompatibility,
-    Uf2BuildVariant,
+    SoftdeviceIdentity, Uf2Build, Uf2BuildVariant,
 };
 use crate::ApplicationAddressRange;
 
@@ -91,9 +91,32 @@ pub struct ErasablePartition {
 }
 
 pub(super) fn erasable_partitions(board: &BoardCatalogEntry) -> Vec<ErasablePartition> {
-    let BoardBuild::Esp(build) = &board.build else {
-        return Vec::new();
-    };
+    match &board.build {
+        BoardBuild::Esp(build) => esp_erasable_partitions(build),
+        BoardBuild::Uf2(build) => uf2_erasable_partitions(build),
+        BoardBuild::NrfSerialDfu(_) => Vec::new(),
+    }
+}
+
+/// Preserved regions for the UF2 variant that matches this SoftDevice.
+pub fn uf2_preserved_regions(
+    build: &Uf2Build,
+    softdevice: &SoftdeviceIdentity,
+) -> Option<Vec<ErasablePartition>> {
+    let variant = build.variants.iter().find(|variant| {
+        SoftdeviceIdentity::parse(
+            &variant.softdevice_family,
+            variant.softdevice_version.clone(),
+        )
+        .ok()
+        .as_ref()
+            == Some(softdevice)
+    })?;
+    let profile = memory_profile_named(variant.memory_profile.as_str())?;
+    Some(preserved_regions(profile))
+}
+
+fn esp_erasable_partitions(build: &EspBuild) -> Vec<ErasablePartition> {
     let Some(profile) = memory_profile_named(build.memory_profile.as_str()) else {
         return Vec::new();
     };
@@ -124,6 +147,80 @@ pub(super) fn erasable_partitions(board: &BoardCatalogEntry) -> Vec<ErasablePart
     parts
 }
 
+fn uf2_erasable_partitions(build: &Uf2Build) -> Vec<ErasablePartition> {
+    let write_end = bootloader_write_end(build);
+    let mut parts: Vec<ErasablePartition> = Vec::new();
+    for variant in &build.variants {
+        let Some(profile) = memory_profile_named(variant.memory_profile.as_str()) else {
+            continue;
+        };
+        for part in preserved_regions(profile) {
+            if write_end.is_some_and(|end| part.offset.saturating_add(part.size) > end) {
+                continue;
+            }
+            if parts.iter().any(|existing| existing.name == part.name) {
+                continue;
+            }
+            parts.push(part);
+        }
+    }
+    parts.sort_by_key(|part| part.offset);
+    parts
+}
+
+/// Exclusive end of the flash the HT-n5262 0.9.0 bootloader will program.
+/// A UF2 block at or past it aborts the update and the volume stays mounted.
+pub const HT_N5262_BOOTLOADER_WRITE_END: u32 = 0x000E_A000;
+
+#[must_use]
+pub fn uf2_write_end_for_board_id(board_id: &str) -> Option<u32> {
+    board_id
+        .eq_ignore_ascii_case("ht-n5262")
+        .then_some(HT_N5262_BOOTLOADER_WRITE_END)
+}
+
+fn bootloader_write_end(build: &Uf2Build) -> Option<u32> {
+    build
+        .board_identities()
+        .find_map(|identity| uf2_write_end_for_board_id(&identity.value))
+}
+
+fn preserved_regions(
+    profile: &'static personal_hopspot_memory::MemoryProfile,
+) -> Vec<ErasablePartition> {
+    let mut parts = Vec::new();
+    for region in profile.regions {
+        if region.retention != RegionRetention::PreserveAcrossFirmwareUpdate {
+            continue;
+        }
+        if matches!(
+            region.role,
+            RegionRole::SoftDevice
+                | RegionRole::RecoveryBootloader
+                | RegionRole::Bootloader
+                | RegionRole::FirmwareImage
+        ) {
+            continue;
+        }
+        let Ok(offset) = u32::try_from(region.range.start()) else {
+            continue;
+        };
+        let Ok(size) = u32::try_from(region.range.byte_len()) else {
+            continue;
+        };
+        if size == 0 || !offset.is_multiple_of(4096) || !size.is_multiple_of(4096) {
+            continue;
+        }
+        parts.push(ErasablePartition {
+            name: region.id.0,
+            label: erasable_partition_label(region.role),
+            offset,
+            size,
+        });
+    }
+    parts
+}
+
 fn erasable_partition_label(role: RegionRole) -> &'static str {
     match role {
         RegionRole::PlatformData => "NVS",
@@ -135,6 +232,10 @@ fn erasable_partition_label(role: RegionRole) -> &'static str {
         RegionRole::RadioProfile => "Radio profile",
         RegionRole::WifiConfiguration => "Sealed Wi-Fi",
         RegionRole::Journal => "Learned state",
+        RegionRole::Reserved => "Reserved",
+        RegionRole::FactoryReserved => "Factory reserved",
+        RegionRole::FirmwareUpdateSlot => "Update slot",
+        RegionRole::BootSelection => "Boot selection",
         _ => "Preserved region",
     }
 }

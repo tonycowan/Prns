@@ -92,6 +92,7 @@ pub(super) const fn capabilities() -> RemoteControlCapabilities {
         .with_request(RemoteControlRequestKind::AnnounceSelf)
         .with_request(RemoteControlRequestKind::InventoryInterfaces)
         .with_request(RemoteControlRequestKind::SetInterfacePower)
+        .with_request(RemoteControlRequestKind::SetInterfaceMode)
         .with_request(RemoteControlRequestKind::SetInterfaceGroup)
         .with_request(RemoteControlRequestKind::InventoryInterfaceDiscoveryGroups)
         .with_request(RemoteControlRequestKind::ReplaceInterfaceDiscoveryGroups)
@@ -102,6 +103,9 @@ pub(super) const fn capabilities() -> RemoteControlCapabilities {
         .with_request(RemoteControlRequestKind::DescribeNodeName)
         .with_request(RemoteControlRequestKind::DescribeBuild)
         .with_request(RemoteControlRequestKind::DescribePower)
+        .with_request(RemoteControlRequestKind::DescribeNetworkTransport)
+        .with_request(RemoteControlRequestKind::SetNetworkTransport)
+        .with_request(RemoteControlRequestKind::InventoryPathTable)
         .with_request(RemoteControlRequestKind::SetSystemPower)
         .with_request(RemoteControlRequestKind::SetDisplayVisibility)
         .with_request(RemoteControlRequestKind::InventoryControllers)
@@ -256,6 +260,35 @@ pub(super) async fn execute<D: RetainedDisplayDevice>(
         RemoteControlHostCommand::DescribePower => {
             Ok(RemoteControlHostResponse::DescribePower(context.power))
         }
+        RemoteControlHostCommand::DescribeNetworkTransport => {
+            Ok(RemoteControlHostResponse::DescribeNetworkTransport(
+                hopspot::NETWORK_TRANSPORT.current(),
+            ))
+        }
+        RemoteControlHostCommand::SetNetworkTransport { transport } => {
+            Ok(RemoteControlHostResponse::SetNetworkTransport(
+                hopspot::NETWORK_TRANSPORT.set(transport),
+            ))
+        }
+        RemoteControlHostCommand::SetInterfaceMode { id, mode } => Ok(
+            RemoteControlHostResponse::SetInterfaceMode(hopspot::queue_interface_mode_change(
+                context.snapshots,
+                id,
+                mode,
+                |target, mode| {
+                    super::node::LIFECYCLE
+                        .sender()
+                        .try_send(
+                            personal_rns::manifold::embassy::InterfaceLifecycle::SetMode {
+                                id: target,
+                                mode,
+                            },
+                        )
+                        .is_ok()
+                },
+                |target, mode| super::node::INTERFACE_STORE.set_interface_mode(target, mode),
+            )),
+        ),
         RemoteControlHostCommand::SetSystemPower { power } => {
             let desired_awake = power == RemoteControlSystemPower::Awake;
             let outcome = if desired_awake && cancel_pending_sleep(context.scheduled_effect) {

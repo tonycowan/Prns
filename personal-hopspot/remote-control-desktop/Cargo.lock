@@ -4085,6 +4085,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "personal-hopspot-core"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embedded-storage",
+ "embedded-storage-async",
+ "heapless 0.8.0",
+ "personal-rns",
+ "prns-core",
+ "prns-macros",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
 name = "personal-hopspot-memory"
 version = "0.1.0"
 
@@ -4099,6 +4114,7 @@ dependencies = [
  "libc",
  "log",
  "ndk-context",
+ "personal-hopspot-core",
  "personal-rns",
  "prns-core",
  "prns-ffi",
@@ -4116,7 +4132,7 @@ dependencies = [
 
 [[package]]
 name = "personal-rns"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "cfg-if",
  "prns-core",
@@ -4375,7 +4391,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "prns-core"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aes",
  "cbc",
@@ -4403,7 +4419,7 @@ dependencies = [
 
 [[package]]
 name = "prns-ffi"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "cfg-if",
  "dispatch2",
@@ -4414,6 +4430,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-io-kit",
+ "portable-atomic",
  "prns-core",
  "tokio",
  "windows 0.58.0",
@@ -4435,7 +4452,7 @@ dependencies = [
 
 [[package]]
 name = "prns-interfaces-embassy"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "embassy-futures",
  "embassy-net",
@@ -4454,7 +4471,7 @@ dependencies = [
 
 [[package]]
 name = "prns-interfaces-tokio"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "bluer",
  "cfg-if",
@@ -4478,11 +4495,11 @@ dependencies = [
 
 [[package]]
 name = "prns-macros"
-version = "0.3.7"
+version = "0.3.8"
 
 [[package]]
 name = "prns-runtime"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "bzip2",
  "cfg-if",
@@ -4493,7 +4510,7 @@ dependencies = [
 
 [[package]]
 name = "prns-runtime-embassy"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "critical-section",
  "embassy-futures",
@@ -4510,12 +4527,13 @@ dependencies = [
 
 [[package]]
 name = "prns-runtime-tokio"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "heapless 0.8.0",
  "nix 0.31.3",
+ "portable-atomic",
  "prns-core",
  "prns-runtime",
  "rtrb",

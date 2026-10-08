@@ -9,7 +9,7 @@ use personal_rns::identity::{Zeroizing, IDENTITY_SECRET_KEY_LEN};
 use personal_rns::interfaces::InterfaceId;
 use personal_rns::manifold::tokio::TokioClock;
 use personal_rns::runtime::request_endpoints::RequestEndpointSet;
-use personal_rns::runtime::{PrnsEvent, PrnsNode, PrnsNodeHandle};
+use personal_rns::runtime::{PrnsEvent, PrnsNodeHandle, RemoteControlHostControls};
 use personal_rns::shared_instance::RnsBlackholeFiles;
 use personal_rns::storage::StorageLayout;
 use personal_rns::RunningTokioInterfaceDiscoveryPublisher;
@@ -23,7 +23,8 @@ use crate::interface_discovery::{
 };
 use crate::observability::ObservabilityGuard;
 use crate::services::{
-    self, BlackholeUpdateTask, DaemonRequestState, ManagementAnnounceTask, ManagementDestinations,
+    self, BlackholeUpdateTask, DaemonNode, DaemonRequestState, ManagementAnnounceTask,
+    ManagementDestinations,
 };
 
 use super::interface_ownership::{InterfaceOwnership, RoutingTableOwnership};
@@ -250,8 +251,8 @@ impl BackgroundTasks {
     }
 }
 
-pub(super) struct BackgroundInputs<'a, R, F, S: StorageLayout> {
-    pub(super) node: PrnsNode<DaemonRequestState, R, F, S>,
+pub(super) struct BackgroundInputs<'a, R, F, S: StorageLayout, C> {
+    pub(super) node: DaemonNode<R, F, S, C>,
     pub(super) handle: &'a PrnsNodeHandle,
     pub(super) plan: &'a DaemonPlan,
     pub(super) interface_runtime: &'a PlanRuntimeContext,
@@ -266,13 +267,14 @@ pub(super) struct BackgroundInputs<'a, R, F, S: StorageLayout> {
     pub(super) started: Instant,
 }
 
-pub(super) fn start<R, F, S>(
-    inputs: BackgroundInputs<'_, R, F, S>,
-) -> (PrnsNode<DaemonRequestState, R, F, S>, BackgroundTasks)
+pub(super) fn start<R, F, S, C>(
+    inputs: BackgroundInputs<'_, R, F, S, C>,
+) -> (DaemonNode<R, F, S, C>, BackgroundTasks)
 where
     R: RequestEndpointSet<DaemonRequestState>,
     F: FnMut(PrnsEvent<'_>, &DaemonRequestState),
     S: StorageLayout,
+    C: RemoteControlHostControls,
 {
     let BackgroundInputs {
         mut node,

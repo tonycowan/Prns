@@ -4,14 +4,12 @@ use personal_hopspot_core::display::{
 };
 #[cfg(feature = "remote-control-pairing")]
 use personal_rns::engine::{OpenRemoteControlPairing, RemoteControlTargetPairingApproval};
-use personal_rns::remote_control::{
-    RemoteControlInitialControllerGrants, RemoteControlSelfAnnouncement, RemoteControlService,
-};
 #[cfg(feature = "remote-control-pairing")]
 use personal_rns::remote_control::{
     RemoteControlPairingAttemptTimeout, RemoteControlPairingExpiresAfter,
     RemoteControlPairingPublicAppDataBytes,
 };
+use personal_rns::remote_control::{RemoteControlSelfAnnouncement, RemoteControlService};
 
 #[cfg(feature = "remote-control-pairing")]
 const REMOTE_CONTROL_PAIRING_WINDOW_MILLIS: u64 = 120_000;
@@ -84,6 +82,11 @@ where
     // the private bump that `reinit_private_psram_heap` resets inside `run_core` before the LoRa
     // queue lands — pinning here would place the live future (OLED/I2C state) in that window and
     // get overwritten, which zeroed I2C Config.frequency after radio bring-up.
+    //
+    // The future itself is about 16 KiB and is built in the external heap. Its poll
+    // frame is larger: the generator subtracts `0x8290` bytes on entry, and core 0
+    // has about 36 KiB free above a 4 KiB guard, so that frame is polled on a
+    // stack in the external heap.
     if B::INTERNAL_SRAM_ONLY {
         allocator_api2::boxed::Box::pin_in(
             run_core::<B>(spawner, bringup),
@@ -91,12 +94,49 @@ where
         )
         .await;
     } else {
-        allocator_api2::boxed::Box::pin_in(
-            run_core::<B>(spawner, bringup),
-            esp_alloc::ExternalMemory,
-        )
-        .await;
+        let pinned = pin_run_core::<B>(spawner, bringup);
+        let stack_top = super::record_stack::allocate_external_stack(128 * 1024);
+        drive_on_external_stack(pinned, stack_top).await;
     }
+}
+
+#[inline(never)]
+async fn drive_on_external_stack<F>(
+    mut pinned: core::pin::Pin<allocator_api2::boxed::Box<F, esp_alloc::ExternalMemory>>,
+    stack_top: *mut u8,
+) where
+    F: core::future::Future<Output = ()>,
+{
+    core::future::poll_fn(|cx| {
+        let mut poll_result = core::task::Poll::Pending;
+        let pinned_ptr: *mut _ = &mut pinned;
+        let cx_ptr: *mut core::task::Context<'_> = cx;
+        super::record_stack::call(stack_top, &mut || {
+            // SAFETY: `pinned` and `cx` are borrowed for this poll only, and `call`
+            // runs the closure to completion before either is used again.
+            let pinned = unsafe { &mut *pinned_ptr };
+            let cx = unsafe { &mut *cx_ptr };
+            poll_result = core::future::Future::poll(pinned.as_mut(), cx);
+        });
+        poll_result
+    })
+    .await;
+}
+
+#[inline(never)]
+fn pin_run_core<B: Esp32S3Board>(
+    spawner: Spawner,
+    hardware: S3BoardHardware<B::Display, B::Battery, B::Gnss>,
+) -> core::pin::Pin<
+    allocator_api2::boxed::Box<impl core::future::Future<Output = ()>, esp_alloc::ExternalMemory>,
+>
+where
+    B::Display: 'static,
+    <B::Display as S3BoardDisplay>::Runtime: 'static,
+    B::Battery: 'static,
+    B::Gnss: 'static,
+{
+    allocator_api2::boxed::Box::pin_in(run_core::<B>(spawner, hardware), esp_alloc::ExternalMemory)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -169,6 +209,9 @@ pub(super) async fn run_core<B: Esp32S3Board>(
         .target_sealing_key(screen::WIFI_CONFIGURATION_SEALING_DOMAIN);
     let mut wifi_configuration_store =
         screen::WifiConfigurationStore::new(shared_flash, memory.wifi_configuration_pages());
+    if !super::record_stack::install() {
+        log::warn!("wifi record stack was not installed");
+    }
     let mut runtime_wifi_station = None;
     match wifi_configuration_store
         .load(&wifi_configuration_key, &mut boot_entropy)

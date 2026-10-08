@@ -3,7 +3,9 @@ use std::time::Duration;
 use personal_rns::config::DaemonPlan;
 use personal_rns::identity::{Zeroizing, IDENTITY_SECRET_KEY_LEN};
 use personal_rns::runtime::request_endpoints::RequestEndpointSet;
-use personal_rns::runtime::{PrnsEvent, PrnsNode, PrnsNodeHandle};
+use personal_rns::runtime::{
+    OsEntropySource, PrnsEvent, PrnsNode, PrnsNodeHandle, RemoteControlHostControls,
+};
 use personal_rns::storage::StorageLayout;
 
 mod blackhole_exchange;
@@ -29,7 +31,9 @@ pub(crate) use management_announcements::{
 pub(crate) use node_page::destination_hash as node_page_destination_hash;
 pub(crate) use remote_management::{PathRoute, StatusRoute};
 pub(crate) use request_routes::DaemonRequestRoutes;
-pub(crate) use request_state::{DaemonRequestState, TransportStatusIdentity};
+pub(crate) use request_state::{
+    daemon_remote_control_requests, DaemonRequestState, TransportStatusIdentity,
+};
 
 pub(crate) struct ManagementDestinations {
     announced: Vec<AnnouncedDestination>,
@@ -64,8 +68,11 @@ impl ManagementDestinations {
 
 pub(crate) struct HostedServiceActivationFailed;
 
-pub(crate) fn activate<R, F, S>(
-    node: &mut PrnsNode<DaemonRequestState, R, F, S>,
+pub(crate) type DaemonNode<R, F, S, C> =
+    PrnsNode<DaemonRequestState, R, F, S, OsEntropySource, C>;
+
+pub(crate) fn activate<R, F, S, C>(
+    node: &mut DaemonNode<R, F, S, C>,
     plan: &DaemonPlan,
     identity: &Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
     nnpages: &crate::nnpages::NnPagesCatalog,
@@ -74,6 +81,7 @@ where
     R: RequestEndpointSet<DaemonRequestState>,
     F: FnMut(PrnsEvent<'_>, &DaemonRequestState),
     S: StorageLayout,
+    C: RemoteControlHostControls,
 {
     let mut destinations = Vec::new();
     if let Some(allowed) = plan.remote_management.allowed() {

@@ -26,11 +26,8 @@ pub(super) const GLOBAL_TEXT_X: i32 = GLOBAL_ICON_X + NAME_ICON_W + 2;
 pub(in crate::screen) const GLOBAL_BACKING_X: i32 = GLOBAL_ICON_X - 2;
 pub(in crate::screen) const GLOBAL_BACKING_Y: i32 = 1;
 pub(in crate::screen) const GLOBAL_BACKING_H: u32 = 11;
+#[cfg(test)]
 pub(super) const NUMBER_GLYPH_WIDTH: i32 = 5;
-pub(super) const COMPACT_DECIMAL_WIDTH: i32 = 2;
-pub(super) const COMPACT_DECIMAL_Y: i32 = 6;
-pub(super) const COMPACT_SLASH_WIDTH: i32 = 3;
-pub(super) const COMPACT_SLASH_Y: i32 = 2;
 pub(in crate::screen) const STAT_ICON_X: i32 = 34;
 pub(in crate::screen) const STAT_TEXT_X: i32 = STAT_ICON_X + 9;
 pub(super) const ACTIVITY_ICON_X: i32 = STAT_ICON_X + 2;

@@ -61,11 +61,20 @@ pub(crate) fn flash(
     reporter: Reporter,
     rc_vault: Option<RcVaultWrite>,
     erase_parts: &[String],
+    lora_config: Option<&str>,
 ) -> Result<(), AppError> {
     let erases = partition_erases(board, erase_parts)?;
+    let lora = radio_profile_part(board, lora_config)?;
     let selected = select_port(port_name)?;
     let expected = expected_device(board)?;
-    let plan = sparse_plan(board, target, provisioning, rc_vault.as_ref(), erases)?;
+    let plan = sparse_plan(
+        board,
+        target,
+        provisioning,
+        rc_vault.as_ref(),
+        lora.as_ref(),
+        erases,
+    )?;
     let total = plan.iter().map(|part| part.bytes.len() as u64).sum::<u64>();
 
     reporter.phase(
@@ -237,11 +246,45 @@ fn partition_erases(
 
 const FLASH_SECTOR_BYTES: u32 = 0x1000;
 
+/// The two `radio_cfg` pages, erased then written, holding one committed LoRa record.
+fn radio_profile_part(
+    board: &BoardCatalogEntry,
+    lora_config: Option<&str>,
+) -> Result<Option<SparsePart>, AppError> {
+    let Some(text) = lora_config else {
+        return Ok(None);
+    };
+    let radio = board
+        .erasable_partitions()
+        .into_iter()
+        .find(|part| part.name == "radio_cfg")
+        .ok_or_else(|| {
+            AppError::unsupported_operation(format!(
+                "{} has no radio_cfg pages to write a LoRa profile into",
+                board.display_name
+            ))
+        })?;
+    let image = personal_hopspot_core::radio_profile_flash_image_from_inventory(text)
+        .ok_or_else(|| AppError::arguments("LoRa config is not a valid profile"))?;
+    if usize::try_from(radio.size).ok() != Some(image.len()) {
+        return Err(AppError::trust_manifest(
+            "radio_cfg is not the two pages a LoRa profile image fills",
+        ));
+    }
+    Ok(Some(SparsePart {
+        offset: radio.offset,
+        bytes: image.to_vec(),
+        erase_before_write: true,
+        erase_only_len: 0,
+    }))
+}
+
 fn sparse_plan(
     board: &BoardCatalogEntry,
     target: &PreparedEspTarget,
     provisioning: &ProvisioningAction,
     rc_vault: Option<&RcVaultWrite>,
+    lora: Option<&SparsePart>,
     erases: Vec<SparsePart>,
 ) -> Result<Vec<SparsePart>, AppError> {
     if matches!(provisioning, ProvisioningAction::ConfigureWithTcp { .. })
@@ -279,6 +322,14 @@ fn sparse_plan(
         plan.push(SparsePart {
             offset: vault.offset,
             bytes: vault.bytes.clone(),
+            erase_before_write: true,
+            erase_only_len: 0,
+        });
+    }
+    if let Some(lora) = lora {
+        plan.push(SparsePart {
+            offset: lora.offset,
+            bytes: lora.bytes.clone(),
             erase_before_write: true,
             erase_only_len: 0,
         });
@@ -924,6 +975,28 @@ mod port_tests {
             port_name: name.to_string(),
             port_type,
         }
+    }
+
+    #[test]
+    fn heltec_v3_lora_profile_is_written_into_radio_cfg() {
+        let catalog = prns_flash_manifest::board_catalog().expect("catalog");
+        let board = catalog.board("heltec-v3").expect("Heltec V3");
+        let part = radio_profile_part(board, Some("L,0,921500,7,5,5,22,18"))
+            .expect("profile")
+            .expect("radio_cfg part");
+        assert_eq!(part.offset, 0x0067_E000);
+        assert_eq!(part.bytes.len(), 8192);
+        assert!(part.erase_before_write);
+        assert!(personal_hopspot_core::flash_image_holds_lora_profile(&part.bytes));
+        assert!(radio_profile_part(board, None).expect("absent").is_none());
+        let v4 = catalog.board("heltec-v4").expect("Heltec V4");
+        let v4_part = radio_profile_part(v4, Some("L,0,921500,7,5,5,22,18"))
+            .expect("profile")
+            .expect("radio_cfg part");
+        assert_eq!(v4_part.offset, 0x00E7_E000);
+        let xiao = catalog.board("xiao-esp32-c6").expect("XIAO C6");
+        assert!(radio_profile_part(xiao, Some("L,0,921500,7,5,5,22,18")).is_err());
+        assert!(radio_profile_part(board, Some("not-a-profile")).is_err());
     }
 
     #[test]

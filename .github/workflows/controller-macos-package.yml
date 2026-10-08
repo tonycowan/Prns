@@ -48,6 +48,7 @@ jobs:
             --out-dir target/controller-firmware-staging \
             --hopspot-flash target/release/hopspot-flash
           test -f target/controller-firmware-staging/firmware/bundle.json
+          test -f target/controller-firmware-staging/firmware/heltec-v3/target.json
           test -f target/controller-firmware-staging/firmware/heltec-v4/target.json
           test -f target/controller-firmware-staging/firmware/heltec-v4-r8/target.json
           test -f target/controller-firmware-staging/firmware/t-echo/target.json
@@ -119,6 +120,7 @@ jobs:
           "$app/Contents/Resources/hopspot-flash" --version
           test -f "$app/Contents/Resources/HOPSPOT_FLASH_VERSION.txt"
           test -f "$app/Contents/Resources/firmware/bundle.json"
+          test -f "$app/Contents/Resources/firmware/heltec-v3/target.json"
           test -f "$app/Contents/Resources/firmware/heltec-v4/target.json"
           test -f "$app/Contents/Resources/firmware/heltec-v4-r8/target.json"
           test -f "$app/Contents/Resources/firmware/t-echo/target.json"

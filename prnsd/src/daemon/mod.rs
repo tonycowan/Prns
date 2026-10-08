@@ -39,15 +39,15 @@ use personal_rns::remote_control::{
     RemoteControlCapabilities, RemoteControlControllerAuthority,
     RemoteControlInitialControllerGrants, RemoteControlPairingAttemptTimeout,
     RemoteControlPairingExpiresAfter, RemoteControlPairingPermissions,
-    RemoteControlPairingPublicAppDataBytes, RemoteControlRequestKind, RemoteControlRequestSet,
-    RemoteControlSelfAnnouncement, RemoteControlService,
+    RemoteControlPairingPublicAppDataBytes, RemoteControlRequestSet, RemoteControlSelfAnnouncement,
+    RemoteControlService,
 };
 use personal_rns::routing::announce::{derive_single_destination_hash, ExpandNameError};
 use personal_rns::runtime::{
     wall_clock_timeline_origin, CryptoPoolConfig, CryptoWorkerPlacement, Diagnostic,
     ManuallyAttached, Message, NodePersistence, NodeRunError, PersistenceFlushStatus, PoolWorkers,
     PrnsEvent, PrnsNode, PrnsNodeRecipe, RemoteControlFileIdentityBootstrapError,
-    RemoteControlPairingControl,
+    RemoteControlNodeSetup, RemoteControlPairingControl,
 };
 use personal_rns::shared_instance::{RnsBlackholeFiles, SharedInstanceCredentials};
 use personal_rns::storage::GrowableHeap;
@@ -57,28 +57,7 @@ use prnsd_control::{config_digest, ManagedProcess, ReloadRequest, ReloadResult, 
 
 fn daemon_remote_control_capabilities() -> RemoteControlCapabilities {
     let mut capabilities = RemoteControlCapabilities::describe_only();
-    for kind in [
-        RemoteControlRequestKind::AnnounceSelf,
-        RemoteControlRequestKind::InventoryInterfaces,
-        RemoteControlRequestKind::InventoryInterfacePeers,
-        RemoteControlRequestKind::InventoryInterfaceConfig,
-        RemoteControlRequestKind::InventoryInterfaceDiscoveryGroups,
-        RemoteControlRequestKind::ReplaceInterfaceDiscoveryGroups,
-        RemoteControlRequestKind::InventoryPathTable,
-        RemoteControlRequestKind::InventoryControllers,
-        RemoteControlRequestKind::SetInterfacePower,
-        RemoteControlRequestKind::SetInterfaceMode,
-        RemoteControlRequestKind::SetInterfaceGroup,
-        RemoteControlRequestKind::SetInterfaceLoRaProfile,
-        RemoteControlRequestKind::SetNetworkTransport,
-        RemoteControlRequestKind::DescribeBuild,
-        RemoteControlRequestKind::DescribePower,
-        RemoteControlRequestKind::DescribeNetworkTransport,
-        RemoteControlRequestKind::DescribeTcpClient,
-        RemoteControlRequestKind::SetTcpClient,
-        RemoteControlRequestKind::AuthorizeController,
-        RemoteControlRequestKind::RevokeController,
-    ] {
+    for kind in services::daemon_remote_control_requests().iter() {
         capabilities = capabilities.with_request(kind);
     }
     capabilities
@@ -458,57 +437,64 @@ pub(super) async fn run(
         Arc::new(std::sync::Mutex::new(None));
     let pending_pairing_for_events = Arc::clone(&pending_pairing_confirmation);
     let open_pairing_for_events = Arc::clone(&open_pairing_state);
-    let mut prns = PrnsNode::new_with_handle(move |handle| PrnsNodeRecipe {
-        transport_identity: transport_secret,
-        remote_control: remote_control.into(),
-        pre_configured_destinations: std::iter::empty(),
-        app_state: services::DaemonRequestState::new(
+    let mut prns = PrnsNode::new_with_handle(move |handle| {
+        let app_state = services::DaemonRequestState::new(
             handle,
             remote_management_transport,
             started,
             request_nnpages,
             request_controls,
-        ),
-        storage: GrowableHeap,
-        request_endpoints: services::DaemonRequestRoutes,
-        interfaces: ManuallyAttached,
-        persistence: NoPersistence,
-        on_event: move |event, _state: &services::DaemonRequestState| match event {
-            PrnsEvent::Diagnostic(Diagnostic::SelfRatchetRotated { destination }) => {
-                let _ = rotated_tx.send(destination);
-            }
-            PrnsEvent::Diagnostic(Diagnostic::RemoteControlPairingExpired { .. }) => {
-                if let Ok(mut state) = open_pairing_for_events.lock() {
-                    *state = None;
+        );
+        // Host-handled requests stay installed only when this object is the node's
+        // controls. The default host answers nothing, so the link comes up and the
+        // request is declined with no reply.
+        PrnsNodeRecipe {
+            transport_identity: transport_secret,
+            remote_control: RemoteControlNodeSetup::new(remote_control)
+                .with_controls(app_state.clone()),
+            pre_configured_destinations: std::iter::empty(),
+            app_state,
+            storage: GrowableHeap,
+            request_endpoints: services::DaemonRequestRoutes,
+            interfaces: ManuallyAttached,
+            persistence: NoPersistence,
+            on_event: move |event, _state: &services::DaemonRequestState| match event {
+                PrnsEvent::Diagnostic(Diagnostic::SelfRatchetRotated { destination }) => {
+                    let _ = rotated_tx.send(destination);
                 }
-                if let Ok(mut pending) = pending_pairing_for_events.lock() {
-                    *pending = None;
+                PrnsEvent::Diagnostic(Diagnostic::RemoteControlPairingExpired { .. }) => {
+                    if let Ok(mut state) = open_pairing_for_events.lock() {
+                        *state = None;
+                    }
+                    if let Ok(mut pending) = pending_pairing_for_events.lock() {
+                        *pending = None;
+                    }
                 }
-            }
-            PrnsEvent::Message(Message::RemoteControlTargetPairingConfirmationRequired(
-                confirmation,
-            )) => {
-                let digits = confirmation.confirmation().confirmation_code().to_string();
-                tracing::info!(
-                    event = "remote_control_pairing_confirmation_required",
-                    confirmation_digits = %digits,
-                );
-                if let Ok(mut pending) = pending_pairing_for_events.lock() {
-                    *pending = Some(confirmation);
+                PrnsEvent::Message(Message::RemoteControlTargetPairingConfirmationRequired(
+                    confirmation,
+                )) => {
+                    let digits = confirmation.confirmation().confirmation_code().to_string();
+                    tracing::info!(
+                        event = "remote_control_pairing_confirmation_required",
+                        confirmation_digits = %digits,
+                    );
+                    if let Ok(mut pending) = pending_pairing_for_events.lock() {
+                        *pending = Some(confirmation);
+                    }
                 }
-            }
-            PrnsEvent::Message(
-                Message::RemoteControlTargetPairingExpired { .. }
-                | Message::RemoteControlTargetPairingLinkClosed { .. }
-                | Message::RemoteControlTargetPairingCompletionRetentionExpired { .. }
-                | Message::RemoteControlTargetPairingCompletionLinkClosed { .. },
-            ) => {
-                if let Ok(mut pending) = pending_pairing_for_events.lock() {
-                    *pending = None;
+                PrnsEvent::Message(
+                    Message::RemoteControlTargetPairingExpired { .. }
+                    | Message::RemoteControlTargetPairingLinkClosed { .. }
+                    | Message::RemoteControlTargetPairingCompletionRetentionExpired { .. }
+                    | Message::RemoteControlTargetPairingCompletionLinkClosed { .. },
+                ) => {
+                    if let Ok(mut pending) = pending_pairing_for_events.lock() {
+                        *pending = None;
+                    }
                 }
-            }
-            PrnsEvent::Message(_) | PrnsEvent::Diagnostic(_) => {}
-        },
+                PrnsEvent::Message(_) | PrnsEvent::Diagnostic(_) => {}
+            },
+        }
     })
     .with_timeline_origin(timeline_origin)
     .with_crypto_pool(CryptoPoolConfig::Pooled {
@@ -1346,6 +1332,8 @@ fn non_interface_configuration_changed(
 
 #[cfg(test)]
 mod status_tests {
+    use personal_rns::remote_control::RemoteControlRequestKind;
+
     use super::*;
 
     #[test]
@@ -1363,7 +1351,13 @@ mod status_tests {
         assert!(capabilities.supports(RemoteControlRequestKind::InventoryInterfaces));
         assert!(capabilities.supports(RemoteControlRequestKind::DescribeTcpClient));
         assert!(capabilities.supports(RemoteControlRequestKind::SetInterfaceMode));
+        assert!(capabilities.supports(RemoteControlRequestKind::DescribePower));
+        assert!(capabilities.supports(RemoteControlRequestKind::InventoryPathTable));
         assert!(capabilities.supports(RemoteControlRequestKind::Describe));
+        let host = services::daemon_remote_control_requests();
+        assert!(host.supports(RemoteControlRequestKind::InventoryInterfaces));
+        assert!(host.supports(RemoteControlRequestKind::DescribePower));
+        assert!(host.supports(RemoteControlRequestKind::InventoryPathTable));
     }
 
     #[test]

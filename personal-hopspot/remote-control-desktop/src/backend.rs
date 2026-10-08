@@ -2416,7 +2416,18 @@ impl RemoteControlBackend {
 
     pub async fn local_path_table(&self) -> Result<Vec<PathTableRow>, BackendError> {
         let session = self.session()?;
+        let started = std::time::Instant::now();
+        eprintln!(
+            "path table {}: calling local route inventory",
+            format_wall_clock_now()
+        );
         let mut routes = NodeIntrospection::routes(&session.handle).await;
+        eprintln!(
+            "path table {}: local route inventory returned in {}ms, {} routes",
+            format_wall_clock_now(),
+            started.elapsed().as_millis(),
+            routes.len()
+        );
         routes.sort_by(|left, right| {
             left.destination
                 .as_bytes()
@@ -2429,7 +2440,7 @@ impl RemoteControlBackend {
             .lock()
             .expect("peer aliases mutex poisoned")
             .clone();
-        Ok(routes
+        let rows = routes
             .into_iter()
             .map(|snapshot| {
                 path_table_row(
@@ -2446,7 +2457,14 @@ impl RemoteControlBackend {
                     &peer_aliases,
                 )
             })
-            .collect())
+            .collect::<Vec<_>>();
+        eprintln!(
+            "path table {}: local fetch returned in {}ms, {} rows",
+            format_wall_clock_now(),
+            started.elapsed().as_millis(),
+            rows.len()
+        );
+        Ok(rows)
     }
 
     pub fn local_interfaces(&self) -> Result<Vec<InterfaceEntry>, BackendError> {
@@ -3843,13 +3861,35 @@ impl RemoteControlBackend {
         &self,
         remote: &RemoteControlTargetHandle<'_>,
     ) -> Result<Vec<PathTableRow>, BackendError> {
+        let started = std::time::Instant::now();
         let mut page = RemoteControlPathPage::First;
         let mut entries = Vec::new();
-        for _ in 0..PATH_TABLE_PAGE_LIMIT {
-            let (inventory, _) = remote
-                .inventory_path_table_page(page)
-                .await
-                .map_err(|error| operation("read path table", error))?;
+        for page_index in 1..=PATH_TABLE_PAGE_LIMIT {
+            let page_label = path_page_label(page);
+            eprintln!(
+                "path table {}: calling inventory_path_table_page {page_index} ({page_label})",
+                format_wall_clock_now()
+            );
+            let call_started = std::time::Instant::now();
+            let (inventory, rtt) = remote.inventory_path_table_page(page).await.map_err(|error| {
+                eprintln!(
+                    "path table {}: inventory_path_table_page {page_index} failed in {}ms: {error:?}",
+                    format_wall_clock_now(),
+                    call_started.elapsed().as_millis()
+                );
+                operation("read path table", error)
+            })?;
+            let continuation = match inventory.continuation() {
+                RemoteControlPathContinuation::Complete => "complete",
+                RemoteControlPathContinuation::More(_) => "more",
+            };
+            eprintln!(
+                "path table {}: inventory_path_table_page {page_index} returned in {}ms, link rtt {}ms, {} rows, {continuation}",
+                format_wall_clock_now(),
+                call_started.elapsed().as_millis(),
+                rtt.millis(),
+                inventory.entries().len()
+            );
             entries.extend(inventory.entries().iter().copied());
             match inventory.continuation() {
                 RemoteControlPathContinuation::Complete => break,
@@ -3874,10 +3914,17 @@ impl RemoteControlBackend {
             .lock()
             .expect("peer aliases mutex poisoned")
             .clone();
-        Ok(entries
+        let rows = entries
             .iter()
             .map(|entry| path_table_row(entry, &labels, &ble_aliases, &peer_aliases))
-            .collect())
+            .collect::<Vec<_>>();
+        eprintln!(
+            "path table {}: remote fetch returned in {}ms, {} rows",
+            format_wall_clock_now(),
+            started.elapsed().as_millis(),
+            rows.len()
+        );
+        Ok(rows)
     }
 
     fn present_inventory<F>(
@@ -5072,7 +5119,7 @@ impl ControllerSession {
         let local_instance_hash = instance_material.identity_hash();
         let node = PrnsNode::new(PrnsNodeRecipe {
             transport_identity: None,
-            remote_control,
+            remote_control: RemoteControlNodeSetup::new(remote_control),
             pre_configured_destinations: [
                 PreConfiguredDestination::Plain {
                     app_name: IDENTITY_CLONE_APP_NAME,
@@ -7186,7 +7233,9 @@ fn interface_peer_from_wire(peer: &RemoteControlInterfacePeer) -> InterfacePeer 
         peer.rx_bytes,
         peer.links,
         peer.destinations,
-        peer.rate_bytes_per_sec,
+        peer.rate_bytes_per_sec
+            .map(std::num::NonZeroU32::get)
+            .unwrap_or(0),
         None,
         peer.radio,
         peer.details,
@@ -7325,7 +7374,10 @@ fn remote_interface_entry(
         links: entry.links,
         transported_links: card.map(|card| card.transported_links).unwrap_or(0),
         destinations: card.map(|card| card.destinations).unwrap_or(0),
-        rate_bytes_per_sec: entry.rate_bytes_per_sec,
+        rate_bytes_per_sec: entry
+            .rate_bytes_per_sec
+            .map(std::num::NonZeroU32::get)
+            .unwrap_or(0),
         gravity: None,
         ifac_bytes: None,
         last_activity_secs: None,
@@ -7390,7 +7442,10 @@ fn local_interface_config(
             | InterfaceKind::I2p
             | InterfaceKind::I2pPeer
             | InterfaceKind::Weave
-            | InterfaceKind::WeavePeer,
+            | InterfaceKind::WeavePeer
+            | InterfaceKind::WifiHaLow
+            | InterfaceKind::WifiHaLowPeer
+            | InterfaceKind::WifiHaLowBroadcast,
         )
         | None => {}
     }
@@ -8533,16 +8588,19 @@ pub fn radio_facts(radio: RadioIndication) -> Vec<InterfaceFact> {
         RadioIndication::NotRadio => Vec::new(),
         RadioIndication::Bluetooth(BluetoothIndication::Pending)
         | RadioIndication::Wifi(WifiIndication::Pending)
+        | RadioIndication::HaLow(WifiIndication::Pending)
         | RadioIndication::LoRa(LoRaIndication::Pending) => vec![InterfaceFact {
             label: RSSI_LABEL.to_string(),
             value: RSSI_PENDING.to_string(),
         }],
-        RadioIndication::Wifi(WifiIndication::Unavailable) => vec![InterfaceFact {
+        RadioIndication::Wifi(WifiIndication::Unavailable)
+        | RadioIndication::HaLow(WifiIndication::Unavailable) => vec![InterfaceFact {
             label: RSSI_LABEL.to_string(),
             value: RSSI_UNAVAILABLE.to_string(),
         }],
         RadioIndication::Bluetooth(BluetoothIndication::Rssi(rssi))
-        | RadioIndication::Wifi(WifiIndication::Rssi(rssi)) => vec![rssi_fact(rssi)],
+        | RadioIndication::Wifi(WifiIndication::Rssi(rssi))
+        | RadioIndication::HaLow(WifiIndication::Rssi(rssi)) => vec![rssi_fact(rssi)],
         RadioIndication::LoRa(LoRaIndication::Sample { rssi, snr, quality }) => {
             let mut facts = vec![rssi_fact(rssi)];
             if let Some(snr) = snr {
@@ -9743,6 +9801,15 @@ fn format_path_via(via: NextHop, labels: &HashMap<String, String>) -> (String, S
     }
 }
 
+fn path_page_label(page: RemoteControlPathPage) -> String {
+    match page {
+        RemoteControlPathPage::First => "first".to_string(),
+        RemoteControlPathPage::After(cursor) => {
+            format!("after {}", encode_hex(cursor.destination().as_bytes()))
+        }
+    }
+}
+
 fn path_table_row(
     entry: &RemoteControlPathEntry,
     labels: &HashMap<String, String>,
@@ -10485,7 +10552,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio: RadioIndication::NotRadio,
             details: PeerDetails::NotApplicable,
         });
@@ -10496,7 +10563,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio: RadioIndication::NotRadio,
             details: PeerDetails::NotApplicable,
         });
@@ -10507,7 +10574,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio: RadioIndication::NotRadio,
             details: PeerDetails::NotApplicable,
         });
@@ -10518,7 +10585,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio: RadioIndication::NotRadio,
             details: PeerDetails::NotApplicable,
         });
@@ -10802,7 +10869,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio: RadioIndication::for_kind(Some(InterfaceKind::BluetoothPeer)),
             details: PeerDetails::NotApplicable,
         });
@@ -11071,7 +11138,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 3,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11082,7 +11149,7 @@ mod tests {
             rx_bytes: 26_000,
             links: 0,
             destinations: 1,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11093,7 +11160,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11104,7 +11171,7 @@ mod tests {
             rx_bytes: 40,
             links: 1,
             destinations: 3,
-            rate_bytes_per_sec: 12,
+            rate_bytes_per_sec: std::num::NonZeroU32::new(12),
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11115,7 +11182,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11144,7 +11211,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11155,7 +11222,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 0,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11166,7 +11233,7 @@ mod tests {
             rx_bytes: 0,
             links: 0,
             destinations: 2,
-            rate_bytes_per_sec: 0,
+            rate_bytes_per_sec: None,
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11177,7 +11244,7 @@ mod tests {
             rx_bytes: 80,
             links: 1,
             destinations: 2,
-            rate_bytes_per_sec: 8,
+            rate_bytes_per_sec: std::num::NonZeroU32::new(8),
             radio,
             details: PeerDetails::NotApplicable,
         });
@@ -11209,7 +11276,7 @@ mod tests {
                 tx_bytes: 0,
                 rx_bytes: 0,
                 links: 0,
-                rate_bytes_per_sec: 0,
+                rate_bytes_per_sec: None,
             },
             Some(&card),
         );
@@ -11246,7 +11313,7 @@ mod tests {
                 tx_bytes: 0,
                 rx_bytes: 0,
                 links: 0,
-                rate_bytes_per_sec: 0,
+                rate_bytes_per_sec: None,
             },
             Some(&card),
         );
@@ -11372,7 +11439,7 @@ mod tests {
                 tx_bytes: 8,
                 rx_bytes: 16,
                 links: 2,
-                rate_bytes_per_sec: 32,
+                rate_bytes_per_sec: std::num::NonZeroU32::new(32),
             },
             Some(&card),
         );
@@ -11400,7 +11467,7 @@ mod tests {
             rx_bytes: 6,
             links: 1,
             destinations: 2,
-            rate_bytes_per_sec: 8,
+            rate_bytes_per_sec: std::num::NonZeroU32::new(8),
             radio: RadioIndication::from_bluetooth_rssi(Some(-62)),
             details: PeerDetails::NotApplicable,
         });
@@ -11440,7 +11507,7 @@ mod tests {
                 tx_bytes: 0,
                 rx_bytes: 0,
                 links: 0,
-                rate_bytes_per_sec: 0,
+                rate_bytes_per_sec: None,
             },
             Some(&card),
         );
@@ -11460,7 +11527,7 @@ mod tests {
                 tx_bytes: 0,
                 rx_bytes: 0,
                 links: 0,
-                rate_bytes_per_sec: 0,
+                rate_bytes_per_sec: None,
             },
             Some(&card),
         );
@@ -11487,7 +11554,7 @@ mod tests {
                 tx_bytes: 0,
                 rx_bytes: 0,
                 links: 0,
-                rate_bytes_per_sec: 0,
+                rate_bytes_per_sec: None,
             },
             Some(&card),
         );

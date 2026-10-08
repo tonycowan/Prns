@@ -27,7 +27,7 @@ use crate::remote_control::{
     RemoteControlStationUplink, RemoteControlSystemPower, RemoteControlWifiCredentialRevision,
     RemoteControlWifiStageOutcome, RemoteControlWifiStation, RemoteControlWifiStationOutcome,
     RemoteControlWifiTransactionStatus, RevokeRemoteControlControllerOutcome,
-    SetRemoteControlControllerGrantOutcome, REMOTE_CONTROL_REQUEST_ENDPOINT_ID,
+    SetRemoteControlControllerGrantOutcome,
 };
 #[cfg(feature = "remote-control-tcp-host")]
 use crate::remote_control::{

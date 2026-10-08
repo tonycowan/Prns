@@ -217,6 +217,21 @@ static USB_MANIFOLD_LANE: StaticManifoldLane<
     { personal_rns::interfaces::usb_auto::DEVICE_MIN_OUTBOUND_FRAMES },
 > = StaticManifoldLane::new();
 
+#[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+#[embassy_executor::task]
+async fn report_rak_battery(mut battery: crate::boards::rak_vbat::WisblockVbat) {
+    let mut gauge = hopspot::BatteryGauge::lipo();
+    loop {
+        let millivolts = battery.sample_millivolts().await;
+        let snapshot = gauge.update(
+            Some(millivolts),
+            hopspot::ExternalPowerState::from_presence(super::bluetooth_auto::usb_vbus_present()),
+        );
+        hopspot::publish_power_snapshot(snapshot);
+        Timer::after(embassy_time::Duration::from_secs(10)).await;
+    }
+}
+
 #[embassy_executor::task]
 async fn manifold_task(
     node: &'static mut Node,
@@ -318,11 +333,26 @@ pub async fn run(spawner: Spawner) -> ! {
     } = hardware;
     #[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
     install_hal_runtime_entropy(entropy);
-    #[cfg(any(
-        feature = "board-mesh-tower-v2",
-        feature = "board-muzi-base-duo",
-        any(feature = "board-rak4631", feature = "board-rak10724")
-    ))]
+    #[cfg(feature = "board-mesh-tower-v2")]
+    let Hardware {
+        usb: usb_driver,
+        vbus,
+        radio,
+        mut status_led,
+        button,
+        sd: sd_card,
+        battery,
+    } = hardware;
+    #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+    let Hardware {
+        usb: usb_driver,
+        vbus,
+        radio,
+        mut status_led,
+        button,
+        battery,
+    } = hardware;
+    #[cfg(feature = "board-muzi-base-duo")]
     let Hardware {
         usb: usb_driver,
         vbus,
@@ -362,7 +392,18 @@ pub async fn run(spawner: Spawner) -> ! {
                 )),
         ),
         WEBUSB_AUTO_PACKET_SIZE,
+        cfg!(feature = "usb-debug-log"),
     );
+    #[cfg(feature = "usb-debug-log")]
+    let _cdc = {
+        use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+        static CDC_STATE: StaticCell<State<'static>> = StaticCell::new();
+        CdcAcmClass::new(
+            &mut builder,
+            CDC_STATE.init(State::new()),
+            WEBUSB_AUTO_PACKET_SIZE,
+        )
+    };
     let mut usb = builder.build();
 
     #[cfg(any(
@@ -577,8 +618,14 @@ pub async fn run(spawner: Spawner) -> ! {
     static PERSISTENCE: StaticCell<super::learned_state::BoardPersistence> = StaticCell::new();
     let persistence = PERSISTENCE.init(persistence);
     spawner.spawn(manifold_task(node, persistence).expect("manifold task fits"));
+    #[cfg(feature = "board-mesh-tower-v2")]
+    spawner.spawn(board::publish_root_test_file(sd_card).expect("sd card task fits"));
     #[cfg(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log"))]
     spawner.spawn(board::console_tick().expect("console tick task fits"));
+    #[cfg(feature = "board-mesh-tower-v2")]
+    spawner.spawn(board::report_battery(battery).expect("battery task fits"));
+    #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+    spawner.spawn(report_rak_battery(battery).expect("battery task fits"));
     let lora_seam = lora_lane.into_seam(NOTIFY.sender(), entropy);
     let usb_seam = usb_lane.into_seam(NOTIFY.sender(), entropy);
     #[cfg(any(

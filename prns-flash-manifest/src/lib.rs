@@ -1,6 +1,5 @@
 //! Shared release contract for the Personal Hopspot web and CLI flashers.
 #![forbid(unsafe_code)]
-
 #![forbid(unsafe_code)]
 
 mod canonical_hex;
@@ -13,14 +12,15 @@ mod trust;
 mod uf2;
 
 pub use catalog::{
-    board_catalog, BoardAvailability, BoardBuild, BoardCatalog, BoardCatalogEntry, CatalogError,
-    ErasablePartition, EspBuild, MemoryProfileReference, MemoryProfileReferenceError,
-    NrfDfuApplicationVersion, NrfDfuBankLayout, NrfSerialDfuBuild, NrfSerialDfuBuildCompatibility,
-    NrfSerialDfuCompatibility, NrfSerialDfuControlApplication, NrfSerialDfuRecoveryBootloader,
-    NrfSerialDfuRecoveryBuild, NrfSerialDfuSerialTransport, NrfSerialDfuSerialTransportError,
+    board_catalog, uf2_preserved_regions, uf2_write_end_for_board_id, BoardAvailability,
+    BoardBuild, BoardCatalog, BoardCatalogEntry, CatalogError, ErasablePartition, EspBuild,
+    MemoryProfileReference, MemoryProfileReferenceError, NrfDfuApplicationVersion,
+    NrfDfuBankLayout, NrfSerialDfuBuild, NrfSerialDfuBuildCompatibility, NrfSerialDfuCompatibility,
+    NrfSerialDfuControlApplication, NrfSerialDfuRecoveryBootloader, NrfSerialDfuRecoveryBuild,
+    NrfSerialDfuSerialTransport, NrfSerialDfuSerialTransportError,
     NrfSerialDfuTouchApplicationAndBootloader, ProvisioningDescriptor, ResolvedMemoryProfile,
     TcpClientProvisioningDescriptor, Transport, Uf2ApplicationLink, Uf2ApplicationUsb,
-    Uf2BoardIdentity, Uf2Build, Uf2BuildVariant, UsbVendorProductId,
+    Uf2BoardIdentity, Uf2Build, Uf2BuildVariant, UsbVendorProductId, HT_N5262_BOOTLOADER_WRITE_END,
 };
 pub use domain::{
     AfterResetStrategy, ApplicationAddressRange, BeforeResetStrategy, BoardId, ChipFamily,
@@ -53,9 +53,9 @@ pub use trust::{
     TrustError, PINNED_MINISIGN_PUBLIC_KEY,
 };
 pub use uf2::{
-    validate_nrf_serial_dfu_build_artifacts, validate_nrf_serial_dfu_recovery_artifact,
-    validate_uf2_artifact, validate_uf2_build_artifact, Uf2ArtifactError, Uf2BootloaderIdentity,
-    Uf2BuildArtifactError, Uf2IdentityError,
+    read_uf2_window, validate_nrf_serial_dfu_build_artifacts,
+    validate_nrf_serial_dfu_recovery_artifact, validate_uf2_artifact, validate_uf2_build_artifact,
+    Uf2ArtifactError, Uf2BootloaderIdentity, Uf2BuildArtifactError, Uf2IdentityError,
 };
 
 pub const FLASH_MANIFEST_SCHEMA: u32 = 3;

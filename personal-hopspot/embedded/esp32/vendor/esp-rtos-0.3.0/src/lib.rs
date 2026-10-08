@@ -115,7 +115,7 @@ use esp_hal::{
 #[cfg_attr(docsrs, doc(cfg(feature = "embassy")))]
 pub use macros::rtos_main as main;
 pub(crate) use scheduler::SCHEDULER;
-pub use task::CurrentThreadHandle;
+pub use task::{CurrentThreadHandle, allow_extra_stack};
 
 use crate::{task::IdleFn, timer::TimeDriver};
 

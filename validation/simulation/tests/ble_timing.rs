@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use personal_rns::engine::InstantMillis;
 use personal_rns::interfaces::bluetooth_auto::{
-    AdvertisingMode, AppleHost, BleAddress, BleBackend, BleEvent, BleIdentity, BleLink,
-    BleRoleCapabilities, CloseReason, Control, DiscoveryGroupId, DiscoveryGroupSet, Endpoint,
+    AdvertisingMode, AppleHost, BleAddress, BleBackend, BleEvent, BleFailureCode, BleIdentity,
+    BleLink, BleRoleCapabilities, CloseReason, Control, DiscoveryGroupId, DiscoveryGroupSet,
+    Endpoint,
     Handshake, HandshakeOutcome, HandshakeReaction, HandshakeRole, LinkCapabilities, LocalPeer,
     Origin, RadioMode, BLE_HW_MTU, CONTROL_MAX_LEN, GROUP_MISMATCH_RETRY_TTL_MS,
 };
@@ -152,6 +153,7 @@ async fn incompatible_group_cooldown_expires_at_the_controlled_runtime_deadline(
                 reason: CloseReason::Incompatible
             }),
             outcome: HandshakeOutcome::Aborted(CloseReason::Incompatible),
+            code: Some(BleFailureCode::GroupMismatch),
         }
     );
     let reply = reaction

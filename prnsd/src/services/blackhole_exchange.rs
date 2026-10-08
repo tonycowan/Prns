@@ -18,7 +18,8 @@ use personal_rns::runtime::request_endpoints::{
 use personal_rns::runtime::{
     ConfigurePreconfiguredDestinationError, IdentityBlackholeControl,
     IdentityBlackholeControlError, IdentityBlackholeSource, PreConfiguredDestination, PrnsEvent,
-    PrnsNode, PrnsNodeHandle, RegisterRequestEndpointError, SendError, ServeMyRequestEndpoints,
+    PrnsNodeHandle, RegisterRequestEndpointError, RemoteControlHostControls, SendError,
+    ServeMyRequestEndpoints,
 };
 use personal_rns::shared_instance::{RnsBlackholeFileError, RnsBlackholeFiles};
 use personal_rns::storage::StorageLayout;
@@ -89,14 +90,15 @@ impl RequestEndpoint<DaemonRequestState> for ListRoute {
     }
 }
 
-pub fn activate<R, F, S>(
-    node: &mut PrnsNode<DaemonRequestState, R, F, S>,
+pub fn activate<R, F, S, C>(
+    node: &mut super::DaemonNode<R, F, S, C>,
     identity: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
 ) -> Result<DestinationHash, ActivationError>
 where
     R: RequestEndpointSet<DaemonRequestState>,
     F: FnMut(PrnsEvent<'_>, &DaemonRequestState),
     S: StorageLayout,
+    C: RemoteControlHostControls,
 {
     let destination = node
         .register_preconfigured_destination(PreConfiguredDestination::Single {

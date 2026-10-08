@@ -623,6 +623,8 @@ pub struct FlashDraft {
     pub enrol_for_management: bool,
     /// Partition-table names to erase while flashing. Empty keeps every preserved region.
     pub erase_parts: Vec<String>,
+    /// Write the selected LoRa region and preset. UF2 boards get it inside the image.
+    pub write_lora_config: bool,
 }
 
 impl Default for FlashDraft {
@@ -639,6 +641,7 @@ impl Default for FlashDraft {
                 .unwrap_or(ModemPreset::MediumFast),
             enrol_for_management: true,
             erase_parts: Vec::new(),
+            write_lora_config: false,
         }
     }
 }
@@ -712,6 +715,181 @@ pub fn wifi_flash_plan(
         password: credentials.password,
         tcp_client,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoraProfilePresence {
+    Present,
+    Absent,
+    Unreadable,
+}
+
+const CURRENT_UF2_READ_LIMIT: u64 = 8 * 1024 * 1024;
+
+pub fn board_is_uf2(slug: &str) -> bool {
+    board_catalog().ok().is_some_and(|catalog| {
+        catalog
+            .board(slug)
+            .is_some_and(|board| matches!(board.transport, Transport::Uf2MassStorage))
+    })
+}
+
+fn board_has_lora(slug: &str) -> bool {
+    board_catalog().ok().is_some_and(|catalog| {
+        catalog.board(slug).is_some_and(|board| {
+            board
+                .interfaces
+                .iter()
+                .any(|interface| interface.eq_ignore_ascii_case("LoRa"))
+        })
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Uf2VolumeProbe {
+    pub lora: LoraProfilePresence,
+    /// Erase-section names fully covered by `CURRENT.UF2`. `None` means the readback
+    /// did not identify one bootloader, so the form keeps the catalog list.
+    pub writable_erase_names: Option<Vec<String>>,
+}
+
+pub fn probe_mounted_lora_profiles(slugs: &[String]) -> Vec<(String, Option<Uf2VolumeProbe>)> {
+    let mut cache = std::collections::HashMap::<PathBuf, Option<Vec<u8>>>::new();
+    let mounts = connected_uf2_mounts();
+    slugs
+        .iter()
+        .map(|slug| {
+            let presence = probe_slug_lora_profile(slug, &mounts, &mut cache);
+            (slug.clone(), presence)
+        })
+        .collect()
+}
+
+fn probe_slug_lora_profile(
+    slug: &str,
+    mounts: &[(PathBuf, Uf2BootloaderIdentity)],
+    cache: &mut std::collections::HashMap<PathBuf, Option<Vec<u8>>>,
+) -> Option<Uf2VolumeProbe> {
+    if !board_is_uf2(slug) {
+        return Some(Uf2VolumeProbe {
+            lora: LoraProfilePresence::Unreadable,
+            writable_erase_names: None,
+        });
+    }
+    let catalog = board_catalog().ok()?;
+    let board = catalog.board(slug)?;
+    let BoardBuild::Uf2(build) = &board.build else {
+        return Some(Uf2VolumeProbe {
+            lora: LoraProfilePresence::Unreadable,
+            writable_erase_names: None,
+        });
+    };
+    let matched = mounts
+        .iter()
+        .filter(|(_, identity)| {
+            build.board_identities().any(|rule| {
+                rule.validated()
+                    .ok()
+                    .is_some_and(|rule| identity.matches_board(&rule))
+            })
+        })
+        .collect::<Vec<_>>();
+    if matched.len() != 1 {
+        return if matched.is_empty() {
+            None
+        } else {
+            Some(Uf2VolumeProbe {
+                lora: LoraProfilePresence::Unreadable,
+                writable_erase_names: None,
+            })
+        };
+    }
+    let (path, identity) = matched[0];
+    let bytes = cache
+        .entry(path.clone())
+        .or_insert_with(|| read_current_uf2(path));
+    let bytes = bytes.as_ref()?;
+    let lora = if board_has_lora(slug) {
+        lora_presence_from_readback(slug, identity.softdevice(), bytes)
+    } else {
+        LoraProfilePresence::Unreadable
+    };
+    Some(Uf2VolumeProbe {
+        lora,
+        writable_erase_names: Some(erase_names_covered_by_readback(
+            slug,
+            identity.softdevice(),
+            bytes,
+        )),
+    })
+}
+
+fn erase_names_covered_by_readback(
+    slug: &str,
+    softdevice: &prns_flash_manifest::SoftdeviceIdentity,
+    bytes: &[u8],
+) -> Vec<String> {
+    let Ok(catalog) = board_catalog() else {
+        return Vec::new();
+    };
+    let Some(board) = catalog.board(slug) else {
+        return Vec::new();
+    };
+    let BoardBuild::Uf2(build) = &board.build else {
+        return Vec::new();
+    };
+    let Some(regions) = prns_flash_manifest::uf2_preserved_regions(build, softdevice) else {
+        return Vec::new();
+    };
+    regions
+        .into_iter()
+        .filter(|part| {
+            prns_flash_manifest::read_uf2_window(bytes, part.offset, part.size).is_some()
+        })
+        .map(|part| part.name.to_string())
+        .collect()
+}
+
+fn lora_presence_from_readback(
+    slug: &str,
+    softdevice: &prns_flash_manifest::SoftdeviceIdentity,
+    bytes: &[u8],
+) -> LoraProfilePresence {
+    let Ok(catalog) = board_catalog() else {
+        return LoraProfilePresence::Unreadable;
+    };
+    let Some(board) = catalog.board(slug) else {
+        return LoraProfilePresence::Unreadable;
+    };
+    let BoardBuild::Uf2(build) = &board.build else {
+        return LoraProfilePresence::Unreadable;
+    };
+    let Some(regions) = prns_flash_manifest::uf2_preserved_regions(build, softdevice) else {
+        return LoraProfilePresence::Unreadable;
+    };
+    let Some(radio) = regions.iter().find(|part| part.name == "radio-profile") else {
+        return LoraProfilePresence::Unreadable;
+    };
+    let Some(window) = prns_flash_manifest::read_uf2_window(bytes, radio.offset, radio.size) else {
+        return LoraProfilePresence::Unreadable;
+    };
+    if personal_hopspot_core::flash_image_holds_lora_profile(&window) {
+        LoraProfilePresence::Present
+    } else {
+        LoraProfilePresence::Absent
+    }
+}
+
+fn read_current_uf2(mount: &Path) -> Option<Vec<u8>> {
+    let path = mount.join("CURRENT.UF2");
+    let file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 || len > CURRENT_UF2_READ_LIMIT || !len.is_multiple_of(512) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(len).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 pub fn erasable_partitions(slug: &str) -> Vec<prns_flash_manifest::ErasablePartition> {
@@ -890,29 +1068,36 @@ fn connected_usb_identities() -> Vec<UsbIdentity> {
 }
 
 fn connected_uf2_identities() -> Vec<Uf2BootloaderIdentity> {
-    let mut identities = Vec::new();
+    connected_uf2_mounts()
+        .into_iter()
+        .map(|(_, identity)| identity)
+        .collect()
+}
+
+fn connected_uf2_mounts() -> Vec<(PathBuf, Uf2BootloaderIdentity)> {
+    let mut mounts = Vec::new();
     let mut seen = HashSet::new();
     if let Some(path) = std::env::var_os("HOPSPOT_TECHOBOOT") {
-        push_uf2_identity(&mut identities, &mut seen, PathBuf::from(path));
+        push_uf2_mount(&mut mounts, &mut seen, PathBuf::from(path));
     }
     for root in ["/Volumes", "/mnt", "/media", "/run/media"] {
-        scan_uf2_root(Path::new(root), 2, &mut identities, &mut seen);
+        scan_uf2_root(Path::new(root), 2, &mut mounts, &mut seen);
     }
     #[cfg(windows)]
     for letter in b'D'..=b'Z' {
-        push_uf2_identity(
-            &mut identities,
+        push_uf2_mount(
+            &mut mounts,
             &mut seen,
             PathBuf::from(format!("{}:\\", letter as char)),
         );
     }
-    identities
+    mounts
 }
 
 fn scan_uf2_root(
     root: &Path,
     depth: usize,
-    identities: &mut Vec<Uf2BootloaderIdentity>,
+    mounts: &mut Vec<(PathBuf, Uf2BootloaderIdentity)>,
     seen: &mut HashSet<PathBuf>,
 ) {
     if depth == 0 {
@@ -924,14 +1109,14 @@ fn scan_uf2_root(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            push_uf2_identity(identities, seen, path.clone());
-            scan_uf2_root(&path, depth - 1, identities, seen);
+            push_uf2_mount(mounts, seen, path.clone());
+            scan_uf2_root(&path, depth - 1, mounts, seen);
         }
     }
 }
 
-fn push_uf2_identity(
-    identities: &mut Vec<Uf2BootloaderIdentity>,
+fn push_uf2_mount(
+    mounts: &mut Vec<(PathBuf, Uf2BootloaderIdentity)>,
     seen: &mut HashSet<PathBuf>,
     path: PathBuf,
 ) {
@@ -939,7 +1124,7 @@ fn push_uf2_identity(
         return;
     }
     if let Some(identity) = read_uf2_identity(&path) {
-        identities.push(identity);
+        mounts.push((path, identity));
     }
 }
 
@@ -956,7 +1141,7 @@ fn read_uf2_identity(path: &Path) -> Option<Uf2BootloaderIdentity> {
 pub fn identity_offset(slug: &str) -> Option<u32> {
     match slug {
         "heltec-v4" | "heltec-v4-r8" | "heltec-e290" => Some(0x00E7_D000),
-        "t-beam-supreme" => Some(0x0067_D000),
+        "heltec-v3" | "heltec-wireless-stick-lite-v3" | "t-beam-supreme" => Some(0x0067_D000),
         "xiao-esp32-c6" => Some(0x003D_F000),
         "t-echo" => Some(0x000E_2000),
         "t114" | "t096" => Some(0x000E_1000),
@@ -1039,6 +1224,7 @@ pub fn flash_enrolled_board(
     enrollable: bool,
     wifi: &WifiFlashPlan,
     erase_parts: &[String],
+    lora_config: Option<&str>,
     on_progress: impl Fn(FlashProgress),
 ) -> Result<(), FlashError> {
     let local_build_escape = std::env::var_os("PRNS_CONTROLLER_FLASH_LOCAL_BUILD").is_some();
@@ -1108,6 +1294,9 @@ pub fn flash_enrolled_board(
     let _hold = Uf2VolumeProbeHold::acquire();
     let mut command = hopspot_flash_command(invocation)?;
     apply_erase_parts(&mut command, erase_parts);
+    if let Some(profile) = lora_config {
+        command.arg("--lora-config").arg(profile);
+    }
     if let Some((path, offset)) = &vault_path {
         command
             .arg("--rc-vault")
@@ -2388,6 +2577,21 @@ mod tests {
         assert!(hv4.supports_wifi);
         assert!(hv4.supports_tcp);
         assert!(hv4.has_lora);
+        let v3 = boards
+            .iter()
+            .find(|board| board.slug == "heltec-v3")
+            .expect("Heltec V3 is in the catalog");
+        assert!(v3.enrollable);
+        assert_eq!(identity_offset("heltec-v3"), Some(0x0067_D000));
+        let stick = boards
+            .iter()
+            .find(|board| board.slug == "heltec-wireless-stick-lite-v3")
+            .expect("Wireless Stick Lite V3 is in the catalog");
+        assert!(stick.enrollable);
+        assert_eq!(
+            identity_offset("heltec-wireless-stick-lite-v3"),
+            Some(0x0067_D000)
+        );
     }
 
     #[test]
@@ -2399,7 +2603,80 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.iter().any(|name| name == "wifi_cfg"));
         assert!(names.iter().any(|name| name == "hopcfg"));
-        assert!(erasable_partitions("t-echo").is_empty());
+        assert!(!FlashDraft::default().write_lora_config);
+        let echo = erasable_partitions("t-echo");
+        assert!(echo.iter().any(|part| part.name == "radio-profile"));
+        assert!(echo.iter().all(|part| part.name != "recovery-bootloader"));
+    }
+
+    #[test]
+    fn uf2_readback_selects_write_lora_only_when_the_profile_pages_are_blank() {
+        let identity = Uf2BootloaderIdentity::parse(
+            b"UF2 Bootloader 0.6.1\nBoard-ID: ht-n5262\nSoftDevice: S140 version 6.1.1\n",
+        )
+        .expect("bootloader identity");
+        let blank = uf2_bytes(0x000E_0000, &[0xFF; 8192]);
+        assert_eq!(
+            lora_presence_from_readback("mesh-tower-v2", identity.softdevice(), &blank),
+            LoraProfilePresence::Absent
+        );
+        let image = personal_hopspot_core::radio_profile_flash_image(DEFAULT_915_PROFILE);
+        let programmed = uf2_bytes(0x000E_0000, &image);
+        assert_eq!(
+            lora_presence_from_readback("mesh-tower-v2", identity.softdevice(), &programmed),
+            LoraProfilePresence::Present
+        );
+        let short = uf2_bytes(0x000E_0000, &[0xFF; 256]);
+        assert_eq!(
+            lora_presence_from_readback("mesh-tower-v2", identity.softdevice(), &short),
+            LoraProfilePresence::Unreadable
+        );
+    }
+
+    #[test]
+    fn mesh_tower_readback_hides_pages_past_the_bootloader_write_end() {
+        let identity = Uf2BootloaderIdentity::parse(
+            b"UF2 Bootloader 0.9.0\nBoard-ID: ht-n5262\nSoftDevice: S140 version 6.1.1\n",
+        )
+        .expect("bootloader identity");
+        let readback = uf2_bytes(0x000E_0000, &[0xFF; 0xA000]);
+        let names =
+            erase_names_covered_by_readback("mesh-tower-v2", identity.softdevice(), &readback);
+        assert!(names.iter().any(|name| name == "radio-profile"));
+        assert!(names.iter().any(|name| name == "journal"));
+        assert!(names.iter().any(|name| name == "application-data-reserved"));
+        assert!(names.iter().all(|name| name != "ble-identity"));
+        assert!(names.iter().all(|name| name != "node-identity"));
+    }
+
+    fn uf2_bytes(base: u32, data: &[u8]) -> Vec<u8> {
+        let mut payload = data.to_vec();
+        let remainder = payload.len() % 256;
+        if remainder != 0 {
+            payload.resize(payload.len() + (256 - remainder), 0);
+        }
+        let blocks = payload.len() / 256;
+        let mut out = Vec::new();
+        for index in 0..blocks {
+            let mut block = [0u8; 512];
+            for (offset, value) in [
+                (0, 0x0A32_4655u32),
+                (4, 0x9E5D_5157),
+                (8, 0x0000_2000),
+                (12, base + u32::try_from(index).expect("index") * 256),
+                (16, 256),
+                (20, u32::try_from(index).expect("index")),
+                (24, u32::try_from(blocks).expect("blocks")),
+                (28, 0xada5_2840),
+                (508, 0x0AB1_6F30),
+            ] {
+                block[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            let start = index * 256;
+            block[32..32 + 256].copy_from_slice(&payload[start..start + 256]);
+            out.extend_from_slice(&block);
+        }
+        out
     }
 
     #[test]

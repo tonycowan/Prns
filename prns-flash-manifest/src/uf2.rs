@@ -350,6 +350,49 @@ fn word(block: &[u8], offset: usize) -> u32 {
     ])
 }
 
+/// Bytes of `[start, start + len)` copied out of a UF2, or `None` when any of them is missing.
+#[must_use]
+pub fn read_uf2_window(bytes: &[u8], start: u32, len: u32) -> Option<Vec<u8>> {
+    if len == 0 || !bytes.len().is_multiple_of(UF2_BLOCK_BYTES) {
+        return None;
+    }
+    let len = usize::try_from(len).ok()?;
+    let mut window = vec![0xFF; len];
+    let mut seen = vec![false; len];
+    let end = start.checked_add(u32::try_from(len).ok()?)?;
+    for block in bytes.chunks_exact(UF2_BLOCK_BYTES) {
+        if u32_at(block, 0) != UF2_MAGIC_START_ZERO
+            || u32_at(block, 4) != UF2_MAGIC_START_ONE
+            || u32_at(block, UF2_BLOCK_BYTES - 4) != UF2_MAGIC_END
+        {
+            return None;
+        }
+        let address = u32_at(block, 12);
+        let payload = u32_at(block, 16);
+        if payload == 0 || payload > u32::try_from(UF2_DATA_BYTES).ok()? {
+            return None;
+        }
+        let payload = payload as usize;
+        let block_end = address.checked_add(payload as u32)?;
+        let overlap_start = address.max(start);
+        let overlap_end = block_end.min(end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        let source = usize::try_from(overlap_start - address).ok()?;
+        let destination = usize::try_from(overlap_start - start).ok()?;
+        let count = usize::try_from(overlap_end - overlap_start).ok()?;
+        window[destination..destination + count]
+            .copy_from_slice(&block[UF2_DATA_OFFSET + source..UF2_DATA_OFFSET + source + count]);
+        seen[destination..destination + count].fill(true);
+    }
+    seen.into_iter().all(|present| present).then_some(window)
+}
+
+fn u32_at(block: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(block[offset..offset + 4].try_into().unwrap_or([0; 4]))
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Uf2ArtifactError {
     #[error("UF2 length {0} is not a nonzero multiple of 512 bytes")]
@@ -665,6 +708,17 @@ mod tests {
             ),
             Err(Uf2ArtifactError::FirmwareOwnership(2))
         );
+    }
+
+    #[test]
+    fn read_uf2_window_requires_every_byte_of_the_range() {
+        let mut bytes = artifact(0x000E_0000, 0xada5_2840, 2);
+        bytes[UF2_DATA_OFFSET] = 0x11;
+        bytes[UF2_BLOCK_BYTES + UF2_DATA_OFFSET + 1] = 0x22;
+        let window = read_uf2_window(&bytes, 0x000E_0000, 512).expect("covered range");
+        assert_eq!(window[0], 0x11);
+        assert_eq!(window[257], 0x22);
+        assert!(read_uf2_window(&bytes, 0x000E_0000, 513).is_none());
     }
 
     #[test]

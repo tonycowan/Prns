@@ -153,7 +153,7 @@ fn large_link_and_destination_counts_fit_right_column() {
     draw_card_with_selection(&mut display, 0, &card, false);
 
     assert_eq!(compact_numeric_width("999K"), 20);
-    assert_eq!(compact_numeric_width("1.2B"), 17);
+    assert_eq!(compact_numeric_width("1.2B"), 20);
     assert!(STAT_TEXT_X + compact_numeric_width("999K") < WIDTH);
     assert!(8 + compact_numeric_width("999M") < STAT_ICON_X);
     assert!(ACTIVITY_TEXT_X + compact_numeric_width("-") < WIDTH);

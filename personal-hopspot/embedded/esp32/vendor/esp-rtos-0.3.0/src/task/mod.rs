@@ -6,6 +6,8 @@ pub(crate) mod arch_specific;
 use core::ffi::c_void;
 use core::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
 
+use portable_atomic::{AtomicUsize, Ordering};
+
 #[cfg(feature = "alloc")]
 use allocator_api2::{
     alloc::{Allocator, Layout},
@@ -32,6 +34,18 @@ use crate::{
 };
 
 pub type IdleFn = extern "C" fn() -> !;
+
+static EXTRA_STACK_BOTTOM: AtomicUsize = AtomicUsize::new(0);
+static EXTRA_STACK_TOP: AtomicUsize = AtomicUsize::new(0);
+
+/// Treat `bottom..top` as an additional stack for the running task.
+///
+/// `bottom` is the low address and `top` is one past the high address. The
+/// scheduler's stack-pointer check accepts this range until the next call.
+pub fn allow_extra_stack(bottom: usize, top: usize) {
+    EXTRA_STACK_BOTTOM.store(bottom, Ordering::Release);
+    EXTRA_STACK_TOP.store(top, Ordering::Release);
+}
 
 pub(crate) extern "C" fn idle_hook() -> ! {
     loop {
@@ -547,10 +561,17 @@ impl Task {
     }
 
     /// Returns whether `sp` points into this task's stack.
-    pub(crate) fn owns_stack_pointer(&self, sp: usize) -> bool {
-        let (bottom, top) = self.stack_range();
-        sp > bottom && sp <= top
+pub(crate) fn owns_stack_pointer(&self, sp: usize) -> bool {
+    let (bottom, top) = self.stack_range();
+    if sp > bottom && sp <= top {
+        return true;
     }
+    // `run_core` is polled on an external-RAM stack. A tick during that poll
+    // sees a stack pointer outside this task's DRAM stack.
+    let extra_bottom = EXTRA_STACK_BOTTOM.load(Ordering::Acquire);
+    let extra_top = EXTRA_STACK_TOP.load(Ordering::Acquire);
+    extra_bottom != 0 && sp > extra_bottom && sp <= extra_top
+}
 
     pub(crate) fn ensure_no_stack_overflow(&self, _sp: usize) {
         #[cfg(sw_task_overflow_detection)]

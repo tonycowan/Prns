@@ -4503,6 +4503,33 @@ fn PathTableBody(
     mut path_hash_long: Signal<HashSet<String>>,
     mut path_filters: Signal<HashMap<String, String>>,
 ) -> Element {
+    let ready_marker = match &state {
+        PathTableState::Ready(rows) => Some((
+            rows.len(),
+            rows.first()
+                .map(|row| row.destination_full.clone())
+                .unwrap_or_default(),
+            rows.last()
+                .map(|row| row.destination_full.clone())
+                .unwrap_or_default(),
+        )),
+        _ => None,
+    };
+    let mut logged_ready = use_signal(|| None);
+    if logged_ready() != ready_marker {
+        logged_ready.set(ready_marker);
+    }
+    use_effect({
+        let id = id.clone();
+        move || {
+            if let Some((count, first, last)) = logged_ready() {
+                eprintln!(
+                    "path table {}: rendered {id} with {count} rows (first {first}, last {last})",
+                    format_wall_clock_now()
+                );
+            }
+        }
+    });
     match state {
         PathTableState::Idle => rsx! { p { class: "note", "Waiting for a path table." } },
         PathTableState::Loading => rsx! { p { class: "note", "Loading…" } },
@@ -4909,6 +4936,9 @@ fn FlashSection(
     #[cfg(not(target_os = "android"))]
     {
         let mut probable_slugs = use_signal(Vec::<String>::new);
+        let mut lora_probes = use_signal(HashMap::<String, crate::flash::LoraProfilePresence>::new);
+        let mut lora_probe_applied = use_signal(HashSet::<String>::new);
+        let mut uf2_writable_erases = use_signal(HashMap::<String, Vec<String>>::new);
         let downloading = use_signal(|| false);
         let importing = use_signal(|| false);
         let exporting = use_signal(|| false);
@@ -4937,7 +4967,62 @@ fn FlashSection(
                         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
-                        probable_slugs.set(found);
+                        probable_slugs.set(found.clone());
+                        let still = found.iter().cloned().collect::<HashSet<_>>();
+                        lora_probes.write().retain(|slug, _| still.contains(slug));
+                        lora_probe_applied
+                            .write()
+                            .retain(|slug| still.contains(slug));
+                        uf2_writable_erases
+                            .write()
+                            .retain(|slug, _| still.contains(slug));
+                        let pending = found
+                            .into_iter()
+                            .filter(|slug| {
+                                crate::flash::board_is_uf2(slug)
+                                    && !lora_probe_applied.read().contains(slug)
+                            })
+                            .collect::<Vec<_>>();
+                        if !pending.is_empty() {
+                            let probed = tokio::task::spawn_blocking(move || {
+                                crate::flash::probe_mounted_lora_profiles(&pending)
+                            })
+                            .await
+                            .unwrap_or_default();
+                            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            for (slug, probe) in probed {
+                                let Some(probe) = probe else {
+                                    continue;
+                                };
+                                lora_probes.write().insert(slug.clone(), probe.lora);
+                                if let Some(names) = probe.writable_erase_names.clone() {
+                                    uf2_writable_erases
+                                        .write()
+                                        .insert(slug.clone(), names.clone());
+                                    if let Some(draft) = flash_forms.write().get_mut(&slug) {
+                                        draft.erase_parts.retain(|name| {
+                                            names.iter().any(|allowed| allowed == name)
+                                        });
+                                    }
+                                }
+                                if !lora_probe_applied.write().insert(slug.clone()) {
+                                    continue;
+                                }
+                                let mut forms = flash_forms.write();
+                                let draft = forms.entry(slug).or_default();
+                                match probe.lora {
+                                    crate::flash::LoraProfilePresence::Absent => {
+                                        draft.write_lora_config = true;
+                                    }
+                                    crate::flash::LoraProfilePresence::Present => {
+                                        draft.write_lora_config = false;
+                                    }
+                                    crate::flash::LoraProfilePresence::Unreadable => {}
+                                }
+                            }
+                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
@@ -4978,10 +5063,15 @@ fn FlashSection(
             });
         });
         let probable = probable_slugs();
-        let mut boards = crate::flash::catalog_boards().unwrap_or_default();
+        let boards_result = crate::flash::catalog_boards();
+        let catalog_error = boards_result.as_ref().err().map(|error| error.to_string());
+        let mut boards = boards_result.unwrap_or_default();
         boards.sort_by_key(|board| !probable.iter().any(|slug| slug == &board.slug));
         let update_note = match (published_tips().as_ref(), check_error().as_ref()) {
             (Some(tips), _) => tips.summary_note(),
+            (None, Some(_)) if boards.is_empty() => {
+                Some("Could not reach the published channels yet.".to_string())
+            }
             (None, Some(_)) => Some(
                 "Could not reach the published channels yet — Import and local images still work."
                     .to_string(),
@@ -5000,6 +5090,9 @@ fn FlashSection(
                 p { class: "lead", "Select a board, open Configure and flash to pick a firmware image and options, then Flash. Enrollment writes this Operator’s grant when the board supports it." }
                 if let Some(note) = update_note {
                     p { class: "note", "{note}" }
+                }
+                if let Some(error) = catalog_error {
+                    p { class: "note", "The board list failed to load ({error}). Import and local images are unavailable until it loads." }
                 }
                 if !checkout_available {
                     p { class: "note", "On Configure and flash, choose a published tip or Import a shared artifact. Build is available when Controller detects a Personal Reticulum checkout." }
@@ -5223,6 +5316,8 @@ fn FlashSection(
                                                         catalog_tick,
                                                         published_tips,
                                                         flash_forms,
+                                                        lora_probes,
+                                                        uf2_writable_erases,
                                                     )}
                                                 }
                                             }
@@ -5253,6 +5348,8 @@ fn flash_configure_fields(
     catalog_tick: Signal<u64>,
     published_tips: Signal<Option<crate::flash::PublishedChannelTips>>,
     flash_forms: Signal<HashMap<String, FlashDraft>>,
+    lora_probes: Signal<HashMap<String, crate::flash::LoraProfilePresence>>,
+    uf2_writable_erases: Signal<HashMap<String, Vec<String>>>,
 ) -> Element {
     let flashing = flash_busy;
     rsx! {
@@ -5275,6 +5372,8 @@ fn flash_configure_fields(
         form.clone(),
         flashing,
         flash_forms,
+        lora_probes,
+        uf2_writable_erases,
     )}
             }
         }
@@ -5420,6 +5519,8 @@ fn flash_options_form(
     form: FlashDraft,
     busy: bool,
     mut flash_forms: Signal<HashMap<String, FlashDraft>>,
+    lora_probes: Signal<HashMap<String, crate::flash::LoraProfilePresence>>,
+    uf2_writable_erases: Signal<HashMap<String, Vec<String>>>,
 ) -> Element {
     rsx! {
         div { class: "edit-card",
@@ -5511,6 +5612,41 @@ fn flash_options_form(
                 }
             }
             if board.has_lora {
+                label {
+                    class: "flash-check",
+                    input {
+                        r#type: "checkbox",
+                        checked: form.write_lora_config,
+                        disabled: busy || board.transport == "Nordic serial DFU",
+                        onchange: {
+                            let slug = slug.clone();
+                            move |event| {
+                                let mut next = flash_forms()
+                                    .get(&slug)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                next.write_lora_config = event.checked();
+                                flash_forms.write().insert(slug.clone(), next);
+                            }
+                        },
+                    }
+                    "Write LoRa config"
+                }
+                if board.transport == "Nordic serial DFU" {
+                    p { class: "note", "This bootloader cannot write the radio-profile pages. Use the UF2 bootloader for this board." }
+                } else {
+                    p { class: "note", "Checked, the region and preset below are written into the radio-profile pages with the firmware." }
+                }
+                {
+                    let probe = lora_probes.read().get(&slug).copied();
+                    rsx! {
+                        if probe == Some(crate::flash::LoraProfilePresence::Absent) {
+                            p { class: "note", "No LoRa profile in the bootloader readback, so Write LoRa config is selected." }
+                        } else if probe == Some(crate::flash::LoraProfilePresence::Unreadable) {
+                            p { class: "note", "The bootloader readback did not include the radio-profile pages, so Write LoRa config was left unchanged." }
+                        }
+                    }
+                }
                 label { "LoRa region"
                     select {
                         value: "{form.lora_region.label()}",
@@ -5571,16 +5707,45 @@ fn flash_options_form(
                         }
                     }
                 }
-                p { class: "note", "US 915 MediumFast is the firmware default. A different region or preset is applied after the node comes up." }
             }
             if !board.supports_wifi && !board.has_lora {
                 p { class: "note", "This board has no flash-time station or LoRa options." }
             }
             {
-                let erase_choices = crate::flash::erasable_partitions(&slug);
+                let all_erase_choices = crate::flash::erasable_partitions(&slug);
+                let allowed = uf2_writable_erases.read().get(&slug).cloned();
+                let hidden = match &allowed {
+                    Some(names) => all_erase_choices
+                        .iter()
+                        .filter(|part| !names.iter().any(|name| name == part.name))
+                        .map(|part| format!("{} ({})", part.label, part.name))
+                        .collect::<Vec<_>>(),
+                    None => Vec::new(),
+                };
+                let erase_choices = match &allowed {
+                    Some(names) => all_erase_choices
+                        .iter()
+                        .filter(|part| names.iter().any(|name| name == part.name))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    None => all_erase_choices,
+                };
+                let hidden_note = hidden.join(", ");
+                let uf2 = board.transport == "UF2 drive";
                 rsx! {
                     if !erase_choices.is_empty() {
-                        p { class: "note", "Erase regions. Checked partitions are erased when this firmware is written. Leave them unchecked to keep what is already on the board." }
+                        p { class: "note",
+                            if uf2 {
+                                "Erase sections. Checked sections are written as blank pages in this UF2. The SoftDevice and recovery bootloader stay."
+                            } else {
+                                "Erase regions. Checked partitions are erased when this firmware is written. Leave them unchecked to keep what is already on the board."
+                            }
+                        }
+                        if uf2 && !hidden_note.is_empty() {
+                            p { class: "note",
+                                "These sections are past the end of the flash this bootloader will write, so they are not listed: {hidden_note}. Including them aborts the update and leaves the drive mounted."
+                            }
+                        }
                         for part in erase_choices {
                             label {
                                 class: "flash-check",
@@ -5836,7 +6001,9 @@ fn start_flash(
                 return;
             }
         };
-        let lora = form.custom_lora_profile();
+        let lora_inventory = form
+            .write_lora_config
+            .then(|| form.lora_profile().inventory_config().as_str().to_string());
         flashing.set(true);
         flash_status.set(String::new());
         let first_stage = if enrollable {
@@ -5875,6 +6042,7 @@ fn start_flash(
                 let progress_tx = progress_tx.clone();
                 let wifi = wifi.clone();
                 let erase_parts = form.erase_parts.clone();
+                let lora_inventory = lora_inventory.clone();
                 move || -> Result<Option<crate::flash::Enrollment>, crate::flash::FlashError> {
                     let enrollment = if enrollable {
                         let _ = progress_tx.send(FlashProgress::running(
@@ -5897,6 +6065,7 @@ fn start_flash(
                         enrollable,
                         &wifi,
                         &erase_parts,
+                        lora_inventory.as_deref(),
                         |progress| {
                             let _ = progress_tx.send(progress);
                         },
@@ -5915,19 +6084,8 @@ fn start_flash(
                             let mut detail = format!(
                                 "{display_name} is flashed and listed under Managed Nodes."
                             );
-                            if let Some(profile) = lora {
-                                match apply_flashed_lora(&backend, &enrollment.target_id, profile)
-                                    .await
-                                {
-                                    Ok(()) => {
-                                        detail.push_str(" Custom LoRa settings were applied.");
-                                    }
-                                    Err(error) => {
-                                        detail.push_str(&format!(
-                                            " Set LoRa from the node’s LoRa card if needed ({error})."
-                                        ));
-                                    }
-                                }
+                            if lora_inventory.is_some() {
+                                detail.push_str(" The LoRa profile was written with the firmware.");
                             }
                             flash_status.set(detail.clone());
                             let mut progress = flash_progress().unwrap_or_else(|| {
@@ -5957,9 +6115,12 @@ fn start_flash(
                     }
                 }
                 Ok(Ok(None)) => {
-                    let detail = format!(
+                    let mut detail = format!(
                         "{display_name} firmware flashed. Pair it from Managed Nodes to manage it."
                     );
+                    if lora_inventory.is_some() {
+                        detail.push_str(" The LoRa profile was written with the firmware.");
+                    }
                     flash_status.set(detail.clone());
                     let progress = flash_progress().unwrap_or_else(|| {
                         FlashProgress::running(enrollable, FlashStage::Complete, "")
@@ -5990,25 +6151,6 @@ fn start_flash(
 }
 
 #[cfg(not(target_os = "android"))]
-async fn apply_flashed_lora(
-    backend: &RemoteControlBackend,
-    target_id: &str,
-    profile: RadioProfile,
-) -> Result<(), BackendError> {
-    let interfaces = backend
-        .interfaces_after_announce(target_id, RemoteControlAnnounceWait::UntilHeard)
-        .await?;
-    let Some(lora) = interfaces.iter().find(|entry| entry.kind == "lora") else {
-        return Err(BackendError::Operation {
-            operation: "set interface LoRa profile",
-            detail: "the flashed node has no LoRa card yet".to_string(),
-        });
-    };
-    backend
-        .set_interface_lora_profile(target_id, &lora.id, profile)
-        .await
-}
-
 fn ota_run_progress(
     flash_progress: Signal<Option<FlashProgress>>,
     flash_status: Signal<String>,

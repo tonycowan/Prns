@@ -563,6 +563,49 @@ fn decode_record(bytes: &[u8; RECORD_LEN]) -> Option<StoredRecord> {
     })
 }
 
+pub const RADIO_PROFILE_PAGE_LEN: usize = 4096;
+pub const RADIO_PROFILE_FLASH_IMAGE_LEN: usize = RADIO_PROFILE_PAGE_LEN * 2;
+
+/// Two blank pages with a committed manual LoRa record at the start of the first.
+///
+/// The second page stays erased so an older record cannot win the generation check.
+#[must_use]
+pub fn radio_profile_flash_image(profile: RadioProfile) -> [u8; RADIO_PROFILE_FLASH_IMAGE_LEN] {
+    let mut image = [0xFF; RADIO_PROFILE_FLASH_IMAGE_LEN];
+    let mut record = encode_record(
+        0,
+        StoredValue::Configuration(SubGConfiguration::manual_lora(profile)),
+    );
+    record[COMMIT_OFFSET..COMMIT_OFFSET + 4].copy_from_slice(&COMMIT_WORD.to_le_bytes());
+    image[..RECORD_LEN].copy_from_slice(&record);
+    image
+}
+
+#[must_use]
+pub fn radio_profile_flash_image_from_inventory(
+    text: &str,
+) -> Option<[u8; RADIO_PROFILE_FLASH_IMAGE_LEN]> {
+    RadioProfile::parse_inventory_config(text).map(radio_profile_flash_image)
+}
+
+/// True when any page begins with a committed LoRa profile, including a legacy record.
+#[must_use]
+pub fn flash_image_holds_lora_profile(image: &[u8]) -> bool {
+    image.chunks(RADIO_PROFILE_PAGE_LEN).any(|page| {
+        let Some(record) = page
+            .get(..RECORD_LEN)
+            .and_then(|bytes| bytes.try_into().ok())
+            .and_then(|bytes| decode_record(&bytes))
+        else {
+            return false;
+        };
+        matches!(
+            record.value.state(),
+            Some(LoRaConfigurationState::Configured(_))
+        )
+    })
+}
+
 fn generation_hint(bytes: &[u8; RECORD_LEN]) -> Option<u64> {
     (bytes[..4] == MAGIC).then(|| {
         u64::from_le_bytes([
@@ -777,6 +820,20 @@ mod tests {
 
     const CAPACITY: usize = 2 * 4096;
     const PAGES: [u32; 2] = [0, 4096];
+
+    #[test]
+    fn radio_profile_flash_image_is_a_configured_record() {
+        let image = radio_profile_flash_image(US915_AUTO_LORA_PROFILE);
+        assert!(flash_image_holds_lora_profile(&image));
+        assert!(!flash_image_holds_lora_profile(
+            &[0xFF; RADIO_PROFILE_FLASH_IMAGE_LEN]
+        ));
+        let text = US915_AUTO_LORA_PROFILE.inventory_config();
+        assert_eq!(
+            radio_profile_flash_image_from_inventory(text.as_str()),
+            Some(image)
+        );
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum FakeError {

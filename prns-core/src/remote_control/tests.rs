@@ -438,6 +438,12 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlRequestKind::DescribeNodeName,
             RemoteControlRequestKind::InspectRadio,
             RemoteControlRequestKind::ConfigureRadio,
+            RemoteControlRequestKind::InventoryPathTable,
+            RemoteControlRequestKind::DescribeNetworkTransport,
+            RemoteControlRequestKind::SetNetworkTransport,
+            RemoteControlRequestKind::FirmwareUpdate,
+            RemoteControlRequestKind::DescribeTcpClient,
+            RemoteControlRequestKind::SetTcpClient,
         ],
     );
     assert_eq!(
@@ -479,6 +485,11 @@ fn protocol_discriminants_are_stable_typed_values() {
             RemoteControlResponseKind::DescribeNodeName,
             RemoteControlResponseKind::InspectRadio,
             RemoteControlResponseKind::ConfigureRadio,
+            RemoteControlResponseKind::InventoryPathTable,
+            RemoteControlResponseKind::DescribeNetworkTransport,
+            RemoteControlResponseKind::SetNetworkTransport,
+            RemoteControlResponseKind::DescribeTcpClient,
+            RemoteControlResponseKind::SetTcpClient,
             RemoteControlResponseKind::ProtocolError,
         ],
     );

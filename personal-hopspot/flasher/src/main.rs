@@ -249,6 +249,7 @@ fn run(cli: Cli, reporter: Reporter) -> Result<(), AppError> {
             rc_vault,
             rc_vault_offset,
             erase_parts,
+            lora_config,
         }) => {
             let board = find_board(&catalog, &board)?;
             let interactive = !json && ui::interactive_terminal();
@@ -285,6 +286,7 @@ fn run(cli: Cli, reporter: Reporter) -> Result<(), AppError> {
                     mount: mount.as_deref(),
                     rc_vault,
                     erase_parts: &erase_parts,
+                    lora_config: lora_config.as_deref(),
                 },
                 reporter,
             )
@@ -306,6 +308,7 @@ struct FlashRequest<'a> {
     mount: Option<&'a Path>,
     rc_vault: Option<esp::RcVaultWrite>,
     erase_parts: &'a [String],
+    lora_config: Option<&'a str>,
 }
 
 fn execute_flash(
@@ -315,7 +318,18 @@ fn execute_flash(
     reporter: Reporter,
 ) -> Result<(), AppError> {
     esp::begin_cancellable_operation()?;
-    esp::validate_erase_parts(board, request.erase_parts)?;
+    match board.transport {
+        Transport::EspSerial => esp::validate_erase_parts(board, request.erase_parts)?,
+        Transport::Uf2MassStorage => {}
+        Transport::NrfSerialDfu
+            if request.erase_parts.is_empty() && request.lora_config.is_none() => {}
+        Transport::NrfSerialDfu => {
+            return Err(AppError::unsupported_operation(format!(
+                "{} serial DFU cannot erase preserved pages or write a LoRa profile",
+                board.display_name
+            )));
+        }
+    }
     let (prepared, detected_uf2) = if request.local_build {
         let detected_uf2 = match board.transport {
             Transport::EspSerial => None,
@@ -407,6 +421,7 @@ fn execute_flash(
             reporter,
             request.rc_vault,
             request.erase_parts,
+            request.lora_config,
         ),
         (Transport::Uf2MassStorage, PreparedTarget::Uf2(prepared)) => {
             if !matches!(request.provisioning, ProvisioningAction::Preserve) {
@@ -423,6 +438,8 @@ fn execute_flash(
                 &prepared,
                 device,
                 request.rc_vault.as_ref(),
+                request.erase_parts,
+                request.lora_config,
                 reporter,
             )
         }
@@ -524,6 +541,7 @@ fn guided(catalog: &BoardCatalog, reporter: Reporter) -> Result<(), AppError> {
             mount: None,
             rc_vault: None,
             erase_parts: &[],
+            lora_config: None,
         },
         reporter,
     )

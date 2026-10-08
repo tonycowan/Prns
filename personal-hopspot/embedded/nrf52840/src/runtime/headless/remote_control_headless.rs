@@ -58,7 +58,10 @@ use super::super::subg_configuration::{apply_subg_configuration, ConfigurationSt
     any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 use super::bluetooth::{BLE_SHARED, BLE_SUPERVISOR_ID, MEMBERS};
-use super::{INTERFACE_STORE, REMOTE_CONTROL_COMMANDS};
+use super::{
+    InterfaceLifecycle, LIFECYCLE, PrnsNodeHandle, COMMANDS, COMPLETION, INTERFACE_STORE,
+    REMOTE_CONTROL_COMMANDS,
+};
 
 const RESPONSE_GRACE_PERIOD: Duration = Duration::from_millis(250);
 const LORA_ENABLED: u8 = 1 << 0;
@@ -125,14 +128,22 @@ pub(super) fn capabilities() -> RemoteControlCapabilities {
         RemoteControlRequestKind::InventoryInterfaceConfig,
         RemoteControlRequestKind::SetInterfaceLoRaProfile,
         RemoteControlRequestKind::DescribeBuild,
+        RemoteControlRequestKind::DescribePower,
         RemoteControlRequestKind::SetNodeName,
         RemoteControlRequestKind::DescribeNodeName,
         RemoteControlRequestKind::SetSystemPower,
         RemoteControlRequestKind::InventoryControllers,
         RemoteControlRequestKind::AuthorizeController,
         RemoteControlRequestKind::RevokeController,
+        RemoteControlRequestKind::SetInterfaceMode,
+        RemoteControlRequestKind::DescribeNetworkTransport,
+        RemoteControlRequestKind::SetNetworkTransport,
     ] {
         capabilities = capabilities.with_request(kind);
+    }
+    #[cfg(feature = "remote-control-path-table")]
+    {
+        capabilities = capabilities.with_request(RemoteControlRequestKind::InventoryPathTable);
     }
     #[cfg(any(
         feature = "board-mesh-tower-v2",
@@ -177,6 +188,7 @@ pub(super) async fn run_headless(
     let mut gnss_wanted = true;
 
     super::node_name::restore().await;
+    let command_handle = PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION);
 
     loop {
         let pending = match scheduled_effect.as_ref() {
@@ -235,6 +247,9 @@ pub(super) async fn run_headless(
             Err(error) => Err(error),
         };
         REMOTE_CONTROL_COMMANDS.complete(token, result);
+        hopspot::apply_pending_network_transport(|cmd| {
+            let _ = command_handle.issue(cmd);
+        });
     }
 }
 
@@ -495,6 +510,36 @@ async fn execute(
             hopspot::hopspot_remote_control_build_version()
                 .map_err(|_| RemoteControlHostCommandError::ApplyFailed)?,
         )),
+        RemoteControlHostCommand::DescribePower => Ok(RemoteControlHostResponse::DescribePower(
+            hopspot::latest_power_snapshot(),
+        )),
+        RemoteControlHostCommand::DescribeNetworkTransport => {
+            Ok(RemoteControlHostResponse::DescribeNetworkTransport(
+                hopspot::NETWORK_TRANSPORT.current(),
+            ))
+        }
+        RemoteControlHostCommand::SetNetworkTransport { transport } => {
+            Ok(RemoteControlHostResponse::SetNetworkTransport(
+                hopspot::NETWORK_TRANSPORT.set(transport),
+            ))
+        }
+        RemoteControlHostCommand::SetInterfaceMode { id, mode } => Ok(
+            RemoteControlHostResponse::SetInterfaceMode(hopspot::queue_interface_mode_change(
+                context.snapshots,
+                id,
+                mode,
+                |target, mode| {
+                    LIFECYCLE
+                        .sender()
+                        .try_send(InterfaceLifecycle::SetMode {
+                            id: target,
+                            mode,
+                        })
+                        .is_ok()
+                },
+                |target, mode| INTERFACE_STORE.set_interface_mode(target, mode),
+            )),
+        ),
         RemoteControlHostCommand::SetSystemPower { power } => {
             let desired_awake = power == RemoteControlSystemPower::Awake;
             let outcome = if desired_awake && cancel_pending_sleep(context.scheduled_effect) {

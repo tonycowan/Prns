@@ -3,13 +3,13 @@ use personal_rns::identity::vault::FileVault;
 use personal_rns::identity::IdentityHash;
 use personal_rns::persistence::FileStore;
 use personal_rns::runtime::request_endpoints::RequestEndpointSet;
-use personal_rns::runtime::{PrnsEvent, PrnsNode};
+use personal_rns::runtime::{PrnsEvent, RemoteControlHostControls};
 use personal_rns::shared_instance::RnsBlackholeFiles;
 use personal_rns::storage::StorageLayout;
 use personal_rns::units::InstantMillis;
 
 use crate::observability::StateRestoreProgress;
-use crate::services::DaemonRequestState;
+use crate::services::{DaemonNode, DaemonRequestState};
 
 pub(crate) struct RestoreInputs<'a> {
     pub(crate) store: &'a FileStore,
@@ -21,13 +21,14 @@ pub(crate) struct RestoreInputs<'a> {
     pub(crate) progress: Option<StateRestoreProgress>,
 }
 
-pub(crate) fn restore<R, F, S>(
-    node: &mut PrnsNode<DaemonRequestState, R, F, S>,
+pub(crate) fn restore<R, F, S, C>(
+    node: &mut DaemonNode<R, F, S, C>,
     mut inputs: RestoreInputs<'_>,
 ) where
     R: RequestEndpointSet<DaemonRequestState>,
     F: FnMut(PrnsEvent<'_>, &DaemonRequestState),
     S: StorageLayout,
+    C: RemoteControlHostControls,
 {
     let mut restored_blackholes = match inputs
         .blackhole_files
