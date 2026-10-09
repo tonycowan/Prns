@@ -21,10 +21,8 @@ pub(crate) struct RestoreInputs<'a> {
     pub(crate) progress: Option<StateRestoreProgress>,
 }
 
-pub(crate) fn restore<R, F, S, C>(
-    node: &mut DaemonNode<R, F, S, C>,
-    mut inputs: RestoreInputs<'_>,
-) where
+pub(crate) fn restore<R, F, S, C>(node: &mut DaemonNode<R, F, S, C>, mut inputs: RestoreInputs<'_>)
+where
     R: RequestEndpointSet<DaemonRequestState>,
     F: FnMut(PrnsEvent<'_>, &DaemonRequestState),
     S: StorageLayout,

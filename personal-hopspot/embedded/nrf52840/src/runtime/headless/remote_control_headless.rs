@@ -59,7 +59,7 @@ use super::super::subg_configuration::{apply_subg_configuration, ConfigurationSt
 ))]
 use super::bluetooth::{BLE_SHARED, BLE_SUPERVISOR_ID, MEMBERS};
 use super::{
-    InterfaceLifecycle, LIFECYCLE, PrnsNodeHandle, COMMANDS, COMPLETION, INTERFACE_STORE,
+    InterfaceLifecycle, PrnsNodeHandle, COMMANDS, COMPLETION, INTERFACE_STORE, LIFECYCLE,
     REMOTE_CONTROL_COMMANDS,
 };
 
@@ -531,10 +531,7 @@ async fn execute(
                 |target, mode| {
                     LIFECYCLE
                         .sender()
-                        .try_send(InterfaceLifecycle::SetMode {
-                            id: target,
-                            mode,
-                        })
+                        .try_send(InterfaceLifecycle::SetMode { id: target, mode })
                         .is_ok()
                 },
                 |target, mode| INTERFACE_STORE.set_interface_mode(target, mode),

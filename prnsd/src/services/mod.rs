@@ -68,8 +68,7 @@ impl ManagementDestinations {
 
 pub(crate) struct HostedServiceActivationFailed;
 
-pub(crate) type DaemonNode<R, F, S, C> =
-    PrnsNode<DaemonRequestState, R, F, S, OsEntropySource, C>;
+pub(crate) type DaemonNode<R, F, S, C> = PrnsNode<DaemonRequestState, R, F, S, OsEntropySource, C>;
 
 pub(crate) fn activate<R, F, S, C>(
     node: &mut DaemonNode<R, F, S, C>,

@@ -139,10 +139,10 @@ pub(crate) mod mesh_pocket;
 pub(crate) mod mesh_tower_v2;
 #[cfg(feature = "board-muzi-base-duo")]
 pub(crate) mod muzi_base_duo;
-#[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
-pub(crate) mod rak_vbat;
 #[cfg(feature = "board-rak4631")]
 pub(crate) mod rak4631;
+#[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
+pub(crate) mod rak_vbat;
 #[cfg(feature = "board-t096")]
 pub(crate) mod t096;
 #[cfg(feature = "board-t1000e")]
