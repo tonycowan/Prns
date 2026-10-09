@@ -2789,7 +2789,7 @@
               "boundary_count": 5222,
               "boundaries_fingerprint": "5a68d99baf9e0c2d3d081998bcbe16a2393fd4ce3f331702d933f966ff86739c",
               "boundaries_artifact": {
-                "path": "work/heltec-v4-r8/function-boundaries.json",
+                "path": "work/heltec-v4-r8-ab/function-boundaries.json",
                 "bytes": 1400453,
                 "fingerprint": "c03e747583cbcd1f43372aa01268c1eff7e2e73568b661f19541a896592c781c"
               },
@@ -3230,7 +3230,7 @@
                   }
                 ],
                 "artifact": {
-                  "path": "work/heltec-v4-r8/stack-evidence.json",
+                  "path": "work/heltec-v4-r8-ab/stack-evidence.json",
                   "bytes": 1630416,
                   "fingerprint": "1ec7bdf53a7be72ca2fbad62590f338657f585afc32dec7ffa67aaeda4ae4efb"
                 }
