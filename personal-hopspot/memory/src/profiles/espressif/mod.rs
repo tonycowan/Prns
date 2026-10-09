@@ -469,7 +469,7 @@ const S3_RUNTIME_RESERVATIONS: [RuntimeReservation; 4] = [
 const C6_RUNTIME_RESERVATIONS: [RuntimeReservation; 1] = [RuntimeReservation {
     id: ReservationId("radio-runtime-heap"),
     address_space: DRAM,
-    bytes: 88 * KIB,
+    bytes: 80 * KIB,
     accounting: ReservationAccounting::SharedPool {
         pool: ReservationPoolId("radio-runtime-heap"),
         charge: ReservationCharge::IncludedInStaticImage,

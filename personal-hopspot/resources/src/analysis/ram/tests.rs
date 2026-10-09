@@ -55,7 +55,7 @@ fn riscv_aliases_share_one_store_and_do_not_recharge_the_static_heap() {
         ]
     );
     assert_eq!(usage[0].additional_reservation_bytes, 0);
-    assert_eq!(usage[0].included_reservation_bytes, 88 * 1024);
+    assert_eq!(usage[0].included_reservation_bytes, 80 * 1024);
     assert_eq!(
         usage[0].capacity,
         RamCapacity::Known {

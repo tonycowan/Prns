@@ -24,6 +24,8 @@ pub(crate) const MEMORY_PROFILE: &MemoryProfile = &XIAO_ESP32_C6;
 // covers it with margin. Kept off the larger end so the leftover linker `.stack` region stays big
 // enough for the BLE construction transient (the single-core main task runs on `.stack` — esp-rtos
 // gives it no separate task stack, so RAM spent on the heap is RAM taken from that one stack).
+// Wi-Fi and BLE together used 88 KiB until the image's other static RAM grew past the 1.4 KiB of
+// stack that was left; 80 KiB is the coexistence heap that still leaves that stack.
 #[cfg(not(any(feature = "bluetooth-auto", feature = "esp-now")))]
 const HEAP_BYTES: usize = 32 * 1024;
 #[cfg(all(feature = "bluetooth-auto", not(feature = "esp-now")))]
@@ -31,7 +33,7 @@ const HEAP_BYTES: usize = 64 * 1024;
 #[cfg(all(feature = "esp-now", not(feature = "bluetooth-auto")))]
 const HEAP_BYTES: usize = 72 * 1024;
 #[cfg(all(feature = "esp-now", feature = "bluetooth-auto"))]
-const HEAP_BYTES: usize = 88 * 1024;
+const HEAP_BYTES: usize = 80 * 1024;
 
 pub(crate) struct C6Hardware {
     pub(crate) usb_rx: UsbSerialJtagRx<'static, Async>,
