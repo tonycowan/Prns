@@ -386,8 +386,8 @@
           "region": "firmware",
           "start": 65536,
           "end": 15192064,
-          "image_bytes": 2324416,
-          "headroom_bytes": 12802112
+          "image_bytes": 2321472,
+          "headroom_bytes": 12805056
         }
       },
       "static_ram": {
@@ -401,11 +401,11 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 341760,
-              "headroom_bytes": 39428
+              "bytes": 358144,
+              "headroom_bytes": 53060
             },
-            "static_section_bytes": 302308,
-            "linker_padding_bytes": 24,
+            "static_section_bytes": 305028,
+            "linker_padding_bytes": 56,
             "additional_reservation_bytes": 0,
             "included_reservation_bytes": 126976,
             "external_reservation_bytes": 0
@@ -417,13 +417,13 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 73728,
+              "bytes": 57344,
               "headroom_bytes": 0
             },
-            "static_section_bytes": 73728,
+            "static_section_bytes": 57344,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 0,
-            "included_reservation_bytes": 73728,
+            "included_reservation_bytes": 57344,
             "external_reservation_bytes": 0
           },
           {
@@ -2101,9 +2101,9 @@
         "value": {
           "region": "firmware",
           "start": 65536,
-          "end": 15192064,
-          "image_bytes": 2316160,
-          "headroom_bytes": 12810368
+          "end": 7602176,
+          "image_bytes": 2346912,
+          "headroom_bytes": 5189728
         }
       },
       "static_ram": {
@@ -2117,11 +2117,11 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 341760,
-              "headroom_bytes": 39684
+              "bytes": 358144,
+              "headroom_bytes": 45060
             },
-            "static_section_bytes": 302060,
-            "linker_padding_bytes": 16,
+            "static_section_bytes": 313028,
+            "linker_padding_bytes": 56,
             "additional_reservation_bytes": 0,
             "included_reservation_bytes": 126976,
             "external_reservation_bytes": 0
@@ -2133,13 +2133,13 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 73728,
+              "bytes": 57344,
               "headroom_bytes": 0
             },
-            "static_section_bytes": 73728,
+            "static_section_bytes": 57344,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 0,
-            "included_reservation_bytes": 73728,
+            "included_reservation_bytes": 57344,
             "external_reservation_bytes": 0
           },
           {
@@ -3779,8 +3779,8 @@
           "region": "firmware",
           "start": 65536,
           "end": 15192064,
-          "image_bytes": 2325984,
-          "headroom_bytes": 12800544
+          "image_bytes": 2324240,
+          "headroom_bytes": 12802288
         }
       },
       "static_ram": {
@@ -3794,11 +3794,11 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 341760,
-              "headroom_bytes": 39620
+              "bytes": 358144,
+              "headroom_bytes": 53252
             },
-            "static_section_bytes": 302112,
-            "linker_padding_bytes": 28,
+            "static_section_bytes": 304888,
+            "linker_padding_bytes": 4,
             "additional_reservation_bytes": 0,
             "included_reservation_bytes": 126976,
             "external_reservation_bytes": 0
@@ -3810,13 +3810,13 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 73728,
+              "bytes": 57344,
               "headroom_bytes": 0
             },
-            "static_section_bytes": 73728,
+            "static_section_bytes": 57344,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 0,
-            "included_reservation_bytes": 73728,
+            "included_reservation_bytes": 57344,
             "external_reservation_bytes": 0
           },
           {
@@ -5438,8 +5438,8 @@
           "region": "firmware",
           "start": 65536,
           "end": 6803456,
-          "image_bytes": 1348272,
-          "headroom_bytes": 5389648
+          "image_bytes": 1327808,
+          "headroom_bytes": 5410112
         }
       },
       "static_ram": {
@@ -5453,10 +5453,10 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 341760,
-              "headroom_bytes": 65892
+              "bytes": 358144,
+              "headroom_bytes": 74120
             },
-            "static_section_bytes": 275864,
+            "static_section_bytes": 284020,
             "linker_padding_bytes": 4,
             "additional_reservation_bytes": 0,
             "included_reservation_bytes": 65536,
@@ -5469,8 +5469,8 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 73728,
-              "headroom_bytes": 73728
+              "bytes": 57344,
+              "headroom_bytes": 57344
             },
             "static_section_bytes": 0,
             "linker_padding_bytes": 0,
@@ -6856,8 +6856,8 @@
           "region": "firmware",
           "start": 65536,
           "end": 6803456,
-          "image_bytes": 2319088,
-          "headroom_bytes": 4418832
+          "image_bytes": 2315888,
+          "headroom_bytes": 4422032
         }
       },
       "static_ram": {
@@ -6871,11 +6871,11 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 341760,
-              "headroom_bytes": 39492
+              "bytes": 358144,
+              "headroom_bytes": 53124
             },
-            "static_section_bytes": 302244,
-            "linker_padding_bytes": 24,
+            "static_section_bytes": 304964,
+            "linker_padding_bytes": 56,
             "additional_reservation_bytes": 0,
             "included_reservation_bytes": 126976,
             "external_reservation_bytes": 0
@@ -6887,13 +6887,13 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 73728,
+              "bytes": 57344,
               "headroom_bytes": 0
             },
-            "static_section_bytes": 73728,
+            "static_section_bytes": 57344,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 0,
-            "included_reservation_bytes": 73728,
+            "included_reservation_bytes": 57344,
             "external_reservation_bytes": 0
           },
           {
@@ -8427,8 +8427,8 @@
           "region": "firmware",
           "start": 65536,
           "end": 4059136,
-          "image_bytes": 1778608,
-          "headroom_bytes": 2214992
+          "image_bytes": 1797792,
+          "headroom_bytes": 2195808
         }
       },
       "static_ram": {
@@ -8443,12 +8443,12 @@
             "capacity": {
               "kind": "known",
               "bytes": 452112,
-              "headroom_bytes": 1480
+              "headroom_bytes": 2384
             },
-            "static_section_bytes": 450624,
+            "static_section_bytes": 449720,
             "linker_padding_bytes": 8,
             "additional_reservation_bytes": 0,
-            "included_reservation_bytes": 90112,
+            "included_reservation_bytes": 81920,
             "external_reservation_bytes": 0
           }
         ]
@@ -9599,9 +9599,9 @@
         "value": {
           "region": "firmware",
           "start": 155648,
-          "end": 782336,
-          "image_bytes": 618492,
-          "headroom_bytes": 8196
+          "end": 786432,
+          "image_bytes": 626900,
+          "headroom_bytes": 3884
         }
       },
       "static_ram": {
@@ -9615,9 +9615,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 2520
+              "headroom_bytes": 2312
             },
-            "static_section_bytes": 140836,
+            "static_section_bytes": 141044,
             "linker_padding_bytes": 4,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
@@ -10711,8 +10711,8 @@
           "region": "firmware",
           "start": 155648,
           "end": 921600,
-          "image_bytes": 615840,
-          "headroom_bytes": 150112
+          "image_bytes": 628944,
+          "headroom_bytes": 137008
         }
       },
       "static_ram": {
@@ -10726,9 +10726,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 1212
+              "headroom_bytes": 1696
             },
-            "static_section_bytes": 142148,
+            "static_section_bytes": 141664,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
@@ -11827,8 +11827,8 @@
           "region": "firmware",
           "start": 155648,
           "end": 921600,
-          "image_bytes": 619044,
-          "headroom_bytes": 146908
+          "image_bytes": 629572,
+          "headroom_bytes": 136380
         }
       },
       "static_ram": {
@@ -11842,9 +11842,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 2456
+              "headroom_bytes": 2232
             },
-            "static_section_bytes": 140900,
+            "static_section_bytes": 141124,
             "linker_padding_bytes": 4,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
@@ -12938,8 +12938,8 @@
           "region": "firmware",
           "start": 155648,
           "end": 921600,
-          "image_bytes": 619052,
-          "headroom_bytes": 146900
+          "image_bytes": 629580,
+          "headroom_bytes": 136372
         }
       },
       "static_ram": {
@@ -12953,9 +12953,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 2456
+              "headroom_bytes": 2232
             },
-            "static_section_bytes": 140900,
+            "static_section_bytes": 141124,
             "linker_padding_bytes": 4,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
@@ -14070,8 +14070,8 @@
           "region": "firmware",
           "start": 155648,
           "end": 921600,
-          "image_bytes": 623452,
-          "headroom_bytes": 142500
+          "image_bytes": 635532,
+          "headroom_bytes": 130420
         }
       },
       "static_ram": {
@@ -14085,9 +14085,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 772
+              "headroom_bytes": 1256
             },
-            "static_section_bytes": 142584,
+            "static_section_bytes": 142100,
             "linker_padding_bytes": 4,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
@@ -15187,8 +15187,8 @@
           "region": "firmware",
           "start": 155648,
           "end": 917504,
-          "image_bytes": 570876,
-          "headroom_bytes": 190980
+          "image_bytes": 583648,
+          "headroom_bytes": 178208
         }
       },
       "static_ram": {
@@ -15202,10 +15202,10 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 5660
+              "headroom_bytes": 6000
             },
-            "static_section_bytes": 137696,
-            "linker_padding_bytes": 4,
+            "static_section_bytes": 137360,
+            "linker_padding_bytes": 0,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
             "external_reservation_bytes": 0
@@ -16291,8 +16291,8 @@
           "region": "firmware",
           "start": 159744,
           "end": 946176,
-          "image_bytes": 521880,
-          "headroom_bytes": 264552
+          "image_bytes": 538700,
+          "headroom_bytes": 247732
         }
       },
       "static_ram": {
@@ -16306,10 +16306,10 @@
             "capacity": {
               "kind": "known",
               "bytes": 196608,
-              "headroom_bytes": 39252
+              "headroom_bytes": 39788
             },
-            "static_section_bytes": 87724,
-            "linker_padding_bytes": 0,
+            "static_section_bytes": 87184,
+            "linker_padding_bytes": 4,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
             "external_reservation_bytes": 0
@@ -17482,8 +17482,8 @@
           "region": "firmware",
           "start": 65536,
           "end": 6803456,
-          "image_bytes": 2127968,
-          "headroom_bytes": 4609952
+          "image_bytes": 1406624,
+          "headroom_bytes": 5331296
         }
       },
       "static_ram": {
@@ -17498,12 +17498,12 @@
             "capacity": {
               "kind": "known",
               "bytes": 341760,
-              "headroom_bytes": 32772
+              "headroom_bytes": 67588
             },
-            "static_section_bytes": 308976,
-            "linker_padding_bytes": 12,
+            "static_section_bytes": 274172,
+            "linker_padding_bytes": 0,
             "additional_reservation_bytes": 0,
-            "included_reservation_bytes": 126976,
+            "included_reservation_bytes": 65536,
             "external_reservation_bytes": 0
           },
           {
@@ -17513,13 +17513,13 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 73728,
-              "headroom_bytes": 0
+              "bytes": 57344,
+              "headroom_bytes": 57344
             },
-            "static_section_bytes": 73728,
+            "static_section_bytes": 0,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 0,
-            "included_reservation_bytes": 73728,
+            "included_reservation_bytes": 0,
             "external_reservation_bytes": 0
           },
           {
@@ -17530,11 +17530,11 @@
             "capacity": {
               "kind": "known",
               "bytes": 32768,
-              "headroom_bytes": 0
+              "headroom_bytes": 32768
             },
             "static_section_bytes": 0,
             "linker_padding_bytes": 0,
-            "additional_reservation_bytes": 32768,
+            "additional_reservation_bytes": 0,
             "included_reservation_bytes": 0,
             "external_reservation_bytes": 0
           },
@@ -18931,8 +18931,8 @@
           "region": "firmware",
           "start": 159744,
           "end": 921600,
-          "image_bytes": 622772,
-          "headroom_bytes": 139084
+          "image_bytes": 631772,
+          "headroom_bytes": 130084
         }
       },
       "static_ram": {
@@ -18946,9 +18946,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 1576
+              "headroom_bytes": 2068
             },
-            "static_section_bytes": 141780,
+            "static_section_bytes": 141288,
             "linker_padding_bytes": 4,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
@@ -20209,8 +20209,8 @@
           "region": "firmware",
           "start": 65536,
           "end": 6803456,
-          "image_bytes": 2236800,
-          "headroom_bytes": 4501120
+          "image_bytes": 2233328,
+          "headroom_bytes": 4504592
         }
       },
       "static_ram": {
@@ -20225,10 +20225,10 @@
             "capacity": {
               "kind": "known",
               "bytes": 341760,
-              "headroom_bytes": 41860
+              "headroom_bytes": 39108
             },
-            "static_section_bytes": 299896,
-            "linker_padding_bytes": 4,
+            "static_section_bytes": 302624,
+            "linker_padding_bytes": 28,
             "additional_reservation_bytes": 0,
             "included_reservation_bytes": 126976,
             "external_reservation_bytes": 0
@@ -20240,13 +20240,13 @@
             ],
             "capacity": {
               "kind": "known",
-              "bytes": 73728,
+              "bytes": 57344,
               "headroom_bytes": 0
             },
-            "static_section_bytes": 73728,
+            "static_section_bytes": 57344,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 0,
-            "included_reservation_bytes": 73728,
+            "included_reservation_bytes": 57344,
             "external_reservation_bytes": 0
           },
           {
@@ -21740,8 +21740,8 @@
           "region": "firmware",
           "start": 155648,
           "end": 917504,
-          "image_bytes": 570340,
-          "headroom_bytes": 191516
+          "image_bytes": 583600,
+          "headroom_bytes": 178256
         }
       },
       "static_ram": {
@@ -21755,10 +21755,10 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 5660
+              "headroom_bytes": 6000
             },
-            "static_section_bytes": 137696,
-            "linker_padding_bytes": 4,
+            "static_section_bytes": 137360,
+            "linker_padding_bytes": 0,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
             "external_reservation_bytes": 0
@@ -22851,8 +22851,8 @@
           "region": "firmware",
           "start": 159744,
           "end": 946176,
-          "image_bytes": 485848,
-          "headroom_bytes": 300584
+          "image_bytes": 498780,
+          "headroom_bytes": 287652
         }
       },
       "static_ram": {
@@ -22866,10 +22866,10 @@
             "capacity": {
               "kind": "known",
               "bytes": 196608,
-              "headroom_bytes": 39860
+              "headroom_bytes": 40428
             },
-            "static_section_bytes": 87116,
-            "linker_padding_bytes": 0,
+            "static_section_bytes": 86544,
+            "linker_padding_bytes": 4,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
             "external_reservation_bytes": 0
@@ -23971,8 +23971,8 @@
           "region": "firmware",
           "start": 155648,
           "end": 917504,
-          "image_bytes": 689272,
-          "headroom_bytes": 72584
+          "image_bytes": 727784,
+          "headroom_bytes": 34072
         }
       },
       "static_ram": {
@@ -23986,9 +23986,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 6116
+              "headroom_bytes": 2352
             },
-            "static_section_bytes": 137244,
+            "static_section_bytes": 141008,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
@@ -25181,8 +25181,8 @@
           "region": "firmware",
           "start": 155648,
           "end": 917504,
-          "image_bytes": 689472,
-          "headroom_bytes": 72384
+          "image_bytes": 706608,
+          "headroom_bytes": 55248
         }
       },
       "static_ram": {
@@ -25196,9 +25196,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 6044
+              "headroom_bytes": 6032
             },
-            "static_section_bytes": 137316,
+            "static_section_bytes": 137328,
             "linker_padding_bytes": 0,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
@@ -26391,8 +26391,8 @@
           "region": "firmware",
           "start": 159744,
           "end": 921600,
-          "image_bytes": 622732,
-          "headroom_bytes": 139124
+          "image_bytes": 631756,
+          "headroom_bytes": 130100
         }
       },
       "static_ram": {
@@ -26406,9 +26406,9 @@
             "capacity": {
               "kind": "known",
               "bytes": 212992,
-              "headroom_bytes": 1572
+              "headroom_bytes": 2064
             },
-            "static_section_bytes": 141784,
+            "static_section_bytes": 141292,
             "linker_padding_bytes": 4,
             "additional_reservation_bytes": 69632,
             "included_reservation_bytes": 0,
