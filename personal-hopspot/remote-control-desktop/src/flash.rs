@@ -656,6 +656,7 @@ impl FlashDraft {
         }
     }
 
+    #[cfg(test)]
     pub fn custom_lora_profile(&self) -> Option<RadioProfile> {
         let profile = self.lora_profile();
         (profile != DEFAULT_915_PROFILE).then_some(profile)
@@ -1184,6 +1185,7 @@ pub fn preparation_steps(profile: &str) -> &'static [&'static str] {
 pub struct Enrollment {
     pub vault_page: [u8; personal_rns::remote_control::REMOTE_CONTROL_IDENTITY_VAULT_PAGE_LEN],
     pub access: RemoteControlTargetAccess,
+    #[allow(dead_code)]
     pub target_id: String,
 }
 

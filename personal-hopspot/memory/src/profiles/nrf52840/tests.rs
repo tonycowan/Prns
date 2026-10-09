@@ -105,16 +105,19 @@ fn memory_x_layouts_derive_from_each_canonical_profile() {
             &MESH_TOWER_V2,
             AddressRange::new(0x26000, 0xE0000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &MUZI_BASE_DUO,
             AddressRange::new(0x26000, 0xE0000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &RAK4631,
             AddressRange::new(0x26000, 0xE0000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
+            68 * KIB,
         ),
         (
             &WIO_TRACKER_L1,
@@ -123,14 +126,8 @@ fn memory_x_layouts_derive_from_each_canonical_profile() {
             68 * KIB,
         ),
         (
-            &RAK4631,
-            AddressRange::new(0x26000, 0xE2000),
-            AddressRange::new(0x2000_C000, 0x2004_0000),
-            68 * KIB,
-        ),
-        (
             &RAK10724,
-            AddressRange::new(0x26000, 0xE2000),
+            AddressRange::new(0x26000, 0xE0000),
             AddressRange::new(0x2000_C000, 0x2004_0000),
             68 * KIB,
         ),

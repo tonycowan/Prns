@@ -38,8 +38,6 @@ type PublishedTips = crate::flash::PublishedChannelTips;
 #[cfg(target_os = "android")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PublishedTips;
-#[cfg(not(target_os = "android"))]
-use personal_rns::interfaces::lora::RadioProfile;
 use personal_rns::interfaces::lora::{
     CodingRate, LoraBandwidth, ModemPreset, Modulation, RegulatoryRegion as Region,
     SpreadingFactor, SubGRegion,

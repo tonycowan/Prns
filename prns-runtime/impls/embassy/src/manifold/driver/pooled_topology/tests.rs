@@ -744,6 +744,7 @@ fn lifecycle_commands_preserve_unrelated_descriptors_and_handle_missing_or_dupli
         let notify = Channel::<CriticalSectionRawMutex, InterfaceId, 1>::new();
         let commands = Channel::<CriticalSectionRawMutex, IssuedCommand, 1>::new();
         let responses = Channel::<CriticalSectionRawMutex, ResourceResponse<0>, 1>::new();
+        let path_page_reply = Signal::new();
         let completion = embassy_sync::signal::Signal::new();
         let lifecycle = Channel::<CriticalSectionRawMutex, InterfaceLifecycle, 2>::new();
         let mut descriptors = HeaplessVec::<InterfaceDescriptor, 4>::new();
@@ -772,6 +773,7 @@ fn lifecycle_commands_preserve_unrelated_descriptors_and_handle_missing_or_dupli
                     notify: notify.receiver(),
                     commands: commands.receiver(),
                     resource_responses: responses.receiver(),
+                    path_page_reply: &path_page_reply,
                     lifecycle: lifecycle.receiver(),
                 },
                 |_| {},
@@ -857,6 +859,7 @@ fn lifecycle_changes_preserve_or_replace_each_lanes_announce_pacer() {
         let notify = Channel::<CriticalSectionRawMutex, InterfaceId, 1>::new();
         let commands = Channel::<CriticalSectionRawMutex, IssuedCommand, 1>::new();
         let responses = Channel::<CriticalSectionRawMutex, ResourceResponse<0>, 1>::new();
+        let path_page_reply = Signal::new();
         let completed = embassy_sync::signal::Signal::new();
         let lifecycle = Channel::<CriticalSectionRawMutex, InterfaceLifecycle, 1>::new();
         let mut descriptors = HeaplessVec::<InterfaceDescriptor, 2>::new();
@@ -884,6 +887,7 @@ fn lifecycle_changes_preserve_or_replace_each_lanes_announce_pacer() {
                 notify: notify.receiver(),
                 commands: commands.receiver(),
                 resource_responses: responses.receiver(),
+                path_page_reply: &path_page_reply,
                 lifecycle: lifecycle.receiver(),
             },
             |_| {},
@@ -1038,6 +1042,7 @@ fn pooled_ingress_retains_live_counts_and_phy_and_rejects_bad_ifac_envelopes() {
     let notify = Channel::<CriticalSectionRawMutex, InterfaceId, 1>::new();
     let commands = Channel::<CriticalSectionRawMutex, IssuedCommand, 1>::new();
     let responses = Channel::<CriticalSectionRawMutex, ResourceResponse<0>, 1>::new();
+    let path_page_reply = Signal::new();
     let lifecycle = Channel::<CriticalSectionRawMutex, InterfaceLifecycle, 1>::new();
     let mut descriptors = HeaplessVec::<InterfaceDescriptor, 1>::new();
     descriptors.push(descriptor(id)).unwrap();
@@ -1070,6 +1075,7 @@ fn pooled_ingress_retains_live_counts_and_phy_and_rejects_bad_ifac_envelopes() {
             notify: notify.receiver(),
             commands: commands.receiver(),
             resource_responses: responses.receiver(),
+            path_page_reply: &path_page_reply,
             lifecycle: lifecycle.receiver(),
         },
         |_| {},
@@ -1145,6 +1151,7 @@ fn publication_refreshes_route_expiry_before_acknowledging_the_new_descriptor() 
         let notify = Channel::<CriticalSectionRawMutex, InterfaceId, 1>::new();
         let commands = Channel::<CriticalSectionRawMutex, IssuedCommand, 1>::new();
         let responses = Channel::<CriticalSectionRawMutex, ResourceResponse<0>, 1>::new();
+        let path_page_reply = Signal::new();
         let completed = embassy_sync::signal::Signal::new();
         let lifecycle = Channel::<CriticalSectionRawMutex, InterfaceLifecycle, 1>::new();
         let mut descriptors = HeaplessVec::<InterfaceDescriptor, 1>::new();
@@ -1176,6 +1183,7 @@ fn publication_refreshes_route_expiry_before_acknowledging_the_new_descriptor() 
                 notify: notify.receiver(),
                 commands: commands.receiver(),
                 resource_responses: responses.receiver(),
+                path_page_reply: &path_page_reply,
                 lifecycle: lifecycle.receiver(),
             },
             |journaled| {
@@ -1250,6 +1258,7 @@ fn pooled_peers_establish_a_link_and_dispatch_resource_responses() {
     let a_notify = Channel::<CriticalSectionRawMutex, InterfaceId, 1>::new();
     let a_commands = Channel::<CriticalSectionRawMutex, IssuedCommand, 1>::new();
     let a_responses = Channel::<CriticalSectionRawMutex, ResourceResponse<64>, 1>::new();
+    let a_path_page_reply = Signal::new();
     let a_lifecycle = Channel::<CriticalSectionRawMutex, InterfaceLifecycle, 1>::new();
     let mut a_descriptors = HeaplessVec::<InterfaceDescriptor, 1>::new();
     a_descriptors.push(descriptor(a_id)).unwrap();
@@ -1278,6 +1287,7 @@ fn pooled_peers_establish_a_link_and_dispatch_resource_responses() {
             notify: a_notify.receiver(),
             commands: a_commands.receiver(),
             resource_responses: a_responses.receiver(),
+            path_page_reply: &a_path_page_reply,
             lifecycle: a_lifecycle.receiver(),
         },
         |event| match event {
@@ -1300,6 +1310,7 @@ fn pooled_peers_establish_a_link_and_dispatch_resource_responses() {
     let b_notify = Channel::<CriticalSectionRawMutex, InterfaceId, 1>::new();
     let b_commands = Channel::<CriticalSectionRawMutex, IssuedCommand, 1>::new();
     let b_responses = Channel::<CriticalSectionRawMutex, ResourceResponse<64>, 1>::new();
+    let b_path_page_reply = Signal::new();
     let b_lifecycle = Channel::<CriticalSectionRawMutex, InterfaceLifecycle, 1>::new();
     let mut b_descriptors = HeaplessVec::<InterfaceDescriptor, 1>::new();
     b_descriptors.push(descriptor(b_id)).unwrap();
@@ -1328,6 +1339,7 @@ fn pooled_peers_establish_a_link_and_dispatch_resource_responses() {
             notify: b_notify.receiver(),
             commands: b_commands.receiver(),
             resource_responses: b_responses.receiver(),
+            path_page_reply: &b_path_page_reply,
             lifecycle: b_lifecycle.receiver(),
         },
         |event| match event {

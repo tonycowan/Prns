@@ -1789,17 +1789,8 @@ impl RemoteControlBackend {
         self.record_local_label(RosterLabelKind::TargetLooking, target_id, Some(&instance));
     }
 
-    pub async fn interfaces_after_announce(
-        &self,
-        target_id: &str,
-        wait: RemoteControlAnnounceWait,
-    ) -> Result<Vec<InterfaceEntry>, BackendError> {
-        self.interfaces_after_announce_reporting(target_id, wait, &mut |_| {})
-            .await
-    }
-
-    /// Same inventory as [`Self::interfaces_after_announce`], reporting each piece
-    /// as soon as that call returns so the UI can render it.
+    /// Inventory after the control announce, reporting each piece as soon as that
+    /// call returns so the UI can render it.
     pub async fn interfaces_after_announce_reporting<F>(
         &self,
         target_id: &str,
