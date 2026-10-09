@@ -160,7 +160,7 @@ fn fixture() -> (
     for slot in 0..PEERS {
         status
             .member(slot)
-            .assign(InterfaceId::new([slot as u8; 8]));
+            .assign(InterfaceId::new([slot as u8; 8]), None);
     }
     (fleet, status, notify)
 }
