@@ -29,8 +29,8 @@ fn canonical_matrix_has_all_unique_profile_bound_targets() -> Result<(), Box<dyn
                 TargetPlatform::Esp
             ),
             (
-                "heltec-v4-r8",
-                "heltec-v4-r8",
+                "heltec-v4-r8-ab",
+                "heltec-v4-r8-ab",
                 "xtensa-esp32s3-none-elf",
                 "xtensa-esp32s3-gnu-ld",
                 TargetPlatform::Esp
@@ -66,13 +66,6 @@ fn canonical_matrix_has_all_unique_profile_bound_targets() -> Result<(), Box<dyn
             (
                 "t-echo-s140-v6",
                 "t-echo-s140-v6",
-                "thumbv7em-none-eabihf",
-                "thumbv7em-rust-lld",
-                TargetPlatform::Nrf52840
-            ),
-            (
-                "t-echo-s140-v7",
-                "t-echo-s140-v7",
                 "thumbv7em-none-eabihf",
                 "thumbv7em-rust-lld",
                 TargetPlatform::Nrf52840

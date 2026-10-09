@@ -83,7 +83,10 @@ compile_error!("nRF52840 board features are mutually exclusive");
     feature = "board-t-echo",
     not(any(feature = "softdevice-s140-v6", feature = "softdevice-s140-v7"))
 ))]
-compile_error!("T-Echo requires exactly one S140 compatibility feature");
+compile_error!("T-Echo requires softdevice-s140-v6; ship the S140 6.1.1 image");
+
+#[cfg(all(feature = "board-t-echo", feature = "softdevice-s140-v7"))]
+compile_error!("T-Echo does not support S140 7.x; ship the S140 6.1.1 image");
 
 #[cfg(all(feature = "board-mesh-tower-v2", not(feature = "softdevice-s140-v6")))]
 compile_error!("MeshTower V2 requires softdevice-s140-v6; HT-n5262 ships S140 6.1.1");

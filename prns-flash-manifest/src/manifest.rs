@@ -670,10 +670,7 @@ mod tests {
                 .iter()
                 .map(|variant| variant.part().path().as_str())
                 .collect::<Vec<_>>(),
-            [
-                "firmware/hopspot/t-echo/0.2.6/t-echo-s140-6.1.1.uf2",
-                "firmware/hopspot/t-echo/0.2.6/t-echo-s140-7.3.0.uf2",
-            ]
+            ["firmware/hopspot/t-echo/0.2.6/t-echo-s140-6.1.1.uf2",]
         );
         Ok(())
     }
@@ -751,19 +748,19 @@ mod tests {
         let board = catalog
             .board("t-echo")
             .ok_or("missing T-Echo catalog entry")?;
-        let mut target = valid_manifest()?
+        let target = valid_manifest()?
             .targets
             .into_iter()
             .find(|target| target.board_slug == "t-echo")
             .ok_or("missing T-Echo target")?;
-        target
-            .variants
-            .retain(|variant| variant.softdevice_version == "6.1.1");
         let version = ReleaseVersion::parse("0.2.6")?;
         let v6 = SoftdeviceIdentity::parse("s140", "6.1.1")?;
         let v7 = SoftdeviceIdentity::parse("s140", "7.3.0")?;
+        let mut mismatched = target.clone();
+        mismatched.variants[0].softdevice_version = "7.3.0".to_string();
 
-        assert!(target.clone().into_validated(board, &version).is_err());
+        assert!(mismatched.into_validated(board, &version).is_err());
+        assert!(target.clone().into_validated(board, &version).is_ok());
         assert!(target
             .clone()
             .into_validated_uf2_variant(board, &version, &v7)

@@ -177,17 +177,13 @@ mod tests {
         let prns_flash_manifest::BoardBuild::Uf2(recipe) = &board.build else {
             return Err("T-Echo does not use UF2".into());
         };
-        let [v6, v7] = recipe.variants.as_slice() else {
-            return Err("T-Echo does not have exactly two build variants".into());
+        let [v6] = recipe.variants.as_slice() else {
+            return Err("T-Echo ships only the S140 6.1.1 image".into());
         };
 
         assert_eq!(
             cargo_features(&recipe.board_feature, v6.application_link),
             "board-t-echo,softdevice-s140-v6"
-        );
-        assert_eq!(
-            cargo_features(&recipe.board_feature, v7.application_link),
-            "board-t-echo,softdevice-s140-v7"
         );
         Ok(())
     }

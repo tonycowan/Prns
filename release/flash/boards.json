@@ -257,16 +257,6 @@
             "application_link": "softdevice-s140-v6",
             "target_directory": "target/s140-v6",
             "filename": "t-echo-s140-6.1.1.uf2"
-          },
-          {
-            "softdevice_family": "s140",
-            "softdevice_version": "7.3.0",
-            "fwid": "0x0123",
-            "memory_profile": "t-echo-s140-v7",
-            "family_id": "0xada52840",
-            "application_link": "softdevice-s140-v7",
-            "target_directory": "target/s140-v7",
-            "filename": "t-echo-s140-7.3.0.uf2"
           }
         ]
       }

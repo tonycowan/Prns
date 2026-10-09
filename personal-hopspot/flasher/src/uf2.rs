@@ -964,7 +964,7 @@ mod tests {
         fs::create_dir(&mount).expect("create mount");
         fs::write(
             mount.join("INFO_UF2.TXT"),
-            info("nRF52840-TEcho-v1", "7.3.0"),
+            info("nRF52840-TEcho-v1", "6.1.1"),
         )
         .expect("write info");
         assert_eq!(
@@ -1004,7 +1004,7 @@ mod tests {
         fs::create_dir(&mount).expect("create mount");
         fs::write(
             mount.join("INFO_UF2.TXT"),
-            "UF2 Bootloader 0.6.1\nBoard ID: nRF52840_TEcho_v2.1\nSoftDevice: S140 version 7.3.0\n",
+            "UF2 Bootloader 0.6.1\nBoard ID: nRF52840_TEcho_v2.1\nSoftDevice: S140 version 6.1.1\n",
         )
         .expect("write identity");
         assert_eq!(

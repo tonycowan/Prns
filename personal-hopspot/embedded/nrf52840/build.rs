@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use personal_hopspot_memory::{
     MemoryProfile, MESH_POCKET_10000, MESH_POCKET_5000, MESH_TOWER_V2, MUZI_BASE_DUO,
     NRF52840_MEMORY_X_BINDING, RAK10724, RAK4631, SENSECAP_SOLAR_NODE, T096, T1000_E, T114,
-    T_ECHO_S140_V6, T_ECHO_S140_V7, WIO_TRACKER_L1,
+    T_ECHO_S140_V6, WIO_TRACKER_L1,
 };
 
 const BOARD_T_ECHO_FEATURE: &str = "CARGO_FEATURE_BOARD_T_ECHO";
@@ -47,8 +47,10 @@ fn main() {
     let softdevice = selected_softdevice();
     let profile: &MemoryProfile = match (board, softdevice) {
         (Board::TEcho, Some(Softdevice::S140V6)) => &T_ECHO_S140_V6,
-        (Board::TEcho, Some(Softdevice::S140V7)) => &T_ECHO_S140_V7,
-        (Board::TEcho, None) => panic!("T-Echo requires exactly one S140 compatibility feature"),
+        (Board::TEcho, Some(Softdevice::S140V7)) => {
+            panic!("T-Echo does not support S140 7.x; ship the S140 6.1.1 image")
+        }
+        (Board::TEcho, None) => panic!("T-Echo requires softdevice-s140-v6"),
         (Board::T096, Some(Softdevice::S140V6)) => &T096,
         (Board::T096, None) => panic!("T096 requires softdevice-s140-v6"),
         (Board::T096, Some(Softdevice::S140V7)) => {

@@ -153,27 +153,6 @@
       }
     },
     {
-      "id": "t-echo-s140-v7",
-      "display_name": "LilyGO T-Echo S140 7.3.0",
-      "memory_profile": "t-echo-s140-v7",
-      "architecture": "thumbv7em",
-      "rust_target": "thumbv7em-none-eabihf",
-      "architecture_adapter": "thumbv7em-rust-lld",
-      "resource": {
-        "kind": "passed",
-        "evidence": {
-          "source": {
-            "kind": "clean-commit",
-            "commit": "875203b20a6f73648f347b3c6ab04db3c5c5082d"
-          },
-          "report_fingerprint": "4b50c97687717caae4b4d68b36c7cf819a37d52933bf1ec23499a8e63b553a8c",
-          "build_fingerprint": "da8c99d909b9892430ebdb10afca7e14ba809a4d0b06a00f6458e8a2fa7a4dba",
-          "toolchain_fingerprint": "75a6259eaebb5273ab6bf620ea36e19f31bda7caff1a56a239816a600f70e5f2",
-          "memory_contract_fingerprint": "5031137380b84665145c00f57a0d1884a34c9d141b1716c08c846cc06f5764ae"
-        }
-      }
-    },
-    {
       "id": "t114",
       "display_name": "Heltec Mesh Node T114 S140 6.1.1",
       "memory_profile": "t114",

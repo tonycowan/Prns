@@ -768,7 +768,7 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].softdevice_version, "6.1.1");
-        assert_eq!(compatible_uf2_build_variants(build, None).len(), 2);
+        assert_eq!(compatible_uf2_build_variants(build, None).len(), 1);
         Ok(())
     }
 

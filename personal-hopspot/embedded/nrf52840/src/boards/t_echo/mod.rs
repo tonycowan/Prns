@@ -6,11 +6,7 @@ mod raster;
 mod ssd1681;
 
 use embassy_futures::join::join;
-#[cfg(feature = "softdevice-s140-v6")]
-use personal_hopspot_memory::T_ECHO_S140_V6;
-#[cfg(not(feature = "softdevice-s140-v6"))]
-use personal_hopspot_memory::T_ECHO_S140_V7;
-use personal_hopspot_memory::{MemoryProfile, RegionRole};
+use personal_hopspot_memory::{MemoryProfile, RegionRole, T_ECHO_S140_V6};
 use personal_rns::interfaces::InterfaceId;
 
 use crate::memory::NrfFirmwareMemory;
@@ -42,10 +38,7 @@ pub(crate) async fn drive_controls(controls: Controls) -> ! {
     core::future::pending().await
 }
 
-#[cfg(feature = "softdevice-s140-v6")]
 pub(crate) const MEMORY_PROFILE: &MemoryProfile = &T_ECHO_S140_V6;
-#[cfg(not(feature = "softdevice-s140-v6"))]
-pub(crate) const MEMORY_PROFILE: &MemoryProfile = &T_ECHO_S140_V7;
 
 const MEMORY: NrfFirmwareMemory = NrfFirmwareMemory::new(MEMORY_PROFILE);
 

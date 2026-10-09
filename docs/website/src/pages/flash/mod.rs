@@ -32,6 +32,27 @@ fn validate_release_0_2_6_fixture(
         .ok_or("0.2.6 fixture board is missing from the current catalog")?;
     historical_heltec.display_name = "Heltec LoRa 32 V4".to_string();
     historical_heltec.silicon = "ESP32-S3 + SX1262".to_string();
+    let historical_t_echo = catalog
+        .boards
+        .iter_mut()
+        .find(|board| board.slug == "t-echo")
+        .ok_or("0.2.6 fixture board is missing from the current catalog")?;
+    let prns_flash_manifest::BoardBuild::Uf2(build) = &mut historical_t_echo.build else {
+        return Err("0.2.6 T-Echo fixture is not a UF2 board".into());
+    };
+    // Release 0.2.6 shipped both SoftDevice images. The current catalog keeps 6.1.1 only.
+    build.variants.push(serde_json::from_str(
+        r#"{
+            "softdevice_family": "s140",
+            "softdevice_version": "7.3.0",
+            "fwid": "0x0123",
+            "memory_profile": "t-echo-s140-v7",
+            "family_id": "0xada52840",
+            "application_link": "softdevice-s140-v7",
+            "target_directory": "target/s140-v7",
+            "filename": "t-echo-s140-7.3.0.uf2"
+        }"#,
+    )?);
     let historical_targets = prns_flash_manifest::ManifestTargetSetPolicy::local_development(
         &catalog,
         &["heltec-v4", "t-beam-supreme", "t-echo", "xiao-esp32-c6"],

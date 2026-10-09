@@ -913,8 +913,8 @@ mod tests {
         }
         .into_validated(board, &version)
         .expect("typed UF2 target");
-        let softdevice = SoftdeviceIdentity::parse("s140", "7.3.0").expect("identity");
-        (version, target, softdevice, artifacts[1].clone())
+        let softdevice = SoftdeviceIdentity::parse("s140", "6.1.1").expect("identity");
+        (version, target, softdevice, artifacts[0].clone())
     }
 
     fn nrf_target() -> (ReleaseVersion, ReleaseTarget, Vec<u8>, Vec<u8>) {

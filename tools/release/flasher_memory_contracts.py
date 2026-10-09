@@ -71,11 +71,6 @@ UF2_MEMORY_CONTRACTS = {
         "firmware_owned": (0x00026000, 0x000bf000),
         "transport_envelope": (0x00026000, 0x000c0000),
     },
-    ("t-echo", "s140", "7.3.0", "0x0123", 0x00027000, "0xada52840"): {
-        "profile": "t-echo-s140-v7",
-        "firmware_owned": (0x00027000, 0x000bf000),
-        "transport_envelope": (0x00027000, 0x000c0000),
-    },
     ("t114", "s140", "6.1.1", "0x00b6", 0x00026000, "0xada52840"): {
         "profile": "t114",
         "firmware_owned": (0x00026000, 0x000e1000),

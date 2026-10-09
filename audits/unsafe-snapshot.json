@@ -19561,7 +19561,7 @@
           "macros",
           "nrf52840",
           "s140",
-          "s140-v7"
+          "s140-v6"
         ]
       },
       "name": "nrf-softdevice",
@@ -19594,14 +19594,14 @@
       "graphs": {
         "nrf52840": []
       },
-      "name": "nrf-softdevice-s140-v7",
-      "source": "personal-hopspot/embedded/nrf52840/vendor/nrf-softdevice/nrf-softdevice-s140-v7",
+      "name": "nrf-softdevice-s140-v6",
+      "source": "personal-hopspot/embedded/nrf52840/vendor/nrf-softdevice/nrf-softdevice-s140-v6",
       "unsafe": {
-        "blocks": 676,
+        "blocks": 670,
         "externs": 5,
-        "functions": 141,
+        "functions": 138,
         "impls": 0,
-        "tokens": 822
+        "tokens": 813
       },
       "version": "0.1.2-prns.1"
     },
@@ -33005,7 +33005,7 @@
         "nrf52840": [
           "board-t-echo",
           "default",
-          "softdevice-s140-v7"
+          "softdevice-s140-v6"
         ]
       },
       "name": "t-echo",

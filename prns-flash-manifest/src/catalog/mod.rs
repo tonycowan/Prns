@@ -647,28 +647,16 @@ const T_ECHO_UF2_RECIPE: PinnedUf2Recipe = PinnedUf2Recipe {
     manufacturer: "Stay Personal",
     product: "Personal Hopspot (T-Echo)",
     serial_number: "PERSONAL-RNS-TECHO-HOP",
-    variants: &[
-        PinnedUf2Variant {
-            softdevice_family: "s140",
-            softdevice_version: "6.1.1",
-            fwid: "0x00b6",
-            memory_profile: "t-echo-s140-v6",
-            family_id: "0xada52840",
-            application_link: Uf2ApplicationLink::SoftdeviceS140V6,
-            target_directory: "target/s140-v6",
-            filename: "t-echo-s140-6.1.1.uf2",
-        },
-        PinnedUf2Variant {
-            softdevice_family: "s140",
-            softdevice_version: "7.3.0",
-            fwid: "0x0123",
-            memory_profile: "t-echo-s140-v7",
-            family_id: "0xada52840",
-            application_link: Uf2ApplicationLink::SoftdeviceS140V7,
-            target_directory: "target/s140-v7",
-            filename: "t-echo-s140-7.3.0.uf2",
-        },
-    ],
+    variants: &[PinnedUf2Variant {
+        softdevice_family: "s140",
+        softdevice_version: "6.1.1",
+        fwid: "0x00b6",
+        memory_profile: "t-echo-s140-v6",
+        family_id: "0xada52840",
+        application_link: Uf2ApplicationLink::SoftdeviceS140V6,
+        target_directory: "target/s140-v6",
+        filename: "t-echo-s140-6.1.1.uf2",
+    }],
 };
 
 const T114_UF2_RECIPE: PinnedUf2Recipe = PinnedUf2Recipe {
@@ -1380,7 +1368,6 @@ mod tests {
                     "riscv32imac-unknown-none-elf"
                 ),
                 ("t-echo", "t-echo-s140-v6", "thumbv7em-none-eabihf"),
-                ("t-echo", "t-echo-s140-v7", "thumbv7em-none-eabihf"),
                 ("t114", "t114", "thumbv7em-none-eabihf"),
                 (
                     "mesh-pocket-5000",
