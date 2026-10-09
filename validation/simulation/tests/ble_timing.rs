@@ -8,9 +8,8 @@ use personal_rns::engine::InstantMillis;
 use personal_rns::interfaces::bluetooth_auto::{
     AdvertisingMode, AppleHost, BleAddress, BleBackend, BleEvent, BleFailureCode, BleIdentity,
     BleLink, BleRoleCapabilities, CloseReason, Control, DiscoveryGroupId, DiscoveryGroupSet,
-    Endpoint,
-    Handshake, HandshakeOutcome, HandshakeReaction, HandshakeRole, LinkCapabilities, LocalPeer,
-    Origin, RadioMode, BLE_HW_MTU, CONTROL_MAX_LEN, GROUP_MISMATCH_RETRY_TTL_MS,
+    Endpoint, Handshake, HandshakeOutcome, HandshakeReaction, HandshakeRole, LinkCapabilities,
+    LocalPeer, Origin, RadioMode, BLE_HW_MTU, CONTROL_MAX_LEN, GROUP_MISMATCH_RETRY_TTL_MS,
 };
 use personal_rns::interfaces::{ConnectionState, InterfaceStatus};
 use personal_rns::manifold::tokio::TokioClock;

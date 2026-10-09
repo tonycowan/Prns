@@ -987,7 +987,9 @@ mod port_tests {
         assert_eq!(part.offset, 0x0067_E000);
         assert_eq!(part.bytes.len(), 8192);
         assert!(part.erase_before_write);
-        assert!(personal_hopspot_core::flash_image_holds_lora_profile(&part.bytes));
+        assert!(personal_hopspot_core::flash_image_holds_lora_profile(
+            &part.bytes
+        ));
         assert!(radio_profile_part(board, None).expect("absent").is_none());
         let v4 = catalog.board("heltec-v4").expect("Heltec V4");
         let v4_part = radio_profile_part(v4, Some("L,0,921500,7,5,5,22,18"))
