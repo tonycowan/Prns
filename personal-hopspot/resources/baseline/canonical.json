@@ -21,7 +21,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -83,7 +85,7 @@
         "linker_version": "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20250920) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
       },
       "memory_contract": {
-        "fingerprint": "79b7ebb26fbcf54fed9bbeb4a706a36de1b582cfd207ae28609e86b1c48db552",
+        "fingerprint": "509116ff496b991680508cbe946fce968c27097af66d098a9a4c7022eb1cdd56",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -141,7 +143,7 @@
             "kind": "reclaimed-ram",
             "geometry": {
               "kind": "fixed-capacity",
-              "bytes": 73728
+              "bytes": 57344
             },
             "linker_ranges": [],
             "backing_store": "reclaimed-sram",
@@ -346,7 +348,7 @@
           {
             "id": "reclaimed-heap",
             "address_space": "reclaimed-ram",
-            "bytes": 73728,
+            "bytes": 57344,
             "accounting": {
               "kind": "shared-pool",
               "pool": "reclaimed-heap",
@@ -1692,9 +1694,9 @@
         "commit": "875203b20a6f73648f347b3c6ab04db3c5c5082d"
       },
       "target": {
-        "id": "heltec-v4-r8",
+        "id": "heltec-v4-r8-ab",
         "display_name": "Heltec LoRa 32 V4 (S3R8)",
-        "memory_profile": "heltec-v4-r8"
+        "memory_profile": "heltec-v4-r8-ab"
       },
       "architecture": {
         "rust_target": "xtensa-esp32s3-none-elf",
@@ -1704,7 +1706,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -1766,7 +1770,7 @@
         "linker_version": "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20250920) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
       },
       "memory_contract": {
-        "fingerprint": "1892468145b17702bed6ff0d1fac7859c083bff8467db188a183b1561f39ad44",
+        "fingerprint": "c930afd418ee1f5545285a77d1547bfbe4d5a74d245edf1270937ad8f81b1ed3",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -1824,7 +1828,7 @@
             "kind": "reclaimed-ram",
             "geometry": {
               "kind": "fixed-capacity",
-              "bytes": 73728
+              "bytes": 57344
             },
             "linker_ranges": [],
             "backing_store": "reclaimed-sram",
@@ -1963,11 +1967,41 @@
             "id": "firmware",
             "address_space": "internal-flash",
             "start": 65536,
-            "end": 15192064,
+            "end": 7602176,
             "alignment": 4096,
             "owner": "firmware-image",
             "retention": "replace-with-firmware",
             "role": "firmware-image"
+          },
+          {
+            "id": "firmware-update",
+            "address_space": "internal-flash",
+            "start": 7602176,
+            "end": 15138816,
+            "alignment": 4096,
+            "owner": "firmware-image",
+            "retention": "replace-with-firmware",
+            "role": "firmware-update-slot"
+          },
+          {
+            "id": "otadata",
+            "address_space": "internal-flash",
+            "start": 15138816,
+            "end": 15147008,
+            "alignment": 4096,
+            "owner": "platform",
+            "retention": "replace-with-firmware",
+            "role": "boot-selection"
+          },
+          {
+            "id": "firmware-slack",
+            "address_space": "internal-flash",
+            "start": 15147008,
+            "end": 15192064,
+            "alignment": 4096,
+            "owner": "platform",
+            "retention": "immutable",
+            "role": "reserved"
           },
           {
             "id": "remote_ctl_id",
@@ -2014,7 +2048,7 @@
         "transport_envelope": {
           "address_space": "internal-flash",
           "start": 65536,
-          "end": 15192064,
+          "end": 7602176,
           "compatibility": "exact-firmware-region"
         },
         "runtime_reservations": [
@@ -2030,7 +2064,7 @@
           {
             "id": "reclaimed-heap",
             "address_space": "reclaimed-ram",
-            "bytes": 73728,
+            "bytes": 57344,
             "accounting": {
               "kind": "shared-pool",
               "pool": "reclaimed-heap",
@@ -3379,7 +3413,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -3441,7 +3477,7 @@
         "linker_version": "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20250920) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
       },
       "memory_contract": {
-        "fingerprint": "24de7f31cf7ec03e2b429c78caf4715021aab127bb50e37ca0a7fc8f4238f31d",
+        "fingerprint": "8821f108dae788047861b9696c9802e4ea2929df57031c5b98c20f0c7b4bd09e",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -3499,7 +3535,7 @@
             "kind": "reclaimed-ram",
             "geometry": {
               "kind": "fixed-capacity",
-              "bytes": 73728
+              "bytes": 57344
             },
             "linker_ranges": [],
             "backing_store": "reclaimed-sram",
@@ -3705,7 +3741,7 @@
           {
             "id": "reclaimed-heap",
             "address_space": "reclaimed-ram",
-            "bytes": 73728,
+            "bytes": 57344,
             "accounting": {
               "kind": "shared-pool",
               "pool": "reclaimed-heap",
@@ -5076,7 +5112,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -5138,7 +5176,7 @@
         "linker_version": "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20250920) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
       },
       "memory_contract": {
-        "fingerprint": "264427a220750a901bf89edcdfeeb3ce538ab8fec54f92c04d3bffff1fa41de0",
+        "fingerprint": "5bdf69524b29c86b8c0595427523b931def8a9a28b96445575e0739f48928091",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -5196,7 +5234,7 @@
             "kind": "reclaimed-ram",
             "geometry": {
               "kind": "fixed-capacity",
-              "bytes": 73728
+              "bytes": 57344
             },
             "linker_ranges": [],
             "backing_store": "reclaimed-sram",
@@ -6453,7 +6491,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -6515,7 +6555,7 @@
         "linker_version": "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20250920) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
       },
       "memory_contract": {
-        "fingerprint": "fe0671d39736d18a48fd2fa7ffa803c8e27e94b167556cd0d7335fb028beb1e7",
+        "fingerprint": "90ab3c7f6a6175dadb15c565e47d3efabc9d9e320ef2b9363e6ee069f697a2fe",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -6573,7 +6613,7 @@
             "kind": "reclaimed-ram",
             "geometry": {
               "kind": "fixed-capacity",
-              "bytes": 73728
+              "bytes": 57344
             },
             "linker_ranges": [],
             "backing_store": "reclaimed-sram",
@@ -6778,7 +6818,7 @@
           {
             "id": "reclaimed-heap",
             "address_space": "reclaimed-ram",
-            "bytes": 73728,
+            "bytes": 57344,
             "accounting": {
               "kind": "shared-pool",
               "pool": "reclaimed-heap",
@@ -9413,7 +9453,7 @@
         "linker_version": "LLD 22.1.8 (https://github.com/rust-lang/llvm-project.git 52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04) (compatible with GNU linkers)"
       },
       "memory_contract": {
-        "fingerprint": "7d726b15f5339a3c519d79fe5d9258727bbbbf2d59d9de545fc56872dd1ef966",
+        "fingerprint": "1840ca931e17d8b650d8f45533bc0eb5280cff692d2b7511575b3c1abbe0338a",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -9426,7 +9466,7 @@
             "linker_ranges": [
               {
                 "start": 155648,
-                "end": 782336
+                "end": 786432
               }
             ],
             "backing_store": "internal-flash",
@@ -9465,21 +9505,11 @@
             "id": "firmware",
             "address_space": "internal-flash",
             "start": 155648,
-            "end": 782336,
+            "end": 786432,
             "alignment": 4096,
             "owner": "firmware-image",
             "retention": "replace-with-firmware",
             "role": "firmware-image"
-          },
-          {
-            "id": "remote-control-identity",
-            "address_space": "internal-flash",
-            "start": 782336,
-            "end": 786432,
-            "alignment": 4096,
-            "owner": "device-identity",
-            "retention": "preserve-across-firmware-update",
-            "role": "remote-control-identity"
           },
           {
             "id": "journal",
@@ -9522,9 +9552,19 @@
             "role": "ble-identity"
           },
           {
-            "id": "reserved",
+            "id": "remote-control-identity",
             "address_space": "internal-flash",
             "start": 970752,
+            "end": 974848,
+            "alignment": 4096,
+            "owner": "device-identity",
+            "retention": "preserve-across-firmware-update",
+            "role": "remote-control-identity"
+          },
+          {
+            "id": "reserved",
+            "address_space": "internal-flash",
+            "start": 974848,
             "end": 1048576,
             "alignment": 4096,
             "owner": "factory",
@@ -9537,7 +9577,7 @@
           "address_space": "internal-flash",
           "start": 155648,
           "end": 786432,
-          "compatibility": "legacy-envelope"
+          "compatibility": "exact-firmware-region"
         },
         "runtime_reservations": [
           {
@@ -10525,7 +10565,7 @@
         "linker_version": "LLD 22.1.8 (https://github.com/rust-lang/llvm-project.git 52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04) (compatible with GNU linkers)"
       },
       "memory_contract": {
-        "fingerprint": "5031137380b84665145c00f57a0d1884a34c9d141b1716c08c846cc06f5764ae",
+        "fingerprint": "61db35ba4f7875c2902003a60b3073b538ba9ac6a0d7a744150209eb6314a7bc",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -10538,7 +10578,7 @@
             "linker_ranges": [
               {
                 "start": 159744,
-                "end": 782336
+                "end": 786432
               }
             ],
             "backing_store": "internal-flash",
@@ -10577,21 +10617,11 @@
             "id": "firmware",
             "address_space": "internal-flash",
             "start": 159744,
-            "end": 782336,
+            "end": 786432,
             "alignment": 4096,
             "owner": "firmware-image",
             "retention": "replace-with-firmware",
             "role": "firmware-image"
-          },
-          {
-            "id": "remote-control-identity",
-            "address_space": "internal-flash",
-            "start": 782336,
-            "end": 786432,
-            "alignment": 4096,
-            "owner": "device-identity",
-            "retention": "preserve-across-firmware-update",
-            "role": "remote-control-identity"
           },
           {
             "id": "journal",
@@ -10634,9 +10664,19 @@
             "role": "ble-identity"
           },
           {
-            "id": "reserved",
+            "id": "remote-control-identity",
             "address_space": "internal-flash",
             "start": 970752,
+            "end": 974848,
+            "alignment": 4096,
+            "owner": "device-identity",
+            "retention": "preserve-across-firmware-update",
+            "role": "remote-control-identity"
+          },
+          {
+            "id": "reserved",
+            "address_space": "internal-flash",
+            "start": 974848,
             "end": 1048576,
             "alignment": 4096,
             "owner": "factory",
@@ -10649,7 +10689,7 @@
           "address_space": "internal-flash",
           "start": 159744,
           "end": 786432,
-          "compatibility": "legacy-envelope"
+          "compatibility": "exact-firmware-region"
         },
         "runtime_reservations": [
           {
@@ -18228,7 +18268,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -18290,7 +18332,7 @@
         "linker_version": "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20250920) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
       },
       "memory_contract": {
-        "fingerprint": "646ea081174bf01bbd71be3550864dd07ad487954fa0ea4cf1e3f4428ccdc191",
+        "fingerprint": "4598196ad27a7ca087e6751e25bd8b9ada25cf825994c87ebe8e236c6787fa3b",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -18348,7 +18390,7 @@
             "kind": "reclaimed-ram",
             "geometry": {
               "kind": "fixed-capacity",
-              "bytes": 73728
+              "bytes": 57344
             },
             "linker_ranges": [],
             "backing_store": "reclaimed-sram",
@@ -18532,42 +18574,13 @@
         },
         "runtime_reservations": [
           {
-            "id": "core1-stack",
+            "id": "internal-heap",
             "address_space": "data-ram",
-            "bytes": 73728,
-            "accounting": {
-              "kind": "dedicated",
-              "charge": "included-in-static-image"
-            }
-          },
-          {
-            "id": "reclaimed-heap",
-            "address_space": "reclaimed-ram",
-            "bytes": 73728,
+            "bytes": 65536,
             "accounting": {
               "kind": "shared-pool",
-              "pool": "reclaimed-heap",
+              "pool": "internal-heap",
               "charge": "included-in-static-image"
-            }
-          },
-          {
-            "id": "radio-internal-heap",
-            "address_space": "data-ram",
-            "bytes": 53248,
-            "accounting": {
-              "kind": "shared-pool",
-              "pool": "radio-internal-heap",
-              "charge": "included-in-static-image"
-            }
-          },
-          {
-            "id": "dcache-heap",
-            "address_space": "dcache-ram",
-            "bytes": 32768,
-            "accounting": {
-              "kind": "shared-pool",
-              "pool": "dcache-heap",
-              "charge": "additional-to-static"
             }
           }
         ]
@@ -20942,7 +20955,9 @@
           "-C",
           "link-arg=-Tlinkall.x",
           "-C",
-          "force-frame-pointers"
+          "force-frame-pointers",
+          "--cfg",
+          "sha2_backend_soft=\"compact\""
         ]
       },
       "build": {
@@ -21004,7 +21019,7 @@
         "linker_version": "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20250920) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
       },
       "memory_contract": {
-        "fingerprint": "cabac317c347b98862029796966984defd6ab2b6f095c704ac8e1e31baaf98b3",
+        "fingerprint": "d1e4e5fed85d0f49298c4206c7fb1cc5bfba8db9e4e87409bb05b508003858c2",
         "address_spaces": [
           {
             "id": "internal-flash",
@@ -21062,7 +21077,7 @@
             "kind": "reclaimed-ram",
             "geometry": {
               "kind": "fixed-capacity",
-              "bytes": 73728
+              "bytes": 57344
             },
             "linker_ranges": [],
             "backing_store": "reclaimed-sram",
@@ -21268,7 +21283,7 @@
           {
             "id": "reclaimed-heap",
             "address_space": "reclaimed-ram",
-            "bytes": 73728,
+            "bytes": 57344,
             "accounting": {
               "kind": "shared-pool",
               "pool": "reclaimed-heap",
