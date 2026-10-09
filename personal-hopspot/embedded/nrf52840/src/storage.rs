@@ -60,7 +60,9 @@ impl Nrf52840Storage {
     const REQUEST_HANDLERS: usize =
         <personal_hopspot_core::node_pages::NodePageRoutes as RequestEndpointSet<()>>::REGISTRATIONS
             .len() + REMOTE_CONTROL_STORAGE.request_handlers();
-    pub const LINK_SESSIONS: usize = 32;
+    // 28 leaves the 68 KiB runtime stack on the boards that were already within
+    // about 2 KiB of it (T096, T114, Wio Tracker). Each slot is a full link row.
+    pub const LINK_SESSIONS: usize = 28;
     const TRANSPORTED_LINKS: usize = 4;
     const CHANNELS: usize = 1;
     const RESOURCE_ASSEMBLIES: usize = 1;
