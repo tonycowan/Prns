@@ -6148,7 +6148,6 @@ fn start_flash(
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn ota_run_progress(
     flash_progress: Signal<Option<FlashProgress>>,
     flash_status: Signal<String>,
