@@ -33011,11 +33011,11 @@
       "name": "t-echo",
       "source": "personal-hopspot/embedded/nrf52840",
       "unsafe": {
-        "blocks": 1502,
-        "externs": 13,
-        "functions": 301,
+        "blocks": 1524,
+        "externs": 14,
+        "functions": 305,
         "impls": 17,
-        "tokens": 1834
+        "tokens": 1861
       },
       "version": "0.1.0"
     },
