@@ -105,8 +105,24 @@ fn main() {
     fs::write(out.join("memory.x"), memory.to_string()).unwrap();
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rustc-link-arg=-Tlink.x");
+    if env::var_os(BOARD_MESH_TOWER_V2_FEATURE).is_some() {
+        fs::write(out.join("firmware_copier.x"), FIRMWARE_COPIER_LINKER).unwrap();
+        println!("cargo:rustc-link-arg=-Tfirmware_copier.x");
+    }
     println!("cargo:rerun-if-changed=build.rs");
 }
+
+const FIRMWARE_COPIER_LINKER: &str = "\
+SECTIONS {
+  .firmware_copier : ALIGN(4) {
+    __firmware_copier_start = .;
+    KEEP(*(.firmware_copier))
+    . = ALIGN(4);
+    __firmware_copier_end = .;
+  } > FLASH
+}
+INSERT AFTER .text;
+";
 
 fn mesh_pocket_profile() -> &'static MemoryProfile {
     match (

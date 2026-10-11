@@ -81,6 +81,16 @@ path = "src/bin/heltec_mesh_tower_v2.rs"
 required-features = ["board-mesh-tower-v2", "softdevice-s140-v6"]
 
 [[bin]]
+name = "mesh-tower-v2-sd-spi"
+path = "src/bin/mesh_tower_v2_sd_spi.rs"
+required-features = ["board-mesh-tower-v2", "softdevice-s140-v6"]
+
+[[bin]]
+name = "mesh-tower-v2-flash-debug"
+path = "src/bin/mesh_tower_v2_flash_debug.rs"
+required-features = ["board-mesh-tower-v2", "softdevice-s140-v6"]
+
+[[bin]]
 name = "muzi-base-duo"
 path = "src/bin/muzi_base_duo.rs"
 required-features = ["board-muzi-base-duo", "softdevice-s140-v6"]

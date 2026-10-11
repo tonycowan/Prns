@@ -74,7 +74,13 @@ pub trait SecurityHandler {
     /// The connection has been bonded and its encryption keys should now be stored.
     ///
     /// Must be implemented if [`can_bond`][Self::can_bond] ever returns `true`.
-    fn on_bonded(&self, _conn: &Connection, _master_id: MasterId, _key: EncryptionInfo, _peer_id: IdentityKey) {
+    fn on_bonded(
+        &self,
+        _conn: &Connection,
+        _master_id: MasterId,
+        _key: EncryptionInfo,
+        _peer_id: IdentityKey,
+    ) {
         panic!("SecurityHandler::on_bonded not implemented")
     }
 

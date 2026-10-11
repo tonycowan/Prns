@@ -2075,11 +2075,120 @@ pub fn current_application_image(slug: &str) -> Result<PathBuf, FlashError> {
                 "no catalog image for {slug} — Import, Build, or select a tip first"
             ))
         })?;
-    find_named_file(&image_dir, "application.bin").ok_or_else(|| {
-        FlashError::Message(format!(
+    if let Some(bin) = find_named_file(&image_dir, "application.bin") {
+        let uf2_is_newer =
+            find_uf2(&image_dir).is_some_and(|uf2| newer_than(&uf2, &bin).unwrap_or(false));
+        if !uf2_is_newer {
+            return Ok(bin);
+        }
+    }
+    let Some(uf2) = find_uf2(&image_dir) else {
+        return Err(FlashError::Message(format!(
             "the selected image for {slug} has no application image"
+        )));
+    };
+    materialize_application_bin(slug, &uf2)
+}
+
+fn newer_than(left: &Path, right: &Path) -> Option<bool> {
+    let left = fs::metadata(left).ok()?.modified().ok()?;
+    let right = fs::metadata(right).ok()?.modified().ok()?;
+    Some(left > right)
+}
+
+fn find_uf2(root: &Path) -> Option<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("uf2") {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Write the raw application next to `uf2` so the install stream can read a file.
+fn materialize_application_bin(slug: &str, uf2: &Path) -> Result<PathBuf, FlashError> {
+    let (base, end) = uf2_application_range(slug)?;
+    let bytes = fs::read(uf2).map_err(|error| {
+        FlashError::Message(format!("could not read {}: {error}", uf2.display()))
+    })?;
+    let image = application_image_from_uf2(&bytes, base, end).ok_or_else(|| {
+        FlashError::Message(format!(
+            "{} is not a contiguous application image",
+            uf2.display()
         ))
-    })
+    })?;
+    let bin = uf2.with_file_name("application.bin");
+    fs::write(&bin, &image).map_err(|error| {
+        FlashError::Message(format!("could not write {}: {error}", bin.display()))
+    })?;
+    Ok(bin)
+}
+
+fn uf2_application_range(slug: &str) -> Result<(u32, u32), FlashError> {
+    let catalog = board_catalog().map_err(|error| FlashError::Message(error.to_string()))?;
+    let board = catalog
+        .board(slug)
+        .ok_or_else(|| FlashError::Message(format!("the board catalog has no entry for {slug}")))?;
+    let BoardBuild::Uf2(build) = &board.build else {
+        return Err(FlashError::Message(format!(
+            "{slug} does not ship a UF2 application image"
+        )));
+    };
+    let variant = build.variants.first().ok_or_else(|| {
+        FlashError::Message(format!("{slug} does not ship a UF2 application image"))
+    })?;
+    let owned = variant
+        .memory_layout()
+        .map_err(|error| FlashError::Message(error.to_string()))?
+        .firmware_owned();
+    Ok((owned.start(), owned.end_exclusive()))
+}
+
+/// Concatenate the 256-byte payloads of a UF2 that starts at `base` and stays inside `end`.
+fn application_image_from_uf2(bytes: &[u8], base: u32, end: u32) -> Option<Vec<u8>> {
+    const BLOCK: usize = 512;
+    const DATA: usize = 32;
+    const PAYLOAD: u32 = 256;
+    const MAGIC0: u32 = 0x0a32_4655;
+    const MAGIC1: u32 = 0x9e5d_5157;
+    const MAGIC_END: u32 = 0x0ab1_6f30;
+    const FAMILY_FLAG: u32 = 0x0000_2000;
+    if bytes.is_empty() || !bytes.len().is_multiple_of(BLOCK) {
+        return None;
+    }
+    let mut image = Vec::new();
+    let mut expected = base;
+    for block in bytes.chunks_exact(BLOCK) {
+        let word = |offset: usize| {
+            u32::from_le_bytes(block[offset..offset + 4].try_into().unwrap_or([0; 4]))
+        };
+        if word(0) != MAGIC0
+            || word(4) != MAGIC1
+            || word(508) != MAGIC_END
+            || word(8) != FAMILY_FLAG
+        {
+            return None;
+        }
+        if word(12) != expected || word(16) != PAYLOAD {
+            return None;
+        }
+        let next = expected.checked_add(PAYLOAD)?;
+        if next > end {
+            return None;
+        }
+        image.extend_from_slice(&block[DATA..DATA + PAYLOAD as usize]);
+        expected = next;
+    }
+    (image.len() >= 8).then_some(image)
 }
 
 fn find_named_file(root: &Path, name: &str) -> Option<PathBuf> {
@@ -2554,6 +2663,51 @@ fn encode_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::image_catalog::CATALOG_ENV_LOCK;
+
+    #[test]
+    fn uf2_application_image_is_the_contiguous_payload() {
+        let payload = {
+            let mut bytes = vec![0u8; 256];
+            bytes[..8].copy_from_slice(&[0x00, 0x00, 0x04, 0x20, 0x01, 0x61, 0x02, 0x00]);
+            bytes
+        };
+        let image =
+            application_image_from_uf2(&uf2_block(0x0002_6000, &payload), 0x0002_6000, 0x000E_0000)
+                .expect("contiguous application");
+        assert_eq!(image, payload);
+        assert!(application_image_from_uf2(
+            &uf2_block(0x0000_0000, &payload),
+            0x0002_6000,
+            0x000E_0000,
+        )
+        .is_none());
+        assert!(application_image_from_uf2(
+            &uf2_block(0x000E_0000, &payload),
+            0x000E_0000,
+            0x000E_0000,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mesh_tower_uf2_covers_the_firmware_region() {
+        assert_eq!(
+            uf2_application_range("mesh-tower-v2").expect("mesh tower ships a uf2"),
+            (0x0002_6000, 0x000E_0000)
+        );
+    }
+
+    fn uf2_block(address: u32, payload: &[u8]) -> Vec<u8> {
+        let mut block = vec![0u8; 512];
+        block[0..4].copy_from_slice(&0x0a32_4655u32.to_le_bytes());
+        block[4..8].copy_from_slice(&0x9e5d_5157u32.to_le_bytes());
+        block[8..12].copy_from_slice(&0x0000_2000u32.to_le_bytes());
+        block[12..16].copy_from_slice(&address.to_le_bytes());
+        block[16..20].copy_from_slice(&256u32.to_le_bytes());
+        block[32..32 + payload.len()].copy_from_slice(payload);
+        block[508..512].copy_from_slice(&0x0ab1_6f30u32.to_le_bytes());
+        block
+    }
 
     #[test]
     fn catalog_lists_shipping_boards_and_marks_dfu_unenrollable() {

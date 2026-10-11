@@ -40,7 +40,11 @@ impl PasskeyReply {
     unsafe fn finalize(&mut self, passkey: Option<&[u8; 6]>) -> Result<(), RawError> {
         let res = if let Some(conn_handle) = self.conn.handle() {
             let ptr = passkey.map(|x| x.as_ptr()).unwrap_or(core::ptr::null());
-            let ret = raw::sd_ble_gap_auth_key_reply(conn_handle, raw::BLE_GAP_AUTH_KEY_TYPE_PASSKEY as u8, ptr);
+            let ret = raw::sd_ble_gap_auth_key_reply(
+                conn_handle,
+                raw::BLE_GAP_AUTH_KEY_TYPE_PASSKEY as u8,
+                ptr,
+            );
             RawError::convert(ret)
         } else {
             Err(RawError::InvalidState)
@@ -86,7 +90,11 @@ impl OutOfBandReply {
     unsafe fn finalize(&mut self, oob: Option<&[u8; 16]>) -> Result<(), RawError> {
         let res = if let Some(conn_handle) = self.conn.handle() {
             let ptr = oob.map(|x| x.as_ptr()).unwrap_or(core::ptr::null());
-            let ret = raw::sd_ble_gap_auth_key_reply(conn_handle, raw::BLE_GAP_AUTH_KEY_TYPE_OOB as u8, ptr);
+            let ret = raw::sd_ble_gap_auth_key_reply(
+                conn_handle,
+                raw::BLE_GAP_AUTH_KEY_TYPE_OOB as u8,
+                ptr,
+            );
             RawError::convert(ret)
         } else {
             Err(RawError::InvalidState)
@@ -112,7 +120,12 @@ struct DeferredReply<const DEFERRED_TYPE: u8> {
 impl<const DEFERRED_TYPE: u8> Drop for DeferredReply<DEFERRED_TYPE> {
     fn drop(&mut self) {
         warn!("DeferredReply<{}> dropped without reply", DEFERRED_TYPE);
-        let res = unsafe { self.finalize(DEFERRED_TYPE, Err(super::GattError::ATTERR_ATTRIBUTE_NOT_FOUND)) };
+        let res = unsafe {
+            self.finalize(
+                DEFERRED_TYPE,
+                Err(super::GattError::ATTERR_ATTRIBUTE_NOT_FOUND),
+            )
+        };
 
         if let Err(_err) = res {
             warn!("sd_ble_gatts_rw_authorize_reply err {:?}", _err);

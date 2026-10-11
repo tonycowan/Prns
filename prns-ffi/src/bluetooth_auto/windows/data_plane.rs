@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use prns_core::interfaces::bluetooth_auto::{
-    fragments_of, BleAddress, BleIdentity, Control, Fragment, L2capPlan, PeerProtocol, Reassembler,
-    BLE_HW_MTU, CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN,
+    dispatch_firmware_copy_notification, fragments_of, BleAddress, BleIdentity, Control, Fragment,
+    L2capPlan, PeerProtocol, Reassembler, BLE_HW_MTU, CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN,
 };
 use prns_core::interfaces::bluetooth_auto::{BleLink, BleSink, BleSource};
 use tokio::sync::{mpsc as tokio_mpsc, watch};
@@ -174,6 +174,9 @@ impl BleLink for WinGattLink {
             tokio::spawn(async move {
                 let mut reassembler = Reassembler::<GATT_REASSEMBLY_CAP>::new();
                 while let Some(message) = inbound_rx.recv().await {
+                    if dispatch_firmware_copy_notification(&message) {
+                        continue;
+                    }
                     let Some(fragment) = Fragment::decode(&message) else {
                         crate::diagnostic_log::warn!(
                             "bluetooth: data fragment decode failed ({} bytes)",

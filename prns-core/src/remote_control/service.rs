@@ -246,8 +246,8 @@ impl<'a> RemoteControlService<'a> {
         })
     }
 
-    /// Register `reticulum.remote.ota` for as long as this node is running. The A/B image
-    /// asks for this. Other boards leave the destination unregistered.
+    /// Register `reticulum.remote.ota` for as long as this node is running. Heltec V4 and
+    /// MeshTower V2 ask for this. Other boards leave the destination unregistered.
     #[must_use]
     pub fn with_firmware_update_destination(mut self) -> Self {
         if let Self::Available(configuration) = &mut self {

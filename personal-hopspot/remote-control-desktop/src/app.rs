@@ -1323,7 +1323,8 @@ fn ManagedTargetConfiguration(
                     if connect_remaining() != remaining {
                         connect_remaining.set(remaining);
                     }
-                    if remaining == 0 && (configuring() || ota()) {
+                    // Dropping this screen cancels the in-flight image send.
+                    if remaining == 0 && !flashing() && (configuring() || ota()) {
                         configuring.set(false);
                         ota.set(false);
                     }
@@ -1369,7 +1370,7 @@ fn ManagedTargetConfiguration(
     rsx! {
         div { class: "target-section",
             h3 { class: "target-section-title", "Configuration" }
-            if connect_remaining() > 0 {
+            if connect_remaining() > 0 || flashing() {
                 div { class: if configuring() || ota() { "interface-toolbar editing" } else { "interface-toolbar" },
                     div { class: "toolbar-track",
                         div { class: "toolbar-pane",
@@ -1698,14 +1699,14 @@ fn ota_flash_toolbar(
     catalog_tick: Signal<u64>,
 ) -> Element {
     let selected = ota_board().unwrap_or_default();
-    let heltec = selected == "heltec-v4-r8";
+    let ota_board_ready = selected == "heltec-v4-r8" || selected == "mesh-tower-v2";
     let _ = catalog_tick();
     let has_image = crate::image_catalog::current_image(&selected)
         .ok()
         .flatten()
         .is_some();
     let image_busy = flashing() || downloading() || importing() || exporting() || building();
-    let can_flash = heltec && has_image && !image_busy;
+    let can_flash = ota_board_ready && has_image && !image_busy;
     rsx! {
         button {
             class: "button",
@@ -1967,16 +1968,26 @@ fn start_ota_firmware_update(
             }
         });
         let outcome = backend()
-            .stream_firmware_update(&target_id, &image, move |status, percent| {
-                let written =
-                    percent.map(|value| image_bytes.saturating_mul(u64::from(value)) / 100);
-                let total = (image_bytes > 0).then_some(image_bytes);
-                let _ = progress_tx.send((status.to_string(), percent, written, total));
-            })
+            .stream_firmware_update(
+                &target_id,
+                &image,
+                board_slug == "mesh-tower-v2",
+                move |status, percent| {
+                    let written =
+                        percent.map(|value| image_bytes.saturating_mul(u64::from(value)) / 100);
+                    let total = (image_bytes > 0).then_some(image_bytes);
+                    let _ = progress_tx.send((status.to_string(), percent, written, total));
+                },
+            )
             .await;
         match outcome {
             Ok(()) => {
-                let detail = "Install accepted. The node reboots onto the new slot.".to_string();
+                let detail = if board_slug == "mesh-tower-v2" {
+                    "Image checked. The tower is copying it into flash and will reboot."
+                } else {
+                    "Install accepted. The node reboots onto the new slot."
+                }
+                .to_string();
                 flash_status.set(detail.clone());
                 let mut progress = ota_progress_from_status(
                     &detail,

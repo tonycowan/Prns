@@ -39,7 +39,10 @@ impl From<RawError> for ConnectError {
 
 pub(crate) static CONNECT_PORTAL: Portal<*const raw::ble_evt_t> = Portal::new();
 
-pub async fn connect(sd: &Softdevice, config: &ConnectConfig<'_>) -> Result<Connection, ConnectError> {
+pub async fn connect(
+    sd: &Softdevice,
+    config: &ConnectConfig<'_>,
+) -> Result<Connection, ConnectError> {
     connect_inner(sd, config, Connection::new).await
 }
 
@@ -49,14 +52,28 @@ pub async fn connect_with_security(
     config: &ConnectConfig<'_>,
     security_handler: &'static dyn crate::ble::security::SecurityHandler,
 ) -> Result<Connection, ConnectError> {
-    connect_inner(sd, config, |conn_handle, role, peer_address, conn_params| {
-        Connection::with_security_handler(conn_handle, role, peer_address, conn_params, security_handler)
-    })
+    connect_inner(
+        sd,
+        config,
+        |conn_handle, role, peer_address, conn_params| {
+            Connection::with_security_handler(
+                conn_handle,
+                role,
+                peer_address,
+                conn_params,
+                security_handler,
+            )
+        },
+    )
     .await
 }
 
 // Begins an ATT MTU exchange procedure, followed by a data length update request as necessary.
-async fn connect_inner<F>(_sd: &Softdevice, config: &ConnectConfig<'_>, new_conn: F) -> Result<Connection, ConnectError>
+async fn connect_inner<F>(
+    _sd: &Softdevice,
+    config: &ConnectConfig<'_>,
+    new_conn: F,
+) -> Result<Connection, ConnectError>
 where
     F: Fn(u16, Role, Address, raw::ble_gap_conn_params_t) -> Result<Connection, OutOfConnsError>,
 {
@@ -166,7 +183,11 @@ impl From<RawError> for ScanError {
 
 pub(crate) static SCAN_PORTAL: Portal<*const raw::ble_evt_t> = Portal::new();
 
-pub async fn scan<'a, F, R>(_sd: &Softdevice, config: &ScanConfig<'a>, mut f: F) -> Result<R, ScanError>
+pub async fn scan<'a, F, R>(
+    _sd: &Softdevice,
+    config: &ScanConfig<'a>,
+    mut f: F,
+) -> Result<R, ScanError>
 where
     F: for<'b> FnMut(&'b raw::ble_gap_evt_adv_report_t) -> Option<R>,
 {

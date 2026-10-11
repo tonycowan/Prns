@@ -89,7 +89,9 @@ pub(crate) async fn run_ble() -> ! {
                 Ok(()) => crate::ble::on_evt(evt.as_ptr() as *const raw::ble_evt_t),
                 Err(RawError::NotFound) => break,
                 Err(RawError::BleNotEnabled) => break,
-                Err(RawError::DataSize) => panic!("BLE_EVT_MAX_SIZE is too low, use larger evt-max-size feature"),
+                Err(RawError::DataSize) => {
+                    panic!("BLE_EVT_MAX_SIZE is too low, use larger evt-max-size feature")
+                }
                 Err(err) => panic!("sd_ble_evt_get err {:?}", err),
             }
         }

@@ -52,6 +52,10 @@ pub(crate) mod gnss;
     any(feature = "board-rak4631", feature = "board-rak10724")
 ))]
 mod headless;
+#[cfg(feature = "usb-debug-log")]
+mod usb_debug;
+#[cfg(feature = "board-mesh-tower-v2")]
+pub(crate) use headless::{close_firmware_link, reply_firmware_resume};
 mod heartbeat;
 #[cfg(any(feature = "board-t-echo", feature = "board-mesh-pocket"))]
 mod interface_cards;
@@ -75,6 +79,8 @@ pub(crate) mod software_vbus;
 #[cfg(not(feature = "board-muzi-base-duo"))]
 mod subg_configuration;
 
+#[cfg(feature = "board-mesh-tower-v2")]
+pub(crate) use bluetooth_gatt_server::native_data_value_handle;
 #[cfg(any(feature = "board-t-echo", feature = "board-mesh-pocket"))]
 pub use firmware::run;
 #[cfg(any(

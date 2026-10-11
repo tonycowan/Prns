@@ -1,10 +1,12 @@
 mod battery;
 mod hardware;
 mod identity;
+mod ota;
 mod sd;
 mod update;
 
 pub(crate) use battery::{console_tick, report_battery};
+pub(crate) use ota::{observe_firmware_update, set_firmware_update_destination};
 pub(crate) use sd::publish_root_test_file;
 
 use embassy_nrf::gpio::Input;

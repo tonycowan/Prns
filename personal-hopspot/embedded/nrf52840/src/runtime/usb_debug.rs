@@ -9,7 +9,6 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::Driver;
-use embassy_usb::UsbDevice;
 
 const RING_BYTES: usize = 1024;
 const PACKET_BYTES: usize = 63;
@@ -87,18 +86,14 @@ impl log::Log for CdcLogger {
 
 static LOGGER: CdcLogger = CdcLogger;
 
-pub fn init() {
+pub(crate) fn init() {
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(log::LevelFilter::Info);
     }
     log::info!("usb-debug: console armed");
 }
 
-pub async fn run<'d, D: Driver<'d>>(mut usb: UsbDevice<'d, D>, class: CdcAcmClass<'d, D>) {
-    embassy_futures::join::join(usb.run(), drain(class)).await;
-}
-
-async fn drain<'d, D: Driver<'d>>(mut class: CdcAcmClass<'d, D>) {
+pub(crate) async fn drain<'d, D: Driver<'d>>(mut class: CdcAcmClass<'d, D>) {
     let mut packet = [0u8; PACKET_BYTES];
     loop {
         class.wait_connection().await;

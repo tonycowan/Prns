@@ -1,4 +1,4 @@
-//! MeshTower V2 microSD, bit-banged on the socket pins.
+//! MeshTower V2 microSD on SPIM2.
 #![cfg_attr(feature = "image-battery-sense", allow(dead_code, unused))]
 //!
 //! The socket nets are P1.00 chip select, P0.06 clock, P1.01 MOSI, and P0.26 MISO.
@@ -13,9 +13,7 @@ use core::fmt::Write;
 
 use embassy_nrf::gpio::{Input, Output};
 use embassy_time::{Duration, Instant, Timer};
-use static_cell::StaticCell;
-
-const BLOCK: usize = 512;
+pub(crate) const BLOCK: usize = 512;
 #[cfg(not(feature = "image-battery-sense"))]
 const SETTLE: Duration = Duration::from_secs(5);
 const MAX_NAME: usize = 64;
@@ -55,6 +53,22 @@ const WRITE_NAME: &[u8] = b"write.txt";
 const WRITE_BODY: &[u8] = b"This file was written";
 const FIRMWARE_NAME: &[u8] = b"firmware.bin";
 const FIRMWARE_DONE: &[u8] = b"firmware.old";
+const FIRMWARE_NEW: &[u8] = b"firmware.new";
+const FIRMWARE_DIGEST: &[u8] = b"firmware.dig";
+/// Directory updates are one sector dance per entry. Publish the stored length on this
+/// stride, and again when the file is complete, instead of after every stream chunk.
+const DIRECTORY_STRIDE: u32 = 4096;
+
+const fn directory_length_due(published: u32, valid: u32, declared: u32) -> bool {
+    valid != published
+        && (valid == declared || valid / DIRECTORY_STRIDE != published / DIRECTORY_STRIDE)
+}
+
+const _: () = assert!(!directory_length_due(0, 423, 10_000));
+const _: () = assert!(directory_length_due(3_807, 4_230, 10_000));
+const _: () = assert!(!directory_length_due(4_230, 4_653, 10_000));
+const _: () = assert!(directory_length_due(9_600, 10_000, 10_000));
+const _: () = assert!(!directory_length_due(10_000, 10_000, 10_000));
 #[cfg(all(feature = "image-spruce-101", not(feature = "image-battery-sense")))]
 const BOOT_ID: &str = "spruce-101";
 #[cfg(all(
@@ -70,8 +84,8 @@ const MBR_BASE: usize = 446;
 const PROTECTIVE_MBR: u8 = 0xEE;
 const EXFAT_MAGIC: &[u8] = b"EXFAT   ";
 
-/// Half of a 100 kHz bit at the 64 MHz CPU clock. Slow enough for card initialization.
-const HALF_BIT_CYCLES: u32 = 320;
+/// SPIM2 bytes per DMA. Short enough that a transfer does not hold off the radio.
+const SPI_CHUNK: usize = 64;
 
 const CMD0_CRC: u8 = crc7(&[0x40, 0, 0, 0, 0]);
 const CMD8_CRC: u8 = crc7(&[0x48, 0, 0, 1, 0xAA]);
@@ -117,7 +131,72 @@ struct Volume {
 struct RootFile {
     first_cluster: u32,
     valid_bytes: u64,
+    allocated_bytes: u64,
     chain: ClusterChain,
+}
+
+pub(crate) struct StagedFirmware {
+    first: u32,
+    cluster_count: u32,
+    sectors_per_cluster: u32,
+    heap_lba: u32,
+    pub(crate) valid: u32,
+    /// Valid length last written into the directory. A reconnect resumes from this, so it
+    /// may lag [`Self::valid`] by less than one [`DIRECTORY_STRIDE`] plus the last chunk.
+    published: u32,
+    pub(crate) declared: u32,
+    set_lba: u32,
+    set_cluster: u32,
+    set_sector: u32,
+    set_index: usize,
+    secondary_count: u8,
+}
+
+impl StagedFirmware {
+    pub(crate) fn image(&self) -> super::update::FirmwareImage {
+        super::update::FirmwareImage {
+            clusters: [0; super::update::MAX_FIRMWARE_CLUSTERS],
+            contiguous_first: self.first,
+            cluster_count: self.cluster_count,
+            sectors_per_cluster: self.sectors_per_cluster,
+            heap_lba: self.heap_lba,
+            bytes: self.declared,
+        }
+    }
+
+    fn located(&self) -> ExistingFile {
+        ExistingFile {
+            file: RootFile {
+                first_cluster: self.first,
+                valid_bytes: u64::from(self.valid),
+                allocated_bytes: u64::from(self.declared),
+                chain: ClusterChain::Contiguous,
+            },
+            set_lba: self.set_lba,
+            set_cluster: self.set_cluster,
+            set_sector: self.set_sector,
+            set_index: self.set_index,
+            secondary_count: self.secondary_count,
+        }
+    }
+
+    fn allocated_file(&self) -> RootFile {
+        RootFile {
+            first_cluster: self.first,
+            valid_bytes: u64::from(self.declared),
+            allocated_bytes: u64::from(self.declared),
+            chain: ClusterChain::Contiguous,
+        }
+    }
+
+    fn valid_file(&self) -> RootFile {
+        RootFile {
+            first_cluster: self.first,
+            valid_bytes: u64::from(self.valid),
+            allocated_bytes: u64::from(self.declared),
+            chain: ClusterChain::Contiguous,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -142,7 +221,7 @@ enum FatLink {
     End,
 }
 
-enum CardError {
+pub(crate) enum CardError {
     IdleTimeout,
     InitTimeout,
     /// MISO produced no response byte. `sample` is the first four bytes clocked in.
@@ -159,9 +238,10 @@ enum CardError {
     Address,
     Interface,
     Status(u8),
+    Spi,
 }
 
-enum VolumeError {
+pub(crate) enum VolumeError {
     Card(CardError),
     NotExfat,
     Geometry,
@@ -198,6 +278,7 @@ impl core::fmt::Display for CardError {
             Self::Address => formatter.write_str("block address overflow"),
             Self::Interface => formatter.write_str("interface condition rejected"),
             Self::Status(status) => write!(formatter, "card status {status:02x}"),
+            Self::Spi => formatter.write_str("spi transfer timed out"),
         }
     }
 }
@@ -261,6 +342,7 @@ enum StreamSlot {
 struct StreamInfo {
     first_cluster: u32,
     valid_bytes: u64,
+    allocated_bytes: u64,
     chain: ClusterChain,
 }
 
@@ -396,8 +478,20 @@ impl SdCard {
         }
         let volume = self.volume()?;
         let cluster_bytes = u64::from(volume.sectors_per_cluster) * BLOCK as u64;
+        if matches!(file.chain, ClusterChain::Contiguous) {
+            let cluster_count = clusters_covering(file.valid_bytes, volume.sectors_per_cluster)?;
+            return Ok(super::update::FirmwareImage {
+                clusters: [0; super::update::MAX_FIRMWARE_CLUSTERS],
+                contiguous_first: file.first_cluster,
+                cluster_count,
+                sectors_per_cluster: volume.sectors_per_cluster,
+                heap_lba: volume.heap_lba,
+                bytes,
+            });
+        }
         let mut image = super::update::FirmwareImage {
             clusters: [0; super::update::MAX_FIRMWARE_CLUSTERS],
+            contiguous_first: 0,
             cluster_count: 0,
             sectors_per_cluster: volume.sectors_per_cluster,
             heap_lba: volume.heap_lba,
@@ -430,8 +524,21 @@ impl SdCard {
     /// Rename `/firmware.bin` to `/firmware.old` in place. Both names are 12 characters, so the
     /// directory set keeps its size. This runs before the copier resets the chip.
     async fn rename_firmware(&mut self, scratch: &mut [u8; BLOCK]) -> Result<(), VolumeError> {
+        self.rename_root(FIRMWARE_NAME, FIRMWARE_DONE, scratch)
+            .await
+    }
+
+    async fn rename_root(
+        &mut self,
+        from: &[u8],
+        to: &[u8],
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<(), VolumeError> {
+        if from.len() != to.len() {
+            return Err(VolumeError::NameRejected);
+        }
         self.mount(scratch).await?;
-        let plan = self.scan_root(FIRMWARE_NAME, scratch).await?;
+        let plan = self.scan_root(from, scratch).await?;
         let Some(existing) = plan.existing else {
             return Err(VolumeError::FileNotFound);
         };
@@ -451,7 +558,7 @@ impl SdCard {
         if set[0] != FILE_ENTRY {
             return Err(VolumeError::Geometry);
         }
-        write_firmware_name(&mut set[..entries * 32], FIRMWARE_DONE);
+        write_firmware_name(&mut set[..entries * 32], to);
         let sum = entry_checksum(&set[..entries * 32]).to_le_bytes();
         set[2] = sum[0];
         set[3] = sum[1];
@@ -464,6 +571,345 @@ impl SdCard {
             index += 1;
         }
         Ok(())
+    }
+
+    /// Bytes of `/firmware.new` already stored for this digest. Zero means send the image
+    /// from the start.
+    pub(crate) async fn firmware_resume_offset(
+        &mut self,
+        digest: &[u8; 32],
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<u32, VolumeError> {
+        self.mount(scratch).await?;
+        let Some((stored, declared)) = self.read_digest_sidecar(scratch).await? else {
+            return Ok(0);
+        };
+        if stored != *digest {
+            return Ok(0);
+        }
+        let Some(existing) = self.staged_existing(scratch).await? else {
+            return Ok(0);
+        };
+        if !self.staged_reusable(&existing, declared)? {
+            return Ok(0);
+        }
+        u32::try_from(existing.file.valid_bytes).map_err(|_| VolumeError::ImageRejected)
+    }
+
+    /// Allocate or reuse `/firmware.new`. `keep_valid` continues a matching partial file.
+    pub(crate) async fn begin_firmware_stream(
+        &mut self,
+        digest: &[u8; 32],
+        declared: u32,
+        keep_valid: bool,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<StagedFirmware, VolumeError> {
+        if declared < 8 || declared > APP_END - APP_BASE {
+            return Err(VolumeError::ImageRejected);
+        }
+        self.mount(scratch).await?;
+        let volume = self.volume()?;
+        let needed = clusters_covering(u64::from(declared), volume.sectors_per_cluster)?;
+        if needed == 0 {
+            return Err(VolumeError::ImageRejected);
+        }
+        let existing = self.staged_existing(scratch).await?;
+        let reusable = match &existing {
+            Some(file) => self.staged_reusable(file, declared)?,
+            None => false,
+        };
+        let staged = if reusable {
+            let existing = existing.ok_or(VolumeError::Fat)?;
+            let valid = if keep_valid {
+                u32::try_from(existing.file.valid_bytes).map_err(|_| VolumeError::ImageRejected)?
+            } else {
+                self.rewrite_staged_entry(
+                    &existing,
+                    0,
+                    u64::from(declared),
+                    existing.file.first_cluster,
+                    scratch,
+                )
+                .await?;
+                0
+            };
+            self.staged_from(existing, valid, declared)?
+        } else {
+            self.allocate_staged(declared, needed, existing, scratch)
+                .await?
+        };
+        self.write_digest_sidecar(digest, declared, scratch).await?;
+        write_console(format_args!(
+            "sd: firmware.new {} of {declared}",
+            staged.valid
+        ));
+        Ok(staged)
+    }
+
+    /// Store `data` at the staged offset. The directory length follows every 4 KiB, and the
+    /// last bytes, so a dropped link repeats at most that unpublished tail.
+    pub(crate) async fn write_firmware_stream(
+        &mut self,
+        staged: &mut StagedFirmware,
+        data: &[u8],
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<(), VolumeError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let offset = u64::from(staged.valid);
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or(VolumeError::OutOfRange)?;
+        if end > u64::from(staged.declared) {
+            return Err(VolumeError::OutOfRange);
+        }
+        let file = staged.allocated_file();
+        self.overwrite_root_file(&file, offset, data, scratch)
+            .await?;
+        staged.valid = u32::try_from(end).map_err(|_| VolumeError::OutOfRange)?;
+        if directory_length_due(staged.published, staged.valid, staged.declared) {
+            self.publish_staged_length(staged, scratch).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn read_firmware_stream(
+        &mut self,
+        staged: &StagedFirmware,
+        offset: u32,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<usize, VolumeError> {
+        let file = staged.valid_file();
+        self.load_file_slice(&file, u64::from(offset), scratch)
+            .await
+    }
+
+    /// Check the reset vector, rename `/firmware.new` to `/firmware.old`, and hand back the
+    /// cluster list the RAM copier reads. A hand-copied `/firmware.bin` is a different file.
+    pub(crate) async fn finish_firmware_stream(
+        &mut self,
+        staged: &mut StagedFirmware,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<super::update::FirmwareImage, VolumeError> {
+        if staged.valid != staged.declared || staged.declared < 8 {
+            return Err(VolumeError::ImageRejected);
+        }
+        self.publish_staged_length(staged, scratch).await?;
+        let file = staged.valid_file();
+        let read = self.load_file_slice(&file, 0, scratch).await?;
+        if read < 8 || !firmware_vector_ok(scratch) {
+            return Err(VolumeError::ImageRejected);
+        }
+        self.rename_root(FIRMWARE_NEW, FIRMWARE_DONE, scratch)
+            .await?;
+        Ok(staged.image())
+    }
+
+    async fn staged_existing(
+        &mut self,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<Option<ExistingFile>, VolumeError> {
+        Ok(self.scan_root(FIRMWARE_NEW, scratch).await?.existing)
+    }
+
+    fn staged_reusable(&self, existing: &ExistingFile, declared: u32) -> Result<bool, VolumeError> {
+        if !matches!(existing.file.chain, ClusterChain::Contiguous)
+            || existing.file.first_cluster < 2
+        {
+            return Ok(false);
+        }
+        if existing.file.valid_bytes > u64::from(declared)
+            || existing.file.allocated_bytes < u64::from(declared)
+        {
+            return Ok(false);
+        }
+        let volume = self.volume()?;
+        let needed = clusters_covering(u64::from(declared), volume.sectors_per_cluster)?;
+        let have = clusters_covering(existing.file.allocated_bytes, volume.sectors_per_cluster)?;
+        Ok(have >= needed)
+    }
+
+    fn staged_from(
+        &self,
+        existing: ExistingFile,
+        valid: u32,
+        declared: u32,
+    ) -> Result<StagedFirmware, VolumeError> {
+        let volume = self.volume()?;
+        let count = clusters_covering(u64::from(declared), volume.sectors_per_cluster)?;
+        Ok(StagedFirmware {
+            first: existing.file.first_cluster,
+            cluster_count: count,
+            sectors_per_cluster: volume.sectors_per_cluster,
+            heap_lba: volume.heap_lba,
+            valid,
+            published: valid,
+            declared,
+            set_lba: existing.set_lba,
+            set_cluster: existing.set_cluster,
+            set_sector: existing.set_sector,
+            set_index: existing.set_index,
+            secondary_count: existing.secondary_count,
+        })
+    }
+
+    async fn allocate_staged(
+        &mut self,
+        declared: u32,
+        needed: u32,
+        existing: Option<ExistingFile>,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<StagedFirmware, VolumeError> {
+        if let Some(existing) = &existing {
+            let chained = !matches!(existing.file.chain, ClusterChain::Contiguous);
+            if chained && existing.file.first_cluster >= 2 {
+                return Err(VolumeError::ImageRejected);
+            }
+        }
+        let volume = self.volume()?;
+        let plan = self.scan_root(FIRMWARE_NEW, scratch).await?;
+        let bitmap = plan.bitmap.ok_or(VolumeError::Geometry)?;
+        let slot = plan.slot;
+        let upcase = plan.upcase_cluster;
+        let first = self
+            .claim_contiguous(bitmap, needed, volume.root_cluster, upcase, scratch)
+            .await?;
+        if let Some(existing) = existing {
+            let old = if existing.file.first_cluster >= 2 {
+                clusters_covering(existing.file.allocated_bytes, volume.sectors_per_cluster)?
+            } else {
+                0
+            };
+            self.rewrite_staged_entry(&existing, 0, u64::from(declared), first, scratch)
+                .await?;
+            if old > 0 {
+                self.set_run_bits(bitmap, existing.file.first_cluster, old, false, scratch)
+                    .await?;
+            }
+            let mut staged = self.staged_from(existing, 0, declared)?;
+            staged.first = first;
+            staged.cluster_count = needed;
+            return Ok(staged);
+        }
+        let Some(slot) = slot else {
+            return Err(VolumeError::DirectoryFull);
+        };
+        self.ensure_directory_room(&slot, bitmap, scratch).await?;
+        self.insert_directory_set(slot, FIRMWARE_NEW, first, 0, scratch)
+            .await?;
+        let Some(created) = self.staged_existing(scratch).await? else {
+            return Err(VolumeError::Fat);
+        };
+        self.rewrite_staged_entry(&created, 0, u64::from(declared), first, scratch)
+            .await?;
+        self.staged_from(created, 0, declared)
+    }
+
+    async fn publish_staged_length(
+        &mut self,
+        staged: &mut StagedFirmware,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<(), VolumeError> {
+        if staged.published == staged.valid {
+            return Ok(());
+        }
+        let located = staged.located();
+        self.rewrite_staged_entry(
+            &located,
+            u64::from(staged.valid),
+            u64::from(staged.declared),
+            staged.first,
+            scratch,
+        )
+        .await?;
+        staged.published = staged.valid;
+        Ok(())
+    }
+
+    async fn rewrite_staged_entry(
+        &mut self,
+        existing: &ExistingFile,
+        valid: u64,
+        allocated: u64,
+        first_cluster: u32,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<(), VolumeError> {
+        let entries = 1 + existing.secondary_count as usize;
+        if existing.secondary_count == 0 || entries > 4 {
+            return Err(VolumeError::Geometry);
+        }
+        let volume = self.volume()?;
+        let mut set = [0u8; 128];
+        let mut index = 0;
+        while index < entries {
+            let (lba, offset) = directory_slot(&volume, existing, index)?;
+            self.read_block(lba, scratch).await?;
+            set[index * 32..index * 32 + 32].copy_from_slice(&scratch[offset..offset + 32]);
+            index += 1;
+        }
+        let mut stream_at = None;
+        index = 1;
+        while index < entries {
+            if set[index * 32] == STREAM_ENTRY {
+                stream_at = Some(index * 32);
+                break;
+            }
+            index += 1;
+        }
+        let Some(stream_at) = stream_at else {
+            return Err(VolumeError::Fat);
+        };
+        set[stream_at + 8..stream_at + 16].copy_from_slice(&valid.to_le_bytes());
+        set[stream_at + 20..stream_at + 24].copy_from_slice(&first_cluster.to_le_bytes());
+        set[stream_at + 24..stream_at + 32].copy_from_slice(&allocated.to_le_bytes());
+        let sum = entry_checksum(&set[..entries * 32]).to_le_bytes();
+        set[2] = sum[0];
+        set[3] = sum[1];
+        index = 0;
+        while index < entries {
+            let (lba, offset) = directory_slot(&volume, existing, index)?;
+            self.read_block(lba, scratch).await?;
+            scratch[offset..offset + 32].copy_from_slice(&set[index * 32..index * 32 + 32]);
+            self.write_block(lba, scratch).await?;
+            index += 1;
+        }
+        Ok(())
+    }
+
+    async fn read_digest_sidecar(
+        &mut self,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<Option<([u8; 32], u32)>, VolumeError> {
+        let file = match self.open_root_file(FIRMWARE_DIGEST, scratch).await {
+            Ok(file) => file,
+            Err(VolumeError::FileNotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if file.valid_bytes < 36 {
+            return Ok(None);
+        }
+        let read = self.load_file_slice(&file, 0, scratch).await?;
+        if read < 36 {
+            return Ok(None);
+        }
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&scratch[..32]);
+        let declared = u32::from_le_bytes([scratch[32], scratch[33], scratch[34], scratch[35]]);
+        Ok(Some((digest, declared)))
+    }
+
+    async fn write_digest_sidecar(
+        &mut self,
+        digest: &[u8; 32],
+        declared: u32,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<(), VolumeError> {
+        let mut sidecar = [0u8; 36];
+        sidecar[..32].copy_from_slice(digest);
+        sidecar[32..].copy_from_slice(&declared.to_le_bytes());
+        self.store_root_file(FIRMWARE_DIGEST, &sidecar, scratch)
+            .await
     }
 
     async fn load_file_slice(
@@ -656,6 +1102,124 @@ impl SdCard {
             bit = next;
         }
         Err(VolumeError::NoSpace)
+    }
+
+    async fn claim_contiguous(
+        &mut self,
+        bitmap: BitmapLoc,
+        count: u32,
+        root_cluster: u32,
+        upcase_cluster: Option<u32>,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<u32, VolumeError> {
+        if count == 0 {
+            return Err(VolumeError::ImageRejected);
+        }
+        let volume = self.volume()?;
+        let span = bitmap_cluster_span(bitmap, volume.sectors_per_cluster);
+        let mut bit = 0u32;
+        let mut run = 0u32;
+        let mut run_start = 0u32;
+        while bit < volume.cluster_count {
+            let byte_index = bit / 8;
+            if u64::from(byte_index) >= bitmap.bytes {
+                return Err(VolumeError::NoSpace);
+            }
+            let sector_index = byte_index / BLOCK as u32;
+            let cluster_step = sector_index / volume.sectors_per_cluster;
+            let sector = sector_index % volume.sectors_per_cluster;
+            let cluster = bitmap
+                .cluster
+                .checked_add(cluster_step)
+                .ok_or(VolumeError::Fat)?;
+            let lba = volume.lba(cluster, sector)?;
+            self.read_block(lba, scratch).await?;
+            let sector_bit = sector_index.saturating_mul((BLOCK as u32).saturating_mul(8));
+            let mut offset = ((bit / 8) as usize) % BLOCK;
+            while offset < BLOCK {
+                let mut shift = bit % 8;
+                let mut mask = 1u8 << shift;
+                while shift < 8 {
+                    let candidate = sector_bit + (offset as u32) * 8 + shift;
+                    if candidate >= volume.cluster_count {
+                        return Err(VolumeError::NoSpace);
+                    }
+                    let cluster_no = candidate + 2;
+                    let reserved = cluster_no == root_cluster
+                        || (cluster_no >= bitmap.cluster
+                            && cluster_no < bitmap.cluster.saturating_add(span))
+                        || Some(cluster_no) == upcase_cluster;
+                    if scratch[offset] & mask == 0 && !reserved {
+                        if run == 0 {
+                            run_start = cluster_no;
+                        }
+                        run = run.saturating_add(1);
+                        if run == count {
+                            return self
+                                .set_run_bits(bitmap, run_start, count, true, scratch)
+                                .await
+                                .map(|()| run_start);
+                        }
+                    } else {
+                        run = 0;
+                    }
+                    mask <<= 1;
+                    shift += 1;
+                    bit = candidate + 1;
+                }
+                offset += 1;
+            }
+        }
+        Err(VolumeError::NoSpace)
+    }
+
+    async fn set_run_bits(
+        &mut self,
+        bitmap: BitmapLoc,
+        first: u32,
+        count: u32,
+        occupy: bool,
+        scratch: &mut [u8; BLOCK],
+    ) -> Result<(), VolumeError> {
+        let volume = self.volume()?;
+        let mut index = 0u32;
+        while index < count {
+            let cluster_no = first.checked_add(index).ok_or(VolumeError::Fat)?;
+            if cluster_no < 2 {
+                return Err(VolumeError::Fat);
+            }
+            let bit = cluster_no - 2;
+            let byte_index = bit / 8;
+            let sector_index = byte_index / BLOCK as u32;
+            let cluster_step = sector_index / volume.sectors_per_cluster;
+            let sector = sector_index % volume.sectors_per_cluster;
+            let map_cluster = bitmap
+                .cluster
+                .checked_add(cluster_step)
+                .ok_or(VolumeError::Fat)?;
+            let lba = volume.lba(map_cluster, sector)?;
+            self.read_block(lba, scratch).await?;
+            let sector_first_bit = sector_index.saturating_mul((BLOCK as u32).saturating_mul(8));
+            let sector_bits = (BLOCK as u32).saturating_mul(8);
+            while index < count {
+                let cluster_no = first.checked_add(index).ok_or(VolumeError::Fat)?;
+                let bit = cluster_no - 2;
+                if bit < sector_first_bit || bit >= sector_first_bit.saturating_add(sector_bits) {
+                    break;
+                }
+                let within = (bit - sector_first_bit) as usize;
+                let offset = within / 8;
+                let mask = 1u8 << (within % 8);
+                if occupy {
+                    scratch[offset] |= mask;
+                } else {
+                    scratch[offset] &= !mask;
+                }
+                index = index.saturating_add(1);
+            }
+            self.write_block(lba, scratch).await?;
+        }
+        Ok(())
     }
 
     async fn write_cluster_prefix(
@@ -854,11 +1418,12 @@ impl SdCard {
             return Ok(());
         }
         Timer::after_millis(10).await;
-        self.probe_hardware_spi();
+        self.arm_spim();
         let idle = u8::from(self.miso.is_high());
-        write_console(format_args!("sd: bitbang miso {idle}"));
+        write_console(format_args!("sd: miso {idle}"));
         self.cs.set_high();
-        self.write_clocks(10).await?;
+        // Sixteen bytes at 125 kHz is just over a millisecond with chip-select high.
+        self.write_clocks(16).await?;
         self.enter_idle().await?;
         write_console(format_args!("sd: idle"));
         let generation = self.interface_condition().await?;
@@ -882,7 +1447,10 @@ impl SdCard {
             self.command_r1(SET_BLOCKLEN, BLOCK as u32, ReadyWait::Brief)
                 .await?;
         }
-        // The socket has 22 ohm series resistors. Stay at the init clock until a block read works.
+        // Init stays at 125 kHz. The socket's 22 ohm resistors still pass 8 MHz once
+        // SCK and MOSI use high drive, which a sector read confirmed on this board.
+        self.set_spim_hz(embassy_nrf::pac::spim::vals::Frequency::M8);
+        write_console(format_args!("sd: 8 MHz"));
         match addressing {
             Addressing::Block => write_console(format_args!("sd: block")),
             Addressing::Byte => write_console(format_args!("sd: byte")),
@@ -1256,7 +1824,9 @@ impl SdCard {
         self.cs.set_high();
         self.clock().await?;
         self.cs.set_low();
+        cortex_m::asm::delay(2_000);
         self.wait_ready(ready).await?;
+        self.clock().await?;
         let mut frame = [0u8; 6];
         frame[0] = 0x40 | index;
         frame[1..5].copy_from_slice(&arg.to_be_bytes());
@@ -1334,7 +1904,10 @@ impl SdCard {
 
     async fn clock(&mut self) -> Result<u8, CardError> {
         embassy_futures::yield_now().await;
-        Ok(self.transfer(0xFF))
+        let tx = [0xFFu8; 1];
+        let mut rx = [0u8; 1];
+        self.exchange(&tx, &mut rx)?;
+        Ok(rx[0])
     }
 
     async fn read_n<const N: usize>(&mut self) -> Result<[u8; N], CardError> {
@@ -1344,60 +1917,92 @@ impl SdCard {
     }
 
     async fn read_bytes(&mut self, buffer: &mut [u8]) -> Result<(), CardError> {
-        for byte in buffer {
-            *byte = self.clock().await?;
+        let mut offset = 0;
+        while offset < buffer.len() {
+            let n = (buffer.len() - offset).min(SPI_CHUNK);
+            embassy_futures::yield_now().await;
+            let tx = [0xFFu8; SPI_CHUNK];
+            self.exchange(&tx[..n], &mut buffer[offset..offset + n])?;
+            offset += n;
         }
         Ok(())
     }
 
     async fn write_ram(&mut self, data: &[u8]) -> Result<(), CardError> {
-        for &byte in data {
+        let mut offset = 0;
+        while offset < data.len() {
+            let n = (data.len() - offset).min(SPI_CHUNK);
             embassy_futures::yield_now().await;
-            let _ = self.transfer(byte);
+            // Copy first. A literal slice can live in flash, and EasyDMA cannot read it.
+            let mut tx = [0xFFu8; SPI_CHUNK];
+            tx[..n].copy_from_slice(&data[offset..offset + n]);
+            let mut rx = [0u8; SPI_CHUNK];
+            self.exchange(&tx[..n], &mut rx[..n])?;
+            offset += n;
         }
         Ok(())
     }
 
-    fn probe_hardware_spi(&mut self) {
-        let clocks = [0xFFu8; 10];
-        let mut ignored = [0u8; 10];
-        self.cs.set_high();
-        let primed = self.hardware_spi_exchange(&clocks, &mut ignored);
-        self.cs.set_low();
-        let mut frame = [0xFFu8; 14];
-        frame[..6].copy_from_slice(&[0x40, 0, 0, 0, 0, CMD0_CRC]);
-        let mut received = [0u8; 14];
-        let finished = self.hardware_spi_exchange(&frame, &mut received);
-        self.cs.set_high();
-        let _ = self.hardware_spi_exchange(&clocks[..1], &mut ignored[..1]);
-        if !primed || !finished {
-            write_console(format_args!("sd: spim timeout"));
-        }
-        let mut hex = heapless::String::<28>::new();
-        for byte in received {
-            let _ = write!(hex, "{byte:02x}");
-        }
-        write_console(format_args!("sd: spim {hex}"));
-    }
-
-    fn hardware_spi_exchange(&mut self, tx: &[u8], rx: &mut [u8]) -> bool {
+    fn arm_spim(&mut self) {
+        use embassy_nrf::pac::gpio::vals::{Dir, Drive, Input, Pull};
         use embassy_nrf::pac::shared::regs::Psel;
         use embassy_nrf::pac::spim::vals::{Cpha, Cpol, Enable, Frequency, Order};
 
+        // Hold the pins so nothing else claims them. SPIM drives SCK and MOSI after this.
+        let _pins = (&self.sck, &self.mosi, &self.miso);
+        // A PIN_CNF write replaces the whole register. Chip-select must stay an
+        // output here or set_low only changes the latch and the card stays deselected.
+        // SCK stays an output whose input buffer is connected. MOSI idles low.
+        // MISO keeps the pull-up the card needs while it is deselected.
+        embassy_nrf::pac::P0.pin_cnf(6).write(|w| {
+            w.set_dir(Dir::OUTPUT);
+            w.set_input(Input::CONNECT);
+            w.set_pull(Pull::DISABLED);
+            w.set_drive(Drive::H0H1);
+        });
+        embassy_nrf::pac::P0.outclr().write(|w| w.set_pin(6, true));
+        embassy_nrf::pac::P1.pin_cnf(1).write(|w| {
+            w.set_dir(Dir::OUTPUT);
+            w.set_input(Input::DISCONNECT);
+            w.set_pull(Pull::DISABLED);
+            w.set_drive(Drive::H0H1);
+        });
+        embassy_nrf::pac::P1.outclr().write(|w| w.set_pin(1, true));
+        embassy_nrf::pac::P0.pin_cnf(26).write(|w| {
+            w.set_dir(Dir::INPUT);
+            w.set_input(Input::CONNECT);
+            w.set_pull(Pull::PULLUP);
+        });
+        embassy_nrf::pac::P1.pin_cnf(0).write(|w| {
+            w.set_dir(Dir::OUTPUT);
+            w.set_input(Input::DISCONNECT);
+            w.set_pull(Pull::DISABLED);
+            w.set_drive(Drive::H0H1);
+        });
+        embassy_nrf::pac::P1.outset().write(|w| w.set_pin(0, true));
+
         let spi = embassy_nrf::pac::SPIM2;
-        let connected = |pin: u32| Psel(pin);
-        let disconnected = Psel(1 << 31);
-        spi.psel().sck().write_value(connected(6));
-        spi.psel().mosi().write_value(connected(33));
-        spi.psel().miso().write_value(connected(26));
-        spi.enable().write(|w| w.set_enable(Enable::ENABLED));
+        spi.psel().sck().write_value(Psel(6));
+        spi.psel().mosi().write_value(Psel(33));
+        spi.psel().miso().write_value(Psel(26));
         spi.config().write(|w| {
             w.set_order(Order::MSB_FIRST);
             w.set_cpol(Cpol::ACTIVE_HIGH);
             w.set_cpha(Cpha::LEADING);
         });
-        spi.frequency().write(|w| w.set_frequency(Frequency::K250));
         spi.orc().write(|w| w.set_orc(0xFF));
+        self.set_spim_hz(Frequency::K125);
+        spi.enable().write(|w| w.set_enable(Enable::ENABLED));
+    }
+
+    fn set_spim_hz(&mut self, frequency: embassy_nrf::pac::spim::vals::Frequency) {
+        embassy_nrf::pac::SPIM2
+            .frequency()
+            .write(|w| w.set_frequency(frequency));
+    }
+
+    fn exchange(&mut self, tx: &[u8], rx: &mut [u8]) -> Result<(), CardError> {
+        let spi = embassy_nrf::pac::SPIM2;
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         spi.dma().rx().ptr().write_value(rx.as_mut_ptr() as u32);
         spi.dma()
@@ -1415,39 +2020,13 @@ impl SdCard {
         while spi.events_end().read() == 0 {
             spins = spins.saturating_add(1);
             if spins > 2_000_000 {
-                break;
+                spi.events_stopped().write_value(0);
+                spi.tasks_stop().write_value(1);
+                return Err(CardError::Spi);
             }
         }
-        let finished = spi.events_end().read() != 0;
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        spi.psel().sck().write_value(disconnected);
-        spi.psel().mosi().write_value(disconnected);
-        spi.psel().miso().write_value(disconnected);
-        spi.enable().write(|w| w.set_enable(Enable::DISABLED));
-        self.sck.set_low();
-        self.mosi.set_high();
-        finished
-    }
-
-    fn transfer(&mut self, out: u8) -> u8 {
-        let mut input = 0u8;
-        for bit in (0..8).rev() {
-            if out & (1 << bit) == 0 {
-                self.mosi.set_low();
-            } else {
-                self.mosi.set_high();
-            }
-            cortex_m::asm::delay(HALF_BIT_CYCLES);
-            self.sck.set_high();
-            cortex_m::asm::delay(HALF_BIT_CYCLES);
-            input <<= 1;
-            if self.miso.is_high() {
-                input |= 1;
-            }
-            self.sck.set_low();
-        }
-        self.mosi.set_high();
-        input
+        Ok(())
     }
 
     async fn write_clocks(&mut self, count: usize) -> Result<(), CardError> {
@@ -1554,6 +2133,7 @@ impl PartialFile {
         self.stream = StreamSlot::Present(StreamInfo {
             first_cluster: le_u32_at(&entry, 20),
             valid_bytes: le_u64_at(&entry, 8),
+            allocated_bytes: le_u64_at(&entry, 24),
             chain,
         });
     }
@@ -1592,6 +2172,7 @@ impl PartialFile {
         ScanControl::Found(RootFile {
             first_cluster: stream.first_cluster,
             valid_bytes: stream.valid_bytes,
+            allocated_bytes: stream.allocated_bytes,
             chain: stream.chain,
         })
     }
@@ -1844,6 +2425,26 @@ fn user_button_held() -> bool {
     value & (1 << 10) == 0
 }
 
+fn bitmap_cluster_span(bitmap: BitmapLoc, sectors_per_cluster: u32) -> u32 {
+    let sectors = bitmap.bytes.div_ceil(BLOCK as u64);
+    let spc = u64::from(sectors_per_cluster.max(1));
+    u32::try_from(sectors.div_ceil(spc).max(1)).unwrap_or(u32::MAX)
+}
+
+fn clusters_covering(bytes: u64, sectors_per_cluster: u32) -> Result<u32, VolumeError> {
+    if bytes == 0 {
+        return Ok(0);
+    }
+    if sectors_per_cluster == 0 {
+        return Err(VolumeError::Geometry);
+    }
+    let cluster_bytes = u64::from(sectors_per_cluster).saturating_mul(BLOCK as u64);
+    if cluster_bytes == 0 {
+        return Err(VolumeError::Geometry);
+    }
+    u32::try_from(bytes.div_ceil(cluster_bytes)).map_err(|_| VolumeError::ImageRejected)
+}
+
 fn firmware_vector_ok(header: &[u8]) -> bool {
     let sp = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
     let reset = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
@@ -1874,26 +2475,32 @@ macro_rules! sd_log {
 }
 
 fn block_buffer() -> &'static mut [u8; BLOCK] {
-    static BLOCK_BUFFER: StaticCell<[u8; BLOCK]> = StaticCell::new();
-    BLOCK_BUFFER.init([0; BLOCK])
+    firmware_scratch()
 }
 
-pub(crate) async fn publish_test_file(card: SdCard) {
+pub(crate) fn firmware_scratch() -> &'static mut [u8; BLOCK] {
+    static mut SCRATCH: [u8; BLOCK] = [0; BLOCK];
+    // SAFETY: boot finishes its card scan before the update task borrows this buffer,
+    // and those two callers never hold it at the same time.
+    unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) }
+}
+
+pub(crate) async fn publish_test_file(card: SdCard) -> SdCard {
     #[cfg(feature = "image-battery-sense")]
     {
-        let _card = card;
+        return card;
     }
     #[cfg(all(not(feature = "image-battery-sense"), feature = "image-spruce-101"))]
     {
-        let _card = card;
         Timer::after(SETTLE).await;
         sd_log!("{BOOT_ID}");
+        return card;
     }
     #[cfg(all(
         not(feature = "image-battery-sense"),
         not(feature = "image-spruce-101")
     ))]
-    alder_boot(card).await;
+    alder_boot(card).await
 }
 
 // Card read/write proof, kept out of the boot path. It read /Test.txt, then wrote and
@@ -2008,7 +2615,7 @@ pub(crate) async fn publish_test_file(card: SdCard) {
     not(feature = "image-battery-sense"),
     not(feature = "image-spruce-101")
 ))]
-async fn alder_boot(mut card: SdCard) {
+async fn alder_boot(mut card: SdCard) -> SdCard {
     sd_log!("sd: boot {BOOT_ID}");
     Timer::after(SETTLE).await;
     let scratch = block_buffer();
@@ -2024,7 +2631,7 @@ async fn alder_boot(mut card: SdCard) {
                     Err(error) => {
                         sd_log!("sd: rename {error}");
                         sd_log!("sd: boot {BOOT_ID}");
-                        return;
+                        return card;
                     }
                 }
                 Timer::after(Duration::from_millis(300)).await;
@@ -2037,9 +2644,11 @@ async fn alder_boot(mut card: SdCard) {
         Err(error) => sd_log!("sd: firmware.bin {error}"),
     }
     sd_log!("sd: boot {BOOT_ID}");
+    card
 }
 
 #[embassy_executor::task]
 pub(crate) async fn publish_root_test_file(card: SdCard) {
-    publish_test_file(card).await;
+    let card = publish_test_file(card).await;
+    super::ota::serve(card).await;
 }

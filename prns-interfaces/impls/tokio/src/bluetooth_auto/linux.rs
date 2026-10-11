@@ -27,11 +27,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
 use prns_core::interfaces::bluetooth_auto::{
-    columba_connection_role, columba_role_capabilities_from_manufacturer, encode_stream_frame,
-    fragments_of, BleAddress, BleIdentity, BleRoleCapabilities, BleUuid, ColumbaConnectionRole,
-    Control, Fragment, L2capPlan, PeerProtocol, Psm, Reassembler, StreamDeframer, BLE_HW_MTU,
-    BLE_SERVICE_UUID, COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID, COLUMBA_TX_UUID, CONTROL_MAX_LEN,
-    FRAGMENT_HEADER_LEN, NATIVE_CONTROL_UUID, NATIVE_DATA_UUID, STREAM_FRAME_PREFIX_LEN,
+    columba_connection_role, columba_role_capabilities_from_manufacturer,
+    dispatch_firmware_copy_notification, encode_stream_frame, fragments_of, BleAddress,
+    BleIdentity, BleRoleCapabilities, BleUuid, ColumbaConnectionRole, Control, Fragment, L2capPlan,
+    PeerProtocol, Psm, Reassembler, StreamDeframer, BLE_HW_MTU, BLE_SERVICE_UUID,
+    COLUMBA_IDENTITY_UUID, COLUMBA_RX_UUID, COLUMBA_TX_UUID, CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN,
+    NATIVE_CONTROL_UUID, NATIVE_DATA_UUID, STREAM_FRAME_PREFIX_LEN,
 };
 use prns_core::interfaces::bluetooth_auto::{
     AdvertisingMode, BleBackend, BleEvent, BleLink, BleSink, BleSource, DialOutcome, Origin,
@@ -2519,6 +2520,9 @@ impl BleSource for GattSource {
                     continue;
                 }
             };
+            if dispatch_firmware_copy_notification(&chunk) {
+                continue;
+            }
             let Some(fragment) = Fragment::decode(&chunk) else {
                 continue;
             };

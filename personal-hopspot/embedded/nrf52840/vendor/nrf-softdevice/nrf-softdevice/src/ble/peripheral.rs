@@ -45,7 +45,10 @@ pub enum ConnectableAdvertisement<'a> {
 impl<'a> From<ConnectableAdvertisement<'a>> for RawAdvertisement<'a> {
     fn from(val: ConnectableAdvertisement<'a>) -> RawAdvertisement<'a> {
         match val {
-            ConnectableAdvertisement::ScannableUndirected { adv_data, scan_data } => RawAdvertisement {
+            ConnectableAdvertisement::ScannableUndirected {
+                adv_data,
+                scan_data,
+            } => RawAdvertisement {
                 kind: raw::BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED as u8,
                 adv_data: Some(adv_data),
                 scan_data: Some(scan_data),
@@ -70,16 +73,22 @@ impl<'a> From<ConnectableAdvertisement<'a>> for RawAdvertisement<'a> {
                 set_id: 0,
             },
             #[cfg(any(feature = "s132", feature = "s140"))]
-            ConnectableAdvertisement::ExtendedNonscannableUndirected { adv_data, set_id } => RawAdvertisement {
-                kind: raw::BLE_GAP_ADV_TYPE_EXTENDED_CONNECTABLE_NONSCANNABLE_UNDIRECTED as u8,
-                adv_data: Some(adv_data),
-                scan_data: None,
-                peer: None,
-                anonymous: false,
-                set_id,
-            },
+            ConnectableAdvertisement::ExtendedNonscannableUndirected { adv_data, set_id } => {
+                RawAdvertisement {
+                    kind: raw::BLE_GAP_ADV_TYPE_EXTENDED_CONNECTABLE_NONSCANNABLE_UNDIRECTED as u8,
+                    adv_data: Some(adv_data),
+                    scan_data: None,
+                    peer: None,
+                    anonymous: false,
+                    set_id,
+                }
+            }
             #[cfg(any(feature = "s132", feature = "s140"))]
-            ConnectableAdvertisement::ExtendedNonscannableDirected { adv_data, peer, set_id } => RawAdvertisement {
+            ConnectableAdvertisement::ExtendedNonscannableDirected {
+                adv_data,
+                peer,
+                set_id,
+            } => RawAdvertisement {
                 kind: raw::BLE_GAP_ADV_TYPE_EXTENDED_CONNECTABLE_NONSCANNABLE_DIRECTED as u8,
                 adv_data: Some(adv_data),
                 scan_data: None,
@@ -132,7 +141,10 @@ pub enum NonconnectableAdvertisement<'a> {
 impl<'a> From<NonconnectableAdvertisement<'a>> for RawAdvertisement<'a> {
     fn from(val: NonconnectableAdvertisement<'a>) -> RawAdvertisement<'a> {
         match val {
-            NonconnectableAdvertisement::ScannableUndirected { adv_data, scan_data } => RawAdvertisement {
+            NonconnectableAdvertisement::ScannableUndirected {
+                adv_data,
+                scan_data,
+            } => RawAdvertisement {
                 kind: raw::BLE_GAP_ADV_TYPE_NONCONNECTABLE_SCANNABLE_UNDIRECTED as _,
                 adv_data: Some(adv_data),
                 scan_data: Some(scan_data),
@@ -149,14 +161,16 @@ impl<'a> From<NonconnectableAdvertisement<'a>> for RawAdvertisement<'a> {
                 set_id: 0,
             },
             #[cfg(any(feature = "s132", feature = "s140"))]
-            NonconnectableAdvertisement::ExtendedScannableUndirected { scan_data, set_id } => RawAdvertisement {
-                kind: raw::BLE_GAP_ADV_TYPE_EXTENDED_NONCONNECTABLE_SCANNABLE_UNDIRECTED as _,
-                adv_data: None,
-                scan_data: Some(scan_data),
-                peer: None,
-                anonymous: false,
-                set_id,
-            },
+            NonconnectableAdvertisement::ExtendedScannableUndirected { scan_data, set_id } => {
+                RawAdvertisement {
+                    kind: raw::BLE_GAP_ADV_TYPE_EXTENDED_NONCONNECTABLE_SCANNABLE_UNDIRECTED as _,
+                    adv_data: None,
+                    scan_data: Some(scan_data),
+                    peer: None,
+                    anonymous: false,
+                    set_id,
+                }
+            }
             #[cfg(any(feature = "s132", feature = "s140"))]
             NonconnectableAdvertisement::ExtendedScannableDirected {
                 scan_data,
@@ -225,7 +239,11 @@ fn start_adv(adv: RawAdvertisement<'_>, config: &Config) -> Result<(), Advertise
     adv_params.properties.type_ = adv.kind;
     adv_params.properties.set_anonymous(u8::from(adv.anonymous));
 
-    adv_params.p_peer_addr = adv.peer.as_ref().map(|x| x.as_raw() as *const _).unwrap_or(ptr::null());
+    adv_params.p_peer_addr = adv
+        .peer
+        .as_ref()
+        .map(|x| x.as_raw() as *const _)
+        .unwrap_or(ptr::null());
     adv_params.primary_phy = config.primary_phy as u8;
     adv_params.secondary_phy = config.secondary_phy as u8;
     adv_params.duration = config.timeout.map(|t| t.max(1)).unwrap_or(0);
@@ -255,8 +273,13 @@ fn start_adv(adv: RawAdvertisement<'_>, config: &Config) -> Result<(), Advertise
         scan_rsp_data: map_data(adv.scan_data),
     };
 
-    let ret =
-        unsafe { raw::sd_ble_gap_adv_set_configure(ptr::addr_of!(ADV_HANDLE) as _, &datas as _, &adv_params as _) };
+    let ret = unsafe {
+        raw::sd_ble_gap_adv_set_configure(
+            ptr::addr_of!(ADV_HANDLE) as _,
+            &datas as _,
+            &adv_params as _,
+        )
+    };
     RawError::convert(ret).map_err(|err| {
         warn!("sd_ble_gap_adv_set_configure err {:?}", err);
         err
@@ -329,9 +352,20 @@ pub async fn advertise_pairable<'a>(
     config: &'a Config,
     security_handler: &'static dyn crate::ble::security::SecurityHandler,
 ) -> Result<Connection, AdvertiseError> {
-    advertise_inner(sd, adv, config, |conn_handle, role, peer_address, conn_params| {
-        Connection::with_security_handler(conn_handle, role, peer_address, conn_params, security_handler)
-    })
+    advertise_inner(
+        sd,
+        adv,
+        config,
+        |conn_handle, role, peer_address, conn_params| {
+            Connection::with_security_handler(
+                conn_handle,
+                role,
+                peer_address,
+                conn_params,
+                security_handler,
+            )
+        },
+    )
     .await
 }
 

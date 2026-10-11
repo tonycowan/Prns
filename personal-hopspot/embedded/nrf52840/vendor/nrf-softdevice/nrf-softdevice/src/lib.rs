@@ -11,7 +11,9 @@ pub(crate) mod util;
 compile_error!("the Prns compatibility fork contains only S140 bindings");
 
 #[cfg(not(any(feature = "ble-central", feature = "ble-peripheral",)))]
-compile_error!("You must activate at least one of the following features: ble-central, ble-peripheral");
+compile_error!(
+    "You must activate at least one of the following features: ble-central, ble-peripheral"
+);
 
 #[cfg(not(any(
     feature = "s112",

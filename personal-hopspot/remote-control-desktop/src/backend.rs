@@ -122,6 +122,9 @@ const ROSTER_WARM_GAP: Duration = Duration::from_secs(3);
 const ROSTER_COLD_BACKOFF_MAX: Duration = Duration::from_secs(30);
 const ROSTER_FETCH_WAIT: Duration = Duration::from_secs(20);
 const TARGET_MONITOR_TTL: Duration = Duration::from_secs(10 * 60);
+/// Refresh Connect once the countdown is this close, while image bytes are still
+/// being confirmed. The send keeps its own ten minute runway.
+const FIRMWARE_MONITOR_REFRESH: Duration = Duration::from_secs(2 * 60);
 /// After Connect drops a route, prefer a direct BLE path when we already have that peer live.
 const DIRECT_PATH_GRACE: Duration = Duration::from_secs(4);
 
@@ -460,6 +463,8 @@ async fn send_update_frame(
 /// node where the inactive slot actually ends and continues from there.
 const FIRMWARE_RESUME_ATTEMPTS: u32 = 32;
 const FIRMWARE_RESUME_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// A MeshTower chunk waits out the card write and, on resume, a reread of the prefix.
+const FIRMWARE_CHUNK_CONFIRM_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
 
 fn parse_resume_offset(data: &[u8]) -> Option<u64> {
     let text = std::str::from_utf8(data).ok()?.trim();
@@ -504,8 +509,9 @@ async fn request_install_path(
 async fn wait_for_resume_offset(
     session: &ControllerSession,
     link_id: personal_rns::routing::links::LinkId,
+    wait: std::time::Duration,
 ) -> Result<usize, BackendError> {
-    let deadline = std::time::Instant::now() + FIRMWARE_RESUME_WAIT;
+    let deadline = std::time::Instant::now() + wait;
     loop {
         let offered = *session
             .firmware_resume
@@ -520,14 +526,28 @@ async fn wait_for_resume_offset(
                 detail: format!("the node asked to resume at {offset}, which does not fit"),
             });
         }
-        if std::time::Instant::now() >= deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
             return Err(BackendError::Operation {
                 operation: "firmware update",
                 detail: "the node did not say where to resume".to_string(),
             });
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The event callback stores the offset, then wakes this wait. A permit that
+        // arrives before `notified` is consumed on the next poll, and the slot is
+        // read again above.
+        tokio::select! {
+            _ = session.firmware_resume_ready.notified() => {}
+            _ = tokio::time::sleep(remaining) => {}
+        }
     }
+}
+
+fn clear_firmware_resume(session: &ControllerSession) {
+    *session
+        .firmware_resume
+        .lock()
+        .expect("firmware resume mutex poisoned") = None;
 }
 
 async fn abandon_firmware_link(
@@ -1777,6 +1797,19 @@ impl RemoteControlBackend {
         };
         if let Ok(mut until) = session.monitor_until.lock() {
             until.insert(target_id.to_owned(), Instant::now() + TARGET_MONITOR_TTL);
+        }
+        self.claim_target_attention(target_id);
+    }
+
+    /// Keep Connect from expiring while a firmware image is still being sent.
+    fn hold_target_monitor_for_firmware(&self, target_id: &str) {
+        let Ok(session) = self.session() else {
+            return;
+        };
+        let now = Instant::now();
+        if let Ok(mut until) = session.monitor_until.lock() {
+            let deadline = firmware_monitor_deadline(until.get(target_id).copied(), now);
+            until.insert(target_id.to_owned(), deadline);
         }
         self.claim_target_attention(target_id);
     }
@@ -3392,6 +3425,7 @@ impl RemoteControlBackend {
         &self,
         target_id: &str,
         image_path: &std::path::Path,
+        confirm_each_chunk: bool,
         mut report: impl FnMut(&str, Option<u8>),
     ) -> Result<(), BackendError> {
         let image = std::fs::read(image_path).map_err(|error| BackendError::Operation {
@@ -3461,6 +3495,7 @@ impl RemoteControlBackend {
                 report(status, percent);
             }
         };
+        self.hold_target_monitor_for_firmware(target_id);
         let digest = prns_core::crypto::sha256(&image);
         let chunk = personal_rns::routing::links::channel::byte_stream::max_stream_payload(
             personal_rns::wire::BROADCAST_MTU,
@@ -3518,15 +3553,16 @@ impl RemoteControlBackend {
                 abandon_firmware_link(session, link_id).await;
                 continue;
             }
-            let resume_at = match wait_for_resume_offset(session, link_id).await {
-                Ok(offset) => offset,
-                Err(error) => {
-                    eprintln!("firmware update: resume offer missing: {error}");
-                    last_error = Some(error);
-                    abandon_firmware_link(session, link_id).await;
-                    continue;
-                }
-            };
+            let resume_at =
+                match wait_for_resume_offset(session, link_id, FIRMWARE_RESUME_WAIT).await {
+                    Ok(offset) => offset,
+                    Err(error) => {
+                        eprintln!("firmware update: resume offer missing: {error}");
+                        last_error = Some(error);
+                        abandon_firmware_link(session, link_id).await;
+                        continue;
+                    }
+                };
             if resume_at > image.len() {
                 session.handle.close_link(link_id);
                 return Err(BackendError::Operation {
@@ -3549,10 +3585,35 @@ impl RemoteControlBackend {
                 eprintln!("firmware update: resuming at {resume_at}");
             }
             let length = (image.len() as u32).to_be_bytes();
+            if confirm_each_chunk {
+                clear_firmware_resume(session);
+            }
             if let Err(error) = send_update_frame(&session.handle, link_id, &length, false).await {
                 last_error = Some(error);
                 abandon_firmware_link(session, link_id).await;
                 continue;
+            }
+            if confirm_each_chunk {
+                match wait_for_resume_offset(session, link_id, FIRMWARE_CHUNK_CONFIRM_WAIT).await {
+                    Ok(ready) if ready == resume_at => {}
+                    Ok(ready) => {
+                        eprintln!("firmware update: card is at {ready}, expected {resume_at}");
+                        last_error = Some(BackendError::Operation {
+                            operation: "firmware update",
+                            detail: format!(
+                                "the node resumed at {ready} bytes after the image length"
+                            ),
+                        });
+                        abandon_firmware_link(session, link_id).await;
+                        continue;
+                    }
+                    Err(error) => {
+                        eprintln!("firmware update: card was not ready: {error}");
+                        last_error = Some(error);
+                        abandon_firmware_link(session, link_id).await;
+                        continue;
+                    }
+                }
             }
             let mut offset = resume_at;
             let mut last_percent = ((offset as u64 * 100) / image.len() as u64) as u8;
@@ -3560,6 +3621,9 @@ impl RemoteControlBackend {
             while offset < image.len() {
                 let end = (offset + chunk).min(image.len());
                 let eof = end == image.len();
+                if confirm_each_chunk {
+                    clear_firmware_resume(session);
+                }
                 if let Err(error) =
                     send_update_frame(&session.handle, link_id, &image[offset..end], eof).await
                 {
@@ -3579,7 +3643,53 @@ impl RemoteControlBackend {
                     stalled = true;
                     break;
                 }
+                if confirm_each_chunk {
+                    match wait_for_resume_offset(session, link_id, FIRMWARE_CHUNK_CONFIRM_WAIT)
+                        .await
+                    {
+                        Ok(confirmed) if confirmed == end => {}
+                        Ok(confirmed) => {
+                            eprintln!(
+                                "firmware update: card confirmed {confirmed}, sent through {end}"
+                            );
+                            report(
+                                &format!(
+                                    "Link stalled at {} of {}. Reconnecting",
+                                    format_transfer_bytes(offset),
+                                    format_transfer_bytes(image.len())
+                                ),
+                                Some(last_percent),
+                            );
+                            last_error = Some(BackendError::Operation {
+                                operation: "firmware update",
+                                detail: format!(
+                                    "the node stored {confirmed} bytes after {end} were sent"
+                                ),
+                            });
+                            stalled = true;
+                            break;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "firmware update: stalled at {offset} of {} ({error})",
+                                image.len()
+                            );
+                            report(
+                                &format!(
+                                    "Link stalled at {} of {}. Reconnecting",
+                                    format_transfer_bytes(offset),
+                                    format_transfer_bytes(image.len())
+                                ),
+                                Some(last_percent),
+                            );
+                            last_error = Some(error);
+                            stalled = true;
+                            break;
+                        }
+                    }
+                }
                 offset = end;
+                self.hold_target_monitor_for_firmware(target_id);
                 let percent = ((offset as u64 * 100) / image.len() as u64) as u8;
                 if percent != last_percent {
                     last_percent = percent;
@@ -3607,12 +3717,17 @@ impl RemoteControlBackend {
                 }
             }
             let elapsed = format_elapsed(transfer_started.elapsed());
-            report(
-                &format!("Image sent in {elapsed}. Waiting for the node to install it"),
-                Some(100),
-            );
-            eprintln!("firmware update: image sent in {elapsed}, waiting for install");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            eprintln!("firmware update: image sent in {elapsed}");
+            // MeshTower shuts the radio down before it programs flash, so there is
+            // no copy progress to follow. A zero percent here redraws the send meter
+            // from the start. The card already confirmed the last byte.
+            if !confirm_each_chunk {
+                report(
+                    &format!("Image sent in {elapsed}. Waiting for the node to install it"),
+                    Some(100),
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
             let _ = session.handle.request_path(destination).await;
             return Ok(());
         }
@@ -4720,6 +4835,8 @@ struct ControllerSession {
     tcp_interface_hosts: Mutex<HashMap<String, String>>,
     /// Latest `resume <offset>` offered by a firmware-update link.
     firmware_resume: Arc<Mutex<Option<(personal_rns::routing::links::LinkId, u64)>>>,
+    /// Signaled after [`Self::firmware_resume`] is written.
+    firmware_resume_ready: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5106,6 +5223,8 @@ impl ControllerSession {
         let pairing_events = pairing.clone();
         let firmware_resume = Arc::new(Mutex::new(None));
         let firmware_resume_events = firmware_resume.clone();
+        let firmware_resume_ready = Arc::new(tokio::sync::Notify::new());
+        let firmware_resume_ready_events = firmware_resume_ready.clone();
         let announce_stream_for_events = announce_stream_events;
         let local_instance_hash = instance_material.identity_hash();
         let node = PrnsNode::new(PrnsNodeRecipe {
@@ -5286,6 +5405,7 @@ impl ControllerSession {
                         *firmware_resume_events
                             .lock()
                             .expect("firmware resume mutex poisoned") = Some((link_id, offset));
+                        firmware_resume_ready_events.notify_one();
                     }
                 }
                 PrnsEvent::Message(_) | PrnsEvent::Diagnostic(_) => {}
@@ -5500,6 +5620,7 @@ impl ControllerSession {
             address_labels: Mutex::new(HashMap::new()),
             tcp_interface_hosts: Mutex::new(HashMap::new()),
             firmware_resume,
+            firmware_resume_ready,
         })
     }
 
@@ -6643,6 +6764,15 @@ fn not_monitoring(target_id: &str) -> BackendError {
     BackendError::Operation {
         operation: "connect to target",
         detail: format!("this controller is not connected to {target_id}"),
+    }
+}
+
+fn firmware_monitor_deadline(current: Option<Instant>, now: Instant) -> Instant {
+    let runway = now + TARGET_MONITOR_TTL;
+    let refresh_at = now + FIRMWARE_MONITOR_REFRESH;
+    match current {
+        Some(deadline) if deadline > refresh_at => deadline,
+        _ => runway,
     }
 }
 
@@ -10148,7 +10278,8 @@ mod tests {
         bluetooth_auto_title, clone_announce_is_usb_local, control_announce_satisfies,
         controller_identity_secret_path, encode_hex, endpoint_matches_wifi_ll_keys,
         ensure_wifi_auto_tcp_client, format_activity_age, format_announce_millis,
-        format_connect_label, format_hop_count, format_interface, format_managed_node_battery,
+        firmware_monitor_deadline, format_connect_label, format_hop_count, format_interface,
+        format_managed_node_battery,
         format_next_hop, format_pairing_open_label, format_target_announce, format_target_route,
         format_utc_millis, generic_bluetooth_auto_title, insert_known_label,
         instance_identity_secret_path, interface_peer, interface_peer_from_wire,
@@ -10207,6 +10338,20 @@ mod tests {
                 .expect("stored target"),
             ("192.0.2.10:4242".to_string(), false)
         );
+    }
+
+    #[test]
+    fn firmware_send_refreshes_a_connect_window_that_is_about_to_close() {
+        let now = Instant::now();
+        let soon = now + Duration::from_secs(30);
+        let held = firmware_monitor_deadline(Some(soon), now);
+        assert!(held > now + Duration::from_secs(9 * 60));
+        let comfortable = now + Duration::from_secs(8 * 60);
+        assert_eq!(
+            firmware_monitor_deadline(Some(comfortable), now),
+            comfortable
+        );
+        assert!(firmware_monitor_deadline(None, now) > now + Duration::from_secs(9 * 60));
     }
 
     #[test]

@@ -11,8 +11,16 @@ use crate::boards::selected as board;
 use super::bluetooth;
 use super::{PrnsNodeHandle, COMMANDS, COMPLETION};
 
-pub(super) const INTERFACE_CAPACITY: usize = 2 + bluetooth::MEMBERS;
-pub(super) const LANE_COUNT: usize = 3;
+pub(super) const INTERFACE_CAPACITY: usize = 1
+    + bluetooth::MEMBERS
+    + cfg!(not(all(
+        feature = "board-mesh-tower-v2",
+        feature = "usb-debug-log"
+    ))) as usize;
+pub(super) const LANE_COUNT: usize = 2 + cfg!(not(all(
+    feature = "board-mesh-tower-v2",
+    feature = "usb-debug-log"
+))) as usize;
 
 pub(super) const fn heartbeat_timing() -> &'static super::super::heartbeat::HeartbeatTiming {
     &super::super::heartbeat::NORMAL

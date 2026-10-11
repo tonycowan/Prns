@@ -145,7 +145,8 @@ impl<T> Portal<T> {
         // If the future gets cancelled from the outside, this gets dropped,
         // and resets the state of the portal to None
         let _bomb = OnDrop::new(|| {
-            self.state.lock(|mut state| *(state.borrow_mut()) = State(None));
+            self.state
+                .lock(|mut state| *(state.borrow_mut()) = State(None));
         });
 
         self.set_function_pointer(&mut call_func);

@@ -4,10 +4,13 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::Timer;
 use embassy_usb::{Builder, Config as UsbConfig};
-use static_cell::{ConstStaticCell, StaticCell};
+#[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
+use static_cell::ConstStaticCell;
+use static_cell::StaticCell;
 
 use personal_hopspot_core as hopspot;
 use personal_rns::engine::IssuedCommand;
+#[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
 use personal_rns::interfaces::lora::{AirtimePolicy, LORA_MAX_PAYLOAD};
 #[cfg(not(any(
     feature = "board-t096",
@@ -18,7 +21,9 @@ use personal_rns::interfaces::lora::{AirtimePolicy, LORA_MAX_PAYLOAD};
 use personal_rns::interfaces::subghz::SubGConfigurationState;
 use personal_rns::interfaces::usb_auto::{WEBUSB_PRODUCT_ID, WEBUSB_VENDOR_ID};
 use personal_rns::interfaces::{ConnectionState, InterfaceId};
-use personal_rns::lora::{LoRaControl, LoRaInterface, LoRaInterfaceInput, LoRaSpectrumStatus};
+use personal_rns::lora::LoRaControl;
+#[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
+use personal_rns::lora::{LoRaInterface, LoRaInterfaceInput, LoRaSpectrumStatus};
 use personal_rns::manifold::embassy::{EmbassyHost, EmbassyInterfaceStatus, InterfaceLifecycle};
 use personal_rns::manifold::interface_seam::Interface;
 use personal_rns::remote_control::{
@@ -37,8 +42,8 @@ use personal_rns::usb_auto::{
 
 use crate::boards::selected as board;
 use board::{
-    Board, Hardware, LoraInterface, Storage, ANNOUNCE_APP_DATA, NODE_ANNOUNCE_APP_DATA,
-    USB_INTERFACE_ID, USB_MANUFACTURER, USB_PRODUCT, USB_SERIAL_NUMBER,
+    Board, Hardware, Storage, ANNOUNCE_APP_DATA, NODE_ANNOUNCE_APP_DATA, USB_INTERFACE_ID,
+    USB_MANUFACTURER, USB_PRODUCT, USB_SERIAL_NUMBER,
 };
 
 #[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
@@ -107,7 +112,10 @@ mod selected;
 #[path = "t1000e.rs"]
 mod selected;
 
+#[cfg(not(feature = "usb-debug-log"))]
 const USB_CONFIG_DESCRIPTOR_BYTES: usize = 64;
+#[cfg(feature = "usb-debug-log")]
+const USB_CONFIG_DESCRIPTOR_BYTES: usize = 256;
 const USB_BOS_DESCRIPTOR_BYTES: usize = 64;
 const WINDOWS_MSOS_VENDOR_CODE: u8 = 0x20;
 const INTERFACE_CAPACITY: usize = selected::INTERFACE_CAPACITY;
@@ -115,7 +123,9 @@ const LANE_COUNT: usize = selected::LANE_COUNT;
 const LANE_DEPTH: usize = 1;
 use super::node_name;
 
+#[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
 const LORA_TX_QUEUE_BYTES: usize = 1024;
+#[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
 const LORA_OUTBOUND_DEPTH: usize = Storage::MAX_OUTGOING_RESOURCE_REACTION_FRAMES;
 #[cfg(any(
     feature = "board-t096",
@@ -190,6 +200,7 @@ pub(super) static COMPLETION: CompletionPool<Mtx, COMPLETIONS_CAP> = CompletionP
 static INTERFACE_STORE: InterfaceStore = EmbassyInterfaceStore::new();
 static REMOTE_CONTROL_COMMANDS: hopspot::HopspotCommandMailbox<REMOTE_CONTROL_COMMAND_DEPTH> =
     hopspot::HopspotCommandMailbox::new();
+#[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
 static LORA_MANIFOLD_LANE: StaticManifoldLane<
     Mtx,
     LORA_MAX_PAYLOAD,
@@ -395,7 +406,7 @@ pub async fn run(spawner: Spawner) -> ! {
         cfg!(feature = "usb-debug-log"),
     );
     #[cfg(feature = "usb-debug-log")]
-    let _cdc = {
+    let cdc = {
         use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
         static CDC_STATE: StaticCell<State<'static>> = StaticCell::new();
         CdcAcmClass::new(
@@ -405,6 +416,8 @@ pub async fn run(spawner: Spawner) -> ! {
         )
     };
     let mut usb = builder.build();
+    #[cfg(feature = "usb-debug-log")]
+    super::usb_debug::init();
 
     #[cfg(any(
         feature = "board-t096",
@@ -468,12 +481,24 @@ pub async fn run(spawner: Spawner) -> ! {
         StaticCell::new();
     let initial_controller_grants =
         crate::boards::initial_controller_grants(factory_grant, FACTORY_GRANT_STORAGE.init(None));
-    let remote_control = RemoteControlService::with_capabilities(
+    #[cfg(feature = "board-mesh-tower-v2")]
+    let ota_destination = remote_control_identity_secrets
+        .identities()
+        .target()
+        .firmware_update_destination();
+    #[cfg(feature = "board-mesh-tower-v2")]
+    board::set_firmware_update_destination(ota_destination);
+    #[cfg_attr(not(feature = "board-mesh-tower-v2"), allow(unused_mut))]
+    let mut remote_control = RemoteControlService::with_capabilities(
         remote_control_identity_secrets,
         initial_controller_grants,
         self_announcement,
         remote_control::capabilities(),
     );
+    #[cfg(feature = "board-mesh-tower-v2")]
+    {
+        remote_control = remote_control.with_firmware_update_destination();
+    }
     let mut manifold_lanes = ManifoldLanes::new();
     #[cfg(any(
         feature = "board-t096",
@@ -521,29 +546,39 @@ pub async fn run(spawner: Spawner) -> ! {
     static LORA_STATUS: StaticCell<EmbassyInterfaceStatus> = StaticCell::new();
     let lora_status: &'static EmbassyInterfaceStatus =
         LORA_STATUS.init(EmbassyInterfaceStatus::new_accounted(
-            LoraInterface::unconfigured_interface_id(),
+            board::LoraInterface::unconfigured_interface_id(),
             ConnectionState::Initializing,
         ));
-    static LORA_SPECTRUM: StaticCell<LoRaSpectrumStatus> = StaticCell::new();
-    let lora_spectrum: &'static LoRaSpectrumStatus = LORA_SPECTRUM.init(LoRaSpectrumStatus::new());
-    static LORA_TX_QUEUE: ConstStaticCell<[u8; LORA_TX_QUEUE_BYTES]> =
-        ConstStaticCell::new([0; LORA_TX_QUEUE_BYTES]);
     static LORA_CONTROL: StaticCell<LoRaControl> = StaticCell::new();
     let (lora_controller, lora_control) = LORA_CONTROL.init(LoRaControl::new()).split();
-    let lora = match LoRaInterface::new(LoRaInterfaceInput {
-        radio,
-        configuration: subg_configuration,
-        airtime_policy: AirtimePolicy::Regional,
-        tx_queue: LORA_TX_QUEUE.take(),
-        control: lora_control,
-        status: lora_status,
-        spectrum: lora_spectrum,
-        lifecycle: LIFECYCLE.dyn_sender(),
-    }) {
-        Ok(lora) => lora,
-        Err(_) => panic!("the built-in LoRa profile and regional policy must be valid"),
+    #[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
+    let (lora, lora_spectrum) = {
+        static LORA_SPECTRUM: StaticCell<LoRaSpectrumStatus> = StaticCell::new();
+        let lora_spectrum: &'static LoRaSpectrumStatus =
+            LORA_SPECTRUM.init(LoRaSpectrumStatus::new());
+        static LORA_TX_QUEUE: ConstStaticCell<[u8; LORA_TX_QUEUE_BYTES]> =
+            ConstStaticCell::new([0; LORA_TX_QUEUE_BYTES]);
+        let lora = match LoRaInterface::new(LoRaInterfaceInput {
+            radio,
+            configuration: subg_configuration,
+            airtime_policy: AirtimePolicy::Regional,
+            tx_queue: LORA_TX_QUEUE.take(),
+            control: lora_control,
+            status: lora_status,
+            spectrum: lora_spectrum,
+            lifecycle: LIFECYCLE.dyn_sender(),
+        }) {
+            Ok(lora) => lora,
+            Err(_) => panic!("the built-in LoRa profile and regional policy must be valid"),
+        };
+        lora_status.set_id(lora.id());
+        (lora, lora_spectrum)
     };
-    lora_status.set_id(lora.id());
+    #[cfg(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log"))]
+    {
+        let _ = (radio, lora_control);
+        lora_status.disable();
+    }
 
     let (usb_tx, usb_rx) = class.split();
     static USB_STATUS: StaticCell<EmbassyInterfaceStatus> = StaticCell::new();
@@ -558,6 +593,7 @@ pub async fn run(spawner: Spawner) -> ! {
         host_presence: ProtocolHostPresence::new(),
     });
 
+    #[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
     let lora_lane = manifold_lanes
         .claim_accounted_interface(&LORA_MANIFOLD_LANE, lora.descriptor(), lora_status)
         .expect("LoRa lane is available");
@@ -626,6 +662,7 @@ pub async fn run(spawner: Spawner) -> ! {
     spawner.spawn(board::report_battery(battery).expect("battery task fits"));
     #[cfg(any(feature = "board-rak4631", feature = "board-rak10724"))]
     spawner.spawn(report_rak_battery(battery).expect("battery task fits"));
+    #[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
     let lora_seam = lora_lane.into_seam(NOTIFY.sender(), entropy);
     let usb_seam = usb_lane.into_seam(NOTIFY.sender(), entropy);
     #[cfg(any(
@@ -649,8 +686,12 @@ pub async fn run(spawner: Spawner) -> ! {
             selected::maintain().await;
         }
     };
+    #[cfg(feature = "usb-debug-log")]
+    let usb_task = embassy_futures::join::join(usb.run(), super::usb_debug::drain(cdc));
+    #[cfg(not(feature = "usb-debug-log"))]
+    let usb_task = usb.run();
     let io = join4(
-        usb.run(),
+        usb_task,
         usb_device.run(usb_seam),
         heartbeat,
         embassy_futures::join::join(
@@ -732,30 +773,79 @@ pub async fn run(spawner: Spawner) -> ! {
         feature = "board-muzi-base-duo",
         any(feature = "board-rak4631", feature = "board-rak10724")
     ))]
-    selected::run(
-        io,
-        lora.run(lora_seam),
-        bluetooth::run(sd, bluetooth),
-        remote_control::run_headless(
-            lora_status,
-            usb_status,
-            lora_controller,
-            subg_configuration.into(),
-            #[cfg(not(feature = "board-muzi-base-duo"))]
-            subg_configuration_store,
-            #[cfg(feature = "board-muzi-base-duo")]
-            radio_store,
-            #[cfg(feature = "board-muzi-base-duo")]
-            radio_service,
-        ),
-        button,
-        node_page_destination,
-    )
-    .await;
+    {
+        #[cfg(not(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log")))]
+        let lora_task = lora.run(lora_seam);
+        #[cfg(all(feature = "board-mesh-tower-v2", feature = "usb-debug-log"))]
+        let lora_task = core::future::pending::<()>();
+        selected::run(
+            io,
+            lora_task,
+            bluetooth::run(sd, bluetooth),
+            remote_control::run_headless(
+                lora_status,
+                usb_status,
+                lora_controller,
+                subg_configuration.into(),
+                #[cfg(not(feature = "board-muzi-base-duo"))]
+                subg_configuration_store,
+                #[cfg(feature = "board-muzi-base-duo")]
+                radio_store,
+                #[cfg(feature = "board-muzi-base-duo")]
+                radio_service,
+            ),
+            button,
+            node_page_destination,
+        )
+        .await;
+    }
     core::future::pending().await
 }
 
-fn ignore_events(_event: PrnsEvent<'_>, _state: &AppState) {}
+fn ignore_events(event: PrnsEvent<'_>, _state: &AppState) {
+    #[cfg(feature = "board-mesh-tower-v2")]
+    board::observe_firmware_update(event);
+    #[cfg(not(feature = "board-mesh-tower-v2"))]
+    let _ = event;
+}
+
+#[cfg(feature = "board-mesh-tower-v2")]
+pub(crate) async fn reply_firmware_resume(
+    link_id: personal_rns::routing::links::LinkId,
+    offset: u32,
+) {
+    use personal_rns::routing::links::channel::MessageType;
+
+    let mut reply = heapless::Vec::<u8, 32>::new();
+    let _ = reply.extend_from_slice(b"resume ");
+    let mut value = offset;
+    let mut digits = [0u8; 10];
+    let mut count = 0usize;
+    if value == 0 {
+        let _ = reply.push(b'0');
+    } else {
+        while value > 0 && count < digits.len() {
+            digits[count] = b'0' + (value % 10) as u8;
+            value /= 10;
+            count += 1;
+        }
+        while count > 0 {
+            count -= 1;
+            let _ = reply.push(digits[count]);
+        }
+    }
+    let _ = reply.push(b'\n');
+    let handle = PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION);
+    let _ = handle
+        .send_channel_message(link_id, MessageType(0xff00), &reply)
+        .await;
+}
+
+#[cfg(feature = "board-mesh-tower-v2")]
+pub(crate) fn close_firmware_link(link_id: personal_rns::routing::links::LinkId) {
+    let handle = PrnsNodeHandle::new(COMMANDS.sender(), &COMPLETION);
+    handle.close_link(link_id);
+}
 
 #[cfg(any(feature = "board-t1000e", feature = "board-sensecap-solar-node"))]
 mod node_page_announce;

@@ -23,12 +23,17 @@ pub(crate) unsafe fn on_evt(ble_evt: *const raw::ble_evt_t) {
                 Role::Peripheral => peripheral::ADV_PORTAL.call(ble_evt),
             };
             if !handled {
-                raw::sd_ble_gap_disconnect(gap_evt.conn_handle, raw::BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION as _);
+                raw::sd_ble_gap_disconnect(
+                    gap_evt.conn_handle,
+                    raw::BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION as _,
+                );
             }
         }
         raw::BLE_GAP_EVTS_BLE_GAP_EVT_DISCONNECTED => {
             trace!("on_disconnected conn_handle={:?}", gap_evt.conn_handle);
-            connection::with_state_by_conn_handle(gap_evt.conn_handle, |state| state.on_disconnected(ble_evt));
+            connection::with_state_by_conn_handle(gap_evt.conn_handle, |state| {
+                state.on_disconnected(ble_evt)
+            });
         }
         raw::BLE_GAP_EVTS_BLE_GAP_EVT_CONN_PARAM_UPDATE => {
             let conn_params = gap_evt.params.conn_param_update.conn_params;
@@ -196,7 +201,10 @@ pub(crate) unsafe fn on_evt(ble_evt: *const raw::ble_evt_t) {
                 let ret = raw::sd_ble_gap_sec_params_reply(
                     gap_evt.conn_handle,
                     raw::BLE_GAP_SEC_STATUS_SUCCESS as u8,
-                    sec_params.as_ref().map(|x| x as *const _).unwrap_or(core::ptr::null()),
+                    sec_params
+                        .as_ref()
+                        .map(|x| x as *const _)
+                        .unwrap_or(core::ptr::null()),
                     &keyset,
                 );
 
@@ -233,10 +241,14 @@ pub(crate) unsafe fn on_evt(ble_evt: *const raw::ble_evt_t) {
                     .security
                     .handler
                     .and_then(|handler| match u32::from(params.key_type) {
-                        raw::BLE_GAP_AUTH_KEY_TYPE_PASSKEY => Connection::from_handle(gap_evt.conn_handle)
-                            .map(|conn| handler.enter_passkey(PasskeyReply::new(conn))),
-                        raw::BLE_GAP_AUTH_KEY_TYPE_OOB => Connection::from_handle(gap_evt.conn_handle)
-                            .map(|conn| handler.recv_out_of_band(OutOfBandReply::new(conn))),
+                        raw::BLE_GAP_AUTH_KEY_TYPE_PASSKEY => {
+                            Connection::from_handle(gap_evt.conn_handle)
+                                .map(|conn| handler.enter_passkey(PasskeyReply::new(conn)))
+                        }
+                        raw::BLE_GAP_AUTH_KEY_TYPE_OOB => {
+                            Connection::from_handle(gap_evt.conn_handle)
+                                .map(|conn| handler.recv_out_of_band(OutOfBandReply::new(conn)))
+                        }
                         _ => None,
                     })
             })
@@ -275,8 +287,12 @@ pub(crate) unsafe fn on_evt(ble_evt: *const raw::ble_evt_t) {
                 .map(|x| x.as_raw() as *const _)
                 .unwrap_or(core::ptr::null());
 
-            let ret =
-                raw::sd_ble_gap_sec_info_reply(gap_evt.conn_handle, key_ptr, core::ptr::null(), core::ptr::null());
+            let ret = raw::sd_ble_gap_sec_info_reply(
+                gap_evt.conn_handle,
+                key_ptr,
+                core::ptr::null(),
+                core::ptr::null(),
+            );
 
             if let Err(_err) = RawError::convert(ret) {
                 warn!("sd_ble_gap_sec_info_reply err {:?}", _err);
@@ -292,7 +308,8 @@ pub(crate) unsafe fn on_evt(ble_evt: *const raw::ble_evt_t) {
             );
             if let Some(conn) = Connection::from_handle(gap_evt.conn_handle) {
                 conn.with_state(|state| {
-                    state.security_mode = SecurityMode::try_from_raw(params.conn_sec.sec_mode).unwrap_or_default();
+                    state.security_mode =
+                        SecurityMode::try_from_raw(params.conn_sec.sec_mode).unwrap_or_default();
                     #[cfg(feature = "ble-sec")]
                     if let Some(handler) = state.security.handler {
                         handler.on_security_update(&conn, state.security_mode);
@@ -311,14 +328,18 @@ pub(crate) unsafe fn on_evt(ble_evt: *const raw::ble_evt_t) {
                 params.kdist_peer._bitfield_1.get(0, 8)
             );
             #[cfg(feature = "ble-sec")]
-            if u32::from(params.auth_status) == raw::BLE_GAP_SEC_STATUS_SUCCESS && params.bonded() != 0 {
+            if u32::from(params.auth_status) == raw::BLE_GAP_SEC_STATUS_SUCCESS
+                && params.bonded() != 0
+            {
                 if let Some(conn) = Connection::from_handle(gap_evt.conn_handle) {
                     conn.with_state(|state| {
                         if let Some(handler) = state.security.handler {
                             let peer_id = if params.kdist_peer.id() != 0 {
                                 IdentityKey::from_raw(state.security.peer_id)
                             } else {
-                                debug!("Peer identity key not distributed; falling back to address");
+                                debug!(
+                                    "Peer identity key not distributed; falling back to address"
+                                );
                                 IdentityKey::from_addr(state.peer_address)
                             };
 
@@ -409,7 +430,9 @@ pub fn set_device_identities_list(
     let ret = unsafe {
         raw::sd_ble_gap_device_identities_set(
             pp_id_keys.map(|x| x.as_ptr()).unwrap_or(core::ptr::null()),
-            pp_local_irks.map(|x| x.as_ptr()).unwrap_or(core::ptr::null()),
+            pp_local_irks
+                .map(|x| x.as_ptr())
+                .unwrap_or(core::ptr::null()),
             id_keys.len() as u8,
         )
     };

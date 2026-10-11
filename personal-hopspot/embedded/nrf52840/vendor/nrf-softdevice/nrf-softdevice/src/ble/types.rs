@@ -228,7 +228,12 @@ impl Address {
 impl defmt::Format for Address {
     fn format(&self, fmt: defmt::Formatter) {
         if self.is_resolved_peer_id() {
-            defmt::write!(fmt, "{:?}(resolved):{=[u8]:x}", self.address_type(), self.bytes())
+            defmt::write!(
+                fmt,
+                "{:?}(resolved):{=[u8]:x}",
+                self.address_type(),
+                self.bytes()
+            )
         } else {
             defmt::write!(fmt, "{:?}:{=[u8]:x}", self.address_type(), self.bytes())
         }
@@ -378,7 +383,8 @@ impl IdentityKey {
         match addr.address_type() {
             AddressType::Public | AddressType::RandomStatic => self.addr == addr,
             AddressType::RandomPrivateResolvable => {
-                let local_hash = random_address_hash(self.irk, addr.bytes()[3..].try_into().unwrap());
+                let local_hash =
+                    random_address_hash(self.irk, addr.bytes()[3..].try_into().unwrap());
                 addr.bytes()[..3] == local_hash
             }
             AddressType::RandomPrivateNonResolvable | AddressType::Anonymous => false,
@@ -477,7 +483,8 @@ impl GattStatus {
     }
 
     pub const fn is_app_error(self) -> bool {
-        self.0 >= raw::BLE_GATT_STATUS_ATTERR_APP_BEGIN as u16 && self.0 <= raw::BLE_GATT_STATUS_ATTERR_APP_END as u16
+        self.0 >= raw::BLE_GATT_STATUS_ATTERR_APP_BEGIN as u16
+            && self.0 <= raw::BLE_GATT_STATUS_ATTERR_APP_END as u16
     }
 
     pub const fn to_result(self) -> Result<(), GattError> {

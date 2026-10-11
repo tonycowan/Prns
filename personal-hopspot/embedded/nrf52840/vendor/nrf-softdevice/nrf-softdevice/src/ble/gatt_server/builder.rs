@@ -5,7 +5,9 @@ use core::mem;
 use core::ptr::null;
 
 use super::characteristic::{self, AttributeMetadata, Presentation};
-use super::{CharacteristicHandles, DescriptorHandle, IncludedServiceHandle, RegisterError, ServiceHandle};
+use super::{
+    CharacteristicHandles, DescriptorHandle, IncludedServiceHandle, RegisterError, ServiceHandle,
+};
 use crate::ble::Uuid;
 use crate::{raw, RawError, Softdevice};
 
@@ -72,7 +74,9 @@ impl<'a> ServiceBuilder<'a> {
         let mut char_md = raw::ble_gatts_char_md_t {
             char_props,
             char_ext_props,
-            p_char_user_desc: char_md.user_description.map_or(null(), |x| x.value.as_ptr()),
+            p_char_user_desc: char_md
+                .user_description
+                .map_or(null(), |x| x.value.as_ptr()),
             char_user_desc_max_size: char_md.user_description.map_or(0, |x| x.max_len),
             char_user_desc_size: char_md.user_description.map_or(0, |x| x.value.len() as u16),
             p_char_pf: cpfd_md.as_ref().map_or(null(), |x| x as _),
@@ -93,7 +97,12 @@ impl<'a> ServiceBuilder<'a> {
         let mut handles: raw::ble_gatts_char_handles_t = unsafe { mem::zeroed() };
 
         let ret = unsafe {
-            raw::sd_ble_gatts_characteristic_add(self.handle, &mut char_md as _, &mut attr as _, &mut handles as _)
+            raw::sd_ble_gatts_characteristic_add(
+                self.handle,
+                &mut char_md as _,
+                &mut attr as _,
+                &mut handles as _,
+            )
         };
         RawError::convert(ret)?;
 
@@ -110,9 +119,13 @@ impl<'a> ServiceBuilder<'a> {
         })
     }
 
-    pub fn include_service(&mut self, service: &ServiceHandle) -> Result<IncludedServiceHandle, RegisterError> {
+    pub fn include_service(
+        &mut self,
+        service: &ServiceHandle,
+    ) -> Result<IncludedServiceHandle, RegisterError> {
         let mut handle = 0;
-        let ret = unsafe { raw::sd_ble_gatts_include_add(self.handle, service.0, &mut handle as _) };
+        let ret =
+            unsafe { raw::sd_ble_gatts_include_add(self.handle, service.0, &mut handle as _) };
         RawError::convert(ret)?;
 
         Ok(IncludedServiceHandle(handle))
@@ -151,7 +164,13 @@ impl<'a> CharacteristicBuilder<'a> {
         };
 
         let mut handle = 0;
-        let ret = unsafe { raw::sd_ble_gatts_descriptor_add(self.handles.value_handle, &attr as _, &mut handle as _) };
+        let ret = unsafe {
+            raw::sd_ble_gatts_descriptor_add(
+                self.handles.value_handle,
+                &attr as _,
+                &mut handle as _,
+            )
+        };
         RawError::convert(ret)?;
 
         Ok(DescriptorHandle(handle))

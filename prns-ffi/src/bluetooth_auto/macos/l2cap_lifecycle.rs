@@ -4,7 +4,8 @@ use dispatch2::{DispatchQueue, DispatchRetained};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use prns_core::interfaces::bluetooth_auto::{
-    encode_stream_frame, Fragment, Reassembler, StreamDeframer, BLE_HW_MTU,
+    dispatch_firmware_copy_notification, encode_stream_frame, Fragment, Reassembler,
+    StreamDeframer, BLE_HW_MTU,
 };
 
 use super::data_plane::{flush, DataPlane, Outbound, PumpHandle, PumpPtr, L2CAP_SDU_LEN};
@@ -77,6 +78,9 @@ fn spawn_gatt_merge(
             let Some(message) = message else {
                 break;
             };
+            if dispatch_firmware_copy_notification(&message) {
+                continue;
+            }
             let Some(fragment) = Fragment::decode(&message) else {
                 continue;
             };

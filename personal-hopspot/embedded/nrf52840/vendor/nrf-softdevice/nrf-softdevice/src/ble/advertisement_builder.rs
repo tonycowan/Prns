@@ -25,7 +25,8 @@ impl AdvertisementDataType {
     pub const SHORT_NAME: AdvertisementDataType = AdvertisementDataType(0x08);
     pub const FULL_NAME: AdvertisementDataType = AdvertisementDataType(0x09);
     pub const TXPOWER_LEVEL: AdvertisementDataType = AdvertisementDataType(0x0a);
-    pub const PERIPHERAL_CONNECTION_INTERVAL_RANGE: AdvertisementDataType = AdvertisementDataType(0x12);
+    pub const PERIPHERAL_CONNECTION_INTERVAL_RANGE: AdvertisementDataType =
+        AdvertisementDataType(0x12);
     pub const SERVICE_SOLICITATION_16: AdvertisementDataType = AdvertisementDataType(0x14);
     pub const SERVICE_SOLICITATION_128: AdvertisementDataType = AdvertisementDataType(0x15);
     pub const SERVICE_SOLICITATION_32: AdvertisementDataType = AdvertisementDataType(0x1f);
@@ -205,7 +206,10 @@ impl<const N: usize> core::ops::Deref for AdvertisementPayload<N> {
 
 impl<const K: usize> AdvertisementBuilder<K> {
     pub const fn new() -> Self {
-        Self { buf: [0; K], ptr: 0 }
+        Self {
+            buf: [0; K],
+            ptr: 0,
+        }
     }
 
     const fn write(mut self, data: &[u8]) -> Self {

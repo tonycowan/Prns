@@ -148,7 +148,9 @@ impl Softdevice {
                 &raw::ble_cfg_t {
                     conn_cfg: raw::ble_conn_cfg_t {
                         conn_cfg_tag: APP_CONN_CFG_TAG,
-                        params: raw::ble_conn_cfg_t__bindgen_ty_1 { gattc_conn_cfg: val },
+                        params: raw::ble_conn_cfg_t__bindgen_ty_1 {
+                            gattc_conn_cfg: val,
+                        },
                     },
                 },
             );
@@ -160,7 +162,9 @@ impl Softdevice {
                 &raw::ble_cfg_t {
                     conn_cfg: raw::ble_conn_cfg_t {
                         conn_cfg_tag: APP_CONN_CFG_TAG,
-                        params: raw::ble_conn_cfg_t__bindgen_ty_1 { gatts_conn_cfg: val },
+                        params: raw::ble_conn_cfg_t__bindgen_ty_1 {
+                            gatts_conn_cfg: val,
+                        },
                     },
                 },
             );
@@ -173,7 +177,9 @@ impl Softdevice {
                 &raw::ble_cfg_t {
                     conn_cfg: raw::ble_conn_cfg_t {
                         conn_cfg_tag: APP_CONN_CFG_TAG,
-                        params: raw::ble_conn_cfg_t__bindgen_ty_1 { l2cap_conn_cfg: val },
+                        params: raw::ble_conn_cfg_t__bindgen_ty_1 {
+                            l2cap_conn_cfg: val,
+                        },
                     },
                 },
             );
@@ -192,7 +198,9 @@ impl Softdevice {
             cfg_set(
                 raw::BLE_GAP_CFGS_BLE_GAP_CFG_ROLE_COUNT,
                 &raw::ble_cfg_t {
-                    gap_cfg: raw::ble_gap_cfg_t { role_count_cfg: val },
+                    gap_cfg: raw::ble_gap_cfg_t {
+                        role_count_cfg: val,
+                    },
                 },
             );
         }
@@ -201,7 +209,9 @@ impl Softdevice {
             cfg_set(
                 raw::BLE_GAP_CFGS_BLE_GAP_CFG_DEVICE_NAME,
                 &raw::ble_cfg_t {
-                    gap_cfg: raw::ble_gap_cfg_t { device_name_cfg: val },
+                    gap_cfg: raw::ble_gap_cfg_t {
+                        device_name_cfg: val,
+                    },
                 },
             );
         }
@@ -211,7 +221,9 @@ impl Softdevice {
             cfg_set(
                 raw::BLE_GAP_CFGS_BLE_GAP_CFG_PPCP_INCL_CONFIG,
                 &raw::ble_cfg_t {
-                    gap_cfg: raw::ble_gap_cfg_t { ppcp_include_cfg: val },
+                    gap_cfg: raw::ble_gap_cfg_t {
+                        ppcp_include_cfg: val,
+                    },
                 },
             );
         }
@@ -221,7 +233,9 @@ impl Softdevice {
             cfg_set(
                 raw::BLE_GAP_CFGS_BLE_GAP_CFG_CAR_INCL_CONFIG,
                 &raw::ble_cfg_t {
-                    gap_cfg: raw::ble_gap_cfg_t { car_include_cfg: val },
+                    gap_cfg: raw::ble_gap_cfg_t {
+                        car_include_cfg: val,
+                    },
                 },
             );
         }
@@ -229,7 +243,9 @@ impl Softdevice {
             cfg_set(
                 raw::BLE_GATTS_CFGS_BLE_GATTS_CFG_SERVICE_CHANGED,
                 &raw::ble_cfg_t {
-                    gatts_cfg: raw::ble_gatts_cfg_t { service_changed: val },
+                    gatts_cfg: raw::ble_gatts_cfg_t {
+                        service_changed: val,
+                    },
                 },
             );
         }
@@ -244,7 +260,10 @@ impl Softdevice {
 
         let mut wanted_app_ram_base = app_ram_base;
         let ret = unsafe { raw::sd_ble_enable(&mut wanted_app_ram_base as _) };
-        info!("softdevice RAM: {:?} bytes", wanted_app_ram_base - 0x20000000);
+        info!(
+            "softdevice RAM: {:?} bytes",
+            wanted_app_ram_base - 0x20000000
+        );
         match RawError::convert(ret) {
             Ok(()) => {}
             Err(RawError::NoMem) => {

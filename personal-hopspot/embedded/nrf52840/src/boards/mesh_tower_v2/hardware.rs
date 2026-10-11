@@ -7,6 +7,9 @@ use embassy_nrf::mode::Blocking;
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::rng::Rng;
 use embassy_nrf::saadc::{self, ChannelConfig, Config as SaadcConfig, Gain, Reference, Saadc};
+#[cfg(feature = "usb-debug-log")]
+use embassy_nrf::spim::Spim;
+#[cfg(not(feature = "usb-debug-log"))]
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
@@ -17,14 +20,24 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::{Delay, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use personal_rns::lora::LoRaInterface;
+#[cfg(feature = "usb-debug-log")]
+use personal_rns::radios::sx126x::Sx126x;
+#[cfg(not(feature = "usb-debug-log"))]
 use personal_rns::radios::sx126x::{BoardConfig, FrontendControl, Sx126x, TcxoVoltage};
 use static_cell::StaticCell;
 
 use crate::boards::status_led::StatusLed;
 
+#[cfg(not(feature = "usb-debug-log"))]
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
     TWISPI0 => spim::InterruptHandler<peripherals::TWISPI0>;
+    TWISPI1 => twim::InterruptHandler<peripherals::TWISPI1>;
+    SAADC => saadc::InterruptHandler;
+});
+#[cfg(feature = "usb-debug-log")]
+bind_interrupts!(struct Irqs {
+    USBD => usb::InterruptHandler<peripherals::USBD>;
     TWISPI1 => twim::InterruptHandler<peripherals::TWISPI1>;
     SAADC => saadc::InterruptHandler;
 });
@@ -41,7 +54,11 @@ type MeshTowerV2UsbDriver = Driver<'static, &'static SoftwareVbusDetect>;
 pub(crate) struct MeshTowerV2Hardware {
     pub(crate) usb: MeshTowerV2UsbDriver,
     pub(crate) vbus: &'static SoftwareVbusDetect,
+    /// Absent on the USB-debug image, which drops LoRa so the console fits.
+    #[cfg(not(feature = "usb-debug-log"))]
     pub(crate) radio: MeshTowerV2Radio,
+    #[cfg(feature = "usb-debug-log")]
+    pub(crate) radio: (),
     pub(crate) status_led: StatusLed,
     pub(crate) button: Input<'static>,
     pub(crate) sd: super::sd::SdCard,
@@ -49,7 +66,9 @@ pub(crate) struct MeshTowerV2Hardware {
 }
 
 struct HeldIo {
+    #[cfg_attr(feature = "usb-debug-log", allow(dead_code))]
     fem_enable: Output<'static>,
+    #[cfg_attr(feature = "usb-debug-log", allow(dead_code))]
     fem_tx_rx: Output<'static>,
     watchdog_done: Output<'static>,
     _watchdog_wake: Input<'static>,
@@ -81,6 +100,7 @@ impl MeshTowerV2Board {
         // SoftDevice reserves P0/P1; keep app interrupts off those. USB at P2, SPI at P3 so a BLE
         // radio event can preempt LoRa SPI.
         interrupt::USBD.set_priority(Priority::P2);
+        #[cfg(not(feature = "usb-debug-log"))]
         interrupt::TWISPI0.set_priority(Priority::P3);
         interrupt::TWISPI1.set_priority(Priority::P3);
         interrupt::SAADC.set_priority(Priority::P3);
@@ -88,11 +108,19 @@ impl MeshTowerV2Board {
         let vbus = crate::runtime::software_vbus::initialize(&SOFTWARE_VBUS);
         let usb = Driver::new(peripherals.USBD, Irqs, vbus);
 
+        #[cfg(not(feature = "usb-debug-log"))]
         let mut radio_spim_config = spim::Config::default();
-        radio_spim_config.frequency = spim::Frequency::M4;
+        #[cfg(not(feature = "usb-debug-log"))]
+        {
+            radio_spim_config.frequency = spim::Frequency::M4;
+        }
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio_sck = peripherals.P0_19;
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio_miso = peripherals.P0_23;
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio_mosi = peripherals.P0_22;
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio_bus = Spim::new(
             peripherals.TWISPI0,
             Irqs,
@@ -101,18 +129,34 @@ impl MeshTowerV2Board {
             radio_mosi,
             radio_spim_config,
         );
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio_cs = Output::new(peripherals.P0_24, Level::High, OutputDrive::Standard);
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio_spi = ExclusiveDevice::new(radio_bus, radio_cs, Delay).unwrap();
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio_busy = Input::new(peripherals.P0_17, Pull::None);
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio_dio1 = Input::new(peripherals.P0_20, Pull::None);
-        let mut radio_reset = Output::new(peripherals.P0_25, Level::Low, OutputDrive::Standard);
-        Timer::after_millis(2).await;
-        radio_reset.set_high();
+        let radio_reset = Output::new(peripherals.P0_25, Level::Low, OutputDrive::Standard);
+        #[cfg(not(feature = "usb-debug-log"))]
+        let mut radio_reset = radio_reset;
+        #[cfg(not(feature = "usb-debug-log"))]
+        {
+            Timer::after_millis(2).await;
+            radio_reset.set_high();
+        }
+        #[cfg(feature = "usb-debug-log")]
+        core::mem::forget(radio_reset);
 
         let pa_detect = Input::new(peripherals.P0_13, Pull::None);
-        let mut fem_enable = Output::new(peripherals.P0_15, Level::High, OutputDrive::Standard);
-        fem_enable.set_high();
-        Timer::after_millis(1).await;
+        let fem_enable = Output::new(peripherals.P0_15, Level::Low, OutputDrive::Standard);
+        #[cfg(not(feature = "usb-debug-log"))]
+        let mut fem_enable = fem_enable;
+        #[cfg(not(feature = "usb-debug-log"))]
+        {
+            fem_enable.set_high();
+            Timer::after_millis(1).await;
+        }
         let mut fem_tx_rx = Output::new(peripherals.P0_16, Level::Low, OutputDrive::Standard);
         fem_tx_rx.set_low();
 
@@ -138,6 +182,7 @@ impl MeshTowerV2Board {
             });
         });
 
+        #[cfg(not(feature = "usb-debug-log"))]
         let radio = Sx126x::new(
             radio_spi,
             radio_busy,
@@ -157,6 +202,8 @@ impl MeshTowerV2Board {
                 },
             },
         );
+        #[cfg(feature = "usb-debug-log")]
+        let radio = ();
 
         let status_led = StatusLed::active_low(Output::new(
             peripherals.P1_15,
@@ -166,7 +213,7 @@ impl MeshTowerV2Board {
         let button = Input::new(peripherals.P1_10, Pull::Up);
 
         // HT-N5262M netlist: CS P1.00, CLK P0.06, MOSI P1.01, MISO P0.26.
-        // Clocked from GPIO so a silent hardware SPI block cannot hide the card.
+        // The card driver arms SPIM2 on these pins. Chip-select stays GPIO.
         let sd_sck = Output::new(peripherals.P0_06, Level::Low, OutputDrive::Standard);
         let sd_mosi = Output::new(peripherals.P1_01, Level::High, OutputDrive::Standard);
         let sd_miso = Input::new(peripherals.P0_26, Pull::Up);
@@ -215,6 +262,7 @@ impl MeshTowerV2Board {
     }
 }
 
+#[cfg(not(feature = "usb-debug-log"))]
 fn enter_transmit() {
     HELD_IO.lock(|held| {
         if let Some(io) = held.borrow_mut().as_mut() {
@@ -224,6 +272,7 @@ fn enter_transmit() {
     });
 }
 
+#[cfg(not(feature = "usb-debug-log"))]
 fn enter_receive() {
     HELD_IO.lock(|held| {
         if let Some(io) = held.borrow_mut().as_mut() {

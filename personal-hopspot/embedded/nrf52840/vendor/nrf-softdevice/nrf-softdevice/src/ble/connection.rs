@@ -196,7 +196,10 @@ const NEW_GAP_ENC_KEY: raw::ble_gap_enc_key_t = raw::ble_gap_enc_key_t {
         ltk: [0; 16],
         _bitfield_1: raw::__BindgenBitfieldUnit::new([0; 1]),
     },
-    master_id: raw::ble_gap_master_id_t { ediv: 0, rand: [0; 8] },
+    master_id: raw::ble_gap_master_id_t {
+        ediv: 0,
+        rand: [0; 8],
+    },
 };
 
 #[cfg(feature = "ble-sec")]
@@ -293,7 +296,10 @@ impl ConnectionState {
         self.disconnect_with_reason(HciStatus::REMOTE_USER_TERMINATED_CONNECTION)
     }
 
-    pub(crate) fn disconnect_with_reason(&mut self, reason: HciStatus) -> Result<(), DisconnectedError> {
+    pub(crate) fn disconnect_with_reason(
+        &mut self,
+        reason: HciStatus,
+    ) -> Result<(), DisconnectedError> {
         let conn_handle = self.check_connected()?;
 
         if self.disconnecting {
@@ -324,7 +330,10 @@ impl ConnectionState {
 
         #[cfg(all(feature = "ble-gatt-server", feature = "ble-sec"))]
         if let Some(handler) = self.security.handler {
-            let conn = unwrap!(Connection::from_handle(conn_handle), "bug: conn_handle has no index");
+            let conn = unwrap!(
+                Connection::from_handle(conn_handle),
+                "bug: conn_handle has no index"
+            );
             handler.save_sys_attrs(&conn);
         }
 
@@ -418,7 +427,10 @@ impl Drop for Connection {
 impl Clone for Connection {
     fn clone(&self) -> Self {
         self.with_state(|state| {
-            state.refcount = unwrap!(state.refcount.checked_add(1), "Too many references to same connection");
+            state.refcount = unwrap!(
+                state.refcount.checked_add(1),
+                "Too many references to same connection"
+            );
         });
 
         Self { index: self.index }
@@ -453,7 +465,10 @@ impl Connection {
     pub fn from_handle(conn_handle: u16) -> Option<Connection> {
         index_by_handle(conn_handle).get().map(|index| {
             with_state(index, |state| {
-                state.refcount = unwrap!(state.refcount.checked_add(1), "Too many references to same connection");
+                state.refcount = unwrap!(
+                    state.refcount.checked_add(1),
+                    "Too many references to same connection"
+                );
                 Connection { index }
             })
         })
@@ -563,7 +578,10 @@ impl Connection {
     /// For central connections, this will initiate a Link Layer connection parameter update procedure.
     /// For peripheral connections, this will send the corresponding L2CAP request to the central. It is then
     /// up to the central to accept or deny the request.
-    pub fn set_conn_params(&self, conn_params: ble_gap_conn_params_t) -> Result<(), SetConnParamsError> {
+    pub fn set_conn_params(
+        &self,
+        conn_params: ble_gap_conn_params_t,
+    ) -> Result<(), SetConnParamsError> {
         let conn_handle = self.with_state(|state| state.check_connected())?;
         let ret = unsafe { raw::sd_ble_gap_conn_param_update(conn_handle, &conn_params) };
         if let Err(err) = RawError::convert(ret) {
@@ -637,15 +655,19 @@ impl Connection {
 
         let params = params.map(core::ptr::from_ref).unwrap_or(core::ptr::null());
         let mut dl_limitation = unsafe { core::mem::zeroed() };
-        let ret = unsafe { raw::sd_ble_gap_data_length_update(conn_handle, params, &mut dl_limitation) };
+        let ret =
+            unsafe { raw::sd_ble_gap_data_length_update(conn_handle, params, &mut dl_limitation) };
 
         if let Err(err) = RawError::convert(ret) {
             warn!("sd_ble_gap_data_length_update err {:?}", err);
 
-            if dl_limitation.tx_payload_limited_octets != 0 || dl_limitation.rx_payload_limited_octets != 0 {
+            if dl_limitation.tx_payload_limited_octets != 0
+                || dl_limitation.rx_payload_limited_octets != 0
+            {
                 warn!(
                     "The requested TX/RX packet length is too long by {:?}/{:?} octets.",
-                    dl_limitation.tx_payload_limited_octets, dl_limitation.rx_payload_limited_octets
+                    dl_limitation.tx_payload_limited_octets,
+                    dl_limitation.rx_payload_limited_octets
                 );
             }
 
@@ -766,7 +788,11 @@ impl Connection {
                 .security
                 .handler
                 .ok_or(EncryptError::NoSecurityHandler)
-                .and_then(|handler| handler.get_peripheral_key(self).ok_or(EncryptError::PeerKeysNotFound))
+                .and_then(|handler| {
+                    handler
+                        .get_peripheral_key(self)
+                        .ok_or(EncryptError::PeerKeysNotFound)
+                })
                 .map(|keys| (conn_handle, keys))
         })?;
 
@@ -793,8 +819,10 @@ impl Iterator for ConnectionIter {
                     let state = &mut *s.get();
                     if state.conn_handle.is_connected() {
                         let index = (n + i) as u8;
-                        state.refcount =
-                            unwrap!(state.refcount.checked_add(1), "Too many references to same connection");
+                        state.refcount = unwrap!(
+                            state.refcount.checked_add(1),
+                            "Too many references to same connection"
+                        );
                         self.0 = index + 1;
                         return Some(Connection { index });
                     }
@@ -816,7 +844,10 @@ impl FusedIterator for ConnectionIter {}
 const DUMMY_STATE: UnsafeCell<ConnectionState> = UnsafeCell::new(ConnectionState::dummy());
 static mut STATES: [UnsafeCell<ConnectionState>; CONNS_MAX] = [DUMMY_STATE; CONNS_MAX];
 
-pub(crate) fn with_state_by_conn_handle<T>(conn_handle: u16, f: impl FnOnce(&mut ConnectionState) -> T) -> T {
+pub(crate) fn with_state_by_conn_handle<T>(
+    conn_handle: u16,
+    f: impl FnOnce(&mut ConnectionState) -> T,
+) -> T {
     let index = unwrap!(
         index_by_handle(conn_handle).get(),
         "bug: with_state_by_conn_handle on conn_handle that has no state"

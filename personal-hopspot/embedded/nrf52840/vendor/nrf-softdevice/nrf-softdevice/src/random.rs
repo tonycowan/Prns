@@ -33,9 +33,8 @@ impl SoftdeviceRandom {
             return Err(RandomError::BufferTooBig);
         }
 
-        let ret = unsafe {
-            raw::sd_rand_application_vector_get(buf[..].as_mut_ptr(), buf.len() as u8)
-        };
+        let ret =
+            unsafe { raw::sd_rand_application_vector_get(buf[..].as_mut_ptr(), buf.len() as u8) };
         match RawError::convert(ret) {
             Ok(()) => Ok(()),
             Err(RawError::SocRandNotEnoughValues) => Err(RandomError::NotEnoughEntropy),

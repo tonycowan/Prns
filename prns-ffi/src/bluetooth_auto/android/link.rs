@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{channel, Receiver};
 
 use prns_core::interfaces::bluetooth_auto::{
-    encode_stream_frame, fragments_of, BleAddress, BleIdentity, Control, Fragment, L2capPlan,
-    PeerProtocol, Reassembler, StreamDeframer, BLE_HW_MTU, CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN,
-    STREAM_FRAME_PREFIX_LEN,
+    dispatch_firmware_copy_notification, encode_stream_frame, fragments_of, BleAddress,
+    BleIdentity, Control, Fragment, L2capPlan, PeerProtocol, Reassembler, StreamDeframer,
+    BLE_HW_MTU, CONTROL_MAX_LEN, FRAGMENT_HEADER_LEN, STREAM_FRAME_PREFIX_LEN,
 };
 use prns_core::interfaces::bluetooth_auto::{BleLink, BleSink, BleSource};
 
@@ -120,6 +120,9 @@ impl BleLink for AndroidBleLink {
             tokio::spawn(async move {
                 let mut reassembler = Reassembler::<GATT_REASSEMBLY_CAP>::new();
                 while let Some(message) = data_in.recv().await {
+                    if dispatch_firmware_copy_notification(&message) {
+                        continue;
+                    }
                     if let Some(fragment) = Fragment::decode(&message) {
                         if let Some(frame) = reassembler.absorb(&fragment) {
                             if frames.send(frame.to_vec()).await.is_err() {

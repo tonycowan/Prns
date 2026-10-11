@@ -94,13 +94,25 @@ impl TryFrom<u8> for WriteOp {
 pub trait Server: Sized {
     type Event;
 
-    fn on_write(&self, conn: &Connection, handle: u16, op: WriteOp, offset: usize, data: &[u8]) -> Option<Self::Event>;
+    fn on_write(
+        &self,
+        conn: &Connection,
+        handle: u16,
+        op: WriteOp,
+        offset: usize,
+        data: &[u8],
+    ) -> Option<Self::Event>;
 
     /// Handle reads of characteristics built with the
     /// [`deferred_read`][characteristic::AttributeMetadata::deferred_read] flag set.
     ///
     /// Your [Server] must provide an implementation of this method if any of your characteristics has that flag set.
-    fn on_deferred_read(&self, handle: u16, offset: usize, reply: DeferredReadReply) -> Option<Self::Event> {
+    fn on_deferred_read(
+        &self,
+        handle: u16,
+        offset: usize,
+        reply: DeferredReadReply,
+    ) -> Option<Self::Event> {
         let _ = (handle, offset, reply);
         panic!("on_deferred_read needs to be implemented for this gatt server");
     }
@@ -225,17 +237,31 @@ where
                             let responder = DeferredReadReply::new(conn);
                             let params = get_union_field(ble_evt, &params.request.read);
                             trace!("gatts authorize read request handle={:?}", params.handle);
-                            server.on_deferred_read(params.handle, usize::from(params.offset), responder)
+                            server.on_deferred_read(
+                                params.handle,
+                                usize::from(params.offset),
+                                responder,
+                            )
                         }
                         raw::BLE_GATTS_AUTHORIZE_TYPE_WRITE => {
                             let responder = DeferredWriteReply::new(conn);
                             let params = get_union_field(ble_evt, &params.request.write);
                             let offset = usize::from(params.offset);
                             let v = get_flexarray(ble_evt, &params.data, params.len as usize);
-                            trace!("gatts authorize write handle={:?} data={:?}", params.handle, v);
+                            trace!(
+                                "gatts authorize write handle={:?} data={:?}",
+                                params.handle,
+                                v
+                            );
 
                             match params.op.try_into() {
-                                Ok(op) => server.on_deferred_write(params.handle, op, offset, v, responder),
+                                Ok(op) => server.on_deferred_write(
+                                    params.handle,
+                                    op,
+                                    offset,
+                                    v,
+                                    responder,
+                                ),
                                 Err(_) => {
                                     error!("gatt_server invalid write op: {}", params.op);
                                     None
@@ -253,7 +279,9 @@ where
                     let params = get_union_field(ble_evt, &gatts_evt.params.hvc);
                     server.on_indicate_confirm(&conn, params.handle)
                 }
-                raw::BLE_GATTS_EVTS_BLE_GATTS_EVT_SC_CONFIRM => server.on_services_changed_confirm(&conn),
+                raw::BLE_GATTS_EVTS_BLE_GATTS_EVT_SC_CONFIRM => {
+                    server.on_services_changed_confirm(&conn)
+                }
                 raw::BLE_GATTS_EVTS_BLE_GATTS_EVT_TIMEOUT => server.on_timeout(&conn),
                 _ => None,
             };
@@ -286,7 +314,9 @@ pub fn get_value(_sd: &Softdevice, handle: u16, buf: &mut [u8]) -> Result<usize,
         len: buf.len() as _,
         offset: 0,
     };
-    let ret = unsafe { raw::sd_ble_gatts_value_get(raw::BLE_CONN_HANDLE_INVALID as u16, handle, &mut value) };
+    let ret = unsafe {
+        raw::sd_ble_gatts_value_get(raw::BLE_CONN_HANDLE_INVALID as u16, handle, &mut value)
+    };
     RawError::convert(ret)?;
 
     if value.len as usize > buf.len() {
@@ -314,7 +344,9 @@ pub fn set_value(_sd: &Softdevice, handle: u16, val: &[u8]) -> Result<(), SetVal
         len: val.len() as _,
         offset: 0,
     };
-    let ret = unsafe { raw::sd_ble_gatts_value_set(raw::BLE_CONN_HANDLE_INVALID as u16, handle, &mut value) };
+    let ret = unsafe {
+        raw::sd_ble_gatts_value_set(raw::BLE_CONN_HANDLE_INVALID as u16, handle, &mut value)
+    };
     RawError::convert(ret)?;
 
     Ok(())
@@ -377,7 +409,11 @@ impl From<DisconnectedError> for IndicateValueError {
 }
 
 /// This will fail if an indication is already in progress
-pub fn indicate_value(conn: &Connection, handle: u16, val: &[u8]) -> Result<(), IndicateValueError> {
+pub fn indicate_value(
+    conn: &Connection,
+    handle: u16,
+    val: &[u8],
+) -> Result<(), IndicateValueError> {
     let conn_handle = conn.with_state(|state| state.check_connected())?;
 
     let mut len: u16 = val.len() as _;
@@ -437,7 +473,8 @@ pub fn set_sys_attrs(conn: &Connection, sys_attrs: Option<&[u8]>) -> Result<(), 
     let conn_handle = conn.with_state(|state| state.check_connected())?;
     let ptr = sys_attrs.map(|x| x.as_ptr()).unwrap_or(core::ptr::null());
     let len = sys_attrs.map(|x| x.len()).unwrap_or_default();
-    let ret = unsafe { raw::sd_ble_gatts_sys_attr_set(conn_handle, ptr, unwrap!(len.try_into()), 0) };
+    let ret =
+        unsafe { raw::sd_ble_gatts_sys_attr_set(conn_handle, ptr, unwrap!(len.try_into()), 0) };
     RawError::convert(ret).map_err(SetSysAttrsError::Raw)
 }
 
@@ -449,8 +486,14 @@ pub(crate) unsafe fn on_evt(ble_evt: *const raw::ble_evt_t) {
             let params = get_union_field(ble_evt, &gatts_evt.params.exchange_mtu_request);
             let want_mtu = params.client_rx_mtu;
             let max_mtu = crate::Softdevice::steal().att_mtu;
-            let mtu = want_mtu.min(max_mtu).max(raw::BLE_GATT_ATT_MTU_DEFAULT as u16);
-            trace!("att mtu exchange: peer wants mtu {:?}, granting {:?}", want_mtu, mtu);
+            let mtu = want_mtu
+                .min(max_mtu)
+                .max(raw::BLE_GATT_ATT_MTU_DEFAULT as u16);
+            trace!(
+                "att mtu exchange: peer wants mtu {:?}, granting {:?}",
+                want_mtu,
+                mtu
+            );
 
             let ret = { raw::sd_ble_gatts_exchange_mtu_reply(conn_handle, mtu) };
             if let Err(_err) = RawError::convert(ret) {

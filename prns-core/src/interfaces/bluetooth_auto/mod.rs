@@ -1,6 +1,7 @@
 mod advertisement;
 mod backend;
 mod duplex;
+mod firmware_copy;
 mod framing;
 mod handshake;
 mod identity;
@@ -25,6 +26,11 @@ pub use backend::{
     RadioMode, ScanningMode,
 };
 pub use duplex::{receive_frames_during, send_frame_duplex, BleDuplexOutcome, BleFrameForwarder};
+#[cfg(feature = "std")]
+pub use firmware_copy::{
+    clear_firmware_copy_sink, dispatch_firmware_copy_notification, install_firmware_copy_sink,
+};
+pub use firmware_copy::{parse_firmware_copy_note, FirmwareCopyNote};
 pub use framing::{
     encode_stream_frame, fragments_of, Fragment, FragmentKind, Reassembler, StreamDeframer,
     BLE_HW_MTU, BLE_WIRE_FRAME_LEN, FRAGMENT_HEADER_LEN, STREAM_FRAME_PREFIX_LEN,

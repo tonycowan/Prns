@@ -1,5 +1,7 @@
 //! GATT service used by the shared nRF52 Bluetooth Auto transport.
 
+use core::sync::atomic::{AtomicU16, Ordering};
+
 use heapless09::Vec as GattValue;
 use nrf_softdevice::ble::gatt_server::builder::ServiceBuilder;
 use nrf_softdevice::ble::gatt_server::characteristic::{Attribute, Metadata, Properties};
@@ -28,6 +30,12 @@ const CONTROL_UUID: [u8; 16] = [
 const DATA_UUID: [u8; 16] = [
     0xe8, 0x28, 0xda, 0xc5, 0x42, 0x8f, 0x7f, 0x91, 0x94, 0x4a, 0x2d, 0x44, 0x00, 0x5b, 0x14, 0x37,
 ];
+
+static NATIVE_DATA_HANDLE: AtomicU16 = AtomicU16::new(0);
+
+pub(crate) fn native_data_value_handle() -> u16 {
+    NATIVE_DATA_HANDLE.load(Ordering::Relaxed)
+}
 
 pub(super) type WriteValue = GattValue<u8, GATT_VALUE_CAPACITY>;
 
@@ -129,6 +137,7 @@ impl ReticulumService {
             )?
             .build();
         let _ = service.build();
+        NATIVE_DATA_HANDLE.store(data.value_handle, Ordering::Relaxed);
         Ok(Self {
             columba_tx,
             columba_rx,
