@@ -53,14 +53,17 @@ mod sink {
 
     use super::FirmwareCopyNote;
 
-    fn slot() -> &'static Mutex<Option<Box<dyn Fn(FirmwareCopyNote) + Send + Sync>>> {
-        static SINK: OnceLock<Mutex<Option<Box<dyn Fn(FirmwareCopyNote) + Send + Sync>>>> =
-            OnceLock::new();
+    type CopySink = Box<dyn Fn(FirmwareCopyNote) + Send + Sync>;
+
+    fn slot() -> &'static Mutex<Option<CopySink>> {
+        static SINK: OnceLock<Mutex<Option<CopySink>>> = OnceLock::new();
         SINK.get_or_init(|| Mutex::new(None))
     }
 
-    pub fn install(sink: Box<dyn Fn(FirmwareCopyNote) + Send + Sync>) {
-        *slot().lock().expect("firmware copy sink") = Some(sink);
+    pub fn install(sink: CopySink) {
+        if let Ok(mut slot) = slot().lock() {
+            *slot = Some(sink);
+        }
     }
 
     pub fn clear() {
