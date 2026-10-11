@@ -136,7 +136,10 @@ async fn main(_spawner: Spawner) -> ! {
     say("flash: ready, firmware file is expected on the card");
     embassy_futures::join::join(
         usb.run(),
-        embassy_futures::join::join(drain(class), run(&mut spi, &mut cs, &mut led, &mut watchdog)),
+        embassy_futures::join::join(
+            drain(class),
+            run(&mut spi, &mut cs, &mut led, &mut watchdog),
+        ),
     )
     .await;
     loop {
