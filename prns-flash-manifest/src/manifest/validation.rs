@@ -328,7 +328,7 @@ fn validate_uf2_variants(
             .collect::<Vec<_>>(),
         None => build.variants.iter().collect::<Vec<_>>(),
     };
-    if expected.is_empty() || target.variants.len() != expected.len() {
+    if expected.is_empty() {
         return Err(invalid_part(
             target,
             "",
@@ -337,11 +337,7 @@ fn validate_uf2_variants(
     }
     let mut identities = BTreeSet::new();
     let mut paths = BTreeSet::new();
-    for (variant, expected) in target.variants.iter().zip(expected) {
-        let expected_application = expected
-            .memory_layout()
-            .map_err(|_| mismatch(target, "UF2 memory profile"))?
-            .transport_envelope();
+    for variant in &target.variants {
         let identity = (
             variant.softdevice_family.as_str(),
             variant.softdevice_version.as_str(),
@@ -353,13 +349,34 @@ fn validate_uf2_variants(
                 "UF2 compatibility key is duplicated",
             ));
         }
+        if !paths.insert(variant.path.as_str()) {
+            return Err(invalid_part(
+                target,
+                &variant.path,
+                "artifact path is duplicated",
+            ));
+        }
+    }
+    for expected in expected {
+        let Some(variant) = target.variants.iter().find(|variant| {
+            variant.softdevice_family == expected.softdevice_family
+                && variant.softdevice_version == expected.softdevice_version
+        }) else {
+            return Err(invalid_part(
+                target,
+                "",
+                "UF2 compatibility variant set disagrees with the catalog",
+            ));
+        };
+        let expected_application = expected
+            .memory_layout()
+            .map_err(|_| mismatch(target, "UF2 memory profile"))?
+            .transport_envelope();
         let expected_path = format!(
             "firmware/hopspot/{}/{version}/{}",
             target.board_slug, expected.filename
         );
-        if variant.softdevice_family != expected.softdevice_family
-            || variant.softdevice_version != expected.softdevice_version
-            || variant.fwid != expected.fwid
+        if variant.fwid != expected.fwid
             || crate::canonical_hex::parse_u32(&variant.application_base)
                 != Some(expected_application.start())
             || variant.family_id != expected.family_id
@@ -386,13 +403,6 @@ fn validate_uf2_variants(
                 target,
                 &variant.path,
                 "SHA-256 must be lowercase hex",
-            ));
-        }
-        if !paths.insert(variant.path.as_str()) {
-            return Err(invalid_part(
-                target,
-                &variant.path,
-                "artifact path is duplicated",
             ));
         }
     }

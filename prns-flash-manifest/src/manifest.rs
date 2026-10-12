@@ -776,6 +776,73 @@ mod tests {
     }
 
     #[test]
+    fn published_uf2_variants_may_include_a_softdevice_this_binary_does_not_flash(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let catalog = board_catalog()?;
+        let board = catalog
+            .board("t-echo")
+            .ok_or("missing T-Echo catalog entry")?;
+        let version = ReleaseVersion::parse("0.2.6")?;
+        let v6 = SoftdeviceIdentity::parse("s140", "6.1.1")?;
+        let v7 = SoftdeviceIdentity::parse("s140", "7.3.0")?;
+        let mut target = valid_manifest()?
+            .targets
+            .into_iter()
+            .find(|target| target.board_slug == "t-echo")
+            .ok_or("missing T-Echo target")?;
+        let mut extra = target.variants[0].clone();
+        extra.softdevice_version = "7.3.0".to_string();
+        extra.path = "firmware/hopspot/t-echo/0.2.6/t-echo-s140-7.3.0.uf2".to_string();
+        target.variants.insert(0, extra);
+
+        let ReleaseTarget::Uf2(validated) = target.clone().into_validated(board, &version)? else {
+            return Err("T-Echo target did not remain UF2".into());
+        };
+        assert_eq!(validated.variants().len(), 1);
+        assert_eq!(validated.variants()[0].compatibility().softdevice(), &v6);
+        assert!(target
+            .clone()
+            .into_validated_uf2_variant(board, &version, &v7)
+            .is_err());
+        let ReleaseTarget::Uf2(selected) = target
+            .clone()
+            .into_validated_uf2_variant(board, &version, &v6)?
+        else {
+            return Err("selected T-Echo target did not remain UF2".into());
+        };
+        assert_eq!(selected.variants().len(), 1);
+        assert_eq!(selected.variants()[0].compatibility().softdevice(), &v6);
+
+        let mut duplicated = target.clone();
+        duplicated.variants.push(duplicated.variants[1].clone());
+        assert!(matches!(
+            duplicated.into_validated(board, &version),
+            Err(ManifestError::InvalidPart { message, .. })
+                if message == "UF2 compatibility key is duplicated"
+                    || message == "artifact path is duplicated"
+        ));
+
+        let mut missing = target.clone();
+        missing
+            .variants
+            .retain(|variant| variant.softdevice_version == "7.3.0");
+        assert!(matches!(
+            missing.into_validated(board, &version),
+            Err(ManifestError::InvalidPart { message, .. })
+                if message == "UF2 compatibility variant set disagrees with the catalog"
+        ));
+
+        let mut drifted = target;
+        drifted.variants[1].application_base = "0x00027000".to_string();
+        assert!(matches!(
+            drifted.into_validated(board, &version),
+            Err(ManifestError::InvalidPart { message, .. })
+                if message == "UF2 compatibility metadata disagrees with the catalog"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn shared_rak_bootloader_identity_cannot_substitute_the_other_kits_release_artifact(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let catalog = board_catalog()?;

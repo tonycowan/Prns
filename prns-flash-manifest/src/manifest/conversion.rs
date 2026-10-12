@@ -288,91 +288,85 @@ fn convert_target(
                     "UF2 target cannot contain top-level parts",
                 ));
             }
-            let variants = variants
-                .into_iter()
-                .map(|variant| {
-                    let path = variant.path.clone();
-                    let catalog_variant = catalog_build
-                        .variants
-                        .iter()
-                        .find(|catalog_variant| {
-                            catalog_variant.softdevice_family == variant.softdevice_family
-                                && catalog_variant.softdevice_version == variant.softdevice_version
-                                && catalog_variant.fwid == variant.fwid
-                                && catalog_variant.family_id == variant.family_id
-                        })
-                        .ok_or_else(|| {
-                            invalid_part_values(
-                                &board_slug,
-                                &path,
-                                "UF2 variant is not pinned by the board catalog",
-                            )
-                        })?;
-                    let memory = catalog_variant.memory_layout().map_err(|error| {
-                        invalid_part_values(&board_slug, &path, &error.to_string())
-                    })?;
-                    let application = memory.transport_envelope();
-                    let softdevice = SoftdeviceIdentity::parse(
-                        &variant.softdevice_family,
-                        variant.softdevice_version,
-                    )
+            let mut converted = Vec::new();
+            for variant in variants {
+                let path = variant.path.clone();
+                let Some(catalog_variant) = catalog_build.variants.iter().find(|catalog_variant| {
+                    catalog_variant.softdevice_family == variant.softdevice_family
+                        && catalog_variant.softdevice_version == variant.softdevice_version
+                        && catalog_variant.fwid == variant.fwid
+                        && catalog_variant.family_id == variant.family_id
+                }) else {
+                    continue;
+                };
+                let memory = catalog_variant
+                    .memory_layout()
                     .map_err(|error| invalid_part_values(&board_slug, &path, &error.to_string()))?;
-                    let fwid = crate::canonical_hex::parse_u16(&variant.fwid).ok_or_else(|| {
-                        invalid_part_values(&board_slug, &path, "FWID is not canonical hexadecimal")
-                    })?;
-                    let application_base = crate::canonical_hex::parse_u32(
-                        &variant.application_base,
-                    )
+                let application = memory.transport_envelope();
+                let softdevice = SoftdeviceIdentity::parse(
+                    &variant.softdevice_family,
+                    variant.softdevice_version.clone(),
+                )
+                .map_err(|error| invalid_part_values(&board_slug, &path, &error.to_string()))?;
+                let fwid = crate::canonical_hex::parse_u16(&variant.fwid).ok_or_else(|| {
+                    invalid_part_values(&board_slug, &path, "FWID is not canonical hexadecimal")
+                })?;
+                let application_base = crate::canonical_hex::parse_u32(&variant.application_base)
                     .ok_or_else(|| {
+                    invalid_part_values(
+                        &board_slug,
+                        &path,
+                        "application base is not canonical hexadecimal",
+                    )
+                })?;
+                if application_base != application.start() {
+                    return Err(invalid_part_values(
+                        &board_slug,
+                        &path,
+                        "application base disagrees with the memory profile",
+                    ));
+                }
+                let family_id =
+                    crate::canonical_hex::parse_u32(&variant.family_id).ok_or_else(|| {
                         invalid_part_values(
                             &board_slug,
                             &path,
-                            "application base is not canonical hexadecimal",
+                            "UF2 family ID is not canonical hexadecimal",
                         )
                     })?;
-                    if application_base != application.start() {
-                        return Err(invalid_part_values(
-                            &board_slug,
-                            &path,
-                            "application base disagrees with the memory profile",
-                        ));
-                    }
-                    let family_id = crate::canonical_hex::parse_u32(&variant.family_id)
-                        .ok_or_else(|| {
-                            invalid_part_values(
-                                &board_slug,
-                                &path,
-                                "UF2 family ID is not canonical hexadecimal",
-                            )
-                        })?;
-                    Ok(Uf2Variant {
-                        compatibility: Uf2Compatibility::new(
-                            softdevice,
-                            fwid,
-                            application_base,
-                            application.end_exclusive(),
-                            family_id,
-                        ),
-                        firmware_owned: memory.firmware_owned(),
-                        part: Uf2Part {
-                            path: ImmutableArtifactPath::parse(variant.path.clone()).map_err(
-                                |error| {
-                                    invalid_part_values(
-                                        &board_slug,
-                                        &variant.path,
-                                        &error.to_string(),
-                                    )
-                                },
-                            )?,
-                            size: variant.size,
-                            sha256: Sha256Digest::parse(variant.sha256).map_err(|error| {
+                converted.push(Uf2Variant {
+                    compatibility: Uf2Compatibility::new(
+                        softdevice,
+                        fwid,
+                        application_base,
+                        application.end_exclusive(),
+                        family_id,
+                    ),
+                    firmware_owned: memory.firmware_owned(),
+                    part: Uf2Part {
+                        path: ImmutableArtifactPath::parse(variant.path.clone()).map_err(
+                            |error| {
                                 invalid_part_values(&board_slug, &variant.path, &error.to_string())
-                            })?,
-                        },
-                    })
-                })
-                .collect::<Result<Vec<_>, ManifestError>>()?;
-            Ok(ReleaseTarget::Uf2(Uf2Target { identity, variants }))
+                            },
+                        )?,
+                        size: variant.size,
+                        sha256: Sha256Digest::parse(variant.sha256).map_err(|error| {
+                            invalid_part_values(&board_slug, &variant.path, &error.to_string())
+                        })?,
+                    },
+                });
+            }
+            if converted.is_empty() {
+                return Err(invalid_part_values(
+                    &board_slug,
+                    "",
+                    "UF2 variant is not pinned by the board catalog",
+                ));
+            }
+            Ok(ReleaseTarget::Uf2(Uf2Target {
+                identity,
+                variants: converted,
+            }))
         }
         Transport::NrfSerialDfu => {
             let BoardBuild::NrfSerialDfu(catalog_build) = &board.build else {

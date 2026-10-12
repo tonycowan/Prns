@@ -243,6 +243,7 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .digits { font-size: 30px; font-weight: 700; letter-spacing: .22em; }
 .toggle { min-width: 58px; }
 .note { color: #66766c; font-size: 14px; }
+.note a { color: #2d6a9f; }
 .error { color: #9b3129; }
 .activity-log { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; max-height: 280px; overflow: auto; }
 .activity-log li { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: start; font-size: 13px; }
@@ -4945,6 +4946,8 @@ fn FlashSection(
     #[cfg(not(target_os = "android"))]
     {
         let mut probable_slugs = use_signal(Vec::<String>::new);
+        let mut flash_devices =
+            use_signal(HashMap::<String, Vec<crate::flash::FlashDeviceChoice>>::new);
         let mut lora_probes = use_signal(HashMap::<String, crate::flash::LoraProfilePresence>::new);
         let mut lora_probe_applied = use_signal(HashSet::<String>::new);
         let mut uf2_writable_erases = use_signal(HashMap::<String, Vec<String>>::new);
@@ -4961,6 +4964,7 @@ fn FlashSection(
         let stop = cancelled.clone();
         let poll = cancelled.clone();
         let check_poll = cancelled.clone();
+        let device_now = cancelled.clone();
         use_drop(move || {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
         });
@@ -4985,6 +4989,20 @@ fn FlashSection(
                         uf2_writable_erases
                             .write()
                             .retain(|slug, _| still.contains(slug));
+                        if let Some(slug) = selected_flash_board() {
+                            let probe = slug.clone();
+                            let devices = tokio::task::spawn_blocking(move || {
+                                crate::flash::list_flash_devices(&probe)
+                            })
+                            .await
+                            .unwrap_or_default();
+                            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            if flash_devices.read().get(&slug) != Some(&devices) {
+                                flash_devices.write().insert(slug, devices);
+                            }
+                        }
                         let pending = found
                             .into_iter()
                             .filter(|slug| {
@@ -5034,6 +5052,31 @@ fn FlashSection(
                         }
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            });
+        });
+        use_effect(move || {
+            let Some(slug) = selected_flash_board() else {
+                return;
+            };
+            let cancelled = device_now.clone();
+            spawn(async move {
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                    || flashing()
+                    || crate::flash::uf2_volume_probes_held()
+                {
+                    return;
+                }
+                let probe = slug.clone();
+                let devices =
+                    tokio::task::spawn_blocking(move || crate::flash::list_flash_devices(&probe))
+                        .await
+                        .unwrap_or_default();
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                if flash_devices.read().get(&slug) != Some(&devices) {
+                    flash_devices.write().insert(slug, devices);
                 }
             });
         });
@@ -5095,6 +5138,27 @@ fn FlashSection(
                     open: flash_info,
                 }
             }
+            if cfg!(target_os = "windows") {
+                p { class: "note",
+                    "Please download and install the "
+                    a {
+                        href: "https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers?tab=downloads",
+                        onclick: move |event| {
+                            event.prevent_default();
+                            let _ = std::process::Command::new("cmd")
+                                .args([
+                                    "/C",
+                                    "start",
+                                    "",
+                                    "https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers?tab=downloads",
+                                ])
+                                .spawn();
+                        },
+                        "USB bridge driver"
+                    }
+                    " on Windows to flash older devices."
+                }
+            }
             div { class: "section-intro",
                 p { class: "lead", "Select a board, open Configure and flash to pick a firmware image and options, then Flash. Enrollment writes this Operator’s grant when the board supports it." }
                 if let Some(note) = update_note {
@@ -5125,6 +5189,13 @@ fn FlashSection(
                             .get(&slug)
                             .cloned()
                             .unwrap_or_default();
+                        let devices = flash_devices
+                            .read()
+                            .get(&slug)
+                            .cloned()
+                            .unwrap_or_default();
+                        let needs_device = devices.len() > 1
+                            && !devices.iter().any(|device| device.id == form.device);
                         let catalog_image = {
                             let _ = catalog_tick();
                             crate::image_catalog::current_image(&slug).ok().flatten()
@@ -5199,7 +5270,7 @@ fn FlashSection(
                                                     button {
                                                         class: if flashing() { "button busy" } else { "button" },
                                                         r#type: "button",
-                                                        disabled: flash_busy || !flash_has_image,
+                                                        disabled: flash_busy || !flash_has_image || needs_device,
                                                         aria_busy: if flashing() { "true" } else { "false" },
                                                         onclick: {
                                                             let board = board.clone();
@@ -5315,6 +5386,7 @@ fn FlashSection(
                                                         board.clone(),
                                                         slug.clone(),
                                                         form.clone(),
+                                                        devices.clone(),
                                                         flash_busy,
                                                         build_status,
                                                         flash_status,
@@ -5347,6 +5419,7 @@ fn flash_configure_fields(
     board: crate::flash::CatalogBoard,
     slug: String,
     form: FlashDraft,
+    devices: Vec<crate::flash::FlashDeviceChoice>,
     flash_busy: bool,
     build_status: Signal<String>,
     flash_status: Signal<String>,
@@ -5379,6 +5452,7 @@ fn flash_configure_fields(
         board.clone(),
         slug.clone(),
         form.clone(),
+        devices,
         flashing,
         flash_forms,
         lora_probes,
@@ -5526,6 +5600,7 @@ fn flash_options_form(
     board: crate::flash::CatalogBoard,
     slug: String,
     form: FlashDraft,
+    devices: Vec<crate::flash::FlashDeviceChoice>,
     busy: bool,
     mut flash_forms: Signal<HashMap<String, FlashDraft>>,
     lora_probes: Signal<HashMap<String, crate::flash::LoraProfilePresence>>,
@@ -5535,6 +5610,51 @@ fn flash_options_form(
         div { class: "edit-card",
             h3 { "Flash options" }
             p { class: "note", "These settings are written with the firmware. Leave Wi-Fi blank to keep whatever is already on the board." }
+            if devices.len() > 1 {
+                {
+                    let serial = devices.first().is_some_and(|device| device.flag == "--port");
+                    let selected = devices
+                        .iter()
+                        .any(|device| device.id == form.device)
+                        .then_some(form.device.clone())
+                        .unwrap_or_default();
+                    let field_label = if serial { "Port" } else { "Bootloader drive" };
+                    let placeholder = if serial { "Choose a port" } else { "Choose a drive" };
+                    let note = if serial {
+                        "Several serial devices are connected. Choose the one this board is using."
+                    } else {
+                        "Several bootloader drives are mounted. Choose the one for this board."
+                    };
+                    rsx! {
+                        label { "{field_label}"
+                            select {
+                                value: "{selected}",
+                                disabled: busy,
+                                onchange: {
+                                    let slug = slug.clone();
+                                    move |event| {
+                                        let mut next = flash_forms()
+                                            .get(&slug)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        next.device = event.value();
+                                        flash_forms.write().insert(slug.clone(), next);
+                                    }
+                                },
+                                option { value: "", "{placeholder}" }
+                                for device in devices {
+                                    option {
+                                        value: "{device.id}",
+                                        selected: selected == device.id,
+                                        "{device.label}"
+                                    }
+                                }
+                            }
+                        }
+                        p { class: "note", "{note}" }
+                    }
+                }
+            }
             if board.enrollable {
                 label {
                     class: "flash-check",
@@ -6052,6 +6172,7 @@ fn start_flash(
                 let wifi = wifi.clone();
                 let erase_parts = form.erase_parts.clone();
                 let lora_inventory = lora_inventory.clone();
+                let device = form.device.clone();
                 move || -> Result<Option<crate::flash::Enrollment>, crate::flash::FlashError> {
                     let enrollment = if enrollable {
                         let _ = progress_tx.send(FlashProgress::running(
@@ -6075,6 +6196,7 @@ fn start_flash(
                         &wifi,
                         &erase_parts,
                         lora_inventory.as_deref(),
+                        Some(device.as_str()).filter(|value| !value.is_empty()),
                         |progress| {
                             let _ = progress_tx.send(progress);
                         },

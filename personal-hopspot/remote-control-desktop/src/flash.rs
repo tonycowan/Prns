@@ -625,6 +625,8 @@ pub struct FlashDraft {
     pub erase_parts: Vec<String>,
     /// Write the selected LoRa region and preset. UF2 boards get it inside the image.
     pub write_lora_config: bool,
+    /// Serial port or bootloader drive chosen when more than one is connected.
+    pub device: String,
 }
 
 impl Default for FlashDraft {
@@ -642,8 +644,18 @@ impl Default for FlashDraft {
             enrol_for_management: true,
             erase_parts: Vec::new(),
             write_lora_config: false,
+            device: String::new(),
         }
     }
+}
+
+/// A connected serial port or UF2 bootloader drive the flash screen can offer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlashDeviceChoice {
+    /// Value passed to `hopspot-flash` (`--port` or `--mount`).
+    pub id: String,
+    pub label: String,
+    pub flag: &'static str,
 }
 
 impl FlashDraft {
@@ -1068,6 +1080,214 @@ fn connected_usb_identities() -> Vec<UsbIdentity> {
         .collect()
 }
 
+/// Serial ports or bootloader drives `hopspot-flash` would treat as ambiguous for `slug`.
+pub fn list_flash_devices(slug: &str) -> Vec<FlashDeviceChoice> {
+    let Ok(catalog) = board_catalog() else {
+        return Vec::new();
+    };
+    let Some(board) = catalog.board(slug) else {
+        return Vec::new();
+    };
+    match &board.build {
+        BoardBuild::Esp(_) => {
+            let Ok(ports) = serialport::available_ports() else {
+                return Vec::new();
+            };
+            serial_flash_choices(ports, None)
+        }
+        BoardBuild::NrfSerialDfu(build) => {
+            let Ok(ports) = serialport::available_ports() else {
+                return Vec::new();
+            };
+            let ids = nrf_serial_usb_ids(build);
+            serial_flash_choices(ports, Some(&ids))
+        }
+        BoardBuild::Uf2(_) => uf2_flash_choices(slug, &connected_uf2_mounts()),
+    }
+}
+
+fn nrf_serial_usb_ids(build: &NrfSerialDfuBuild) -> Vec<(u16, u16)> {
+    [
+        &build.serial.touch_application_and_bootloader.usb,
+        &build.serial.recovery_bootloader.usb,
+    ]
+    .into_iter()
+    .filter_map(usb_id_pair)
+    .collect()
+}
+
+fn usb_id_pair(usb: &UsbVendorProductId) -> Option<(u16, u16)> {
+    Some((
+        parse_hex_u16(&usb.vendor_id)?,
+        parse_hex_u16(&usb.product_id)?,
+    ))
+}
+
+fn serial_flash_choices(
+    ports: Vec<serialport::SerialPortInfo>,
+    usb_ids: Option<&[(u16, u16)]>,
+) -> Vec<FlashDeviceChoice> {
+    let mut candidates = ports
+        .into_iter()
+        .filter(|port| match usb_ids {
+            Some(ids) => matches!(
+                &port.port_type,
+                SerialPortType::UsbPort(usb) if ids.contains(&(usb.vid, usb.pid))
+            ),
+            None => is_likely_serial_port(port),
+        })
+        .collect::<Vec<_>>();
+    candidates = dedupe_macos_serial_aliases(candidates);
+    candidates.sort_by(|left, right| left.port_name.cmp(&right.port_name));
+    candidates
+        .into_iter()
+        .map(|port| {
+            let label = describe_serial_port(&port);
+            FlashDeviceChoice {
+                id: port.port_name,
+                label,
+                flag: "--port",
+            }
+        })
+        .collect()
+}
+
+fn describe_serial_port(port: &serialport::SerialPortInfo) -> String {
+    let SerialPortType::UsbPort(usb) = &port.port_type else {
+        return port.port_name.clone();
+    };
+    let name = usb
+        .product
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(usb
+            .manufacturer
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()));
+    match name {
+        Some(name) => format!("{} — {name}", port.port_name),
+        None => format!("{} — {:04x}:{:04x}", port.port_name, usb.vid, usb.pid),
+    }
+}
+
+fn is_likely_serial_port(port: &serialport::SerialPortInfo) -> bool {
+    if matches!(port.port_type, SerialPortType::UsbPort(_)) {
+        return true;
+    }
+    let name = port.port_name.to_ascii_lowercase();
+    name.contains("ttyacm")
+        || name.contains("ttyusb")
+        || name.contains("usbmodem")
+        || name.contains("usbserial")
+        || (cfg!(windows)
+            && name.strip_prefix("com").is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+            }))
+}
+
+/// macOS exposes each USB serial interface as both `/dev/cu.*` and `/dev/tty.*`.
+fn dedupe_macos_serial_aliases(
+    ports: Vec<serialport::SerialPortInfo>,
+) -> Vec<serialport::SerialPortInfo> {
+    let mut by_key: Vec<(String, serialport::SerialPortInfo)> = Vec::new();
+    for port in ports {
+        let key = macos_serial_identity_key(&port.port_name);
+        if let Some((_, existing)) = by_key.iter_mut().find(|(seen, _)| seen == &key) {
+            if prefers_cu_over_tty(&port.port_name, &existing.port_name) {
+                *existing = port;
+            }
+            continue;
+        }
+        by_key.push((key, port));
+    }
+    by_key.into_iter().map(|(_, port)| port).collect()
+}
+
+fn macos_serial_identity_key(name: &str) -> String {
+    let basename = name.rsplit('/').next().unwrap_or(name);
+    let lowered = basename.to_ascii_lowercase();
+    if let Some(rest) = lowered.strip_prefix("cu.") {
+        return rest.to_string();
+    }
+    if let Some(rest) = lowered.strip_prefix("tty.") {
+        return rest.to_string();
+    }
+    lowered
+}
+
+fn prefers_cu_over_tty(candidate: &str, current: &str) -> bool {
+    let candidate_cu = candidate
+        .rsplit('/')
+        .next()
+        .unwrap_or(candidate)
+        .starts_with("cu.");
+    let current_cu = current
+        .rsplit('/')
+        .next()
+        .unwrap_or(current)
+        .starts_with("cu.");
+    candidate_cu && !current_cu
+}
+
+fn uf2_flash_choices(
+    slug: &str,
+    mounts: &[(PathBuf, Uf2BootloaderIdentity)],
+) -> Vec<FlashDeviceChoice> {
+    let Ok(catalog) = board_catalog() else {
+        return Vec::new();
+    };
+    let Some(board) = catalog.board(slug) else {
+        return Vec::new();
+    };
+    let BoardBuild::Uf2(build) = &board.build else {
+        return Vec::new();
+    };
+    let mut choices = mounts
+        .iter()
+        .filter(|(_, identity)| {
+            build.board_identities().any(|rule| {
+                rule.validated()
+                    .ok()
+                    .is_some_and(|rule| identity.matches_board(&rule))
+            })
+        })
+        .map(|(path, identity)| FlashDeviceChoice {
+            id: path.display().to_string(),
+            label: format!("{} — {}", path.display(), identity.board_id()),
+            flag: "--mount",
+        })
+        .collect::<Vec<_>>();
+    choices.sort_by(|left, right| left.id.cmp(&right.id));
+    choices
+}
+
+fn resolve_flash_device<'a>(
+    selected: Option<&str>,
+    choices: &'a [FlashDeviceChoice],
+) -> Result<Option<&'a FlashDeviceChoice>, FlashError> {
+    let selected = selected.map(str::trim).filter(|value| !value.is_empty());
+    match selected {
+        Some(id) => choices
+            .iter()
+            .find(|choice| choice.id == id)
+            .ok_or_else(|| {
+                FlashError::Message(format!(
+                    "{id} is no longer connected; choose the port again"
+                ))
+            })
+            .map(Some),
+        None if choices.len() > 1 => Err(FlashError::Message(format!(
+            "multiple devices are connected ({}); choose one before flashing",
+            choices
+                .iter()
+                .map(|choice| choice.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+        None => Ok(None),
+    }
+}
+
 fn connected_uf2_identities() -> Vec<Uf2BootloaderIdentity> {
     connected_uf2_mounts()
         .into_iter()
@@ -1227,6 +1447,7 @@ pub fn flash_enrolled_board(
     wifi: &WifiFlashPlan,
     erase_parts: &[String],
     lora_config: Option<&str>,
+    device: Option<&str>,
     on_progress: impl Fn(FlashProgress),
 ) -> Result<(), FlashError> {
     let local_build_escape = std::env::var_os("PRNS_CONTROLLER_FLASH_LOCAL_BUILD").is_some();
@@ -1293,8 +1514,13 @@ pub fn flash_enrolled_board(
         })
         .transpose()?;
     reject_unknown_erase_parts(slug, erase_parts)?;
+    let devices = list_flash_devices(slug);
+    let device_choice = resolve_flash_device(device, &devices)?;
     let _hold = Uf2VolumeProbeHold::acquire();
     let mut command = hopspot_flash_command(invocation)?;
+    if let Some(choice) = device_choice {
+        command.arg(choice.flag).arg(&choice.id);
+    }
     apply_erase_parts(&mut command, erase_parts);
     if let Some(profile) = lora_config {
         command.arg("--lora-config").arg(profile);
@@ -2753,6 +2979,7 @@ mod tests {
     #[test]
     fn flash_form_lists_preserved_partitions_and_erases_none_by_default() {
         assert!(FlashDraft::default().erase_parts.is_empty());
+        assert!(FlashDraft::default().device.is_empty());
         let names = erasable_partitions("heltec-v4-r8")
             .into_iter()
             .map(|part| part.name.to_string())
@@ -2833,6 +3060,109 @@ mod tests {
             out.extend_from_slice(&block);
         }
         out
+    }
+
+    fn usb_port(name: &str, vid: u16, pid: u16) -> serialport::SerialPortInfo {
+        serialport::SerialPortInfo {
+            port_name: name.to_string(),
+            port_type: SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid,
+                pid,
+                serial_number: None,
+                manufacturer: Some("Silicon Labs".to_string()),
+                product: Some("CP2102 USB to UART Bridge".to_string()),
+            }),
+        }
+    }
+
+    #[test]
+    fn macos_callout_and_dialin_nodes_are_one_port() {
+        let choices = serial_flash_choices(
+            vec![
+                usb_port("/dev/tty.usbserial-1", 0x10c4, 0xea60),
+                usb_port("/dev/cu.usbserial-1", 0x10c4, 0xea60),
+                usb_port("/dev/cu.usbserial-2", 0x10c4, 0xea60),
+            ],
+            None,
+        );
+        assert_eq!(choices.len(), 2);
+        assert!(choices
+            .iter()
+            .any(|choice| choice.id == "/dev/cu.usbserial-1"));
+        assert!(choices.iter().all(|choice| choice.flag == "--port"));
+        assert!(choices[0].label.contains("CP2102"));
+    }
+
+    #[test]
+    fn a_usb_filter_keeps_only_matching_ports() {
+        let choices = serial_flash_choices(
+            vec![
+                usb_port("COM3", 0x10c4, 0xea60),
+                usb_port("COM4", 0x1915, 0x521f),
+                serialport::SerialPortInfo {
+                    port_name: "COM1".to_string(),
+                    port_type: SerialPortType::Unknown,
+                },
+            ],
+            Some(&[(0x1915, 0x521f)]),
+        );
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].id, "COM4");
+    }
+
+    #[test]
+    fn several_ports_require_an_explicit_choice() {
+        let choices = [
+            FlashDeviceChoice {
+                id: "COM3".to_string(),
+                label: "COM3 — CP2102".to_string(),
+                flag: "--port",
+            },
+            FlashDeviceChoice {
+                id: "COM4".to_string(),
+                label: "COM4 — USB Serial".to_string(),
+                flag: "--port",
+            },
+        ];
+        let missing = resolve_flash_device(None, &choices).expect_err("two ports need a choice");
+        assert!(missing.to_string().contains("choose one"));
+        let chosen = resolve_flash_device(Some("COM4"), &choices)
+            .expect("known port")
+            .expect("explicit port");
+        assert_eq!(chosen.id, "COM4");
+        assert_eq!(chosen.flag, "--port");
+        assert!(resolve_flash_device(Some("COM9"), &choices).is_err());
+        assert!(resolve_flash_device(None, &choices[..1])
+            .expect("one port")
+            .is_none());
+    }
+
+    #[test]
+    fn two_matching_bootloaders_are_separate_flash_choices() {
+        let identity = Uf2BootloaderIdentity::parse(
+            b"UF2 Bootloader 0.9.0\nBoard-ID: ht-n5262\nSoftDevice: S140 version 6.1.1\n",
+        )
+        .expect("bootloader identity");
+        let other = Uf2BootloaderIdentity::parse(
+            b"UF2 Bootloader 0.9.0\nBoard-ID: wisblock-rak4631-board\nSoftDevice: S140 version 6.1.1\n",
+        )
+        .expect("other bootloader");
+        let choices = uf2_flash_choices(
+            "t114",
+            &[
+                (PathBuf::from("/Volumes/HT-B"), identity.clone()),
+                (PathBuf::from("/Volumes/RAK"), other),
+                (PathBuf::from("/Volumes/HT-A"), identity),
+            ],
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.id.as_str())
+                .collect::<Vec<_>>(),
+            ["/Volumes/HT-A", "/Volumes/HT-B"]
+        );
+        assert!(choices.iter().all(|choice| choice.flag == "--mount"));
     }
 
     #[test]
