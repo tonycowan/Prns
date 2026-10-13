@@ -52,6 +52,11 @@ impl PrnsNodeHandle {
         response.await.ok()
     }
 
+    pub(super) async fn monotonic_now(&self) -> Option<crate::engine::InstantMillis> {
+        self.introspect(|reply| NodeIntrospectionRequest::MonotonicNow { reply })
+            .await
+    }
+
     pub async fn destination_identity_hash(
         &self,
         destination: DestinationHash,

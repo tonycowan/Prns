@@ -230,6 +230,7 @@ fn remote_control_path_inventory<S: StorageLayout>(
     engine: &EngineState<S>,
     descriptors: &[InterfaceDescriptor],
     page: RemoteControlPathPage,
+    now: crate::engine::InstantMillis,
 ) -> RemoteControlPathInventory {
     let mut builder = RemoteControlPathPageBuilder::new(page);
     engine.visit_route_snapshots(AttachedInterfaces::new(descriptors), |snapshot| {
@@ -242,7 +243,9 @@ fn remote_control_path_inventory<S: StorageLayout>(
             snapshot.expires_at.0,
         ));
     });
-    builder.finish()
+    let mut inventory = builder.finish();
+    inventory.set_observed_at(now.0);
+    inventory
 }
 
 /// Borrowed lanes and channels for one pooled-topology manifold run.
@@ -510,6 +513,7 @@ pub(crate) async fn run_pooled<
                                 engine,
                                 descriptors,
                                 page,
+                                now,
                             ));
                             continue;
                         }

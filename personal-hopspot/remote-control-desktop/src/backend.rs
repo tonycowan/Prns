@@ -3969,7 +3969,7 @@ impl RemoteControlBackend {
     ) -> Result<Vec<PathTableRow>, BackendError> {
         let started = std::time::Instant::now();
         let mut page = RemoteControlPathPage::First;
-        let mut entries = Vec::new();
+        let mut stamped = Vec::new();
         for page_index in 1..=PATH_TABLE_PAGE_LIMIT {
             let page_label = path_page_label(page);
             eprintln!(
@@ -3996,7 +3996,14 @@ impl RemoteControlBackend {
                 rtt.millis(),
                 inventory.entries().len()
             );
-            entries.extend(inventory.entries().iter().copied());
+            let observed_at = inventory.observed_at();
+            stamped.extend(
+                inventory
+                    .entries()
+                    .iter()
+                    .copied()
+                    .map(|entry| (entry, observed_at)),
+            );
             match inventory.continuation() {
                 RemoteControlPathContinuation::Complete => break,
                 RemoteControlPathContinuation::More(cursor) => {
@@ -4010,7 +4017,7 @@ impl RemoteControlBackend {
         }
         let session = self.session()?;
         let mut labels = path_table_labels(session).await;
-        for entry in &entries {
+        for (entry, _) in &stamped {
             note_observed_hop(session, &mut labels, entry.via(), entry.interface());
         }
         publish_address_labels(session, &mut labels);
@@ -4020,9 +4027,11 @@ impl RemoteControlBackend {
             .lock()
             .expect("peer aliases mutex poisoned")
             .clone();
-        let rows = entries
+        let rows = stamped
             .iter()
-            .map(|entry| path_table_row(entry, &labels, &ble_aliases, &peer_aliases))
+            .map(|(entry, observed_at)| {
+                path_table_row_at(entry, &labels, &ble_aliases, &peer_aliases, *observed_at)
+            })
             .collect::<Vec<_>>();
         eprintln!(
             "path table {}: remote fetch returned in {}ms, {} rows",
@@ -9937,6 +9946,16 @@ fn path_table_row(
     ble_aliases: &HashMap<String, String>,
     peer_aliases: &HashMap<String, String>,
 ) -> PathTableRow {
+    path_table_row_at(entry, labels, ble_aliases, peer_aliases, None)
+}
+
+fn path_table_row_at(
+    entry: &RemoteControlPathEntry,
+    labels: &HashMap<String, String>,
+    ble_aliases: &HashMap<String, String>,
+    peer_aliases: &HashMap<String, String>,
+    observed_at: Option<u64>,
+) -> PathTableRow {
     let destination_full = encode_hex(entry.destination().as_bytes());
     let (mut via, via_full) = format_path_via(entry.via(), labels);
     if !via.contains(" (") && !matches!(entry.via(), NextHop::Direct) {
@@ -9967,8 +9986,8 @@ fn path_table_row(
             format_interface(entry.interface()),
             appearance_prefix(entry.interface())
         ),
-        learned: format_announce_millis(entry.learned_at()),
-        expires: format_announce_millis(entry.expires_at()),
+        learned: format_path_clock(entry.learned_at(), observed_at),
+        expires: format_path_clock(entry.expires_at(), observed_at),
     }
 }
 fn path_from_route(
@@ -10199,6 +10218,28 @@ pub fn format_wall_clock_now() -> String {
     format_announce_millis(u64::try_from(millis).unwrap_or(u64::MAX))
 }
 
+fn format_path_clock(tick: u64, observed_at: Option<u64>) -> String {
+    let Some(observed_at) = observed_at else {
+        return format_announce_millis(tick);
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let now = u64::try_from(now).unwrap_or(u64::MAX);
+    format_announce_millis(unix_millis_from_device_tick(tick, observed_at, now))
+}
+
+/// `tick` and `observed_at` share the device's monotonic clock. Subtracting them from the
+/// controller's current UTC millis yields the civil time of that tick.
+fn unix_millis_from_device_tick(tick: u64, observed_at: u64, controller_now: u64) -> u64 {
+    if tick >= observed_at {
+        controller_now.saturating_add(tick.saturating_sub(observed_at))
+    } else {
+        controller_now.saturating_sub(observed_at.saturating_sub(tick))
+    }
+}
+
 fn format_announce_millis(millis: u64) -> String {
     let unix_secs = i64::try_from(millis / 1_000).unwrap_or(0);
     match local_civil(unix_secs) {
@@ -10294,10 +10335,10 @@ mod tests {
         remember_transport_node, remote_interface_entry, render_target_names,
         resolve_controller_tcp_target, resolve_paired_target_hash, route_interface_kind, short_id,
         should_forget_control_route, should_wait_for_control_announce, stored_alias, target_label,
-        tcp_host_label, BackendError, InterfaceEntry, InterfaceFact, InterfacePower, PeerHealth,
-        RemoteControlAnnounceWait, TargetPath, TargetStatus, CONTROLLER_IDENTITY_FILE,
-        DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE, MANAGER_ALIASES_FILE, TARGET_MONITOR_TTL,
-        THIS_CONTROLLER_PEER_ALIAS,
+        tcp_host_label, unix_millis_from_device_tick, BackendError, InterfaceEntry, InterfaceFact,
+        InterfacePower, PeerHealth, RemoteControlAnnounceWait, TargetPath, TargetStatus,
+        CONTROLLER_IDENTITY_FILE, DEFAULT_TCP_TARGET, INSTANCE_IDENTITY_FILE, MANAGER_ALIASES_FILE,
+        TARGET_MONITOR_TTL, THIS_CONTROLLER_PEER_ALIAS,
     };
     use personal_rns::identity::IdentityHash;
     use personal_rns::interfaces::bluetooth_auto::BleIdentity;
@@ -12770,5 +12811,19 @@ mod tests {
         assert!(!pairing.is_dismissed_session("other-device", first_open));
         assert!(pairing.dismiss_operator(id));
         assert!(!pairing.dismiss_operator(""));
+    }
+
+    #[test]
+    fn device_tick_becomes_utc_only_when_the_reply_carries_monotonic_now() {
+        let controller_now = 1_700_000_000_000;
+        let observed_at = 5_000;
+        assert_eq!(
+            unix_millis_from_device_tick(1_000, observed_at, controller_now),
+            controller_now - 4_000
+        );
+        assert_eq!(
+            unix_millis_from_device_tick(8_000, observed_at, controller_now),
+            controller_now + 3_000
+        );
     }
 }

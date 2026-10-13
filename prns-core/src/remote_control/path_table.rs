@@ -25,11 +25,14 @@ pub const REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN: usize = TRUNCATED_HASH_BYTE_LEN
     .saturating_add(8)
     .saturating_add(8);
 
+const REMOTE_CONTROL_PATH_OBSERVED_AT_LEN: usize = 8;
+
 pub const REMOTE_CONTROL_PATH_INVENTORY_MAX_ENCODED_BODY_LEN: usize = 1usize
     .saturating_add(
         REMOTE_CONTROL_PATH_TABLE_CAP.saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN),
     )
-    .saturating_add(RemoteControlPathContinuation::MAX_ENCODED_LEN);
+    .saturating_add(RemoteControlPathContinuation::MAX_ENCODED_LEN)
+    .saturating_add(REMOTE_CONTROL_PATH_OBSERVED_AT_LEN);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteControlPathEntry {
@@ -103,6 +106,9 @@ pub enum RemoteControlPathInventoryError {
 pub struct RemoteControlPathInventory {
     entries: Vec<RemoteControlPathEntry, REMOTE_CONTROL_PATH_TABLE_CAP>,
     continuation: RemoteControlPathContinuation,
+    /// Device monotonic tick at the moment this page was built. Absent on replies from firmware
+    /// that predates the field, which the controller still renders as raw ticks.
+    observed_at: Option<u64>,
 }
 
 impl RemoteControlPathInventory {
@@ -111,6 +117,7 @@ impl RemoteControlPathInventory {
         Self {
             entries: Vec::new(),
             continuation: RemoteControlPathContinuation::Complete,
+            observed_at: None,
         }
     }
 
@@ -122,6 +129,15 @@ impl RemoteControlPathInventory {
     #[must_use]
     pub const fn continuation(&self) -> RemoteControlPathContinuation {
         self.continuation
+    }
+
+    #[must_use]
+    pub const fn observed_at(&self) -> Option<u64> {
+        self.observed_at
+    }
+
+    pub const fn set_observed_at(&mut self, tick: u64) {
+        self.observed_at = Some(tick);
     }
 
     pub fn push(
@@ -165,6 +181,11 @@ impl RemoteControlPathInventory {
                     .saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN),
             )
             .saturating_add(self.continuation.encoded_len())
+            .saturating_add(if self.observed_at.is_some() {
+                REMOTE_CONTROL_PATH_OBSERVED_AT_LEN
+            } else {
+                0
+            })
     }
 
     pub fn write_body(&self, body: &mut [u8]) -> Result<(), RemoteControlMessageWriteError> {
@@ -198,10 +219,20 @@ impl RemoteControlPathInventory {
                 .entries
                 .len()
                 .saturating_mul(REMOTE_CONTROL_PATH_ENTRY_ENCODED_LEN);
-            let Some(continuation) = rest.get_mut(continuation_start..) else {
+            let continuation_end =
+                continuation_start.saturating_add(self.continuation.encoded_len());
+            let Some(continuation) = rest.get_mut(continuation_start..continuation_end) else {
                 return Err(RemoteControlMessageWriteError::BufferTooShort);
             };
-            self.continuation.write_into(continuation)
+            self.continuation.write_into(continuation)?;
+            if let Some(tick) = self.observed_at {
+                let tick_end = continuation_end.saturating_add(REMOTE_CONTROL_PATH_OBSERVED_AT_LEN);
+                let Some(slot) = rest.get_mut(continuation_end..tick_end) else {
+                    return Err(RemoteControlMessageWriteError::BufferTooShort);
+                };
+                slot.copy_from_slice(&tick.to_be_bytes());
+            }
+            Ok(())
         }
     }
 
@@ -235,17 +266,12 @@ impl RemoteControlPathInventory {
             if !unread.is_empty() {
                 return Err(RemoteControlResponseParseError::Malformed);
             }
-            let Some(continuation) = RemoteControlPathContinuation::parse(continuation_bytes)
-            else {
-                return Err(if continuation_bytes.is_empty() {
-                    RemoteControlResponseParseError::Truncated
-                } else {
-                    RemoteControlResponseParseError::Malformed
-                });
-            };
+            let (continuation, observed_at) =
+                parse_continuation_and_observed_at(continuation_bytes)?;
             if inventory.set_continuation(continuation).is_err() {
                 return Err(RemoteControlResponseParseError::Malformed);
             }
+            inventory.observed_at = observed_at;
             Ok(inventory)
         }
     }
@@ -323,6 +349,43 @@ impl RemoteControlPathPageBuilder {
             }
         }
     }
+}
+
+#[cfg(feature = "remote-control-path-table")]
+fn parse_continuation_and_observed_at(
+    bytes: &[u8],
+) -> Result<(RemoteControlPathContinuation, Option<u64>), RemoteControlResponseParseError> {
+    if let Some(continuation) = RemoteControlPathContinuation::parse(bytes) {
+        return Ok((continuation, None));
+    }
+    let Some((prefix, tick)) = bytes.split_at_checked(
+        bytes
+            .len()
+            .saturating_sub(REMOTE_CONTROL_PATH_OBSERVED_AT_LEN),
+    ) else {
+        return Err(if bytes.is_empty() {
+            RemoteControlResponseParseError::Truncated
+        } else {
+            RemoteControlResponseParseError::Malformed
+        });
+    };
+    if tick.len() != REMOTE_CONTROL_PATH_OBSERVED_AT_LEN {
+        return Err(if bytes.is_empty() {
+            RemoteControlResponseParseError::Truncated
+        } else {
+            RemoteControlResponseParseError::Malformed
+        });
+    }
+    let Some(continuation) = RemoteControlPathContinuation::parse(prefix) else {
+        return Err(if bytes.is_empty() {
+            RemoteControlResponseParseError::Truncated
+        } else {
+            RemoteControlResponseParseError::Malformed
+        });
+    };
+    let mut raw = [0u8; REMOTE_CONTROL_PATH_OBSERVED_AT_LEN];
+    raw.copy_from_slice(tick);
+    Ok((continuation, Some(u64::from_be_bytes(raw))))
 }
 
 #[cfg(feature = "remote-control-path-table")]
@@ -469,5 +532,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed, inventory);
+        assert_eq!(parsed.observed_at(), None);
+    }
+
+    #[test]
+    fn path_inventory_round_trips_an_appended_monotonic_tick() {
+        let mut inventory = RemoteControlPathInventory::empty();
+        inventory.push(entry(0x10)).unwrap();
+        inventory.set_observed_at(0x0102_0304_0506_0708);
+        let mut body = [0u8; REMOTE_CONTROL_PATH_INVENTORY_MAX_ENCODED_BODY_LEN];
+        inventory.write_body(&mut body).unwrap();
+        let parsed = RemoteControlPathInventory::parse_body(
+            body.get(..inventory.encoded_body_len()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed, inventory);
+        assert_eq!(parsed.observed_at(), Some(0x0102_0304_0506_0708));
+    }
+
+    #[test]
+    fn path_inventory_without_a_monotonic_tick_stays_readable() {
+        let mut legacy = RemoteControlPathInventory::empty();
+        legacy.push(entry(0x10)).unwrap();
+        let mut body = [0u8; REMOTE_CONTROL_PATH_INVENTORY_MAX_ENCODED_BODY_LEN];
+        legacy.write_body(&mut body).unwrap();
+        let legacy_len = legacy.encoded_body_len();
+        let parsed =
+            RemoteControlPathInventory::parse_body(body.get(..legacy_len).unwrap()).unwrap();
+        assert_eq!(parsed.observed_at(), None);
+        assert_eq!(parsed.entries(), legacy.entries());
+
+        let mut extended = body[..legacy_len].to_vec();
+        extended.extend_from_slice(&50u64.to_be_bytes());
+        let stamped = RemoteControlPathInventory::parse_body(&extended).unwrap();
+        assert_eq!(stamped.observed_at(), Some(50));
+        assert_eq!(stamped.entries(), legacy.entries());
+        assert_eq!(stamped.continuation(), legacy.continuation());
     }
 }

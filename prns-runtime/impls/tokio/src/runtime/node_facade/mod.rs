@@ -763,7 +763,11 @@ impl super::PrnsNodeApi for PrnsNodeHandle {
                 snapshot.expires_at.0,
             ));
         }
-        builder.finish()
+        let mut inventory = builder.finish();
+        if let Some(now) = self.monotonic_now().await {
+            inventory.set_observed_at(now.0);
+        }
+        inventory
     }
 
     fn close_link(&self, link_id: LinkId) -> bool {

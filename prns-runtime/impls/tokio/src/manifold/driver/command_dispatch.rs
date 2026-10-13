@@ -670,6 +670,9 @@ where
                         });
                         let _ = reply.send(snapshots);
                     }
+                    NodeIntrospectionRequest::MonotonicNow { reply } => {
+                        let _ = reply.send(now);
+                    }
                     NodeIntrospectionRequest::Route { destination, reply } => {
                         let _ = reply.send(engine.route_snapshot(destination, topology.view()));
                     }

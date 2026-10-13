@@ -51,6 +51,9 @@ pub enum NodeIntrospectionRequest {
     Routes {
         reply: oneshot::Sender<Vec<RouteSnapshot>>,
     },
+    MonotonicNow {
+        reply: oneshot::Sender<crate::engine::InstantMillis>,
+    },
     Route {
         destination: DestinationHash,
         reply: oneshot::Sender<Option<RouteSnapshot>>,
