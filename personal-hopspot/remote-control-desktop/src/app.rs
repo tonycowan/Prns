@@ -51,7 +51,7 @@ const PATH_TABLE_COLLAPSED_ROWS: usize = 5;
 const PATH_TABLE_EXPANDED_ROWS: usize = 10;
 
 const STYLES: &str = r#"
-:root { font-family: Inter, system-ui, sans-serif; color: #17221b; background: #edf2ed; }
+:root { font-family: Inter, system-ui, sans-serif; color: #222222; background: #ffffff; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 button, input, select { font: inherit; }
@@ -71,17 +71,17 @@ button { cursor: pointer; }
   align-items: center;
   gap: 12px;
   padding: 12px 18px;
-  background: #183d2b;
-  color: #f5faf6;
-  box-shadow: 0 1px 0 rgba(0, 0, 0, .18);
+  background: #ffffff;
+  color: #555555;
+  border-bottom: 2px solid #5c7080;
 }
 .app-bar-nav { display: flex; align-items: center; gap: 4px; justify-self: start; }
-.app-bar h1 { margin: 0; font-size: 20px; font-weight: 700; text-align: center; letter-spacing: .01em; }
+.app-bar h1 { margin: 0; font-size: 20px; font-weight: 500; text-align: center; letter-spacing: .01em; color: #555555; }
 .app-bar-spacer { justify-self: end; }
 .app-bar button {
   border: 0;
   background: transparent;
-  color: #b7cfc0;
+  color: #6b6b6b;
   width: 42px;
   height: 42px;
   border-radius: 10px;
@@ -89,66 +89,94 @@ button { cursor: pointer; }
   display: grid;
   place-items: center;
 }
-.app-bar button:hover { color: white; background: #2d6046; }
+.app-bar button:hover { color: #3f3f3f; background: #e5eef6; }
 .app-bar button.active {
-  color: #143326;
-  background: #eef7f1;
-  box-shadow: 0 0 0 2px rgba(238, 247, 241, .35), inset 0 0 0 1px #9fcdb3;
+  color: #333333;
+  background: #d5e6f3;
+  box-shadow: none;
 }
-.app-bar button.active:hover { color: #143326; background: #e4f2e9; }
+.app-bar button.active:hover { color: #333333; background: #c9dff0; }
 .app-bar svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .app-bar button.active svg { stroke-width: 2.35; }
 .content {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: clip;
   -webkit-overflow-scrolling: touch;
-  padding: 28px 38px 38px;
+  padding: 20px 0 38px;
+  width: 100%;
+  background: #ffffff;
+}
+.content > .heading-row,
+.content > .section-intro,
+.content > p {
   max-width: 1050px;
   width: 100%;
-  margin: 0 auto;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 38px;
+  padding-right: 38px;
 }
 @media (max-width: 720px) {
-  .content { padding: 16px 14px 28px; }
+  .content { padding: 16px 0 28px; }
+  .content > .heading-row,
+  .content > .section-intro,
+  .content > p { padding-left: 18px; padding-right: 18px; }
   .app-bar { padding: 10px 12px; gap: 8px; }
   .app-bar h1 { font-size: 17px; }
 }
 h1 { margin: 5px 0 8px; font-size: 31px; }
-.lead { color: #5a6a60; margin: 0; }
+h1, h2, h3, .twisty-title, .sibling-alias { color: #555555; }
+h1, h2, h3 { font-weight: 500; }
+.lead { color: #6b6b6b; margin: 0; }
 .section-intro { margin: 8px 0 26px; }
 .section-intro .info-note { margin: 10px 0 0; }
 .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-.card { background: white; border: 1px solid #d7e0d9; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(24, 61, 43, .05); }
-.flash-board { cursor: pointer; text-align: left; width: 100%; border: 1px solid #d7e0d9; background: white; border-radius: 10px; padding: 16px 18px; }
-.flash-board.selected, .flash-board:hover { border-color: #2d6046; background: #f4f8f5; }
-.flash-board.probable { border-color: #2d6046; box-shadow: 0 0 0 2px rgba(45, 96, 70, .22); }
+.card {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  width: 100%;
+  margin: 0;
+  padding: 18px max(38px, calc((100% - 1050px) / 2 + 38px)) 22px;
+  border-top: 1px solid #5c7080;
+}
+.content > section.card:last-of-type { border-bottom: 1px solid #5c7080; }
+@media (max-width: 720px) {
+  .card { padding-left: 18px; padding-right: 18px; }
+}
+.flash-board { cursor: pointer; text-align: left; width: 100%; border: 1px solid #d5e0ea; background: white; border-radius: 10px; padding: 16px 18px; }
+.flash-board.selected, .flash-board:hover { border-color: #68a0c4; background: #f3f8fb; }
+.flash-board.probable { border-color: #68a0c4; box-shadow: 0 0 0 2px rgba(104, 160, 196, .35); }
 .flash-board h3 { margin: 0 0 4px; font-size: 17px; }
-.flash-board .meta { color: #5a6a60; font-size: 13px; margin: 0; }
-.flash-board .detected { margin: 8px 0 0; font-size: 12px; font-weight: 600; color: #183d2b; }
-.accordion-item.probable { border-color: #2d6046; box-shadow: 0 0 0 2px rgba(45, 96, 70, .22); }
+.flash-board .meta { color: #6b6b6b; font-size: 13px; margin: 0; }
+.flash-board .detected { margin: 8px 0 0; font-size: 12px; font-weight: 600; color: #3a3a3a; }
+.accordion-item.probable { box-shadow: none; }
 .flash-actions { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; margin-top: 4px; }
 .flash-stages { list-style: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 10px 0 0; padding: 0; }
 .flash-stages[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .flash-stage { position: relative; display: grid; justify-items: center; gap: 8px; text-align: center; }
 .ota-meter-block { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 10px 0 0; }
-.ota-meter { height: 8px; border-radius: 4px; background: #e4ebe6; overflow: hidden; }
-.ota-meter-fill { height: 100%; background: #1f6b45; transition: width 120ms linear; }
-.ota-meter-percent { font-size: 12px; font-weight: 600; color: #183d2b; font-variant-numeric: tabular-nums; min-width: 2.75em; text-align: right; }
+.ota-meter { height: 8px; border-radius: 4px; background: #e3ebf2; overflow: hidden; }
+.ota-meter-fill { height: 100%; background: #3d86b5; transition: width 120ms linear; }
+.ota-meter-percent { font-size: 12px; font-weight: 600; color: #3a3a3a; font-variant-numeric: tabular-nums; min-width: 2.75em; text-align: right; }
 .flash-run-summary { display: grid; gap: 4px; margin: 10px 0 0; }
 .flash-run-summary > div { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 8px; align-items: baseline; }
-.flash-run-summary dt { margin: 0; font-size: 12px; font-weight: 600; color: #5a6a60; }
-.flash-run-summary dd { margin: 0; font-size: 12px; color: #183d2b; font-variant-numeric: tabular-nums; }
-.flash-stage::before { content: ""; position: absolute; top: 11px; right: calc(50% + 16px); left: calc(-50% + 16px); height: 2px; background: #d7e0d9; }
+.flash-run-summary dt { margin: 0; font-size: 12px; font-weight: 600; color: #6b6b6b; }
+.flash-run-summary dd { margin: 0; font-size: 12px; color: #3a3a3a; font-variant-numeric: tabular-nums; }
+.flash-stage::before { content: ""; position: absolute; top: 11px; right: calc(50% + 16px); left: calc(-50% + 16px); height: 2px; background: #d5e0ea; }
 .flash-stage:first-child::before { content: none; }
-.flash-stage.done::before, .flash-stage.current::before { background: #2d6046; }
+.flash-stage.done::before, .flash-stage.current::before { background: #68a0c4; }
 .flash-stage.failed::before { background: #8a2f2f; }
-.flash-stage .dot { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #d7e0d9; background: white; }
-.flash-stage.current .dot { border-color: #2d6046; background: #2d6046; box-shadow: 0 0 0 4px rgba(45, 96, 70, .18); }
-.flash-stage.done .dot { border-color: #2d6046; background: #2d6046; }
+.flash-stage .dot { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #d5e0ea; background: white; }
+.flash-stage.current .dot { border-color: #68a0c4; background: #68a0c4; box-shadow: 0 0 0 4px rgba(104, 160, 196, .32); }
+.flash-stage.done .dot { border-color: #68a0c4; background: #68a0c4; }
 .flash-stage.failed .dot { border-color: #8a2f2f; background: #8a2f2f; }
 .flash-stage.skipped .dot { border-style: dashed; }
-.flash-stage .label { font-size: 12px; font-weight: 600; color: #5a6a60; }
-.flash-stage.current .label, .flash-stage.done .label { color: #183d2b; }
+.flash-stage .label { font-size: 12px; font-weight: 600; color: #6b6b6b; }
+.flash-stage.current .label, .flash-stage.done .label { color: #3a3a3a; }
 .flash-stage.failed .label { color: #8a2f2f; }
 .flash-stage-detail { margin: 10px 0 0; white-space: pre-wrap; max-height: 14em; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 .flash-manage { margin-top: 12px; }
@@ -157,8 +185,8 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
 .heading-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .heading-row h1, .heading-row h2 { margin: 0; }
 .heading-actions { display: flex; align-items: center; }
-.info { flex: 0 0 auto; width: 32px; height: 32px; border: 0; background: transparent; color: #5a6a60; border-radius: 50%; padding: 0; font: italic 700 16px/1 Georgia, "Times New Roman", serif; }
-.info:hover, .info.open { background: #eef5f0; color: #183d2b; }
+.info { flex: 0 0 auto; width: 32px; height: 32px; border: 0; background: transparent; color: #6b6b6b; border-radius: 50%; padding: 0; font: italic 700 16px/1 Georgia, "Times New Roman", serif; }
+.info:hover, .info.open { background: #eef4f9; color: #3a3a3a; }
 .info-note { margin: 10px 0 14px; }
 .twisty-bar { display: flex; align-items: stretch; }
 .twisty-bar .twisty-row { flex: 1; min-width: 0; }
@@ -170,13 +198,13 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
 .target-main > .target-section,
 .target-main > .whitelist-rule { grid-column: 1 / -1; min-width: 0; }
 .target-section { display: grid; gap: 8px; min-width: 0; }
-.target-section-title { margin: 0; font-size: 12px; font-weight: 700; color: #17221b; }
+.target-section-title { margin: 0; font-size: 12px; font-weight: 500; color: #555555; }
 .target-title { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; }
 .target-title .name { font-weight: 700; flex: 0 0 auto; }
-.target-title .build { font-size: 12px; font-weight: 500; color: #64736a; flex: 0 0 auto; }
-.target-title .peer-alias { flex: 1; min-width: 72px; max-width: none; height: 30px; margin: 0; border: 0; border-radius: 0; padding: 0; background: transparent; font: inherit; font-weight: 700; color: inherit; }
-.target-title .peer-alias:focus { outline: none; box-shadow: 0 1px 0 #2d6046; }
-.target-subtitle { font-size: 12px; font-weight: 500; color: #64736a; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.target-title .build { font-size: 12px; font-weight: 500; color: #737373; flex: 0 0 auto; }
+.target-title .peer-alias { flex: 1; min-width: 72px; max-width: none; height: 30px; margin: 0; border: 0; border-radius: 0; padding: 0; background: transparent; font: inherit; font-weight: 700; color: #555555; }
+.target-title .peer-alias:focus { outline: none; box-shadow: 0 1px 0 #68a0c4; }
+.target-subtitle { font-size: 12px; font-weight: 500; color: #737373; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .target-aside { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 7.75rem; }
 .target-aside-status { display: flex; align-items: center; justify-content: flex-end; gap: 2px; }
 .target-controller-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
@@ -186,26 +214,26 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
   align-self: center;
   font-variant-numeric: tabular-nums;
   font-size: 13px;
-  color: #2d6a9f;
+  color: #2f74a8;
   white-space: nowrap;
 }
 .target-copy .target-controller-actions { flex-wrap: wrap; gap: 9px; }
 .target-head .refresh { align-self: center; }
-.refresh { flex: 0 0 auto; align-self: center; border: 0; background: transparent; color: #183d2b; padding: 8px 10px; line-height: 1; font-size: 18px; }
-.refresh:hover { background: #eef5f0; border-radius: 6px; }
+.refresh { flex: 0 0 auto; align-self: center; border: 0; background: transparent; color: #3a3a3a; padding: 8px 10px; line-height: 1; font-size: 18px; }
+.refresh:hover { background: #eef4f9; border-radius: 6px; }
 .peer-head .refresh { padding: 2px 4px; font-size: 16px; }
 .stack { display: grid; gap: 12px; }
-.status { color: #64736a; font-size: 13px; }
-.status.online { color: #167346; }
+.status { color: #737373; font-size: 13px; }
+.status.online { color: #2a7eae; }
 .status.sleeping { color: #956b16; }
-.status.awaiting { color: #2d6a9f; }
-.button { appearance: none; -webkit-appearance: none; border: 1px solid #b7c8bc; border-radius: 7px; background: white; color: #183d2b; padding: 7px 10px; font-family: inherit; font-size: 13px; font-weight: 400; line-height: normal; }
-.button:hover { background: #f3f7f4; }
-.button.primary { border-color: #246844; background: #246844; color: white; }
+.status.awaiting { color: #2f74a8; }
+.button { appearance: none; -webkit-appearance: none; border: 1px solid #b7c6d4; border-radius: 7px; background: white; color: #3a3a3a; padding: 7px 10px; font-family: inherit; font-size: 13px; font-weight: 400; line-height: normal; }
+.button:hover { background: #f2f7fb; }
+.button.primary { border-color: #2f6f9e; background: #2f6f9e; color: white; }
 .button.danger { border-color: #a3493f; color: #8b3029; }
 .button:disabled { opacity: .5; cursor: default; }
 .button:disabled:hover { background: inherit; }
-.button.primary:disabled:hover { background: #246844; }
+.button.primary:disabled:hover { background: #2f6f9e; }
 .button.busy { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 92px; }
 .button.busy:disabled { opacity: 1; cursor: progress; }
 .spinner { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; }
@@ -226,70 +254,90 @@ h1 { margin: 5px 0 8px; font-size: 31px; }
 .edit-card h3 { margin: 0; font-size: 15px; }
 .flash-image-pick { display: grid; gap: 10px; margin: 0 0 20px; }
 .flash-image-pick label { display: grid; gap: 8px; margin: 0; }
+.flash-image-pick label.outlined { display: block; margin: 10px 0 0; }
 .flash-image-pick select { margin-top: 0; }
 .flash-image-pick .flash-actions { margin: 0; }
 .flash-image-pick .flash-actions .button { min-width: 92px; }
 .flash-image-pick .flash-build-status { margin: 0; white-space: pre-wrap; max-height: 14em; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 .facts div.changed { background: #fff8ea; box-shadow: inset 3px 0 0 #c48a1a; border-radius: 4px; padding: 2px 6px; }
 .facts div.changed dt { color: #956b16; }
-.unsaved-overlay { position: fixed; inset: 0; background: rgba(23, 34, 27, .35); display: grid; place-items: center; z-index: 20; padding: 24px; }
-.unsaved-dialog { background: white; border: 1px solid #d7e0d9; border-radius: 10px; padding: 22px; max-width: 440px; width: 100%; box-shadow: 0 8px 24px rgba(24, 61, 43, .16); }
+.unsaved-overlay { position: fixed; inset: 0; background: rgba(23, 32, 40, .35); display: grid; place-items: center; z-index: 20; padding: 24px; }
+.unsaved-dialog { background: white; border: 1px solid #d5e0ea; border-radius: 10px; padding: 22px; max-width: 440px; width: 100%; box-shadow: 0 8px 24px rgba(27, 70, 102, .16); }
 .unsaved-dialog p { margin: 0 0 16px; }
-label { color: #425348; font-size: 14px; font-weight: 600; }
-input { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius: 7px; padding: 10px 11px; background: #fbfdfb; }
-select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius: 7px; padding: 10px 11px; background: #fbfdfb; }
+label { color: #4a4a4a; font-size: 14px; font-weight: 600; }
+input { width: 100%; margin-top: 6px; border: 1px solid #bfc9d4; border-radius: 7px; padding: 10px 11px; background: #f8fbfd; }
+select { width: 100%; margin-top: 6px; border: 1px solid #bfc9d4; border-radius: 7px; padding: 10px 11px; background: #f8fbfd; }
 .flash-check { display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .flash-check input { width: auto; margin: 0; padding: 0; }
 .digits { font-size: 30px; font-weight: 700; letter-spacing: .22em; }
 .toggle { min-width: 58px; }
-.note { color: #66766c; font-size: 14px; }
-.note a { color: #2d6a9f; }
+.note { color: #767676; font-size: 14px; }
+.note a { color: #2f74a8; }
 .error { color: #9b3129; }
-.activity-log { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; max-height: 280px; overflow: auto; }
-.activity-log li { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: start; font-size: 13px; }
-.activity-log time { color: #52705c; font-variant-numeric: tabular-nums; }
+.activity-log { display: grid; gap: 0; margin: 8px 0 0; padding: 0; list-style: none; max-height: 280px; overflow: auto; border-top: 1px solid #7d8c9a; }
+.activity-log li { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: start; font-size: 13px; padding: 8px 0; border-top: 1px solid #7d8c9a; }
+.activity-log li:first-child { border-top: 0; }
+.activity-log time { color: #666666; font-variant-numeric: tabular-nums; }
 .activity-log p { margin: 0; }
-.announce-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 14px; }
-.announce-toolbar label { flex: 1 1 220px; display: grid; gap: 6px; margin: 0; font-size: 13px; font-weight: 600; color: #52705c; }
-.announce-toolbar input { width: 100%; height: 34px; margin: 0; border: 1px solid #bfcac2; border-radius: 7px; padding: 0 10px; background: #fbfdfb; }
+.announce-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 0 0 14px; }
+.announce-toolbar label { flex: 1 1 220px; display: grid; gap: 6px; margin: 0; font-size: 13px; font-weight: 600; color: #666666; }
+.announce-toolbar label.outlined { flex: 1 1 220px; display: block; margin-top: 10px; gap: 0; font-size: inherit; font-weight: inherit; color: inherit; }
+.announce-toolbar input { width: 100%; height: 34px; margin: 0; border: 1px solid #bfc9d4; border-radius: 7px; padding: 0 10px; background: #f8fbfd; }
 .announce-toolbar .button { flex: 0 0 auto; }
-.announce-meta { margin: 0 0 12px; font-size: 13px; color: #5a6a60; }
-.announce-stream { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
-.announce-stream li { border: 1px solid #d7e0d9; border-radius: 8px; padding: 12px 14px; background: #fbfdfb; display: grid; gap: 8px; }
+.announce-meta { margin: 0 0 12px; font-size: 13px; color: #6b6b6b; }
+.announce-stream { display: grid; gap: 0; margin: 8px 0 0; padding: 0; list-style: none; border-top: 1px solid #7d8c9a; }
+.announce-stream li { border: 0; border-radius: 0; padding: 12px 0; background: transparent; display: grid; gap: 8px; border-top: 1px solid #7d8c9a; }
+.announce-stream li:first-child { border-top: 0; }
 .announce-stream .announce-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; justify-content: space-between; }
-.announce-stream time { color: #52705c; font-variant-numeric: tabular-nums; font-size: 12px; }
-.announce-stream .announce-dest { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; color: #183d2b; overflow-wrap: anywhere; }
+.announce-stream time { color: #666666; font-variant-numeric: tabular-nums; font-size: 12px; }
+.announce-stream .announce-dest { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; color: #3a3a3a; overflow-wrap: anywhere; }
 .announce-stream .announce-facts { display: grid; gap: 4px; margin: 0; }
 .announce-stream .announce-facts div { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: 8px; font-size: 13px; }
-.announce-stream .announce-facts dt { color: #52705c; font-weight: 600; }
+.announce-stream .announce-facts dt { color: #666666; font-weight: 600; }
 .announce-stream .announce-facts dd { margin: 0; overflow-wrap: anywhere; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-.accordion { display: grid; gap: 10px; }
-.accordion-item { background: white; border: 1px solid #d7e0d9; border-radius: 8px; box-shadow: 0 2px 8px rgba(24, 61, 43, .05); }
-.accordion-item.awaiting { border-style: dashed; }
-.accordion-item.open { border-color: #27734c; box-shadow: 0 0 0 2px #d8ebdf; }
+.accordion { display: grid; gap: 0; width: 100%; }
+.accordion-item {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  width: 100%;
+  padding: 6px max(38px, calc((100% - 1050px) / 2 + 38px)) 14px;
+  border-top: 1px solid #5c7080;
+}
+.content > .accordion > .accordion-item:last-child { border-bottom: 1px solid #5c7080; }
+.accordion-item.awaiting { border-top-color: #68a0c4; }
+.accordion-item.open { background: transparent; box-shadow: none; }
+.accordion-item.probable .twisty-title { box-shadow: inset 3px 0 0 #68a0c4; padding-left: 8px; }
+.accordion-item > .twisty-row,
+.accordion-item > .target-head { padding-left: 0; padding-right: 0; }
+@media (max-width: 720px) {
+  .accordion-item { padding-left: 18px; padding-right: 18px; }
+}
 .twisty-row { width: 100%; border: 0; background: transparent; padding: 14px 16px; text-align: left; display: flex; align-items: center; gap: 8px; }
-.twisty { width: 16px; height: 16px; flex: 0 0 auto; position: relative; color: #5a6a60; }
+.twisty { width: 16px; height: 16px; flex: 0 0 auto; position: relative; color: #6b6b6b; }
 .twisty::before { content: ""; position: absolute; top: 50%; left: 50%; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: translate(-70%, -50%) rotate(-45deg); }
 .twisty.open::before { transform: translate(-50%, -65%) rotate(45deg); }
 .twisty-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
-.twisty-title { font-weight: 700; }
-.twisty-as-of { color: #66766c; font-size: 12px; font-variant-numeric: tabular-nums; }
-.twisty-path { color: #52705c; font-size: 12px; }
-.twisty-address { color: #64736a; font-size: 13px; word-break: break-all; }
-.allow-list-key { color: #64736a; font-size: 12px; word-break: break-all; }
+.twisty-title { font-weight: 500; }
+.twisty-as-of { color: #767676; font-size: 12px; font-variant-numeric: tabular-nums; }
+.twisty-path { color: #666666; font-size: 12px; }
+.twisty-address { color: #737373; font-size: 13px; word-break: break-all; }
+.allow-list-key { color: #737373; font-size: 12px; word-break: break-all; }
 .identity-block { margin: 18px 0 8px; }
 .card > .heading-row { margin-bottom: 8px; }
 .card > .heading-row h2 { margin: 0; }
 .identity-block h2, .identity-block h3, .identity-block h4 { margin: 0 0 8px; }
-.identity-kicker { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #52705c; margin: 0 0 4px; }
+.identity-kicker { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #666666; margin: 0 0 4px; }
 .identity-block .note { margin: 0 0 8px; }
 .identity-block .interface-toolbar { margin: 4px 0 12px; }
 .identity-block .toolbar-pane { flex-wrap: wrap; }
 .identity-block .actions { margin-top: 12px; }
-.sibling-list { display: grid; gap: 8px; margin: 0 0 12px; }
-.sibling-row { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid #e3ebe5; border-radius: 7px; background: #fbfdfb; }
+.sibling-list { display: grid; gap: 0; margin: 8px 0 12px; border-top: 1px solid #7d8c9a; }
+.sibling-row { display: grid; gap: 2px; padding: 10px 0; border: 0; border-radius: 0; background: transparent; border-top: 1px solid #7d8c9a; }
+.sibling-list > .sibling-row:first-child { border-top: 0; }
 .sibling-row .twisty-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.sibling-row .sibling-alias { font-weight: 700; min-width: 0; }
+.sibling-row .sibling-alias { font-weight: 500; min-width: 0; }
 .sibling-row .peer-alias { flex: 1; min-width: 80px; max-width: 220px; }
 .sibling-row .whitelist-remove { flex: 0 0 auto; }
 .hash-row { display: flex; align-items: center; gap: 8px; }
@@ -298,8 +346,8 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .whitelist-table { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 10px; align-items: center; width: 100%; min-width: 0; }
 .path-title { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .path-title h2, .path-title h3 { margin: 0; }
-.path-twisty { border: 0; background: transparent; padding: 0; width: 24px; height: 24px; flex: 0 0 auto; display: grid; place-items: center; color: #5a6a60; }
-.path-twisty:hover { color: #183d2b; }
+.path-twisty { border: 0; background: transparent; padding: 0; width: 24px; height: 24px; flex: 0 0 auto; display: grid; place-items: center; color: #6b6b6b; }
+.path-twisty:hover { color: #3a3a3a; }
 .path-scroll {
   --path-line: 22px;
   --path-gap: 4px;
@@ -314,54 +362,109 @@ select { width: 100%; margin-top: 6px; border: 1px solid #bfcac2; border-radius:
 .path-table-head, .path-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; height: var(--path-line); line-height: var(--path-line); }
 .path-table-head span, .path-row span { white-space: nowrap; }
 .path-hash-toggle { border: 0; background: transparent; padding: 0; margin: 0; font: inherit; font-weight: inherit; color: inherit; cursor: pointer; text-align: left; white-space: nowrap; }
-.path-hash-toggle:hover { color: #183d2b; }
-.path-table-head { position: sticky; top: 0; z-index: 1; background: white; font-size: 11px; font-weight: 700; color: #5a6a60; }
-.path-row { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: #17221b; }
+.path-hash-toggle:hover { color: #3a3a3a; }
+.path-table-head { position: sticky; top: 0; z-index: 1; background: #ffffff; font-size: 11px; font-weight: 700; color: #6b6b6b; }
+.path-row { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: #222222; }
 .whitelist-table.can-remove { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
-.whitelist-head { color: #52705c; font-size: 12px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.whitelist-hash { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: transparent; padding: 0; text-align: left; color: #17221b; font: inherit; font-variant-numeric: tabular-nums; }
+.whitelist-head { color: #666666; font-size: 12px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.whitelist-hash { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: transparent; padding: 0; text-align: left; color: #222222; font: inherit; font-variant-numeric: tabular-nums; }
 .whitelist-hash:hover { text-decoration: underline; }
-.whitelist-alias { min-width: 0; width: 100%; height: 30px; margin: 0; border: 1px solid #bfcac2; border-radius: 7px; padding: 0 8px; background: #fbfdfb; }
-.whitelist-alias-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #17221b; }
-.whitelist-alias-text.placeholder { color: #64736a; }
+.whitelist-alias { min-width: 0; width: 100%; height: 30px; margin: 0; border: 1px solid #bfc9d4; border-radius: 7px; padding: 0 8px; background: #f8fbfd; }
+.whitelist-alias-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #222222; }
+.whitelist-alias-text.placeholder { color: #737373; }
 .whitelist-remove { min-width: 92px; }
 .hash-popup { max-width: 520px; }
 .hash-popup .twisty-address { word-break: break-all; }
-.whitelist-rule { border: 0; border-top: 1px solid #d7e0d9; margin: 4px 0; }
+.whitelist-rule { border: 0; border-top: 1px solid #7d8c9a; margin: 4px 0; }
 .accordion-body { padding: 0 16px 16px 40px; display: grid; gap: 12px; }
 .interface-list-head { display: flex; align-items: center; gap: 12px; }
 .interface-list-head .actions { margin: 0; }
 .interface-list-head .interface-as-of { margin-left: auto; }
-.interface-as-of { margin: 0; text-align: right; color: #66766c; font-size: 12px; font-variant-numeric: tabular-nums; }
-.interface-list { display: grid; gap: 8px; }
-.interface-item { border: 1px solid #e3ebe5; border-radius: 7px; background: #fbfdfb; }
-.interface-item.open { border-color: #b7c8bc; }
+.interface-as-of { margin: 0; text-align: right; color: #767676; font-size: 12px; font-variant-numeric: tabular-nums; }
+.interface-list { display: grid; gap: 0; margin-top: 8px; border-top: 1px solid #7d8c9a; }
+.interface-item { border: 0; border-radius: 0; background: transparent; border-top: 1px solid #7d8c9a; }
+.interface-list > .interface-item:first-child { border-top: 0; }
+.interface-item.open { background: transparent; }
 .interface-item .twisty-row { padding: 11px 12px; }
 .interface-item .accordion-body { padding: 0 12px 12px 38px; }
 .facts { display: grid; gap: 4px; margin: 0; min-width: 0; }
 .facts div { display: grid; grid-template-columns: minmax(0, 6.75rem) minmax(0, 1fr); gap: 8px 10px; align-items: start; font-size: 13px; min-width: 0; }
-.facts dt { color: #52705c; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
-.facts dd { margin: 0; color: #17221b; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.facts dt { color: #666666; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.facts dd { margin: 0; color: #222222; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .facts dd.wrap { word-break: normal; overflow-wrap: anywhere; }
 .facts dd.with-unit { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .facts dd.with-unit input { flex: 1 1 auto; width: auto; min-width: 0; }
-.facts .unit { flex: 0 0 3.25em; color: #52705c; white-space: nowrap; }
+.facts .unit { flex: 0 0 3.25em; color: #666666; white-space: nowrap; }
 .facts input,
-.facts select { width: 100%; height: 30px; margin: 0; border: 1px solid #bfcac2; border-radius: 7px; padding: 0 8px; background: #fbfdfb; }
+.facts select { width: 100%; height: 30px; margin: 0; border: 1px solid #bfc9d4; border-radius: 7px; padding: 0 8px; background: #f8fbfd; }
+.facts div:has(> label.outlined) { grid-template-columns: minmax(0, 1fr); }
+.facts div.changed:has(> label.outlined) { background: transparent; box-shadow: none; padding: 0; }
+label.outlined {
+  position: relative;
+  display: block;
+  width: 100%;
+  margin: 10px 0 0;
+  padding: 10px 12px 8px;
+  border: 1px solid #8ea0b0;
+  border-radius: 8px;
+  background: #f8fbfd;
+}
+label.outlined > span {
+  position: absolute;
+  top: 0;
+  left: 10px;
+  max-width: calc(100% - 24px);
+  transform: translateY(-50%);
+  padding: 0 6px;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: #6b6b6b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+label.outlined input,
+label.outlined select {
+  width: 100%;
+  height: auto;
+  margin: 0;
+  padding: 2px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  outline: none;
+}
+label.outlined select {
+  padding-right: 22px;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%236b6b6b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right center;
+  background-size: 12px 12px;
+  appearance: none;
+  cursor: pointer;
+}
+label.outlined select:disabled { cursor: default; }
+label.outlined:focus-within { border-color: #2f6f9e; }
+label.outlined:focus-within > span { color: #3a3a3a; }
+label.outlined:has(:disabled) { opacity: .6; }
+.facts div.changed > label.outlined { border-color: #c48a1a; background: #fff8ea; }
+.facts div.changed > label.outlined > span { color: #956b16; }
 .facts .failure dd { color: #9b3129; }
 .facts .health-warn dd { color: #8a5a12; }
-.facts .health-ok dd { color: #1f6b3a; }
-.peer-list { display: grid; gap: 10px; margin: 8px 0 0; padding: 0; list-style: none; min-width: 0; }
-.peer-card { border: 1px solid #e3ebe5; border-radius: 6px; padding: 10px; background: #fff; min-width: 0; }
+.facts .health-ok dd { color: #2a7eae; }
+.peer-list { display: grid; gap: 0; margin: 8px 0 0; padding: 0; list-style: none; min-width: 0; border-top: 1px solid #7d8c9a; }
+.peer-card { border: 0; border-radius: 0; padding: 10px 0; background: transparent; min-width: 0; border-top: 1px solid #7d8c9a; }
+.peer-list > .peer-card:first-child { border-top: 0; }
 .peer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 13px; }
 .peer-title { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; flex: 1; }
-.peer-title .peer-alias { flex: 1; min-width: 72px; max-width: none; height: 30px; margin: 0; border: 0; border-radius: 0; padding: 0; background: transparent; font: inherit; font-weight: 700; color: inherit; }
-.peer-title .peer-alias:focus { outline: none; box-shadow: 0 1px 0 #2d6046; }
-.peer-subtitle { font-size: 12px; font-weight: 500; color: #64736a; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.peer-alias { flex: 1; min-width: 72px; height: 28px; margin: 0; border: 1px solid #bfcac2; border-radius: 7px; padding: 0 8px; background: #fbfdfb; }
+.peer-title .peer-alias { flex: 1; min-width: 72px; max-width: none; height: 30px; margin: 0; border: 0; border-radius: 0; padding: 0; background: transparent; font: inherit; font-weight: 700; color: #555555; }
+.peer-title .peer-alias:focus { outline: none; box-shadow: 0 1px 0 #68a0c4; }
+.peer-subtitle { font-size: 12px; font-weight: 500; color: #737373; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peer-alias { flex: 1; min-width: 72px; height: 28px; margin: 0; border: 1px solid #bfc9d4; border-radius: 7px; padding: 0 8px; background: #f8fbfd; }
 @media (max-width: 720px) {
-  .app-bar { padding: 10px 12px; }
-  .content { padding: 20px 18px 24px; }
   .accordion-body,
   .interface-item .accordion-body { padding-left: 16px; }
 }
@@ -1617,8 +1720,7 @@ fn ManagedTargetConfiguration(
                             dl { class: "facts",
                                 div {
                                     class: if transport_dirty { "changed" } else { "" },
-                                    dt { "Transport" }
-                                    dd {
+                                    OutlinedText { label: "Transport".to_string(),
                                         select {
                                             value: "{transport_draft().wire_value()}",
                                             disabled: saving(),
@@ -1645,8 +1747,7 @@ fn ManagedTargetConfiguration(
                                 }
                                 div {
                                     class: if image_dirty { "changed" } else { "" },
-                                    dt { "Image type" }
-                                    dd {
+                                    OutlinedText { label: "Image type".to_string(),
                                         select {
                                             value: "{image_draft().unwrap_or_default()}",
                                             disabled: saving(),
@@ -1868,7 +1969,7 @@ fn ota_flash_deck(
         let _ = catalog_tick();
         rsx! {
             div { class: "stack",
-                label { "Board"
+                OutlinedText { label: "Board".to_string(),
                     select {
                         value: "{selected}",
                         disabled: true,
@@ -2664,7 +2765,7 @@ fn whitelist_configure_pane(
                     WhitelistTableKind::Configure,
                 ),
             }
-            label { "Allow-list key"
+            OutlinedText { label: "Allow-list key".to_string(),
                 input {
                     r#type: "text",
                     value: "{add_key}",
@@ -3314,8 +3415,7 @@ fn InterfaceAccordion(
                                                         dl { class: "facts",
                                                             div {
                                                                 class: if draft.field_changed(&entry, InterfaceField::Mode) { "changed" } else { "" },
-                                                                dt { "Mode" }
-                                                                dd {
+                                                                OutlinedText { label: "Mode".to_string(),
                                                                     select {
                                                                         value: "{draft.mode.wire_value()}",
                                                                         disabled: saving_this,
@@ -3359,8 +3459,7 @@ fn InterfaceAccordion(
                                                             if can_edit_tcp_target(&entry) {
                                                                 div {
                                                                     class: if draft.field_changed(&entry, InterfaceField::TcpTarget) { "changed" } else { "" },
-                                                                    dt { "Target" }
-                                                                    dd {
+                                                                    OutlinedText { label: "Target".to_string(),
                                                                         input {
                                                                             r#type: "text",
                                                                             value: "{draft.tcp_target}",
@@ -3392,8 +3491,7 @@ fn InterfaceAccordion(
                                                             if can_edit_wifi_station(&entry) && scope != CONTROLLER_SCOPE {
                                                                 div {
                                                                     class: if draft.field_changed(&entry, InterfaceField::WifiStation) { "changed" } else { "" },
-                                                                    dt { "SSID" }
-                                                                    dd {
+                                                                    OutlinedText { label: "SSID".to_string(),
                                                                         input {
                                                                             r#type: "text",
                                                                             value: "{draft.wifi_ssid}",
@@ -3423,8 +3521,7 @@ fn InterfaceAccordion(
                                                                 }
                                                                 div {
                                                                     class: if draft.wifi_password.is_empty() { "" } else { "changed" },
-                                                                    dt { "Password" }
-                                                                    dd {
+                                                                    OutlinedText { label: "Password".to_string(),
                                                                         input {
                                                                             r#type: "password",
                                                                             value: "{draft.wifi_password}",
@@ -3457,8 +3554,7 @@ fn InterfaceAccordion(
                                                             if can_edit_group(&entry) {
                                                                 div {
                                                                     class: if draft.field_changed(&entry, InterfaceField::Group) { "changed" } else { "" },
-                                                                    dt { "Group" }
-                                                                    dd {
+                                                                    OutlinedText { label: "Group".to_string(),
                                                                         input {
                                                                             r#type: "text",
                                                                             value: "{draft.group}",
@@ -3498,8 +3594,7 @@ fn InterfaceAccordion(
                                                                     rsx! {
                                                                         div {
                                                                             class: if draft.lora_control_changed(&entry, LoRaTuneControl::Region) { "changed" } else { "" },
-                                                                            dt { "Region" }
-                                                                            dd {
+                                                                            OutlinedText { label: "Region".to_string(),
                                                                                 select {
                                                                                     value: "{profile.region().label()}",
                                                                                     disabled: saving_this,
@@ -3530,8 +3625,7 @@ fn InterfaceAccordion(
                                                                         }
                                                                         div {
                                                                             class: if draft.lora_control_changed(&entry, LoRaTuneControl::Frequency) { "changed" } else { "" },
-                                                                            dt { "Frequency" }
-                                                                            dd { class: "with-unit",
+                                                                            OutlinedText { label: "Frequency (MHz)".to_string(),
                                                                                 input {
                                                                                     r#type: "text",
                                                                                     value: "{format_lora_frequency_input(profile.frequency().hz())}",
@@ -3549,13 +3643,11 @@ fn InterfaceAccordion(
                                                                                         }
                                                                                     },
                                                                                 }
-                                                                                span { class: "unit", "MHz" }
                                                                             }
                                                                         }
                                                                         div {
                                                                             class: if draft.lora_control_changed(&entry, LoRaTuneControl::Preset) { "changed" } else { "" },
-                                                                            dt { "Preset" }
-                                                                            dd {
+                                                                            OutlinedText { label: "Preset".to_string(),
                                                                                 select {
                                                                                     value: "{preset.map(ModemPreset::label).unwrap_or(\"Custom\")}",
                                                                                     disabled: saving_this,
@@ -3594,8 +3686,7 @@ fn InterfaceAccordion(
                                                                         }
                                                                         div {
                                                                             class: if draft.lora_control_changed(&entry, LoRaTuneControl::SpreadingFactor) { "changed" } else { "" },
-                                                                            dt { "SF" }
-                                                                            dd {
+                                                                            OutlinedText { label: "SF".to_string(),
                                                                                 select {
                                                                                     value: "{spreading_factor as u8}",
                                                                                     disabled: saving_this,
@@ -3635,8 +3726,7 @@ fn InterfaceAccordion(
                                                                         }
                                                                         div {
                                                                             class: if draft.lora_control_changed(&entry, LoRaTuneControl::Bandwidth) { "changed" } else { "" },
-                                                                            dt { "Bandwidth" }
-                                                                            dd {
+                                                                            OutlinedText { label: "Bandwidth".to_string(),
                                                                                 select {
                                                                                     value: "{bandwidth.hz() / 1_000}",
                                                                                     disabled: saving_this,
@@ -3676,8 +3766,7 @@ fn InterfaceAccordion(
                                                                         }
                                                                         div {
                                                                             class: if draft.lora_control_changed(&entry, LoRaTuneControl::CodingRate) { "changed" } else { "" },
-                                                                            dt { "CR" }
-                                                                            dd {
+                                                                            OutlinedText { label: "CR".to_string(),
                                                                                 select {
                                                                                     value: "{coding_rate.denominator()}",
                                                                                     disabled: saving_this,
@@ -3717,8 +3806,7 @@ fn InterfaceAccordion(
                                                                         }
                                                                         div {
                                                                             class: if draft.lora_control_changed(&entry, LoRaTuneControl::TxPower) { "changed" } else { "" },
-                                                                            dt { "TX power" }
-                                                                            dd { class: "with-unit",
+                                                                            OutlinedText { label: "TX power (dBm)".to_string(),
                                                                                 input {
                                                                                     r#type: "number",
                                                                                     value: "{profile.tx_power().dbm()}",
@@ -3738,13 +3826,11 @@ fn InterfaceAccordion(
                                                                                         }
                                                                                     },
                                                                                 }
-                                                                                span { class: "unit", "dBm" }
                                                                             }
                                                                         }
                                                                         div {
                                                                             class: if draft.lora_control_changed(&entry, LoRaTuneControl::Preamble) { "changed" } else { "" },
-                                                                            dt { "Preamble" }
-                                                                            dd {
+                                                                            OutlinedText { label: "Preamble".to_string(),
                                                                                 input {
                                                                                     r#type: "number",
                                                                                     value: "{profile.preamble().count()}",
@@ -3837,8 +3923,7 @@ fn PairingPanel(
                 p { class: "error", "{pairing_error}" }
             }
             if matches!(pairing(), PairingState::Idle | PairingState::Connecting) {
-                label {
-                    "Invitation code"
+                OutlinedText { label: "Invitation code".to_string(),
                     input {
                         value: "{invitation_code}",
                         placeholder: "XXXX-XXXX",
@@ -4084,6 +4169,16 @@ fn SaveButton(busy: bool, disabled: bool, on_save: EventHandler<MouseEvent>) -> 
 }
 
 #[component]
+fn OutlinedText(label: String, children: Element) -> Element {
+    rsx! {
+        label { class: "outlined",
+            span { "{label}" }
+            {children}
+        }
+    }
+}
+
+#[component]
 fn InfoHint(label: String, mut open: Signal<bool>) -> Element {
     rsx! {
         button {
@@ -4300,8 +4395,7 @@ fn AnnouncesSection(
         }
         section { class: "card",
             div { class: "announce-toolbar",
-                label {
-                    "Filter"
+                OutlinedText { label: "Filter".to_string(),
                     input {
                         r#type: "search",
                         placeholder: "destination, name, alias, interface, hops, app data…",
@@ -4577,8 +4671,7 @@ fn PathTableBody(
             };
             rsx! {
                 div { class: "announce-toolbar",
-                    label {
-                        "Filter"
+                    OutlinedText { label: "Filter".to_string(),
                         input {
                             r#type: "search",
                             placeholder: "hash, alias, via, interface…",
@@ -5485,7 +5578,7 @@ fn flash_image_picker(
     let pick_value = crate::flash::selected_image_pick_value(catalog_image.as_ref(), &pick_options);
     rsx! {
         div { class: "flash-image-pick",
-            label { "Firmware image"
+            OutlinedText { label: "Firmware image".to_string(),
                 select {
                     value: "{pick_value}",
                     disabled: flash_busy,
@@ -5626,7 +5719,7 @@ fn flash_options_form(
                         "Several bootloader drives are mounted. Choose the one for this board."
                     };
                     rsx! {
-                        label { "{field_label}"
+                        OutlinedText { label: field_label.to_string(),
                             select {
                                 value: "{selected}",
                                 disabled: busy,
@@ -5678,7 +5771,7 @@ fn flash_options_form(
                 }
             }
             if board.supports_wifi {
-                label { "Station SSID"
+                OutlinedText { label: "Station SSID".to_string(),
                     input {
                         r#type: "text",
                         value: "{form.wifi_ssid}",
@@ -5698,7 +5791,7 @@ fn flash_options_form(
                         },
                     }
                 }
-                label { "Station password"
+                OutlinedText { label: "Station password".to_string(),
                     input {
                         r#type: "password",
                         value: "{form.wifi_password}",
@@ -5720,7 +5813,7 @@ fn flash_options_form(
                 }
             }
             if board.supports_tcp {
-                label { "TCP client"
+                OutlinedText { label: "TCP client".to_string(),
                     input {
                         r#type: "text",
                         value: "{form.tcp_client}",
@@ -5776,7 +5869,7 @@ fn flash_options_form(
                         }
                     }
                 }
-                label { "LoRa region"
+                OutlinedText { label: "LoRa region".to_string(),
                     select {
                         value: "{form.lora_region.label()}",
                         disabled: busy,
@@ -5806,7 +5899,7 @@ fn flash_options_form(
                         }
                     }
                 }
-                label { "LoRa preset"
+                OutlinedText { label: "LoRa preset".to_string(),
                     select {
                         value: "{form.lora_preset.label()}",
                         disabled: busy,
@@ -6976,8 +7069,7 @@ fn ControllerConfigurationPanel(
                             dl { class: "facts",
                                 div {
                                     class: if dirty { "changed" } else { "" },
-                                    dt { "Transport" }
-                                    dd {
+                                    OutlinedText { label: "Transport".to_string(),
                                         select {
                                             value: "{transport_draft().wire_value()}",
                                             disabled: saving(),
@@ -7714,8 +7806,8 @@ fn clone_identity_controls(
     let locality_ok = clone.locality.allows_clone();
     rsx! {
         p { class: if locality_ok { "note" } else { "error" }, "{clone.locality.operator_message()}" }
-        label {
-            "Alias used to refer to the sibling (e.g.: Laptop, phone1)"
+        OutlinedText {
+            label: "Alias used to refer to the sibling (e.g.: Laptop, phone1)".to_string(),
             input {
                 r#type: "text",
                 placeholder: "{backend().suggested_sibling_alias()}",
