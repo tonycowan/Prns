@@ -20,6 +20,7 @@ mod request_routes;
 mod request_state;
 
 const MANAGEMENT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
+const REMOTE_CONTROL_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub(crate) use blackhole_exchange::{
     spawn_updater as spawn_blackhole_updater, BlackholeUpdateTask, ListRoute,
@@ -60,7 +61,7 @@ impl ManagementDestinations {
             hash,
             available_when: None,
             name_file: None,
-            schedule: AnnouncementSchedule::ImmediateThenFixed(Duration::from_secs(60)),
+            schedule: AnnouncementSchedule::ImmediateThenFixed(REMOTE_CONTROL_ANNOUNCE_INTERVAL),
         });
         self
     }
