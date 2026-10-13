@@ -562,7 +562,10 @@ mod tests {
         assert_eq!(parsed.observed_at(), None);
         assert_eq!(parsed.entries(), legacy.entries());
 
-        let mut extended = body[..legacy_len].to_vec();
+        let mut extended = body
+            .get(..legacy_len)
+            .expect("legacy body fits the inventory buffer")
+            .to_vec();
         extended.extend_from_slice(&50u64.to_be_bytes());
         let stamped = RemoteControlPathInventory::parse_body(&extended).unwrap();
         assert_eq!(stamped.observed_at(), Some(50));
