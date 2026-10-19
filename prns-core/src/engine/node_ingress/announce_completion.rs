@@ -64,9 +64,11 @@ impl<S: StorageLayout> EngineState<S> {
             }
         }
         if let Some(path) = effects.discovered_path.take() {
-            while let Some(settled) =
+            while let Some(settled) = if path.pinned_only {
+                self.pop_settled_pinned_path_request(&path.destination, path.interface)
+            } else {
                 self.pop_settled_path_request_on(&path.destination, path.interface)
-            {
+            } {
                 settle(
                     sink,
                     settled.command_id,

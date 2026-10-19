@@ -109,6 +109,15 @@ impl<S: StorageLayout> EngineState<S> {
             .pop_settled_on(destination, interface)
     }
 
+    pub fn pop_settled_pinned_path_request(
+        &mut self,
+        destination: &DestinationHash,
+        interface: crate::interfaces::InterfaceId,
+    ) -> Option<SettledPathRequest> {
+        self.pending_path_requests
+            .pop_settled_pinned(destination, interface)
+    }
+
     /// Drain one pending request whose timeout has passed. Call repeatedly until `None` to fully drain. Every pop is that command's timeout settlement.
     pub fn pop_timed_out_path_request(&mut self, now: InstantMillis) -> Option<ExpiredPathRequest> {
         self.pending_path_requests.pop_expired(now)

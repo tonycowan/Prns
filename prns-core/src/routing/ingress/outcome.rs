@@ -61,6 +61,9 @@ pub(crate) struct DiscoveredPath {
     pub destination: DestinationHash,
     pub hops: u8,
     pub interface: InterfaceId,
+    /// The answer did not match the retained route, so only a request that
+    /// asked for this interface may settle.
+    pub pinned_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

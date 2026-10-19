@@ -134,6 +134,14 @@ impl<C: PendingPathRequestTable> PendingPathRequests<C> {
         Some(settled)
     }
 
+    pub fn has_pinned(&self, destination: &DestinationHash, interface: InterfaceId) -> bool {
+        self.table
+            .destinations()
+            .iter()
+            .zip(self.table.only_interfaces())
+            .any(|(candidate, only)| candidate == destination && *only == Some(interface))
+    }
+
     /// Completes one request that asked for `interface`, or that asked for any interface.
     pub fn pop_settled_on(
         &mut self,
@@ -148,6 +156,26 @@ impl<C: PendingPathRequestTable> PendingPathRequests<C> {
             .position(|(candidate, only)| {
                 candidate == destination && only.is_none_or(|only| only == interface)
             })?;
+        let settled = SettledPathRequest {
+            command_id: *self.table.command_ids().get(index)?,
+        };
+        self.table.swap_remove(index);
+        self.refresh_earliest_timeout();
+        Some(settled)
+    }
+
+    /// Completes one request that asked for this interface and no other.
+    pub fn pop_settled_pinned(
+        &mut self,
+        destination: &DestinationHash,
+        interface: InterfaceId,
+    ) -> Option<SettledPathRequest> {
+        let index = self
+            .table
+            .destinations()
+            .iter()
+            .zip(self.table.only_interfaces())
+            .position(|(candidate, only)| candidate == destination && *only == Some(interface))?;
         let settled = SettledPathRequest {
             command_id: *self.table.command_ids().get(index)?,
         };

@@ -274,6 +274,7 @@ impl<S: StorageLayout> EngineState<S> {
                     destination: arrival.announce.destination,
                     hops: arrival.hops,
                     interface: arrival.receiving_interface,
+                    pinned_only: false,
                 });
                 let rebroadcast = self.schedule_rebroadcast(arrival, interfaces, fill_random);
                 effects.accepted_announce = Some(AcceptedAnnounceEffect {
@@ -297,17 +298,19 @@ impl<S: StorageLayout> EngineState<S> {
                         destination: arrival.announce.destination,
                         hops: arrival.hops,
                         interface: arrival.receiving_interface,
+                        pinned_only: false,
                     });
                     self.schedule_rebroadcast(arrival, interfaces, fill_random);
                 } else if arrival.is_path_response
                     && self
                         .pending_path_requests
-                        .contains(&arrival.announce.destination)
+                        .has_pinned(&arrival.announce.destination, arrival.receiving_interface)
                 {
                     effects.discovered_path = Some(DiscoveredPath {
                         destination: arrival.announce.destination,
                         hops: arrival.hops,
                         interface: arrival.receiving_interface,
+                        pinned_only: true,
                     });
                 }
                 AnnounceIngest::Ignored
