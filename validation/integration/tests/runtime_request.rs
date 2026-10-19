@@ -201,7 +201,10 @@ async fn a_request_endpoints_answers_a_live_request_over_tcp() {
         assert_eq!(destination, dest_a, "heard the responder's destination");
 
         let link_cmd = commands_b
-            .issue(PrnsCommand::EstablishLink(EstablishLink { destination }))
+            .issue(PrnsCommand::EstablishLink(EstablishLink {
+                destination,
+                only_interface: None,
+            }))
             .expect("the initiator node is running");
         let link_id = loop {
             match heard_rx.recv().await.expect("initiator stays alive") {

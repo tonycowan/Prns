@@ -72,8 +72,10 @@ impl<S: StorageLayout> EngineState<S> {
             Err(error) => return PathRequestWriteOutcome::SerializeFailed(error),
         };
 
+        let only = request.only_interface;
         let slowest = slowest_eligible_bitrate(interfaces, |descriptor| {
-            path_request_egress_eligible(descriptor, None, PathRequestAudience::Network)
+            only.is_none_or(|interface| descriptor.id == interface)
+                && path_request_egress_eligible(descriptor, None, PathRequestAudience::Network)
         });
         let timeout_ms = path_timeout_floor_ms.map_or_else(
             || path_discovery_timeout_ms(slowest),
@@ -83,6 +85,7 @@ impl<S: StorageLayout> EngineState<S> {
             destination: request.destination,
             command_id: id,
             timeout_at: InstantMillis(now.0.saturating_add(timeout_ms)),
+            only_interface: request.only_interface,
         });
         self.recent_path_requests
             .mark_seen_at(request.destination, now);
@@ -95,6 +98,15 @@ impl<S: StorageLayout> EngineState<S> {
         destination: &DestinationHash,
     ) -> Option<SettledPathRequest> {
         self.pending_path_requests.pop_settled_for(destination)
+    }
+
+    pub fn pop_settled_path_request_on(
+        &mut self,
+        destination: &DestinationHash,
+        interface: crate::interfaces::InterfaceId,
+    ) -> Option<SettledPathRequest> {
+        self.pending_path_requests
+            .pop_settled_on(destination, interface)
     }
 
     /// Drain one pending request whose timeout has passed. Call repeatedly until `None` to fully drain. Every pop is that command's timeout settlement.
@@ -143,6 +155,7 @@ mod tests {
             &RequestPath {
                 destination,
                 id: PathRequestId::new([0x55; 16]),
+                only_interface: None,
             },
             InstantMillis(1_000),
             AttachedInterfaces::new(&transporting_interfaces()),
@@ -186,6 +199,7 @@ mod tests {
             &RequestPath {
                 destination,
                 id: PathRequestId::new([0x55; 16]),
+                only_interface: None,
             },
             InstantMillis(1_000),
             AttachedInterfaces::new(&interfaces),

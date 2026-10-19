@@ -831,7 +831,11 @@ impl<S: StorageLayout> EngineState<S> {
                     &mut buf,
                 ) {
                     PathRequestWriteOutcome::Written { wire_bytes, culled } => {
-                        fan_frame(interfaces, FanTarget::All, &buf[..wire_bytes], sink);
+                        let fan = match request.only_interface {
+                            Some(interface) => FanTarget::Only(interface),
+                            None => FanTarget::All,
+                        };
+                        fan_frame(interfaces, fan, &buf[..wire_bytes], sink);
                         if let Some(culled) = culled {
                             settle(
                                 sink,

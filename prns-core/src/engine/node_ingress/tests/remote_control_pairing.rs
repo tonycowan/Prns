@@ -294,6 +294,7 @@ fn direct_pairing_availability_does_not_settle_network_path_discovery() {
             &RequestPath {
                 destination,
                 id: PathRequestId::new([0xD4; 16]),
+                only_interface: None,
             },
             OBSERVED_AT,
             attached,

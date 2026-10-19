@@ -272,7 +272,9 @@ impl<S: StorageLayout> EngineState<S> {
             };
         };
         let hops = stored.hops;
-        let fire_on = stored.receiving_interface;
+        let fire_on = establish
+            .only_interface
+            .unwrap_or(stored.receiving_interface);
         let Some(route_evidence) = self
             .routing_table
             .route_evidence_handle_for(&establish.destination)

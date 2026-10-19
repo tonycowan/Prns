@@ -79,6 +79,7 @@ fn a_verified_cached_response_completes_discovery_without_renewing_route_evidenc
             &RequestPath {
                 destination,
                 id: PathRequestId::new([0x31; 16]),
+                only_interface: None,
             },
             now,
             interfaces,

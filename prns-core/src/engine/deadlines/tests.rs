@@ -800,6 +800,7 @@ fn settle_timed_out_path_requests_closes_each_expired_request_once_past_its_dead
         &RequestPath {
             destination: DestinationHash::new([0x44; 16]),
             id: PathRequestId::new([0x55; 16]),
+            only_interface: None,
         },
         issued_at,
         &mut buf,

@@ -1,0 +1,87 @@
+[package]
+name = "personal-hopspot-comms"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Awill, a private journal shared with people you have added."
+
+[workspace]
+resolver = "2"
+
+[[bin]]
+name = "awill"
+path = "src/main.rs"
+
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+web = ["dioxus/web"]
+
+[dependencies]
+chrono = { version = "0.4.42", default-features = false, features = ["std", "clock", "wasmbind"] }
+dioxus = { version = "=0.7.5" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+qrcode = "0.14"
+rqrr = "0.8"
+
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+arboard = "3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+audiopus_sys = { version = "0.2", features = ["static"] }
+cpal = "0.15"
+opus = "0.3"
+personal-rns = { path = "../../personal-rns", version = "0.3.8", default-features = false, features = ["tokio-host", "tcp"] }
+tokio = { version = "1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "AVCaptureDevice",
+    "AVCaptureInput",
+    "AVCaptureOutput",
+    "AVCaptureOutputBase",
+    "AVCaptureSession",
+    "AVCaptureSessionPreset",
+    "AVCaptureVideoDataOutput",
+    "AVMediaFormat",
+    "block2",
+    "dispatch2",
+    "objc2-core-media",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["CMSampleBuffer", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-foundation = { version = "0.3", features = ["NSDictionary", "NSError", "NSObject", "NSString", "NSValue"] }
+personal-rns = { path = "../../personal-rns", version = "0.3.8", default-features = false, features = ["wifi-auto-apple", "bluetooth-auto", "usb"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+personal-rns = { path = "../../personal-rns", version = "0.3.8", default-features = false, features = ["wifi-auto-mdns", "bluetooth-auto", "usb"] }
+prns-ffi = { path = "../../prns-ffi", version = "0.3.8", default-features = false }
+jni = "0.21"
+ndk-context = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "Clipboard",
+    "ClipboardEvent",
+    "DataTransfer",
+    "DataTransferItem",
+    "DataTransferItemList",
+    "File",
+    "Navigator",
+    "Window",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

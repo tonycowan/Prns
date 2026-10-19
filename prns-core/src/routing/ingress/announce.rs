@@ -273,6 +273,7 @@ impl<S: StorageLayout> EngineState<S> {
                 effects.discovered_path = Some(DiscoveredPath {
                     destination: arrival.announce.destination,
                     hops: arrival.hops,
+                    interface: arrival.receiving_interface,
                 });
                 let rebroadcast = self.schedule_rebroadcast(arrival, interfaces, fill_random);
                 effects.accepted_announce = Some(AcceptedAnnounceEffect {
@@ -295,8 +296,19 @@ impl<S: StorageLayout> EngineState<S> {
                     effects.discovered_path = Some(DiscoveredPath {
                         destination: arrival.announce.destination,
                         hops: arrival.hops,
+                        interface: arrival.receiving_interface,
                     });
                     self.schedule_rebroadcast(arrival, interfaces, fill_random);
+                } else if arrival.is_path_response
+                    && self
+                        .pending_path_requests
+                        .contains(&arrival.announce.destination)
+                {
+                    effects.discovered_path = Some(DiscoveredPath {
+                        destination: arrival.announce.destination,
+                        hops: arrival.hops,
+                        interface: arrival.receiving_interface,
+                    });
                 }
                 AnnounceIngest::Ignored
             }

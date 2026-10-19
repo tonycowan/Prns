@@ -453,7 +453,10 @@ impl PrnsRuntime {
         let id = self.mint_command_id();
         self.ingest_command(
             id,
-            PrnsCommand::EstablishLink(EstablishLink { destination }),
+            PrnsCommand::EstablishLink(EstablishLink {
+                destination,
+                only_interface: None,
+            }),
             now_ms,
             entropy,
         );
@@ -475,6 +478,7 @@ impl PrnsRuntime {
             PrnsCommand::RequestPath(RequestPath {
                 destination,
                 id: request_id,
+                only_interface: None,
             }),
             now_ms,
             entropy,

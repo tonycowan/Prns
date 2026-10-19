@@ -60,6 +60,7 @@ impl Default for IngestEffects<'_> {
 pub(crate) struct DiscoveredPath {
     pub destination: DestinationHash,
     pub hops: u8,
+    pub interface: InterfaceId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -755,6 +755,7 @@ mod tests {
                 command: PrnsCommand::RequestPath(RequestPath {
                     destination: DestinationHash::new([0x44; 16]),
                     id: PathRequestId::new([0x55; 16]),
+                    only_interface: None,
                 }),
             },
             AttachedInterfaces::new(&[]),

@@ -701,7 +701,10 @@ mod tests {
             };
             assert_eq!(
                 issued.command,
-                PrnsCommand::EstablishLink(EstablishLink { destination }),
+                PrnsCommand::EstablishLink(EstablishLink {
+                    destination,
+                    only_interface: None,
+                }),
             );
             assert!(completion
                 .send(Settlement::EstablishLink(Ok(LinkEstablished {
@@ -765,7 +768,10 @@ mod tests {
             };
             assert_eq!(
                 issued.command,
-                PrnsCommand::EstablishLink(EstablishLink { destination }),
+                PrnsCommand::EstablishLink(EstablishLink {
+                    destination,
+                    only_interface: None,
+                }),
             );
             assert!(completion
                 .send(Settlement::EstablishLink(Ok(LinkEstablished {

@@ -1400,6 +1400,7 @@ fn pooled_peers_establish_a_link_and_dispatch_resource_responses() {
                 id: CommandId(1),
                 command: PrnsCommand::EstablishLink(EstablishLink {
                     destination: personal_node_destination(),
+                    only_interface: None,
                 }),
             })
             .unwrap();

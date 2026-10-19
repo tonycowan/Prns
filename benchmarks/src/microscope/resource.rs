@@ -183,6 +183,7 @@ impl ResourceCycle {
             id: CommandId(1),
             command: PrnsCommand::EstablishLink(EstablishLink {
                 destination: self.destination,
+                only_interface: None,
             }),
         };
         let now = self.tick();

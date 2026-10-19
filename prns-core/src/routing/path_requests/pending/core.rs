@@ -1,5 +1,6 @@
 use crate::engine::CommandId;
 use crate::engine::InstantMillis;
+use crate::interfaces::InterfaceId;
 use crate::wire::DestinationHash;
 
 /// The ordinary RNS path-request lifetime. Bitrate-aware callers retain this as a floor.
@@ -10,6 +11,8 @@ pub struct PendingPathRequest {
     pub destination: DestinationHash,
     pub command_id: CommandId,
     pub timeout_at: InstantMillis,
+    /// `None` is answered by any interface. `Some` is answered only by that interface.
+    pub only_interface: Option<InterfaceId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +46,7 @@ pub trait PendingPathRequestTable {
     fn destinations(&self) -> &[DestinationHash];
     fn command_ids(&self) -> &[CommandId];
     fn timeout_ats(&self) -> &[InstantMillis];
+    fn only_interfaces(&self) -> &[Option<InterfaceId>];
 
     fn push(&mut self, request: PendingPathRequest) -> Result<usize, TrackPathRequestError>;
     fn swap_remove(&mut self, index: usize);
@@ -130,6 +134,28 @@ impl<C: PendingPathRequestTable> PendingPathRequests<C> {
         Some(settled)
     }
 
+    /// Completes one request that asked for `interface`, or that asked for any interface.
+    pub fn pop_settled_on(
+        &mut self,
+        destination: &DestinationHash,
+        interface: InterfaceId,
+    ) -> Option<SettledPathRequest> {
+        let index = self
+            .table
+            .destinations()
+            .iter()
+            .zip(self.table.only_interfaces())
+            .position(|(candidate, only)| {
+                candidate == destination && only.is_none_or(|only| only == interface)
+            })?;
+        let settled = SettledPathRequest {
+            command_id: *self.table.command_ids().get(index)?,
+        };
+        self.table.swap_remove(index);
+        self.refresh_earliest_timeout();
+        Some(settled)
+    }
+
     /// Pop one request whose timeout has passed. Call repeatedly until `None` to fully drain.
     pub fn pop_expired(&mut self, now: InstantMillis) -> Option<ExpiredPathRequest> {
         let index = self.table.first_expired(now)?;
@@ -164,6 +190,7 @@ mod tests {
             destination: dest(destination),
             command_id: CommandId(command_id),
             timeout_at: InstantMillis(timeout_at),
+            only_interface: None,
         }
     }
 
@@ -290,5 +317,46 @@ mod tests {
             })
         );
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn an_answer_on_one_interface_leaves_the_other_waiting() {
+        use crate::interfaces::InterfaceId;
+
+        let mut table: PendingPathRequests<FixedPendingPathRequestTable<4>> =
+            PendingPathRequests::default();
+        let wifi = InterfaceId::new([1; 8]);
+        let ble = InterfaceId::new([2; 8]);
+        assert_eq!(
+            table.track(PendingPathRequest {
+                destination: dest(1),
+                command_id: CommandId(1),
+                timeout_at: InstantMillis(15_000),
+                only_interface: Some(wifi),
+            }),
+            None
+        );
+        assert_eq!(
+            table.track(PendingPathRequest {
+                destination: dest(1),
+                command_id: CommandId(2),
+                timeout_at: InstantMillis(15_000),
+                only_interface: Some(ble),
+            }),
+            None
+        );
+        assert_eq!(
+            table.pop_settled_on(&dest(1), wifi),
+            Some(SettledPathRequest {
+                command_id: CommandId(1),
+            })
+        );
+        assert_eq!(table.pop_settled_on(&dest(1), wifi), None);
+        assert_eq!(
+            table.pop_settled_on(&dest(1), ble),
+            Some(SettledPathRequest {
+                command_id: CommandId(2),
+            })
+        );
     }
 }

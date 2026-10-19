@@ -110,7 +110,8 @@ async fn supplied_identifiers_reach_timed_commands_and_exact_settlement() {
                 request,
                 RequestPath {
                     destination: PEER,
-                    id: PathRequestId::new([byte; PATH_REQUEST_ID_LEN])
+                    id: PathRequestId::new([byte; PATH_REQUEST_ID_LEN]),
+                    only_interface: None,
                 }
             );
             assert_eq!(

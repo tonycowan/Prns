@@ -15,6 +15,7 @@ pub struct HeapPendingPathRequestTable {
     destinations: Vec<DestinationHash>,
     command_ids: Vec<CommandId>,
     timeout_ats: Vec<InstantMillis>,
+    only_interfaces: Vec<Option<crate::interfaces::InterfaceId>>,
     index: HeapLemireIndex,
     #[cfg(feature = "std")]
     timeout_index: HeapDeadlineIndex,
@@ -36,6 +37,9 @@ impl PendingPathRequestTable for HeapPendingPathRequestTable {
     }
     fn timeout_ats(&self) -> &[InstantMillis] {
         &self.timeout_ats
+    }
+    fn only_interfaces(&self) -> &[Option<crate::interfaces::InterfaceId>] {
+        &self.only_interfaces
     }
 
     fn index_of(&self, destination: &DestinationHash) -> Option<usize> {
@@ -73,6 +77,7 @@ impl PendingPathRequestTable for HeapPendingPathRequestTable {
         self.destinations.push(request.destination);
         self.command_ids.push(request.command_id);
         self.timeout_ats.push(request.timeout_at);
+        self.only_interfaces.push(request.only_interface);
         self.index.insert(row, &self.destinations);
         #[cfg(feature = "std")]
         {
@@ -103,5 +108,6 @@ impl PendingPathRequestTable for HeapPendingPathRequestTable {
         self.destinations.swap_remove(index);
         self.command_ids.swap_remove(index);
         self.timeout_ats.swap_remove(index);
+        self.only_interfaces.swap_remove(index);
     }
 }

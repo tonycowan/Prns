@@ -506,7 +506,10 @@ impl<
         &self,
         destination: DestinationHash,
     ) -> Result<LinkId, SendError<EstablishLinkFailure>> {
-        self.settle_command(EstablishLink { destination })
+        self.settle_command(EstablishLink {
+            destination,
+            only_interface: None,
+        })
             .await
             .map(|established| established.link_id)
     }

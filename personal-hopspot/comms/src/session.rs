@@ -1,0 +1,2554 @@
+//! The journal's own identity and `lxmf.delivery` destination.
+//!
+//! This is the person's address, not a hopspot's private delivery destination.
+//! The public key is what a contact scans. The destination hash is derived from
+//! that key and the fixed name `lxmf.delivery`, and it is what a path request names.
+
+use std::collections::HashMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use personal_rns::identity::in_memory::InMemoryNodeIdentity;
+use personal_rns::identity::{IdentityHash, IdentitySigner, PublicIdentityMaterial};
+use personal_rns::prelude::*;
+use personal_rns::routing::announce::derive_single_destination_hash;
+use personal_rns::routing::delivery::Delivery;
+use personal_rns::routing::links::LinkId;
+#[cfg(target_os = "macos")]
+use personal_rns::wifi_auto::{apple_service_discovery, AutoWifi};
+#[cfg(target_os = "android")]
+use personal_rns::wifi_auto::{
+    native_service_discovery_with_host_lan, AutoWifi, AutoWifiDevicePolicy,
+};
+use personal_rns::{load_or_create_identity_secret, IdentitySecretFileError};
+
+const DELIVERY_APP: &str = "lxmf";
+const DELIVERY_ASPECTS: &[&str] = &["delivery"];
+const IDENTITY_FILE: &str = "identity";
+
+pub static PUBLIC_KEY: OnceLock<String> = OnceLock::new();
+static RUNNING: OnceLock<RunningJournal> = OnceLock::new();
+static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+static HANDLE: OnceLock<PrnsNodeHandle> = OnceLock::new();
+static OURS: OnceLock<IdentityHash> = OnceLock::new();
+static MAIL: OnceLock<Mutex<Mail>> = OnceLock::new();
+
+struct Mail {
+    peers: HashMap<LinkId, IdentityHash>,
+    waiting: HashMap<LinkId, Vec<crate::lxmf::NoteLetter>>,
+    inbox: Vec<ArrivedNote>,
+    /// Notes whose link receipt has come back.
+    acked: Vec<u64>,
+}
+
+/// A note that arrived on a link, still waiting for the contact list.
+pub struct ArrivedNote {
+    pub identity: String,
+    pub words: String,
+    pub written_at: f64,
+}
+
+pub struct JournalIdentity {
+    secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
+    public_key_hex: String,
+    destination: DestinationHash,
+    hash: IdentityHash,
+}
+
+#[derive(Debug)]
+pub enum SessionError {
+    Identity(IdentitySecretFileError),
+    RemoteControl(RemoteControlFileIdentityBootstrapError),
+    Destination,
+    EngineStopped,
+    Io(io::Error),
+}
+
+pub struct RunningJournal {
+    identity: JournalIdentity,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl core::fmt::Display for SessionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Identity(error) => write!(formatter, "journal identity: {error}"),
+            Self::RemoteControl(error) => write!(formatter, "journal remote control: {error}"),
+            Self::Destination => write!(formatter, "journal delivery name is not valid"),
+            Self::EngineStopped => write!(formatter, "journal engine stopped before it was ready"),
+            Self::Io(error) => write!(formatter, "journal session: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
+impl JournalIdentity {
+    pub fn load_or_create(directory: &Path) -> Result<Self, SessionError> {
+        std::fs::create_dir_all(directory).map_err(SessionError::Io)?;
+        let secret = load_or_create_identity_secret(&directory.join(IDENTITY_FILE))
+            .map_err(SessionError::Identity)?;
+        Self::from_secret(secret)
+    }
+
+    pub fn public_key_hex(&self) -> &str {
+        &self.public_key_hex
+    }
+
+    pub fn destination(&self) -> DestinationHash {
+        self.destination
+    }
+
+    fn from_secret(secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>) -> Result<Self, SessionError> {
+        let signer = InMemoryNodeIdentity::from_secret_key_bytes(&secret);
+        let destination =
+            derive_single_destination_hash(&signer.identity_hash(), DELIVERY_APP, DELIVERY_ASPECTS)
+                .map_err(|_| SessionError::Destination)?;
+        Ok(Self {
+            public_key_hex: hex_encode(&signer.public_key_bytes()),
+            secret,
+            destination,
+            hash: signer.identity_hash(),
+        })
+    }
+}
+
+impl RunningJournal {
+    pub fn public_key_hex(&self) -> &str {
+        self.identity.public_key_hex()
+    }
+
+    pub fn start(directory: &Path) -> Result<Self, SessionError> {
+        let identity = JournalIdentity::load_or_create(directory)?;
+        let secret = identity.secret.clone();
+        let destination = identity.destination();
+        let _ = OURS.set(identity.hash);
+        let home = directory.to_path_buf();
+        let remote_directory = home.join("remote-control");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let thread = std::thread::Builder::new()
+            .name("journal".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(SessionError::Io(error)));
+                        return;
+                    }
+                };
+                let _ = RUNTIME.set(runtime.handle().clone());
+                runtime.block_on(async move {
+                    let node =
+                        match stand_up_live(&remote_directory, &home, secret, on_journal_event) {
+                            Ok(node) => node,
+                            Err(error) => {
+                                let _ = ready_tx.send(Err(error));
+                                return;
+                            }
+                        };
+                    let _ = HANDLE.set(node.handle());
+                    let announcer = node.handle();
+                    let _ = ready_tx.send(Ok(()));
+                    let announce = tokio::spawn(async move {
+                        let mut ticker = tokio::time::interval(Duration::from_secs(15));
+                        loop {
+                            ticker.tick().await;
+                            if announcer
+                                .issue(PrnsCommand::AnnounceNow(AnnounceNow {
+                                    destination,
+                                    target: AnnounceTarget::AllInterfaces,
+                                    app_data: AnnounceAppData::Registered,
+                                }))
+                                .is_none()
+                            {
+                                return;
+                            }
+                        }
+                    });
+                    let _ = node
+                        .run_until(async move {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await;
+                    announce.abort();
+                });
+            })
+            .map_err(SessionError::Io)?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                identity,
+                shutdown: Some(shutdown_tx),
+                thread: Some(thread),
+            }),
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = thread.join();
+                Err(SessionError::EngineStopped)
+            }
+        }
+    }
+}
+
+impl Drop for RunningJournal {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+pub fn start_default() -> Result<(), SessionError> {
+    let running = RunningJournal::start(&default_directory())?;
+    let _ = PUBLIC_KEY.set(running.public_key_hex().to_string());
+    let _ = RUNNING.set(running);
+    prepare_contacts();
+    Ok(())
+}
+
+struct OpeningBook {
+    people: Vec<crate::model::Person>,
+    next_id: u64,
+    writable: bool,
+}
+
+fn book_slot() -> &'static Mutex<OpeningBook> {
+    static BOOK: OnceLock<Mutex<OpeningBook>> = OnceLock::new();
+    BOOK.get_or_init(|| {
+        Mutex::new(OpeningBook {
+            people: Vec::new(),
+            next_id: 1,
+            writable: false,
+        })
+    })
+}
+
+/// Reads the saved contacts. A missing file is an empty book that can be written.
+fn prepare_contacts() {
+    let path = default_directory().join("contacts");
+    let mut book = book_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match std::fs::read_to_string(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            book.people.clear();
+            book.next_id = 1;
+            book.writable = true;
+        }
+        Ok(text) => match crate::model::decode_contacts(&text) {
+            Some(people) => {
+                crate::model::note_ids_from(&people);
+                book.next_id = crate::model::next_person_id(&people);
+                book.people = people;
+                book.writable = true;
+            }
+            None => {
+                book.people.clear();
+                book.next_id = 1;
+                book.writable = false;
+            }
+        },
+        Err(_) => {
+            book.people.clear();
+            book.next_id = 1;
+            book.writable = false;
+        }
+    }
+}
+
+pub fn opening_contacts() -> Vec<crate::model::Person> {
+    book_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .people
+        .clone()
+}
+
+pub fn opening_next_id() -> u64 {
+    book_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .next_id
+}
+
+/// Writes the contact book next to the identity. A book that could not be read is left untouched.
+pub fn save_contacts(people: &[crate::model::Person]) {
+    let mut book = book_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !book.writable {
+        return;
+    }
+    book.people = people.to_vec();
+    book.next_id = crate::model::next_person_id(people);
+    let directory = default_directory();
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let temporary = directory.join("contacts.tmp");
+    let path = directory.join("contacts");
+    if write_private(&temporary, crate::model::encode_contacts(people).as_bytes()).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&temporary, &path);
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+pub fn default_directory() -> PathBuf {
+    if let Ok(directory) = std::env::var("JOURNAL_HOME") {
+        return PathBuf::from(directory);
+    }
+    #[cfg(target_os = "android")]
+    {
+        return android_files_dir().unwrap_or_else(|| std::env::temp_dir().join("journal"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        PathBuf::from(home).join("Library/Application Support/Journal")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("APPDATA")
+            .map(|app_data| PathBuf::from(app_data).join("Journal"))
+            .unwrap_or_else(|_| PathBuf::from(".local/share/journal"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "android")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        PathBuf::from(home).join(".local/share/journal")
+    }
+}
+
+#[cfg(target_os = "android")]
+pub struct ClipboardContents {
+    pub text: Option<String>,
+    pub image: Option<Vec<u8>>,
+}
+
+#[cfg(target_os = "android")]
+pub fn read_clipboard() -> Option<ClipboardContents> {
+    with_android_context(|env, context| {
+        let clipboard = system_service(env, context, "clipboard")?;
+        if clipboard.is_null() {
+            return Ok(ClipboardContents {
+                text: None,
+                image: None,
+            });
+        }
+        let clip = env
+            .call_method(
+                &clipboard,
+                "getPrimaryClip",
+                "()Landroid/content/ClipData;",
+                &[],
+            )?
+            .l()?;
+        if clip.is_null() {
+            return Ok(ClipboardContents {
+                text: None,
+                image: None,
+            });
+        }
+        let count = env.call_method(&clip, "getItemCount", "()I", &[])?.i()?;
+        if count <= 0 {
+            return Ok(ClipboardContents {
+                text: None,
+                image: None,
+            });
+        }
+        let item = env
+            .call_method(
+                &clip,
+                "getItemAt",
+                "(I)Landroid/content/ClipData$Item;",
+                &[jni::objects::JValue::Int(0)],
+            )?
+            .l()?;
+        let sequence = item_text(env, &item)?;
+        let text = java_char_sequence(env, sequence)?;
+        let uri = env
+            .call_method(&item, "getUri", "()Landroid/net/Uri;", &[])?
+            .l()?;
+        let image = if uri.is_null() {
+            None
+        } else {
+            read_uri_bytes(env, context, &uri).ok().flatten()
+        };
+        Ok(ClipboardContents { text, image })
+    })
+    .ok()
+}
+
+#[cfg(target_os = "android")]
+fn item_text<'local>(
+    env: &mut jni::JNIEnv<'local>,
+    item: &jni::objects::JObject<'local>,
+) -> jni::errors::Result<jni::objects::JObject<'local>> {
+    env.call_method(item, "getText", "()Ljava/lang/CharSequence;", &[])?
+        .l()
+}
+
+#[cfg(target_os = "android")]
+fn java_char_sequence(
+    env: &mut jni::JNIEnv,
+    value: jni::objects::JObject,
+) -> jni::errors::Result<Option<String>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let text = env
+        .call_method(&value, "toString", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let text: String = env.get_string(&jni::objects::JString::from(text))?.into();
+    Ok(Some(text))
+}
+
+#[cfg(target_os = "android")]
+fn read_uri_bytes(
+    env: &mut jni::JNIEnv,
+    context: &jni::objects::JObject,
+    uri: &jni::objects::JObject,
+) -> jni::errors::Result<Option<Vec<u8>>> {
+    let resolver = env
+        .call_method(
+            context,
+            "getContentResolver",
+            "()Landroid/content/ContentResolver;",
+            &[],
+        )?
+        .l()?;
+    let stream = env
+        .call_method(
+            &resolver,
+            "openInputStream",
+            "(Landroid/net/Uri;)Ljava/io/InputStream;",
+            &[jni::objects::JValue::Object(uri)],
+        )?
+        .l()?;
+    if stream.is_null() {
+        return Ok(None);
+    }
+    let out = env.new_object("java/io/ByteArrayOutputStream", "()V", &[])?;
+    let buffer = env.new_byte_array(8192)?;
+    let mut total = 0i32;
+    loop {
+        let read = env
+            .call_method(
+                &stream,
+                "read",
+                "([B)I",
+                &[jni::objects::JValue::Object(&buffer)],
+            )?
+            .i()?;
+        if read <= 0 {
+            break;
+        }
+        total += read;
+        if total > 8 * 1024 * 1024 {
+            let _ = env.call_method(&stream, "close", "()V", &[]);
+            return Ok(None);
+        }
+        env.call_method(
+            &out,
+            "write",
+            "([BII)V",
+            &[
+                jni::objects::JValue::Object(&buffer),
+                jni::objects::JValue::Int(0),
+                jni::objects::JValue::Int(read),
+            ],
+        )?;
+    }
+    let _ = env.call_method(&stream, "close", "()V", &[]);
+    let bytes = env.call_method(&out, "toByteArray", "()[B", &[])?.l()?;
+    Ok(Some(env.convert_byte_array(
+        jni::objects::JByteArray::from(bytes),
+    )?))
+}
+
+#[cfg(target_os = "android")]
+fn system_service<'local>(
+    env: &mut jni::JNIEnv<'local>,
+    context: &jni::objects::JObject,
+    name: &str,
+) -> jni::errors::Result<jni::objects::JObject<'local>> {
+    let name = env.new_string(name)?;
+    env.call_method(
+        context,
+        "getSystemService",
+        "(Ljava/lang/String;)Ljava/lang/Object;",
+        &[jni::objects::JValue::Object(&name)],
+    )?
+    .l()
+}
+
+#[cfg(target_os = "android")]
+pub fn copy_to_clipboard(text: &str) -> bool {
+    with_android_context(|env, context| {
+        let clipboard_service = env.new_string("clipboard")?;
+        let clipboard = env
+            .call_method(
+                context,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[jni::objects::JValue::Object(&clipboard_service)],
+            )?
+            .l()?;
+        let label = env.new_string("Public key")?;
+        let contents = env.new_string(text)?;
+        let clip = env
+            .call_static_method(
+                "android/content/ClipData",
+                "newPlainText",
+                "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+                &[
+                    jni::objects::JValue::Object(&label),
+                    jni::objects::JValue::Object(&contents),
+                ],
+            )?
+            .l()?;
+        env.call_method(
+            clipboard,
+            "setPrimaryClip",
+            "(Landroid/content/ClipData;)V",
+            &[jni::objects::JValue::Object(&clip)],
+        )?;
+        Ok(())
+    })
+    .is_ok()
+}
+
+#[cfg(target_os = "android")]
+fn android_files_dir() -> Option<PathBuf> {
+    with_android_context(|env, context| {
+        let file = env
+            .call_method(context, "getFilesDir", "()Ljava/io/File;", &[])?
+            .l()?;
+        let path = env
+            .call_method(file, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let path: String = env.get_string(&jni::objects::JString::from(path))?.into();
+        Ok(PathBuf::from(path).join("journal"))
+    })
+    .ok()
+}
+
+#[cfg(target_os = "android")]
+pub fn machine_name() -> String {
+    let model = with_android_context(|env, context| {
+        let value = env
+            .call_method(context, "machineName", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let string = jni::objects::JString::from(value);
+        let text: String = env.get_string(&string)?.into();
+        Ok(text)
+    })
+    .unwrap_or_default();
+    machine_label(&model)
+}
+
+/// The first word of a phone's model, so "Pixel 7 Pro" is "Pixel".
+#[cfg(any(test, target_os = "android"))]
+pub fn machine_label(model: &str) -> String {
+    match model.split_whitespace().next() {
+        Some(word) if !word.is_empty() => word.to_string(),
+        _ => "Phone".to_string(),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn with_android_context<T>(
+    body: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JObject) -> jni::errors::Result<T>,
+) -> jni::errors::Result<T> {
+    let ctx = ndk_context::android_context();
+    // SAFETY: The Dioxus Android binding installs this process JavaVM before `main`.
+    // `JavaVM::from_raw` only wraps that pointer; dropping the wrapper does not destroy the VM.
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }?;
+    let mut env = vm.attach_current_thread()?;
+    // SAFETY: The same binding publishes the activity as a live JNI context reference.
+    // `JObject` does not delete that reference when dropped.
+    let context = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
+    body(&mut env, &context)
+}
+
+#[cfg(target_os = "android")]
+pub enum PhotoCapture {
+    Code(String),
+    Cancelled,
+    Denied,
+    Unavailable,
+}
+
+#[cfg(target_os = "android")]
+pub async fn capture_photo() -> PhotoCapture {
+    let Some(runtime) = RUNTIME.get() else {
+        return PhotoCapture::Unavailable;
+    };
+    runtime
+        .spawn_blocking(capture_photo_blocking)
+        .await
+        .unwrap_or(PhotoCapture::Unavailable)
+}
+
+#[cfg(target_os = "android")]
+fn capture_photo_blocking() -> PhotoCapture {
+    with_android_context(|env, context| {
+        // The activity object is already loaded. Looking the class up by name from this
+        // worker thread uses the system loader and cannot see the app.
+        let class = env.get_object_class(context)?;
+        let value = env
+            .call_static_method(&class, "capture", "()Ljava/lang/String;", &[])?
+            .l()?;
+        if !value.is_null() {
+            let string = jni::objects::JString::from(value);
+            let text = env.get_string(&string)?;
+            let Ok(text) = text.to_str() else {
+                return Ok(PhotoCapture::Unavailable);
+            };
+            return Ok(PhotoCapture::Code(text.to_owned()));
+        }
+        let status = env.get_static_field(&class, "status", "I")?.i()?;
+        Ok(match status {
+            0 => PhotoCapture::Cancelled,
+            1 => PhotoCapture::Denied,
+            _ => PhotoCapture::Unavailable,
+        })
+    })
+    .unwrap_or(PhotoCapture::Unavailable)
+}
+
+/// A note for a contact whose code is their identity public key.
+/// The words travel as an LXMF message on a link to that contact's `lxmf.delivery` address.
+pub fn send_note(contact_identity: &str, words: &str, note_id: u64) {
+    let words = words.trim().to_string();
+    if words.is_empty() {
+        return;
+    }
+    let Some(destination) = destination_for_contact(contact_identity) else {
+        return;
+    };
+    let Some(runtime) = RUNTIME.get() else {
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        return;
+    };
+    let ours = OURS.get().copied();
+    let packed = crate::lxmf::pack_note(&words, crate::lxmf::unix_now());
+    let only = preferred(contact_identity);
+    runtime.spawn(async move {
+        let _ = seek_path(&handle, destination, only).await;
+        let Ok(link) = handle.establish_link(destination).await else {
+            return;
+        };
+        if let Some(ours) = ours {
+            let _ = handle.identify(link, ours).await;
+        }
+        if handle.send_link_packet(link, &packed).await.is_ok() {
+            mail().acked.push(note_id);
+        }
+    });
+}
+
+/// Which of the four wires currently has a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireMarks {
+    pub wifi: bool,
+    pub internet: bool,
+    pub ble: bool,
+    pub usb: bool,
+}
+
+impl WireMarks {
+    const fn quiet() -> Self {
+        Self {
+            wifi: false,
+            internet: false,
+            ble: false,
+            usb: false,
+        }
+    }
+}
+
+/// Wifi auto, a TCP client, BLE, and USB, read from the interfaces the node has up.
+pub fn wire_marks() -> WireMarks {
+    let Some(handle) = HANDLE.get() else {
+        return WireMarks::quiet();
+    };
+    marks_from(&handle.interfaces())
+}
+
+fn marks_from(snapshots: &[personal_rns::interfaces::InterfaceSnapshot]) -> WireMarks {
+    use personal_rns::interfaces::{ConnectionState, InterfaceKind};
+
+    let mut marks = WireMarks::quiet();
+    for snapshot in snapshots {
+        if !matches!(
+            snapshot.connection,
+            ConnectionState::Connected | ConnectionState::Degraded
+        ) {
+            continue;
+        }
+        match snapshot.id.kind() {
+            Some(InterfaceKind::AutoWifi | InterfaceKind::WifiPeer) => marks.wifi = true,
+            Some(InterfaceKind::TcpClient) => marks.internet = true,
+            Some(InterfaceKind::BluetoothAuto | InterfaceKind::BluetoothPeer) => marks.ble = true,
+            Some(InterfaceKind::UsbAutoHost | InterfaceKind::UsbAutoDevice) => marks.usb = true,
+            _ => {}
+        }
+    }
+    marks
+}
+
+/// How a contact can be reached, after each live interface has been tried.
+pub use crate::model::Reach;
+
+struct ReachState {
+    generation: u64,
+    rows: Vec<SearchRow>,
+    measured: Option<Measured>,
+    done: bool,
+}
+
+struct SearchRow {
+    interface: personal_rns::interfaces::InterfaceId,
+    name: String,
+    step: crate::model::MeshStep,
+}
+
+#[derive(Clone, Copy)]
+struct Measured {
+    ways: crate::model::OfferedWays,
+    interface: personal_rns::interfaces::InterfaceId,
+}
+
+fn reach_map() -> std::sync::MutexGuard<'static, HashMap<String, ReachState>> {
+    static MAP: OnceLock<Mutex<HashMap<String, ReachState>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub fn reach_for(identity: &str) -> Reach {
+    match reach_map().get(identity.trim()) {
+        Some(state) => {
+            let winner_interface = state.done.then_some(state.measured).flatten();
+            let lines = state
+                .rows
+                .iter()
+                .map(|row| {
+                    let won = winner_interface
+                        .is_some_and(|measured| measured.interface == row.interface);
+                    let mut status = crate::model::mesh_status(row.step);
+                    if won {
+                        status = format!("{status}, winner");
+                    }
+                    crate::model::ReachLine {
+                        name: row.name.clone(),
+                        status,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let winner = lines
+                .iter()
+                .find(|line| line.status.ends_with(", winner"))
+                .map(|line| line.name.clone());
+            Reach {
+                pending: !state.done,
+                ways: state
+                    .measured
+                    .map(|measured| measured.ways)
+                    .unwrap_or_else(crate::model::OfferedWays::none),
+                lines,
+                winner,
+            }
+        }
+        None => Reach {
+            pending: false,
+            ways: crate::model::OfferedWays::none(),
+            lines: Vec::new(),
+            winner: None,
+        },
+    }
+}
+
+fn preferred(identity: &str) -> Option<personal_rns::interfaces::InterfaceId> {
+    match reach_map().get(identity.trim()) {
+        Some(state) if state.done => state.measured.map(|measured| measured.interface),
+        _ => None,
+    }
+}
+
+pub fn forget(identity: &str) {
+    reach_map().remove(identity.trim());
+}
+
+/// Asks every live interface at once, then sends a 400-byte message on each
+/// one that answers. Each answer is timed on its own. The quickest is the one we keep.
+pub fn measure(identity: &str) {
+    let identity = identity.trim().to_string();
+    if destination_for_contact(&identity).is_none() {
+        return;
+    }
+    if !matches!(call_face(), CallFace::Quiet | CallFace::Failed { .. }) {
+        return;
+    }
+    let generation = next_search();
+    let rows = search_rows(&paths_to_try());
+    {
+        let mut map = reach_map();
+        if map.contains_key(&identity) {
+            return;
+        }
+        map.insert(
+            identity.clone(),
+            ReachState {
+                generation,
+                rows,
+                measured: None,
+                done: false,
+            },
+        );
+    }
+    let Some(runtime) = RUNTIME.get().cloned() else {
+        finish_search(&identity, generation, None);
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        finish_search(&identity, generation, None);
+        return;
+    };
+    let ours = OURS.get().copied();
+    runtime.spawn(async move {
+        let measured = probe_contact(&handle, &identity, generation, ours).await;
+        finish_search(&identity, generation, measured);
+    });
+}
+
+fn next_search() -> u64 {
+    static SEARCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn finish_search(identity: &str, generation: u64, measured: Option<Measured>) {
+    let mut map = reach_map();
+    let Some(state) = map.get_mut(identity) else {
+        return;
+    };
+    if state.generation != generation {
+        return;
+    }
+    state.measured = measured;
+    state.done = true;
+}
+
+fn drop_unfinished(identity: &str, generation: u64) {
+    let mut map = reach_map();
+    let Some(state) = map.get_mut(identity) else {
+        return;
+    };
+    if state.generation != generation {
+        return;
+    }
+    state.rows.retain(|row| {
+        !matches!(
+            row.step,
+            crate::model::MeshStep::Finding | crate::model::MeshStep::Testing
+        )
+    });
+}
+
+fn note_step(
+    identity: &str,
+    generation: u64,
+    interface: personal_rns::interfaces::InterfaceId,
+    step: crate::model::MeshStep,
+) {
+    let mut map = reach_map();
+    let Some(state) = map.get_mut(identity) else {
+        return;
+    };
+    if state.generation != generation || state.done {
+        return;
+    }
+    if let Some(row) = state.rows.iter_mut().find(|row| row.interface == interface) {
+        row.step = step;
+    }
+}
+
+/// How long one search row waits before the table moves on. The engine keeps its own longer deadline.
+const STEP_WAIT: Duration = Duration::from_secs(5);
+
+async fn seek_path(
+    handle: &PrnsNodeHandle,
+    destination: personal_rns::wire::DestinationHash,
+    only: Option<personal_rns::interfaces::InterfaceId>,
+) {
+    let _ = handle.request_path_on(destination, only).await;
+}
+
+async fn probe_contact(
+    handle: &PrnsNodeHandle,
+    identity: &str,
+    generation: u64,
+    ours: Option<personal_rns::identity::IdentityHash>,
+) -> Option<Measured> {
+    let destination = destination_for_contact(identity)?;
+    let interfaces = {
+        let map = reach_map();
+        match map.get(identity) {
+            Some(state) if state.generation == generation => state
+                .rows
+                .iter()
+                .map(|row| row.interface)
+                .collect::<Vec<_>>(),
+            _ => return None,
+        }
+    };
+    let mut paths = tokio::task::JoinSet::new();
+    for interface in interfaces {
+        let handle = handle.clone();
+        paths.spawn(async move {
+            let found = tokio::time::timeout(
+                STEP_WAIT,
+                handle.request_path_on(destination, Some(interface)),
+            )
+            .await
+            .is_ok_and(|found| found.is_ok());
+            (interface, found)
+        });
+    }
+    let mut probes = tokio::task::JoinSet::new();
+    let mut best: Option<(personal_rns::interfaces::InterfaceId, u64)> = None;
+    loop {
+        if paths.is_empty() && probes.is_empty() {
+            break;
+        }
+        tokio::select! {
+            joined = paths.join_next(), if !paths.is_empty() => {
+                let Some(Ok((interface, found))) = joined else {
+                    continue;
+                };
+                if !found {
+                    note_step(identity, generation, interface, crate::model::MeshStep::NoPath);
+                    continue;
+                }
+                note_step(identity, generation, interface, crate::model::MeshStep::Testing);
+                let handle = handle.clone();
+                probes.spawn(async move {
+                    let round_trip_ms = send_probe(&handle, destination, interface, ours).await;
+                    (interface, round_trip_ms)
+                });
+            }
+            joined = probes.join_next(), if !probes.is_empty() => {
+                let Some(Ok((interface, round_trip_ms))) = joined else {
+                    continue;
+                };
+                let Some(round_trip_ms) = round_trip_ms else {
+                    note_step(identity, generation, interface, crate::model::MeshStep::TimedOut);
+                    continue;
+                };
+                note_step(
+                    identity,
+                    generation,
+                    interface,
+                    crate::model::MeshStep::Rate(round_trip_ms),
+                );
+                if crate::model::enough_for_video(round_trip_ms) {
+                    drop_unfinished(identity, generation);
+                    paths.abort_all();
+                    probes.abort_all();
+                    let _ = handle.request_path_on(destination, Some(interface)).await;
+                    return Some(Measured {
+                        ways: crate::model::ways_for_ack(Some(round_trip_ms)),
+                        interface,
+                    });
+                }
+                let better = best.map(|(_, have)| round_trip_ms < have).unwrap_or(true);
+                if better {
+                    best = Some((interface, round_trip_ms));
+                }
+            }
+        }
+    }
+    let (interface, round_trip_ms) = best?;
+    let _ = handle.request_path_on(destination, Some(interface)).await;
+    Some(Measured {
+        ways: crate::model::ways_for_ack(Some(round_trip_ms)),
+        interface,
+    })
+}
+
+fn search_rows(interfaces: &[personal_rns::interfaces::InterfaceId]) -> Vec<SearchRow> {
+    let names: Vec<String> = interfaces.iter().copied().map(interface_name).collect();
+    interfaces
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, interface)| {
+            let name = names[index].clone();
+            let repeats = names.iter().filter(|item| *item == &name).count();
+            let name = if repeats > 1 {
+                let nth = names
+                    .iter()
+                    .take(index + 1)
+                    .filter(|item| *item == &name)
+                    .count();
+                format!("{name} {nth}")
+            } else {
+                name
+            };
+            SearchRow {
+                interface,
+                name,
+                step: crate::model::MeshStep::Finding,
+            }
+        })
+        .collect()
+}
+
+fn interface_name(interface: personal_rns::interfaces::InterfaceId) -> String {
+    use personal_rns::interfaces::InterfaceKind;
+    match interface.kind() {
+        Some(InterfaceKind::AutoWifi | InterfaceKind::WifiPeer) => "Wi-Fi",
+        Some(InterfaceKind::TcpClient | InterfaceKind::TcpServer) => "Internet",
+        Some(InterfaceKind::BluetoothAuto | InterfaceKind::BluetoothPeer) => "Bluetooth",
+        Some(InterfaceKind::UsbAutoHost | InterfaceKind::UsbAutoDevice) => "USB",
+        _ => "Link",
+    }
+    .to_string()
+}
+
+async fn send_probe(
+    handle: &PrnsNodeHandle,
+    destination: personal_rns::wire::DestinationHash,
+    interface: personal_rns::interfaces::InterfaceId,
+    ours: Option<personal_rns::identity::IdentityHash>,
+) -> Option<u64> {
+    let opened = std::sync::Mutex::new(None);
+    let measured = async {
+        let link = handle
+            .establish_link_on(destination, Some(interface))
+            .await
+            .ok()?
+            .link_id;
+        *opened
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(link);
+        if let Some(ours) = ours {
+            let _ = handle.identify(link, ours).await;
+        }
+        let sent = handle.send_link_packet(link, &probe_packet()).await;
+        sent.ok().map(|receipt| receipt.rtt.millis())
+    };
+    let measured = tokio::time::timeout(STEP_WAIT, measured)
+        .await
+        .ok()
+        .flatten();
+    if let Some(link) = opened
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        handle.close_link(link);
+    }
+    measured
+}
+
+fn probe_packet() -> Vec<u8> {
+    let mut packet = vec![0u8; 400];
+    packet[0] = b'P';
+    packet
+}
+
+/// Peer sockets when they are already up. The discovery interface is the path
+/// only while no peer of that kind is connected. Local and other wires are not paths.
+fn paths_to_try() -> Vec<personal_rns::interfaces::InterfaceId> {
+    use personal_rns::interfaces::InterfaceKind;
+
+    let live = live_interfaces();
+    let wifi_peer = live
+        .iter()
+        .any(|interface| interface.kind() == Some(InterfaceKind::WifiPeer));
+    let bluetooth_peer = live
+        .iter()
+        .any(|interface| interface.kind() == Some(InterfaceKind::BluetoothPeer));
+    live.into_iter()
+        .filter(|interface| carries_a_person(interface.kind(), wifi_peer, bluetooth_peer))
+        .collect()
+}
+
+fn carries_a_person(
+    kind: Option<personal_rns::interfaces::InterfaceKind>,
+    wifi_peer: bool,
+    bluetooth_peer: bool,
+) -> bool {
+    use personal_rns::interfaces::InterfaceKind;
+    match kind {
+        Some(InterfaceKind::AutoWifi) => !wifi_peer,
+        Some(InterfaceKind::WifiPeer) => true,
+        Some(InterfaceKind::BluetoothAuto) => !bluetooth_peer,
+        Some(InterfaceKind::BluetoothPeer) => true,
+        Some(
+            InterfaceKind::UsbAutoHost | InterfaceKind::UsbAutoDevice | InterfaceKind::TcpClient,
+        ) => true,
+        _ => false,
+    }
+}
+
+fn live_interfaces() -> Vec<personal_rns::interfaces::InterfaceId> {
+    use personal_rns::interfaces::ConnectionState;
+
+    let Some(handle) = HANDLE.get() else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for snapshot in handle.interfaces() {
+        if !matches!(
+            snapshot.connection,
+            ConnectionState::Connected | ConnectionState::Degraded
+        ) {
+            continue;
+        }
+        if !ids.contains(&snapshot.id) {
+            ids.push(snapshot.id);
+        }
+    }
+    ids
+}
+
+/// Notes that arrived on a link. The contact list decides which ones stay.
+pub fn drain_inbox() -> Vec<ArrivedNote> {
+    std::mem::take(&mut mail().inbox)
+}
+
+/// Notes the other side has acknowledged.
+pub fn drain_acks() -> Vec<u64> {
+    std::mem::take(&mut mail().acked)
+}
+
+pub fn same_contact(stored_identity: &str, identity_hash_hex: &str) -> bool {
+    let stored = stored_identity.trim();
+    if stored.eq_ignore_ascii_case(identity_hash_hex) {
+        return true;
+    }
+    let Some(bytes) = decode_hex(stored) else {
+        return false;
+    };
+    let Ok(material) = PublicIdentityMaterial::from_slice(&bytes) else {
+        return false;
+    };
+    hex_encode(material.identity_hash().as_bytes()).eq_ignore_ascii_case(identity_hash_hex)
+}
+
+/// Yields without parking the interface thread. The journal runtime owns the timer.
+pub async fn pause() {
+    rest(250).await;
+}
+
+/// Yields for `millis` without parking the interface thread.
+pub async fn rest(millis: u64) {
+    let Some(runtime) = RUNTIME.get() else {
+        std::thread::sleep(Duration::from_millis(millis));
+        return;
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    runtime.spawn(async move {
+        tokio::time::sleep(Duration::from_millis(millis)).await;
+        let _ = tx.send(());
+    });
+    let _ = rx.await;
+}
+
+fn on_journal_event(event: PrnsEvent<'_>, _: &NoRemoteControlHostControls) {
+    match event {
+        PrnsEvent::Diagnostic(Diagnostic::PeerIdentified { link_id, identity }) => {
+            remember_peer(link_id, identity);
+        }
+        PrnsEvent::Message(Message::Delivered(Delivery::Link(delivery))) => {
+            accept_words(delivery.link_id, delivery.plaintext);
+        }
+        _ => {}
+    }
+}
+
+fn mail() -> std::sync::MutexGuard<'static, Mail> {
+    MAIL.get_or_init(|| {
+        Mutex::new(Mail {
+            peers: HashMap::new(),
+            waiting: HashMap::new(),
+            inbox: Vec::new(),
+            acked: Vec::new(),
+        })
+    })
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn remember_peer(link_id: LinkId, identity: IdentityHash) {
+    let identity_hex = hex_encode(identity.as_bytes());
+    {
+        let mut mail = mail();
+        mail.peers.insert(link_id, identity);
+        if let Some(waiting) = mail.waiting.remove(&link_id) {
+            for letter in waiting {
+                mail.inbox.push(ArrivedNote {
+                    identity: identity_hex.clone(),
+                    words: letter.words,
+                    written_at: letter.written_at,
+                });
+            }
+        }
+    }
+    note_peer_on_call(link_id, &identity_hex);
+}
+
+fn accept_words(link_id: LinkId, bytes: &[u8]) {
+    if bytes.first() == Some(&b'V') {
+        accept_voice(link_id, bytes);
+        return;
+    }
+    let Some(letter) = crate::lxmf::open_note(bytes) else {
+        return;
+    };
+    let mut mail = mail();
+    if let Some(identity) = mail.peers.get(&link_id).copied() {
+        mail.inbox.push(ArrivedNote {
+            identity: hex_encode(identity.as_bytes()),
+            words: letter.words,
+            written_at: letter.written_at,
+        });
+    } else {
+        mail.waiting.entry(link_id).or_default().push(letter);
+    }
+}
+
+fn destination_for_contact(stored_identity: &str) -> Option<DestinationHash> {
+    let bytes = decode_hex(stored_identity.trim())?;
+    let material = PublicIdentityMaterial::from_slice(&bytes).ok()?;
+    derive_single_destination_hash(&material.identity_hash(), DELIVERY_APP, DELIVERY_ASPECTS).ok()
+}
+
+/// What the open journal shows for the voice button.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallFace {
+    Quiet,
+    /// `outgoing` is the side that placed the call. The other side is answering.
+    Placing {
+        identity: String,
+        outgoing: bool,
+    },
+    Live {
+        identity: String,
+    },
+    Failed {
+        identity: String,
+        words: &'static str,
+    },
+    /// A contact is calling, and nobody has answered yet.
+    Ringing {
+        identity: String,
+        ticket: u64,
+    },
+}
+
+/// A voice call that ended, ready to be written into the thread.
+pub struct FinishedCall {
+    pub identity: String,
+    pub seconds: u64,
+    pub outgoing: bool,
+}
+
+/// Someone in the contacts is asking to talk.
+pub struct IncomingCall {
+    pub ticket: u64,
+    pub identity: String,
+}
+
+struct Call {
+    face: CallFace,
+    generation: u64,
+    outgoing: bool,
+    /// The other person has answered. Audio stays quiet until then.
+    answered: bool,
+    started: Option<Instant>,
+    link: Option<LinkId>,
+    finished: Option<FinishedCall>,
+    invites: Vec<IncomingCall>,
+    next_ticket: u64,
+    tickets: HashMap<u64, LinkId>,
+    held: HashMap<LinkId, Held>,
+}
+
+#[derive(Default)]
+struct Held {
+    identity: Option<String>,
+    hello: bool,
+    invited: bool,
+    packets: Vec<Vec<u8>>,
+}
+
+static CALL: OnceLock<Mutex<Call>> = OnceLock::new();
+
+fn calls() -> std::sync::MutexGuard<'static, Call> {
+    CALL.get_or_init(|| {
+        Mutex::new(Call {
+            face: CallFace::Quiet,
+            generation: 0,
+            outgoing: false,
+            answered: false,
+            started: None,
+            link: None,
+            finished: None,
+            invites: Vec::new(),
+            next_ticket: 1,
+            tickets: HashMap::new(),
+            held: HashMap::new(),
+        })
+    })
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub fn call_face() -> CallFace {
+    calls().face.clone()
+}
+
+pub fn drain_invites() -> Vec<IncomingCall> {
+    std::mem::take(&mut calls().invites)
+}
+
+pub fn take_finished() -> Option<FinishedCall> {
+    calls().finished.take()
+}
+
+/// Opens the microphone and a link to this contact, then keeps sending voice.
+pub fn place_call(identity: &str) {
+    let identity = identity.trim().to_string();
+    let Some(destination) = destination_for_contact(&identity) else {
+        return;
+    };
+    let Some(runtime) = RUNTIME.get().cloned() else {
+        fail_now(&identity, crate::voice::DIDNT_CONNECT);
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        fail_now(&identity, crate::voice::DIDNT_CONNECT);
+        return;
+    };
+    let Some(generation) = begin_call(&identity, true) else {
+        return;
+    };
+    let ours = OURS.get().copied();
+    let only = preferred(&identity);
+    runtime.spawn(async move {
+        if !prepare_voice(generation, &identity).await {
+            return;
+        }
+        let _ = seek_path(&handle, destination, only).await;
+        if !still(generation) {
+            stop_voice();
+            return;
+        }
+        let Ok(link) = handle.establish_link(destination).await else {
+            stop_voice();
+            fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
+            return;
+        };
+        if let Some(ours) = ours {
+            let _ = handle.identify(link, ours).await;
+        }
+        if !bind_link(generation, link) {
+            stop_voice();
+            let _ = handle
+                .send_link_packet(link, &crate::voice::bye_packet())
+                .await;
+            return;
+        }
+        let hello = handle
+            .send_link_packet(link, &crate::voice::hello_packet())
+            .await;
+        if !call_can_continue(hello) {
+            stop_voice();
+            fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
+            let _ = handle
+                .send_link_packet(link, &crate::voice::bye_packet())
+                .await;
+            return;
+        }
+        loop {
+            if !still(generation) {
+                stop_voice();
+                let _ = handle
+                    .send_link_packet(link, &crate::voice::bye_packet())
+                    .await;
+                return;
+            }
+            if crate::voice::stopped() {
+                fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
+                let _ = handle
+                    .send_link_packet(link, &crate::voice::bye_packet())
+                    .await;
+                return;
+            }
+            if peer_answered(generation) {
+                break;
+            }
+            rest(50).await;
+        }
+        release_held(link);
+        if !mark_live(generation, &identity, link) {
+            stop_voice();
+            let _ = handle
+                .send_link_packet(link, &crate::voice::bye_packet())
+                .await;
+            return;
+        }
+        speak(handle, link, generation, identity, true).await;
+    });
+}
+
+pub fn answer(ticket: u64) {
+    let taken = {
+        let mut call = calls();
+        let Some(link) = call.tickets.remove(&ticket) else {
+            return;
+        };
+        call.invites.retain(|invite| invite.ticket != ticket);
+        if !matches!(
+            call.face,
+            CallFace::Quiet | CallFace::Failed { .. } | CallFace::Ringing { .. }
+        ) {
+            Some(Err(link))
+        } else {
+            let held = call.held.remove(&link).unwrap_or_default();
+            let identity = held.identity.clone().unwrap_or_default();
+            call.generation = call.generation.wrapping_add(1);
+            let generation = call.generation;
+            call.outgoing = false;
+            call.answered = true;
+            call.started = None;
+            call.link = Some(link);
+            call.face = CallFace::Placing {
+                identity: identity.clone(),
+                outgoing: false,
+            };
+            Some(Ok((link, identity, generation)))
+        }
+    };
+    match taken {
+        Some(Err(link)) => send_bye(link),
+        Some(Ok((link, identity, generation))) => {
+            let Some(runtime) = RUNTIME.get().cloned() else {
+                fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
+                return;
+            };
+            let Some(handle) = HANDLE.get().cloned() else {
+                fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
+                return;
+            };
+            runtime.spawn(async move {
+                if !prepare_voice(generation, &identity).await {
+                    send_bye(link);
+                    return;
+                }
+                if !still(generation) {
+                    stop_voice();
+                    send_bye(link);
+                    return;
+                }
+                release_held(link);
+                if !mark_live(generation, &identity, link) {
+                    stop_voice();
+                    send_bye(link);
+                    return;
+                }
+                // The hello goes out as the first voice packet. Waiting for its
+                // receipt here kept this side silent while the caller was already talking.
+                crate::voice::stage_hello();
+                speak(handle, link, generation, identity, false).await;
+            });
+        }
+        None => {}
+    }
+}
+
+pub fn decline(ticket: u64) {
+    let link = {
+        let mut call = calls();
+        let Some(link) = call.tickets.remove(&ticket) else {
+            return;
+        };
+        call.held.remove(&link);
+        call.invites.retain(|invite| invite.ticket != ticket);
+        if let CallFace::Ringing {
+            ticket: ringing, ..
+        } = call.face
+        {
+            if ringing == ticket {
+                call.face = CallFace::Quiet;
+            }
+        }
+        link
+    };
+    send_bye(link);
+}
+
+/// Keeps a call from a known contact on the page until someone answers it.
+pub fn offer_incoming(invite: IncomingCall) {
+    let busy = {
+        let mut call = calls();
+        if matches!(call.face, CallFace::Quiet | CallFace::Failed { .. }) {
+            call.face = CallFace::Ringing {
+                identity: invite.identity,
+                ticket: invite.ticket,
+            };
+            false
+        } else {
+            true
+        }
+    };
+    if busy {
+        decline(invite.ticket);
+    }
+}
+
+pub fn hang_up() {
+    let mut call = calls();
+    if let CallFace::Live { identity } = &call.face {
+        let seconds = call
+            .started
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+        call.finished = Some(FinishedCall {
+            identity: identity.clone(),
+            seconds,
+            outgoing: call.outgoing,
+        });
+    }
+    call.generation = call.generation.wrapping_add(1);
+    call.face = CallFace::Quiet;
+    call.link = None;
+    drop(call);
+    stop_voice();
+}
+
+fn stop_voice() {
+    crate::voice::stop();
+    #[cfg(target_os = "android")]
+    hold_to_ear(false);
+}
+
+#[cfg(target_os = "android")]
+fn hold_to_ear(on: bool) {
+    let method = if on { "beginCall" } else { "endCall" };
+    let _ = with_android_context(|env, context| {
+        env.call_method(context, method, "()V", &[])?;
+        Ok(())
+    });
+}
+
+async fn prepare_voice(generation: u64, identity: &str) -> bool {
+    if !still(generation) {
+        return false;
+    }
+    #[cfg(target_os = "android")]
+    if !microphone_allowed().await {
+        fail_if(generation, identity, crate::voice::NEEDS_MICROPHONE);
+        return false;
+    }
+    let Some(runtime) = RUNTIME.get() else {
+        fail_if(generation, identity, crate::voice::DIDNT_CONNECT);
+        return false;
+    };
+    #[cfg(target_os = "android")]
+    hold_to_ear(true);
+    let opened = runtime.spawn_blocking(crate::voice::start).await;
+    if !still(generation) {
+        stop_voice();
+        return false;
+    }
+    match opened {
+        Ok(Ok(())) if !crate::voice::stopped() => true,
+        Ok(Err(words)) => {
+            fail_if(generation, identity, words);
+            false
+        }
+        _ => {
+            stop_voice();
+            fail_if(generation, identity, crate::voice::DIDNT_CONNECT);
+            false
+        }
+    }
+}
+
+async fn speak(
+    handle: PrnsNodeHandle,
+    link: LinkId,
+    generation: u64,
+    identity: String,
+    outgoing: bool,
+) {
+    loop {
+        if !still(generation) || crate::voice::stopped() {
+            break;
+        }
+        let Some(packet) = crate::voice::take_one() else {
+            rest(5).await;
+            continue;
+        };
+        if !still(generation) || crate::voice::stopped() {
+            break;
+        }
+        // The side that opened the link never proves data that comes back, so a
+        // receipt for the return voice does not arrive until it times out. Waiting
+        // for that receipt held the responder to one moment per timeout.
+        if let Some(sent) = hand_to_link(&handle, link, &packet).await {
+            if !call_can_continue(sent) {
+                stop_voice();
+                break;
+            }
+        }
+    }
+    let _ = handle
+        .send_link_packet(link, &crate::voice::bye_packet())
+        .await;
+    finish_call(generation, &identity, outgoing);
+}
+
+fn begin_call(identity: &str, outgoing: bool) -> Option<u64> {
+    let mut call = calls();
+    if !matches!(call.face, CallFace::Quiet | CallFace::Failed { .. }) {
+        return None;
+    }
+    call.generation = call.generation.wrapping_add(1);
+    call.outgoing = outgoing;
+    call.answered = false;
+    call.started = None;
+    call.link = None;
+    call.face = CallFace::Placing {
+        identity: identity.to_string(),
+        outgoing,
+    };
+    Some(call.generation)
+}
+
+fn still(generation: u64) -> bool {
+    calls().generation == generation
+}
+
+fn peer_answered(generation: u64) -> bool {
+    let call = calls();
+    call.generation == generation && call.answered
+}
+
+/// Queues one voice packet and returns at once.
+///
+/// `Some` means the link answered before the packet was queued, usually because
+/// the link is already gone. `None` means the packet is on its way.
+async fn hand_to_link(
+    handle: &PrnsNodeHandle,
+    link: LinkId,
+    packet: &[u8],
+) -> Option<
+    Result<
+        personal_rns::PacketReceiptDelivered,
+        personal_rns::SendError<personal_rns::engine::SendToLinkFailure>,
+    >,
+> {
+    let sending = handle.send_link_packet(link, packet);
+    tokio::pin!(sending);
+    tokio::select! {
+        biased;
+        result = &mut sending => Some(result),
+        _ = std::future::ready(()) => None,
+    }
+}
+
+/// A voice packet that never got its receipt can be skipped. The call ends
+/// when the link itself is gone.
+fn call_can_continue(
+    result: Result<
+        personal_rns::PacketReceiptDelivered,
+        personal_rns::SendError<personal_rns::engine::SendToLinkFailure>,
+    >,
+) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(personal_rns::SendError::Failed(failure)) => matches!(
+            failure,
+            personal_rns::engine::SendToLinkFailure::Timeout
+                | personal_rns::engine::SendToLinkFailure::Culled
+                | personal_rns::engine::SendToLinkFailure::WriteFailed(_)
+        ),
+        Err(personal_rns::SendError::Busy | personal_rns::SendError::PayloadTooLarge) => true,
+        Err(personal_rns::SendError::NodeStopped) => false,
+    }
+}
+
+fn bind_link(generation: u64, link: LinkId) -> bool {
+    let mut call = calls();
+    if call.generation != generation {
+        return false;
+    }
+    call.link = Some(link);
+    true
+}
+
+fn mark_live(generation: u64, identity: &str, link: LinkId) -> bool {
+    let mut call = calls();
+    if call.generation != generation {
+        return false;
+    }
+    call.face = CallFace::Live {
+        identity: identity.to_string(),
+    };
+    call.link = Some(link);
+    call.started = Some(Instant::now());
+    true
+}
+
+fn finish_call(generation: u64, identity: &str, outgoing: bool) {
+    let mut call = calls();
+    if call.generation != generation {
+        return;
+    }
+    if call.finished.is_none() {
+        if let CallFace::Live { .. } = call.face {
+            let seconds = call
+                .started
+                .map(|start| start.elapsed().as_secs())
+                .unwrap_or(0);
+            call.finished = Some(FinishedCall {
+                identity: identity.to_string(),
+                seconds,
+                outgoing,
+            });
+        }
+    }
+    call.generation = call.generation.wrapping_add(1);
+    call.face = CallFace::Quiet;
+    call.link = None;
+    stop_voice();
+}
+
+fn fail_now(identity: &str, words: &'static str) {
+    let mut call = calls();
+    if !matches!(call.face, CallFace::Quiet | CallFace::Failed { .. }) {
+        return;
+    }
+    call.face = CallFace::Failed {
+        identity: identity.to_string(),
+        words,
+    };
+}
+
+fn fail_if(generation: u64, identity: &str, words: &'static str) {
+    let mut call = calls();
+    if call.generation != generation {
+        return;
+    }
+    stop_voice();
+    call.face = CallFace::Failed {
+        identity: identity.to_string(),
+        words,
+    };
+    call.link = None;
+}
+
+fn send_bye(link: LinkId) {
+    let Some(runtime) = RUNTIME.get() else {
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        return;
+    };
+    runtime.spawn(async move {
+        let _ = handle
+            .send_link_packet(link, &crate::voice::bye_packet())
+            .await;
+    });
+}
+
+fn release_held(link: LinkId) {
+    let packets = {
+        let mut call = calls();
+        call.held.remove(&link).map(|held| held.packets)
+    };
+    for packet in packets.unwrap_or_default() {
+        crate::voice::hear(&packet);
+    }
+}
+
+fn accept_voice(link_id: LinkId, bytes: &[u8]) {
+    let peer = mail().peers.get(&link_id).copied();
+    match crate::voice::kind(bytes) {
+        crate::voice::VoiceKind::Hello => note_hello(link_id, peer),
+        crate::voice::VoiceKind::Audio => note_audio(link_id, bytes, peer),
+        crate::voice::VoiceKind::Bye => note_bye(link_id),
+        crate::voice::VoiceKind::Other => {}
+    }
+}
+
+fn note_hello(link_id: LinkId, peer: Option<IdentityHash>) {
+    let play_held = {
+        let mut call = calls();
+        if call.link == Some(link_id) {
+            call.answered = true;
+            true
+        } else {
+            false
+        }
+    };
+    if play_held {
+        release_held(link_id);
+        return;
+    }
+    let mut call = calls();
+    if let Some(identity) = placing_identity(&call.face) {
+        if peer.is_some_and(|peer| same_contact(&identity, &hex_encode(peer.as_bytes())))
+            && call.link.is_none()
+        {
+            call.link = Some(link_id);
+            call.answered = true;
+        }
+        return;
+    }
+    {
+        let held = call.held.entry(link_id).or_default();
+        held.hello = true;
+        if held.identity.is_none() {
+            if let Some(peer) = peer {
+                held.identity = Some(hex_encode(peer.as_bytes()));
+            }
+        }
+    }
+    invite_held(&mut call, link_id);
+}
+
+fn note_audio(link_id: LinkId, bytes: &[u8], peer: Option<IdentityHash>) {
+    let play_now = {
+        let mut call = calls();
+        if call.link == Some(link_id) && crate::voice::running() && call.answered {
+            true
+        } else {
+            let held = call.held.entry(link_id).or_default();
+            if held.packets.len() >= 64 {
+                held.packets.remove(0);
+            }
+            held.packets.push(bytes.to_vec());
+            if held.identity.is_none() {
+                if let Some(peer) = peer {
+                    held.identity = Some(hex_encode(peer.as_bytes()));
+                }
+            }
+            false
+        }
+    };
+    if play_now {
+        crate::voice::hear(bytes);
+    }
+}
+
+fn note_bye(link_id: LinkId) {
+    let ending = {
+        let call = calls();
+        if call.link == Some(link_id) {
+            let identity = match &call.face {
+                CallFace::Placing { identity, .. } | CallFace::Live { identity } => {
+                    identity.clone()
+                }
+                _ => String::new(),
+            };
+            let unanswered = matches!(call.face, CallFace::Placing { outgoing: true, .. });
+            Some((call.generation, unanswered, identity))
+        } else {
+            None
+        }
+    };
+    if let Some((generation, unanswered, identity)) = ending {
+        if unanswered {
+            fail_if(generation, &identity, crate::voice::WASNT_ANSWERED);
+        } else {
+            hang_up();
+        }
+        return;
+    }
+    let mut call = calls();
+    if let CallFace::Ringing { ticket, .. } = call.face {
+        if call.tickets.get(&ticket) == Some(&link_id) {
+            call.face = CallFace::Quiet;
+        }
+    }
+    call.held.remove(&link_id);
+    call.tickets.retain(|_, link| *link != link_id);
+    let live: Vec<u64> = call.tickets.keys().copied().collect();
+    call.invites.retain(|invite| live.contains(&invite.ticket));
+}
+
+fn note_peer_on_call(link_id: LinkId, identity_hex: &str) {
+    let mut call = calls();
+    if let Some(identity) = placing_identity(&call.face) {
+        if same_contact(&identity, identity_hex) && call.link.is_none() {
+            call.link = Some(link_id);
+        }
+        return;
+    }
+    {
+        let Some(held) = call.held.get_mut(&link_id) else {
+            return;
+        };
+        if held.identity.is_none() {
+            held.identity = Some(identity_hex.to_string());
+        }
+    }
+    invite_held(&mut call, link_id);
+}
+
+fn invite_held(call: &mut Call, link_id: LinkId) {
+    let Some(held) = call.held.get_mut(&link_id) else {
+        return;
+    };
+    if held.invited || !held.hello {
+        return;
+    }
+    let Some(identity) = held.identity.clone() else {
+        return;
+    };
+    held.invited = true;
+    let ticket = call.next_ticket;
+    call.next_ticket = call.next_ticket.wrapping_add(1);
+    call.tickets.insert(ticket, link_id);
+    call.invites.push(IncomingCall { ticket, identity });
+}
+
+fn placing_identity(face: &CallFace) -> Option<String> {
+    match face {
+        CallFace::Placing { identity, .. } | CallFace::Live { identity } => Some(identity.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn microphone_allowed() -> bool {
+    let Some(runtime) = RUNTIME.get() else {
+        return false;
+    };
+    runtime
+        .spawn_blocking(microphone_allowed_blocking)
+        .await
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "android")]
+fn microphone_allowed_blocking() -> bool {
+    with_android_context(|env, context| {
+        let allowed = env
+            .call_method(context, "allowMicrophone", "()I", &[])?
+            .i()?;
+        Ok(allowed == 0)
+    })
+    .unwrap_or(false)
+}
+
+fn stand_up_live<F>(
+    remote_directory: &Path,
+    home: &Path,
+    secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
+    on_event: F,
+) -> Result<PrnsNode<NoRemoteControlHostControls, (), F, GrowableHeap>, SessionError>
+where
+    F: FnMut(PrnsEvent<'_>, &NoRemoteControlHostControls),
+{
+    #[cfg(any(target_os = "macos", target_os = "android"))]
+    {
+        stand_up_on_lan(remote_directory, home, secret, on_event)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    {
+        let _ = home;
+        stand_up(remote_directory, secret, on_event)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn stand_up_on_lan<F>(
+    remote_directory: &Path,
+    home: &Path,
+    secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
+    on_event: F,
+) -> Result<PrnsNode<NoRemoteControlHostControls, (), F, GrowableHeap>, SessionError>
+where
+    F: FnMut(PrnsEvent<'_>, &NoRemoteControlHostControls),
+{
+    let announce = Vec::new();
+    let remote_control = remote_control_service(remote_directory)?;
+    let home = home.to_path_buf();
+    Ok(PrnsNode::new(PrnsNodeRecipe {
+        transport_identity: None,
+        remote_control: remote_control.into(),
+        pre_configured_destinations: [delivery_destination(secret, &announce)],
+        app_state: NoRemoteControlHostControls,
+        storage: GrowableHeap,
+        request_endpoints: request_endpoints![],
+        interfaces: move |handle: &PrnsNodeHandle| attach_interfaces(handle, &home),
+        persistence: NoPersistence,
+        on_event,
+    }))
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn attach_interfaces(handle: &PrnsNodeHandle, home: &Path) {
+    attach_wifi(handle);
+    attach_internet(handle, home);
+    attach_ble(handle, home);
+    attach_usb(handle);
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn attach_wifi(handle: &PrnsNodeHandle) {
+    #[cfg(target_os = "macos")]
+    let wifi = AutoWifi::default().with_host_discovery(apple_service_discovery());
+    #[cfg(target_os = "android")]
+    let wifi =
+        AutoWifi::default().with_native_host_discovery(native_service_discovery_with_host_lan(
+            AutoWifiDevicePolicy::default(),
+            crate::lan::inventory(),
+        ));
+    #[cfg(target_os = "android")]
+    crate::lan::remember_status(wifi.status());
+    let _attached = handle.supervise(wifi);
+}
+
+/// A TCP client dials one internet address. It stays quiet until `JOURNAL_TCP`
+/// or a saved `tcp-target` names `host:port`.
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn attach_internet(handle: &PrnsNodeHandle, home: &Path) {
+    let (target, enabled) = tcp_dial_target(home);
+    let client = TcpClientInterface::new(target);
+    let status = client.status();
+    if !enabled {
+        status.disable();
+    }
+    handle.attach(client);
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn tcp_dial_target(home: &Path) -> (String, bool) {
+    if let Some(target) = std::env::var("JOURNAL_TCP")
+        .ok()
+        .and_then(|value| parse_tcp_target(&value))
+    {
+        let _ = std::fs::write(home.join("tcp-target"), format!("{target}\n"));
+        return (target, true);
+    }
+    if let Some(target) = std::fs::read_to_string(home.join("tcp-target"))
+        .ok()
+        .and_then(|text| parse_tcp_target(&text))
+    {
+        return (target, true);
+    }
+    ("127.0.0.1:4242".to_string(), false)
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn parse_tcp_target(value: &str) -> Option<String> {
+    let value = value.trim();
+    let (host, port) = value.rsplit_once(':')?;
+    let host = host.trim();
+    let port = port.trim().parse::<u16>().ok()?;
+    if host.is_empty() || port == 0 {
+        return None;
+    }
+    Some(format!("{host}:{port}"))
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn attach_ble(handle: &PrnsNodeHandle, home: &Path) {
+    let Ok(identity) = personal_rns::load_or_create_ble_identity(&home.join("ble")) else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let _attached = handle.attach(personal_rns::AutoBle::new(identity));
+    }
+    #[cfg(target_os = "android")]
+    {
+        use personal_rns::bluetooth_auto::BluetoothAuto;
+        use personal_rns::interfaces::bluetooth_auto::{
+            AndroidHost, Endpoint, LinkCapabilities, BLE_HW_MTU,
+        };
+        use prns_ffi::bluetooth_auto::android::AndroidBleBackend;
+
+        let bridge = crate::links::ble_bridge();
+        bridge.set_local_identity(identity);
+        let bluetooth = BluetoothAuto::<_, { AndroidBleBackend::MAX_PEERS }>::new(
+            AndroidBleBackend::new(bridge),
+            identity,
+            Endpoint::Android(AndroidHost::Android),
+            LinkCapabilities {
+                l2cap: None,
+                link_mtu: BLE_HW_MTU as u16,
+            },
+        );
+        let _attached = handle.supervise(bluetooth);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn attach_usb(handle: &PrnsNodeHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::Arc;
+
+        use tokio::sync::Notify;
+
+        if std::env::var_os("PRNS_USB_AUTO_ANDROID_ACCESSORY").is_none() {
+            std::env::set_var("PRNS_USB_AUTO_ANDROID_ACCESSORY", "1");
+        }
+        let usb = personal_rns::usb_auto::UsbAutoHost::new(
+            personal_rns::usb_auto::DEFAULT_USB_AUTO_ID,
+            personal_rns::usb_auto::scan_native_usb_auto_targets,
+            open_usb_target,
+            Arc::new(Notify::new()),
+        );
+        handle.add_interface(usb);
+    }
+    #[cfg(target_os = "android")]
+    {
+        use std::sync::Arc;
+
+        use personal_rns::interfaces::InterfaceId;
+        use personal_rns::usb_auto::{UsbAutoCandidate, UsbAutoHost};
+
+        let bridge = crate::links::usb_bridge();
+        let scan = {
+            let bridge = bridge.clone();
+            move || {
+                if bridge.is_connected() {
+                    vec![UsbAutoCandidate::prns_specific("android-usb")]
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+        let open = {
+            let bridge = bridge.clone();
+            move |_candidate: UsbAutoCandidate| {
+                let bridge = bridge.clone();
+                async move { Ok(bridge.open_stream()) }
+            }
+        };
+        let usb = UsbAutoHost::new(
+            InterfaceId::new([0xD1; 8]),
+            scan,
+            open,
+            Arc::clone(&bridge.rescan()),
+        );
+        handle.add_interface(usb);
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn open_usb_target(
+    candidate: personal_rns::usb_auto::UsbAutoCandidate,
+) -> std::io::Result<personal_rns::usb_auto::NativeUsbAutoStream> {
+    personal_rns::usb_auto::open_native_usb_auto_target(
+        candidate,
+        personal_rns::usb_auto::DEFAULT_USB_BAUD,
+    )
+    .await
+}
+
+#[cfg(any(test, not(any(target_os = "macos", target_os = "android"))))]
+fn stand_up<F>(
+    remote_directory: &Path,
+    secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
+    on_event: F,
+) -> Result<PrnsNode<NoRemoteControlHostControls, (), F, GrowableHeap>, SessionError>
+where
+    F: FnMut(PrnsEvent<'_>, &NoRemoteControlHostControls),
+{
+    let announce = Vec::new();
+    let remote_control = remote_control_service(remote_directory)?;
+    Ok(PrnsNode::new(PrnsNodeRecipe {
+        transport_identity: None,
+        remote_control: remote_control.into(),
+        pre_configured_destinations: [delivery_destination(secret, &announce)],
+        app_state: NoRemoteControlHostControls,
+        storage: GrowableHeap,
+        request_endpoints: request_endpoints![],
+        interfaces: ManuallyAttached,
+        persistence: NoPersistence,
+        on_event,
+    }))
+}
+
+fn delivery_destination<'a>(
+    secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
+    announce: &'a [u8],
+) -> PreConfiguredDestination<'a> {
+    PreConfiguredDestination::Single {
+        app_name: DELIVERY_APP,
+        aspects: DELIVERY_ASPECTS,
+        identity: secret,
+        announce_app_data: announce,
+        proof: ProofStrategy::ProveAll,
+        link_requests: LinkRequestPolicy::AcceptAll,
+        ratchet: RatchetPolicy::Ratcheted,
+        resource_strategy: ResourceStrategy::AcceptNone,
+        maximum_request_bytes: Default::default(),
+        request_endpoints: ServeMyRequestEndpoints::No,
+    }
+}
+
+fn remote_control_service(directory: &Path) -> Result<RemoteControlService<'static>, SessionError> {
+    let bootstrap = RemoteControlIdentityDirectory::new(directory)
+        .load_or_generate()
+        .map_err(SessionError::RemoteControl)?;
+    let (secrets, _) = bootstrap.into_parts();
+    Ok(RemoteControlService::new(
+        secrets,
+        RemoteControlInitialControllerGrants::Nobody,
+        RemoteControlSelfAnnouncement::Unavailable,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use personal_rns::prelude::*;
+    use tokio::sync::mpsc;
+
+    use personal_rns::interfaces::{
+        ConnectionState, InterfaceGravity, InterfaceId, InterfaceMode, InterfaceSnapshot,
+        Membership, PeerDetails, RadioIndication,
+    };
+
+    use super::{
+        call_can_continue, carries_a_person, delivery_destination, machine_label, marks_from,
+        parse_tcp_target, stand_up, JournalIdentity, WireMarks, STEP_WAIT,
+    };
+
+    #[test]
+    fn a_search_step_moves_on_after_five_seconds() {
+        assert_eq!(STEP_WAIT, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_search_uses_peer_sockets_and_skips_local_wires() {
+        use personal_rns::interfaces::InterfaceKind;
+        assert!(carries_a_person(Some(InterfaceKind::WifiPeer), true, false));
+        assert!(!carries_a_person(
+            Some(InterfaceKind::AutoWifi),
+            true,
+            false
+        ));
+        assert!(carries_a_person(
+            Some(InterfaceKind::AutoWifi),
+            false,
+            false
+        ));
+        assert!(!carries_a_person(
+            Some(InterfaceKind::BluetoothAuto),
+            false,
+            true
+        ));
+        assert!(carries_a_person(
+            Some(InterfaceKind::BluetoothPeer),
+            false,
+            true
+        ));
+        assert!(!carries_a_person(
+            Some(InterfaceKind::LocalClient),
+            false,
+            false
+        ));
+        assert!(!carries_a_person(None, false, false));
+    }
+
+    #[test]
+    fn a_slow_voice_packet_keeps_the_call() {
+        use personal_rns::engine::{SendToLinkFailure, SendToLinkRejection};
+        use personal_rns::SendError;
+
+        assert!(call_can_continue(Err(SendError::Failed(
+            SendToLinkFailure::Timeout
+        ))));
+        assert!(call_can_continue(Err(SendError::Busy)));
+        assert!(!call_can_continue(Err(SendError::Failed(
+            SendToLinkFailure::LinkClosed
+        ))));
+        assert!(!call_can_continue(Err(SendError::Failed(
+            SendToLinkFailure::Rejected(SendToLinkRejection::LinkNotActive)
+        ))));
+        assert!(!call_can_continue(Err(SendError::NodeStopped)));
+    }
+
+    #[test]
+    fn a_phone_name_is_the_first_word_of_its_model() {
+        assert_eq!(machine_label("Pixel 7 Pro"), "Pixel");
+        assert_eq!(machine_label("  Pixel Fold "), "Pixel");
+        assert_eq!(machine_label(""), "Phone");
+        assert_eq!(machine_label("   "), "Phone");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "android"))]
+    #[test]
+    fn a_tcp_target_is_a_host_and_port() {
+        assert_eq!(
+            parse_tcp_target("  example.com:4242\n"),
+            Some("example.com:4242".to_string())
+        );
+        assert_eq!(parse_tcp_target("missing"), None);
+        assert_eq!(parse_tcp_target("host:0"), None);
+    }
+
+    #[test]
+    fn wire_letters_follow_a_live_peer_on_each_interface() {
+        let quiet = marks_from(&[]);
+        assert_eq!(quiet, WireMarks::quiet());
+
+        let snapshots = [
+            snapshot(InterfaceKind::AutoWifi, ConnectionState::Disconnected),
+            snapshot(InterfaceKind::WifiPeer, ConnectionState::Connected),
+            snapshot(InterfaceKind::TcpClient, ConnectionState::Degraded),
+            snapshot(InterfaceKind::TcpServer, ConnectionState::Connected),
+            snapshot(InterfaceKind::BluetoothPeer, ConnectionState::Connected),
+            snapshot(InterfaceKind::UsbAutoHost, ConnectionState::Initializing),
+            snapshot(InterfaceKind::UsbAutoDevice, ConnectionState::Connected),
+        ];
+        assert_eq!(
+            marks_from(&snapshots),
+            WireMarks {
+                wifi: true,
+                internet: true,
+                ble: true,
+                usb: true,
+            }
+        );
+
+        let down = [snapshot(
+            InterfaceKind::BluetoothAuto,
+            ConnectionState::Disconnected,
+        )];
+        assert!(!marks_from(&down).ble);
+    }
+
+    fn snapshot(kind: InterfaceKind, connection: ConnectionState) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            id: InterfaceId::from_channel_tag(kind, b"journal"),
+            mode: InterfaceMode::Full,
+            gravity: InterfaceGravity::ZERO,
+            connection,
+            failure_reason: None,
+            rx_bytes: 0,
+            tx_bytes: 0,
+            transfer_rates: None,
+            destinations: 0,
+            links: 0,
+            transported_links: 0,
+            membership: Membership::Independent,
+            radio: RadioIndication::for_kind(Some(kind)),
+            details: PeerDetails::NotApplicable,
+        }
+    }
+
+    #[test]
+    fn a_journal_keeps_its_public_key_and_answers_as_lxmf_delivery() {
+        let directory = temp_journal();
+        let first = JournalIdentity::load_or_create(&directory).expect("identity");
+        let second = JournalIdentity::load_or_create(&directory).expect("the same identity");
+        assert_eq!(first.public_key_hex(), second.public_key_hex());
+        assert_eq!(first.public_key_hex().len(), 128);
+        assert!(first
+            .public_key_hex()
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(first.destination(), second.destination());
+        let again = delivery_destination(first.secret.clone(), b"");
+        assert_eq!(
+            again.destination_hash().expect("delivery name"),
+            first.destination()
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_journals_open_a_link_to_lxmf_delivery() {
+        let listener_dir = temp_journal();
+        let dialer_dir = temp_journal();
+        let listener_identity =
+            JournalIdentity::load_or_create(&listener_dir).expect("listener identity");
+        let destination = listener_identity.destination();
+        let tcp = TcpServer::bind("127.0.0.1:0")
+            .await
+            .expect("localhost listener");
+        let address = tcp.local_addr().expect("bound address").to_string();
+        let listener = stand_up(
+            &listener_dir.join("remote-control"),
+            listener_identity.secret.clone(),
+            |_event, _state| {},
+        )
+        .expect("listener");
+        let listener_handle = listener.handle();
+        let _server = listener_handle.supervise(tcp);
+
+        let (heard_tx, mut heard_rx) = mpsc::unbounded_channel();
+        let dialer_identity =
+            JournalIdentity::load_or_create(&dialer_dir).expect("dialer identity");
+        let client = TcpClientInterface::new(address);
+        let dialer = stand_up(
+            &dialer_dir.join("remote-control"),
+            dialer_identity.secret,
+            move |event, _state| {
+                if let PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard {
+                    destination: heard, ..
+                }) = event
+                {
+                    let _ = heard_tx.send(heard);
+                }
+            },
+        )
+        .expect("dialer");
+        // The client has to be attached while the node is built. stand_up uses ManuallyAttached,
+        // so attach it now, before either node runs.
+        dialer.handle().attach(client);
+
+        let announcer = listener_handle.clone();
+        let announce = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(200));
+            loop {
+                ticker.tick().await;
+                if announcer
+                    .issue(PrnsCommand::AnnounceNow(AnnounceNow {
+                        destination,
+                        target: AnnounceTarget::AllInterfaces,
+                        app_data: AnnounceAppData::Registered,
+                    }))
+                    .is_none()
+                {
+                    return;
+                }
+            }
+        });
+
+        let dialer_handle = dialer.handle();
+        let exchange = async {
+            loop {
+                let heard = heard_rx.recv().await.expect("announce stream closed");
+                if heard == destination {
+                    break;
+                }
+            }
+            dialer_handle
+                .establish_link(destination)
+                .await
+                .expect("link to lxmf.delivery");
+        };
+
+        tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(10), exchange) => {
+                result.expect("the journals did not link within 10 seconds");
+            }
+            result = listener.run() => {
+                result.expect("listener failed");
+                panic!("listener stopped before the link");
+            }
+            result = dialer.run() => {
+                result.expect("dialer failed");
+                panic!("dialer stopped before the link");
+            }
+        }
+        announce.abort();
+        let _ = std::fs::remove_dir_all(&listener_dir);
+        let _ = std::fs::remove_dir_all(&dialer_dir);
+    }
+
+    #[test]
+    fn a_public_key_matches_its_identity_hash() {
+        let directory = temp_journal();
+        let identity = super::JournalIdentity::load_or_create(&directory).expect("identity");
+        let hash = super::hex_encode(identity.hash.as_bytes());
+        assert!(super::same_contact(identity.public_key_hex(), &hash));
+        assert!(!super::same_contact("not-a-key", &hash));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    fn temp_journal() -> std::path::PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "journal-session-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("temp journal directory");
+        directory
+    }
+}
+
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    let text = text.as_bytes();
+    let mut index = 0;
+    while index < text.len() {
+        let high = hex_value(text[index])?;
+        let low = hex_value(text[index + 1])?;
+        bytes.push((high << 4) | low);
+        index += 2;
+    }
+    Some(bytes)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}

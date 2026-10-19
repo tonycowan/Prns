@@ -466,10 +466,22 @@ impl PrnsNodeHandle {
         &self,
         destination: DestinationHash,
     ) -> Result<LinkEstablished, SendError<EstablishLinkFailure>> {
+        self.establish_link_on(destination, None).await
+    }
+
+    /// Opens a link and, when `only_interface` is set, sends the request on that interface.
+    pub async fn establish_link_on(
+        &self,
+        destination: DestinationHash,
+        only_interface: Option<InterfaceId>,
+    ) -> Result<LinkEstablished, SendError<EstablishLinkFailure>> {
         let timing = self.first_hop_command_timing(destination).await;
         match self
             .settle_with_timing(
-                PrnsCommand::EstablishLink(EstablishLink { destination }),
+                PrnsCommand::EstablishLink(EstablishLink {
+                    destination,
+                    only_interface,
+                }),
                 timing,
             )
             .await

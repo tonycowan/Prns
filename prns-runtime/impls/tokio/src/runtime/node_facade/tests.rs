@@ -410,7 +410,10 @@ async fn establish_link_resolves_the_link_id_from_the_settlement() {
         HostCommand::AwaitedEngine { issued, completion } => {
             assert_eq!(
                 issued.command,
-                PrnsCommand::EstablishLink(EstablishLink { destination: PEER }),
+                PrnsCommand::EstablishLink(EstablishLink {
+                    destination: PEER,
+                    only_interface: None
+                }),
             );
             completion
                 .send(Settlement::EstablishLink(Ok(LinkEstablished {

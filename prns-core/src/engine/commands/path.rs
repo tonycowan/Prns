@@ -1,3 +1,4 @@
+use crate::interfaces::InterfaceId;
 use crate::units::HopCount;
 use crate::wire::{DestinationHash, WireError, TRUNCATED_HASH_BYTE_LEN};
 
@@ -23,6 +24,8 @@ impl PathRequestId {
 pub struct RequestPath {
     pub destination: DestinationHash,
     pub id: PathRequestId,
+    /// When set, the request is sent on this interface only. `None` asks on every interface.
+    pub only_interface: Option<InterfaceId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +95,7 @@ mod tests {
         let request = RequestPath {
             destination: DestinationHash::new([0x44; 16]),
             id: PathRequestId::new([0x55; 16]),
+            only_interface: None,
         };
 
         assert_eq!(
@@ -115,6 +119,7 @@ mod tests {
         let verb = RequestPath {
             destination: DestinationHash::new([0x11; 16]),
             id: PathRequestId::new([0x22; 16]),
+            only_interface: None,
         };
 
         assert_eq!(verb.into_command(), PrnsCommand::RequestPath(verb));

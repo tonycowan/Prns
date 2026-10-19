@@ -140,6 +140,7 @@ async fn a_link_establishes_and_carries_data_across_two_live_manifolds() {
             id: CommandId(7),
             command: PrnsCommand::EstablishLink(EstablishLink {
                 destination: personal_node_destination(),
+                only_interface: None,
             }),
         }))
         .unwrap();

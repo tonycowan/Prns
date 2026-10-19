@@ -12,6 +12,8 @@ use super::{PacketReceiptDelivered, PrnsCommand, Settleable, Settlement};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EstablishLink {
     pub destination: DestinationHash,
+    /// When set, the link request is sent on this interface instead of the remembered path.
+    pub only_interface: Option<crate::interfaces::InterfaceId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +284,7 @@ mod tests {
     fn establish_link_recovers_its_typed_settlement() {
         let verb = EstablishLink {
             destination: DestinationHash::new([0x11; 16]),
+            only_interface: None,
         };
 
         assert_eq!(verb.into_command(), PrnsCommand::EstablishLink(verb));

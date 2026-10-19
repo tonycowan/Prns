@@ -1,5 +1,6 @@
 use crate::engine::CommandId;
 use crate::engine::InstantMillis;
+use crate::interfaces::InterfaceId;
 use crate::routing::path_requests::pending::{
     PendingPathRequest, PendingPathRequestTable, TrackPathRequestError,
 };
@@ -11,6 +12,7 @@ pub struct FixedPendingPathRequestTable<const MAX_PENDING_PATH_REQUESTS: usize> 
     destinations: [DestinationHash; MAX_PENDING_PATH_REQUESTS],
     command_ids: [CommandId; MAX_PENDING_PATH_REQUESTS],
     timeout_ats: [InstantMillis; MAX_PENDING_PATH_REQUESTS],
+    only_interfaces: [Option<InterfaceId>; MAX_PENDING_PATH_REQUESTS],
 }
 
 impl<const MAX_PENDING_PATH_REQUESTS: usize> Default
@@ -22,6 +24,7 @@ impl<const MAX_PENDING_PATH_REQUESTS: usize> Default
             destinations: [DestinationHash::new([0u8; 16]); MAX_PENDING_PATH_REQUESTS],
             command_ids: [CommandId(0); MAX_PENDING_PATH_REQUESTS],
             timeout_ats: [InstantMillis(0); MAX_PENDING_PATH_REQUESTS],
+            only_interfaces: [None; MAX_PENDING_PATH_REQUESTS],
         }
     }
 }
@@ -45,6 +48,9 @@ impl<const MAX_PENDING_PATH_REQUESTS: usize> PendingPathRequestTable
     fn timeout_ats(&self) -> &[InstantMillis] {
         &self.timeout_ats[..self.len]
     }
+    fn only_interfaces(&self) -> &[Option<InterfaceId>] {
+        &self.only_interfaces[..self.len]
+    }
 
     fn push(&mut self, request: PendingPathRequest) -> Result<usize, TrackPathRequestError> {
         if self.len >= MAX_PENDING_PATH_REQUESTS {
@@ -54,6 +60,7 @@ impl<const MAX_PENDING_PATH_REQUESTS: usize> PendingPathRequestTable
         self.destinations[i] = request.destination;
         self.command_ids[i] = request.command_id;
         self.timeout_ats[i] = request.timeout_at;
+        self.only_interfaces[i] = request.only_interface;
         self.len += 1;
         Ok(i)
     }
@@ -64,6 +71,7 @@ impl<const MAX_PENDING_PATH_REQUESTS: usize> PendingPathRequestTable
             self.destinations[index] = self.destinations[last];
             self.command_ids[index] = self.command_ids[last];
             self.timeout_ats[index] = self.timeout_ats[last];
+            self.only_interfaces[index] = self.only_interfaces[last];
         }
         self.len = last;
     }

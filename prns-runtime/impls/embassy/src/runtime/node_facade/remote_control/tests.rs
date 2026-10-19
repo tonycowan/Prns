@@ -143,7 +143,10 @@ fn controller_pairing_initiation_establishes_the_observed_endpoint_before_beginn
             let issued = commands.receiver().receive().await;
             assert_eq!(
                 issued.command,
-                PrnsCommand::EstablishLink(EstablishLink { destination }),
+                PrnsCommand::EstablishLink(EstablishLink {
+                    destination,
+                    only_interface: None,
+                }),
             );
             assert!(matches!(
                 handle.route_journaled(
@@ -375,7 +378,10 @@ fn connection_resolves_links_identifies_and_refuses_unpermitted_egress() {
         let issued = commands.receiver().receive().await;
         assert_eq!(
             issued.command,
-            PrnsCommand::EstablishLink(EstablishLink { destination }),
+            PrnsCommand::EstablishLink(EstablishLink {
+                destination,
+                only_interface: None,
+            }),
         );
         assert!(matches!(
             handle.route_journaled(
@@ -446,7 +452,10 @@ fn identification_failure_queues_link_cleanup_and_preserves_the_failure() {
         let issued = commands.receiver().receive().await;
         assert_eq!(
             issued.command,
-            PrnsCommand::EstablishLink(EstablishLink { destination }),
+            PrnsCommand::EstablishLink(EstablishLink {
+                destination,
+                only_interface: None,
+            }),
         );
         assert!(matches!(
             handle.route_journaled(

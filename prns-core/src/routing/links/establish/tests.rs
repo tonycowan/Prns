@@ -69,6 +69,7 @@ fn vector_establish_entropy() -> EstablishLinkEntropy {
 fn establish() -> EstablishLink {
     EstablishLink {
         destination: peer_destination(),
+        only_interface: None,
     }
 }
 

@@ -375,7 +375,10 @@ async fn initiate_link(
         }
     };
     let establish = commands
-        .issue(PrnsCommand::EstablishLink(EstablishLink { destination }))
+        .issue(PrnsCommand::EstablishLink(EstablishLink {
+            destination,
+            only_interface: None,
+        }))
         .expect("manifold alive");
     let link_id = loop {
         match events.recv().await.expect("manifold alive") {
