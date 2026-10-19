@@ -3,8 +3,12 @@
 //! The photo is the same mark shown on Your QR code: the contact's name,
 //! then their identity public key, one field per line.
 
-use image::{DynamicImage, GrayImage, ImageBuffer, Luma};
+#[cfg(test)]
+use image::Luma;
+use image::{DynamicImage, GrayImage, ImageBuffer};
+#[cfg(test)]
 use qrcode::types::Color;
+#[cfg(test)]
 use qrcode::QrCode;
 
 pub fn contact_from_code(payload: &str) -> Option<(String, String)> {
