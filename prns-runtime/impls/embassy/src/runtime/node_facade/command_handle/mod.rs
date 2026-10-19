@@ -510,8 +510,8 @@ impl<
             destination,
             only_interface: None,
         })
-            .await
-            .map(|established| established.link_id)
+        .await
+        .map(|established| established.link_id)
     }
 
     pub async fn identify(
