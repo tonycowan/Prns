@@ -1,16 +1,19 @@
 [application]
-name = "Awill"
+name = "TouchBase"
 default_platform = "desktop"
 android_min_sdk_version = 30
 android_main_activity = "android/MainActivity.kt"
 
 [web.app]
-title = "Awill"
+title = "TouchBase"
 
 [bundle]
 identifier = "org.personal.prns.comms"
 publisher = "Personal PRNS"
-short_description = "Where there's a will there's a way"
+short_description = "A private journal shared with people you have added"
+
+[permissions]
+location = { precision = "fine", description = "TouchBase uses your location when you add it to a note." }
 
 [android]
 min_sdk = 30
@@ -29,6 +32,8 @@ manifest = """
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -41,6 +46,10 @@ manifest = """
     <queries>
         <intent>
             <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
         </intent>
     </queries>
 """

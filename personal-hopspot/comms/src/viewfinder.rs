@@ -1,4 +1,4 @@
-//! The laptop camera, open while a contact's code is being read.
+//! The camera, open while a contact's code is being read.
 //!
 //! Frames stay small enough to search as they arrive. The picture shown on the
 //! page is mirrored; the search uses the camera's own orientation, which is
@@ -16,6 +16,11 @@ use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput,
     AVCaptureInput, AVCaptureOutput, AVCaptureSession, AVCaptureSessionPreset1280x720,
     AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
+};
+#[cfg(target_os = "ios")]
+#[allow(deprecated)]
+use objc2_av_foundation::{
+    AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureVideoOrientation,
 };
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{
@@ -205,8 +210,7 @@ struct Opened {
 /// SAFETY: `media` is the video type. The returned session is running and must be stopped
 /// by the caller before it is dropped. The delegate must be kept until the callback is cleared.
 unsafe fn open_session(run: u64, media: &objc2_av_foundation::AVMediaType) -> Option<Opened> {
-    // SAFETY: default video device for this process. Nil means this Mac has no camera.
-    let device = unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }?;
+    let device = video_device(media)?;
     // SAFETY: opens that device for capture. An error means it is unavailable.
     let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }.ok()?;
     let output = unsafe { AVCaptureVideoDataOutput::new() };
@@ -244,6 +248,14 @@ unsafe fn open_session(run: u64, media: &objc2_av_foundation::AVMediaType) -> Op
             return None;
         }
         session.addOutput(output_ref);
+        #[cfg(target_os = "ios")]
+        if let Some(connection) = output.connectionWithMediaType(media) {
+            // The phone is held upright. Turn the frames to match, so the code is not on its side.
+            #[allow(deprecated)]
+            if connection.isVideoOrientationSupported() {
+                connection.setVideoOrientation(AVCaptureVideoOrientation::Portrait);
+            }
+        }
         session.commitConfiguration();
         session.startRunning();
     }
@@ -253,6 +265,26 @@ unsafe fn open_session(run: u64, media: &objc2_av_foundation::AVMediaType) -> Op
         _delegate: delegate,
         _queue: queue,
     })
+}
+
+fn video_device(media: &objc2_av_foundation::AVMediaType) -> Option<Retained<AVCaptureDevice>> {
+    #[cfg(target_os = "ios")]
+    {
+        // SAFETY: the wide-angle type is a process-wide constant. The back camera
+        // photographs a code held up to the phone.
+        let device_type = unsafe { AVCaptureDeviceTypeBuiltInWideAngleCamera };
+        if let Some(device) = unsafe {
+            AVCaptureDevice::defaultDeviceWithDeviceType_mediaType_position(
+                device_type,
+                Some(media),
+                AVCaptureDevicePosition::Back,
+            )
+        } {
+            return Some(device);
+        }
+    }
+    // SAFETY: default video device for this process. Nil means there is no camera.
+    unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }
 }
 
 fn on_frame(sample: &CMSampleBuffer) {

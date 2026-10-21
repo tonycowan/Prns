@@ -1,7 +1,10 @@
-//! An LXMF note: the time it was written, an empty title, the words, and no fields.
+//! An LXMF note: the time it was written, an empty title, the words, and fields.
 //!
-//! Direct delivery is the packed message on a link. The link's own receipt is the
-//! acknowledgement. Propagation is not used here.
+//! A place, when the note still has one, is a `loc` field. Direct delivery is
+//! the packed message on a link. The link's own receipt is the acknowledgement.
+//! Propagation is not used here.
+
+use crate::model::Place;
 
 /// A note opened from an LXMF message.
 #[derive(Debug, Clone, PartialEq)]
@@ -9,10 +12,16 @@ pub struct NoteLetter {
     pub words: String,
     /// Unix seconds carried in the message.
     pub written_at: f64,
+    pub place: Option<Place>,
 }
 
 /// Packs the words the way LXMF packs a message.
 pub fn pack_note(words: &str, written_at: f64) -> Vec<u8> {
+    pack_placed_note(words, written_at, None)
+}
+
+/// Packs a note that may also carry a place in its fields.
+pub fn pack_placed_note(words: &str, written_at: f64, place: Option<Place>) -> Vec<u8> {
     let words = words.trim().as_bytes();
     let mut out = Vec::with_capacity(16 + words.len());
     out.push(0x94);
@@ -20,12 +29,63 @@ pub fn pack_note(words: &str, written_at: f64) -> Vec<u8> {
     out.extend_from_slice(&written_at.to_be_bytes());
     push_bin(&mut out, b"");
     push_bin(&mut out, words);
-    out.push(0x80);
+    match place {
+        Some(place) => {
+            let text = place.text();
+            out.push(0x81);
+            push_bin(&mut out, b"loc");
+            push_bin(&mut out, text.as_bytes());
+        }
+        None => out.push(0x80),
+    }
     out
 }
 
-/// Opens a packed LXMF message. Anything that is not one is left closed.
-pub fn open_note(bytes: &[u8]) -> Option<NoteLetter> {
+/// A reaction to a note, matched by the time it was written, or by its words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReactionLetter {
+    pub written_at: f64,
+    /// The words of the note this mark belongs to.
+    pub words: String,
+    pub reaction: Option<crate::model::Reaction>,
+}
+
+/// Packs a reaction. The message body is empty, so an older app leaves it closed.
+pub fn pack_reaction(
+    target_written_at: f64,
+    words: &str,
+    reaction: Option<crate::model::Reaction>,
+) -> Vec<u8> {
+    let name = reaction.map(crate::model::Reaction::name).unwrap_or("-");
+    let on = format!("{:016x}", target_written_at.to_bits());
+    let mut out = Vec::new();
+    out.push(0x94);
+    out.push(0xcb);
+    out.extend_from_slice(&unix_now().to_be_bytes());
+    push_bin(&mut out, b"");
+    push_bin(&mut out, b"");
+    out.push(0x83);
+    push_bin(&mut out, b"on");
+    push_bin(&mut out, on.as_bytes());
+    push_bin(&mut out, b"rx");
+    push_bin(&mut out, name.as_bytes());
+    push_bin(&mut out, b"of");
+    push_bin(&mut out, words.trim().as_bytes());
+    out
+}
+
+struct ReadMessage {
+    words: String,
+    written_at: f64,
+    fields: MessageFields,
+}
+
+struct MessageFields {
+    place: Option<Place>,
+    reaction: Option<(f64, String, Option<crate::model::Reaction>)>,
+}
+
+fn read_message(bytes: &[u8]) -> Option<ReadMessage> {
     let mut reader = Reader { bytes };
     let len = reader.array_len()?;
     if len < 4 {
@@ -34,20 +94,42 @@ pub fn open_note(bytes: &[u8]) -> Option<NoteLetter> {
     let written_at = reader.number()?;
     let _title = reader.bytes_or_text()?;
     let words = reader.bytes_or_text()?;
-    for _ in 3..len {
+    let fields = reader.fields()?;
+    for _ in 4..len {
         reader.skip()?;
     }
     if !reader.bytes.is_empty() {
         return None;
     }
     let words = String::from_utf8(words).ok()?;
-    let words = words.trim();
-    if words.is_empty() {
+    Some(ReadMessage {
+        words: words.trim().to_string(),
+        written_at,
+        fields,
+    })
+}
+
+/// Opens a packed LXMF message. Anything that is not one is left closed.
+pub fn open_note(bytes: &[u8]) -> Option<NoteLetter> {
+    let read = read_message(bytes)?;
+    if read.fields.reaction.is_some() || (read.words.is_empty() && read.fields.place.is_none()) {
         return None;
     }
     Some(NoteLetter {
-        words: words.to_string(),
+        words: read.words,
+        written_at: read.written_at,
+        place: read.fields.place,
+    })
+}
+
+/// Opens a reaction. A note, and anything else, is left closed.
+pub fn open_reaction(bytes: &[u8]) -> Option<ReactionLetter> {
+    let read = read_message(bytes)?;
+    let (written_at, words, reaction) = read.fields.reaction?;
+    Some(ReactionLetter {
         written_at,
+        words,
+        reaction,
     })
 }
 
@@ -125,8 +207,89 @@ impl<'a> Reader<'a> {
         Some(self.take(len)?.to_vec())
     }
 
+    fn fields(&mut self) -> Option<MessageFields> {
+        let marker = self.u8()?;
+        let pairs = if (0x80..=0x8f).contains(&marker) {
+            (marker & 0x0f) as usize
+        } else if marker == 0xde {
+            self.u16()? as usize
+        } else if marker == 0xdf {
+            usize::try_from(self.u32()?).ok()?
+        } else {
+            self.skip_marked(marker)?;
+            return Some(MessageFields {
+                place: None,
+                reaction: None,
+            });
+        };
+        let mut place = None;
+        let mut mark = None;
+        let mut on = None;
+        let mut of = String::new();
+        for _ in 0..pairs {
+            match self.text_or_skip()? {
+                Some(key) if key == b"loc" => {
+                    if let Some(value) = self.text_or_skip()? {
+                        if let Ok(text) = std::str::from_utf8(&value) {
+                            place = Place::parse(text);
+                        }
+                    }
+                }
+                Some(key) if key == b"rx" => {
+                    if let Some(value) = self.text_or_skip()? {
+                        mark = String::from_utf8(value).ok();
+                    }
+                }
+                Some(key) if key == b"on" => {
+                    if let Some(value) = self.text_or_skip()? {
+                        if let Ok(text) = std::str::from_utf8(&value) {
+                            on = u64::from_str_radix(text, 16).ok().map(f64::from_bits);
+                        }
+                    }
+                }
+                Some(key) if key == b"of" => {
+                    if let Some(value) = self.text_or_skip()? {
+                        if let Ok(text) = String::from_utf8(value) {
+                            of = text;
+                        }
+                    }
+                }
+                _ => self.skip()?,
+            }
+        }
+        let reaction = match mark {
+            Some(name) => {
+                let written_at = on?;
+                let reaction = if name == "-" {
+                    None
+                } else {
+                    Some(crate::model::Reaction::parse(&name)?)
+                };
+                Some((written_at, of, reaction))
+            }
+            None => None,
+        };
+        Some(MessageFields { place, reaction })
+    }
+
+    fn text_or_skip(&mut self) -> Option<Option<Vec<u8>>> {
+        let marker = *self.bytes.first()?;
+        if (0xa0..=0xbf).contains(&marker)
+            || matches!(marker, 0xc4 | 0xc5 | 0xc6 | 0xd9 | 0xda | 0xdb)
+        {
+            Some(Some(self.bytes_or_text()?))
+        } else {
+            self.skip()?;
+            Some(None)
+        }
+    }
+
     fn skip(&mut self) -> Option<()> {
         let marker = self.u8()?;
+        self.skip_marked(marker)
+    }
+
+    fn skip_marked(&mut self, marker: u8) -> Option<()> {
         if marker <= 0x7f || (0xe0..=0xff).contains(&marker) {
             return Some(());
         }
@@ -237,6 +400,7 @@ mod tests {
         let note = open_note(&packed).expect("note");
         assert_eq!(note.words, "The pears are ready.");
         assert_eq!(note.written_at, 1_700_000_000.0);
+        assert!(note.place.is_none());
         assert_eq!(packed[0], 0x94);
         assert_eq!(packed[1], 0xcb);
         assert_eq!(*packed.last().unwrap(), 0x80);
@@ -248,6 +412,25 @@ mod tests {
     }
 
     #[test]
+    fn a_reaction_round_trips_and_is_not_a_note() {
+        let packed = pack_reaction(
+            1_700_000_000.0,
+            "The pears are ready.",
+            Some(crate::model::Reaction::Love),
+        );
+        assert!(open_note(&packed).is_none());
+        let letter = open_reaction(&packed).expect("reaction");
+        assert_eq!(letter.written_at.to_bits(), 1_700_000_000.0f64.to_bits());
+        assert_eq!(letter.words, "The pears are ready.");
+        assert_eq!(letter.reaction, Some(crate::model::Reaction::Love));
+        let cleared = pack_reaction(1_700_000_000.0, "The pears are ready.", None);
+        let letter = open_reaction(&cleared).expect("cleared");
+        assert_eq!(letter.written_at.to_bits(), 1_700_000_000.0f64.to_bits());
+        assert!(letter.reaction.is_none());
+        assert!(open_reaction(&pack_note("The pears are ready.", 1.0)).is_none());
+    }
+
+    #[test]
     fn a_message_with_a_field_still_opens() {
         // timestamp as an integer, title as text, one string field after the words.
         let mut packed = vec![0x94, 0xce];
@@ -256,5 +439,17 @@ mod tests {
         let note = open_note(&packed).expect("note");
         assert_eq!(note.words, "Hi");
         assert_eq!(note.written_at, 1_700_000_000.0);
+        assert!(note.place.is_none());
+    }
+
+    #[test]
+    fn a_place_round_trips_in_the_fields() {
+        let place = Place::from_degrees(40.7484, -73.9857).expect("place");
+        let packed = pack_placed_note("Meet me 📍 Location", 1_700_000_000.0, Some(place));
+        let note = open_note(&packed).expect("note");
+        assert_eq!(note.words, "Meet me 📍 Location");
+        assert_eq!(note.place, Some(place));
+        let without = pack_placed_note("Meet me", 1_700_000_000.0, None);
+        assert!(open_note(&without).expect("note").place.is_none());
     }
 }

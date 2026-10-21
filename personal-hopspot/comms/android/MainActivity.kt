@@ -1,18 +1,26 @@
 package dev.dioxus.main
 
 import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import org.personal.prns.controller.BleLink
 import org.personal.prns.controller.UsbLink
@@ -24,6 +32,8 @@ class MainActivity : WryActivity() {
     private var found: AtomicReference<String?>? = null
     private var micWaiting: CountDownLatch? = null
     private var micStatus: Int = 1
+    private var placeWaiting: CountDownLatch? = null
+    private var placeGranted: Boolean = false
     private var wifi: WifiLan? = null
     private var scanner: CodeScan? = null
     private var ble: BleLink? = null
@@ -44,6 +54,14 @@ class MainActivity : WryActivity() {
             micStatus = if (granted) 0 else 1
             micWaiting?.countDown()
             micWaiting = null
+        }
+
+    private val placePermission =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+            placeGranted = granted[Manifest.permission.ACCESS_FINE_LOCATION] == true
+                || granted[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+            placeWaiting?.countDown()
+            placeWaiting = null
         }
 
     private val radios =
@@ -201,6 +219,107 @@ class MainActivity : WryActivity() {
         return micStatus
     }
 
+    fun readPlace(): String? {
+        if (!ensureLocationPermission()) {
+            return null
+        }
+        val manager = getSystemService(LocationManager::class.java) ?: return null
+        val provider = chooseProvider(manager) ?: return null
+        recent(manager, provider)?.let { return it }
+        return awaitFix(manager, provider)
+    }
+
+    private fun chooseProvider(manager: LocationManager): String? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            manager.isProviderEnabled(LocationManager.FUSED_PROVIDER)
+        ) {
+            return LocationManager.FUSED_PROVIDER
+        }
+        if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            return LocationManager.GPS_PROVIDER
+        }
+        if (manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            return LocationManager.NETWORK_PROVIDER
+        }
+        return null
+    }
+
+    private fun recent(manager: LocationManager, provider: String): String? {
+        val location = try {
+            manager.getLastKnownLocation(provider)
+        } catch (_: SecurityException) {
+            null
+        } ?: return null
+        if (System.currentTimeMillis() - location.time > 120_000) {
+            return null
+        }
+        return format(location)
+    }
+
+    private fun awaitFix(manager: LocationManager, provider: String): String? {
+        val latch = CountDownLatch(1)
+        val found = AtomicReference<Location?>(null)
+        val listener = LocationListener { location ->
+            found.set(location)
+            latch.countDown()
+        }
+        try {
+            manager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper())
+        } catch (_: SecurityException) {
+            return null
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        try {
+            if (!latch.await(45, TimeUnit.SECONDS)) {
+                return null
+            }
+        } finally {
+            manager.removeUpdates(listener)
+        }
+        return found.get()?.let { format(it) }
+    }
+
+    private fun format(location: Location) = "${location.latitude},${location.longitude}"
+
+    fun openPlace(query: String) {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(query))
+        runOnUiThread {
+            try {
+                startActivity(intent)
+            } catch (_: ActivityNotFoundException) {
+            }
+        }
+    }
+
+    private fun ensureLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        if (fine || coarse) {
+            return true
+        }
+        val latch = CountDownLatch(1)
+        placeGranted = false
+        runOnUiThread {
+            placeWaiting = latch
+            try {
+                placePermission.launch(
+                    arrayOf(
+                        Manifest.permission.ACCESS_FINE_LOCATION,
+                        Manifest.permission.ACCESS_COARSE_LOCATION,
+                    ),
+                )
+            } catch (_: IllegalStateException) {
+                placeGranted = false
+                latch.countDown()
+            }
+        }
+        latch.await(60, TimeUnit.SECONDS)
+        return placeGranted
+    }
+
     fun beginScan(latch: CountDownLatch, output: AtomicReference<String?>) {
         waiting = latch
         found = output
@@ -254,6 +373,17 @@ class MainActivity : WryActivity() {
 
         @Volatile
         private var instance: MainActivity? = null
+
+        @JvmStatic
+        fun showPlace(query: String) {
+            instance?.openPlace(query)
+        }
+
+        @JvmStatic
+        fun whereAmI(): String? {
+            val activity = instance ?: return null
+            return activity.readPlace()
+        }
 
         @JvmStatic
         fun capture(): String? {

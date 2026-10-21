@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-pub const NEEDS_MICROPHONE: &str = "Awill needs the microphone for a voice call.";
+pub const NEEDS_MICROPHONE: &str = "TouchBase needs the microphone for a voice call.";
 pub const DIDNT_CONNECT: &str = "The call didn't connect.";
 pub const WASNT_ANSWERED: &str = "The call wasn't answered.";
 
@@ -28,6 +28,7 @@ const PLAY_LIMIT: usize = RATE as usize / 2;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
+static RINGBACK: AtomicBool = AtomicBool::new(false);
 /// Bumped on every start and stop so a previous audio thread cannot keep the next call.
 static LIVE: AtomicU64 = AtomicU64::new(0);
 static GATE: Mutex<()> = Mutex::new(());
@@ -36,6 +37,7 @@ static PLAY: OnceLock<Mutex<VecDeque<i16>>> = OnceLock::new();
 static OUTBOX: OnceLock<Mutex<VecDeque<Vec<u8>>>> = OnceLock::new();
 static INBOX: OnceLock<Mutex<VecDeque<(u16, Vec<u8>)>>> = OnceLock::new();
 static ASSEMBLY: OnceLock<Mutex<Assembly>> = OnceLock::new();
+static RING: OnceLock<Mutex<RingTone>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoiceKind {
@@ -105,9 +107,18 @@ pub fn start() -> Result<(), &'static str> {
 }
 
 pub fn stop() {
+    RINGBACK.store(false, Ordering::Release);
     LIVE.fetch_add(1, Ordering::AcqRel);
     STOP.store(true, Ordering::Release);
     RUNNING.store(false, Ordering::Release);
+}
+
+/// Plays the call arpeggio into the open earpiece until this is set false.
+pub fn ringback(on: bool) {
+    let was = RINGBACK.swap(on, Ordering::AcqRel);
+    if was != on {
+        ring_tone().frame = 0;
+    }
 }
 
 pub fn take_one() -> Option<Vec<u8>> {
@@ -350,10 +361,55 @@ fn pump(
             }
         }
         play_inbox(&mut decoder, output_rate, &mut last_heard, &mut decoded);
+        feed_ringback(output_rate);
         if !produced {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
+}
+
+fn feed_ringback(output_rate: u32) {
+    if !RINGBACK.load(Ordering::Acquire) {
+        return;
+    }
+    let mut tone = ring_tone();
+    if tone.rate != output_rate || tone.samples.is_empty() {
+        tone.samples = crate::chime::ringback_samples(output_rate);
+        tone.rate = output_rate;
+        tone.frame = 0;
+    }
+    if tone.samples.is_empty() {
+        return;
+    }
+    let mut play = play_buf();
+    let ahead = samples_for_20ms(output_rate).saturating_mul(2);
+    if play.len() >= ahead {
+        return;
+    }
+    let add = samples_for_20ms(output_rate).saturating_mul(3);
+    for _ in 0..add {
+        let sample = tone.samples[tone.frame % tone.samples.len()];
+        tone.frame = tone.frame.wrapping_add(1);
+        play.push_back(sample);
+    }
+}
+
+fn ring_tone() -> MutexGuard<'static, RingTone> {
+    RING.get_or_init(|| {
+        Mutex::new(RingTone {
+            rate: 0,
+            frame: 0,
+            samples: Vec::new(),
+        })
+    })
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct RingTone {
+    rate: u32,
+    frame: usize,
+    samples: Vec<i16>,
 }
 
 fn play_inbox(

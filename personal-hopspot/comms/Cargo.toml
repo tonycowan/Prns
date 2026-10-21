@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "Awill, a private journal shared with people you have added."
+description = "TouchBase, a private journal shared with people you have added."
 
 [workspace]
 resolver = "2"
 
 [[bin]]
-name = "awill"
+name = "touchbase"
 path = "src/main.rs"
 
 [features]
@@ -35,6 +35,28 @@ cpal = "0.15"
 opus = "0.3"
 personal-rns = { path = "../../personal-rns", version = "0.3.8", default-features = false, features = ["tokio-host", "tcp"] }
 tokio = { version = "1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "AVCaptureDevice",
+    "AVCaptureInput",
+    "AVCaptureOutput",
+    "AVCaptureOutputBase",
+    "AVCaptureSession",
+    "AVCaptureSessionPreset",
+    "AVCaptureVideoDataOutput",
+    "AVMediaFormat",
+    "block2",
+    "dispatch2",
+    "objc2-core-media",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["CMSampleBuffer", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-foundation = { version = "0.3", features = ["NSDictionary", "NSError", "NSObject", "NSString", "NSValue", "NSURL"] }
+personal-rns = { path = "../../personal-rns", version = "0.3.8", default-features = false, features = ["wifi-auto-apple", "bluetooth-auto", "tokio-host", "tcp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
@@ -72,11 +94,14 @@ web-sys = { version = "0.3", features = [
     "Blob",
     "Clipboard",
     "ClipboardEvent",
+    "Coordinates",
     "DataTransfer",
     "DataTransferItem",
     "DataTransferItemList",
     "File",
+    "Geolocation",
     "Navigator",
+    "Position",
     "Window",
 ] }
 

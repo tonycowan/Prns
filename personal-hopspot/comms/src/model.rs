@@ -16,6 +16,190 @@ pub enum NoteKind {
     Video,
 }
 
+/// A place carried with a note. Degrees are kept at seven decimal places.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub latitude_e7: i32,
+    pub longitude_e7: i32,
+}
+
+/// Shown in the note while it is being written. If these words are still there
+/// when the note is sent, the place is sent with them.
+pub const PLACEHOLDER: &str = "📍 Location";
+
+impl Place {
+    pub fn from_degrees(latitude: f64, longitude: f64) -> Option<Self> {
+        if !latitude.is_finite()
+            || !longitude.is_finite()
+            || !(-90.0..=90.0).contains(&latitude)
+            || !(-180.0..=180.0).contains(&longitude)
+        {
+            return None;
+        }
+        Some(Self {
+            latitude_e7: (latitude * 10_000_000.0).round() as i32,
+            longitude_e7: (longitude * 10_000_000.0).round() as i32,
+        })
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let (latitude, longitude) = text.trim().split_once(',')?;
+        Self::from_degrees(
+            latitude.trim().parse().ok()?,
+            longitude.trim().parse().ok()?,
+        )
+    }
+
+    pub fn latitude(self) -> f64 {
+        f64::from(self.latitude_e7) / 10_000_000.0
+    }
+
+    pub fn longitude(self) -> f64 {
+        f64::from(self.longitude_e7) / 10_000_000.0
+    }
+
+    pub fn text(self) -> String {
+        format!("{:.7},{:.7}", self.latitude(), self.longitude())
+    }
+}
+
+/// The words of a note, with the place marker taken out once the map is shown.
+pub fn shown_words(words: &str, place: Option<Place>) -> String {
+    if place.is_none() {
+        return words.to_string();
+    }
+    let mut out = words.replace(PLACEHOLDER, "");
+    while out.contains("  ") {
+        out = out.replace("  ", " ");
+    }
+    out.lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// One OpenStreetMap tile positioned inside the place window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapTile {
+    pub x: u32,
+    pub y: u32,
+    pub left: f64,
+    pub top: f64,
+    pub edge: f64,
+}
+
+/// A square of about 500 m², with the place in the middle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapWindow {
+    pub zoom: u32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+    pub tiles: Vec<MapTile>,
+}
+
+const VIEW_SIDE_METERS: f64 = 22.360679774997898;
+const MERCATOR_LIMIT: f64 = 1.4844222297453322;
+
+pub fn map_window(place: Place) -> MapWindow {
+    let latitude = place.latitude();
+    let longitude = place.longitude();
+    let zoom = (1..=19)
+        .rev()
+        .find(|&zoom| pixels_for_view(latitude, zoom) <= 512.0)
+        .unwrap_or(19);
+    let geo = pixels_for_view(latitude, zoom);
+    let width = geo.max(168.0).round().max(1.0);
+    let scale = width / geo;
+    let (world_x, world_y) = world_pixel(latitude, longitude, zoom);
+    let left = world_x - geo / 2.0;
+    let top = world_y - geo / 2.0;
+    let n = 1_i64 << zoom;
+    let x0 = (left / 256.0).floor() as i64;
+    let x1 = ((left + geo) / 256.0).floor() as i64;
+    let y0 = (top / 256.0).floor() as i64;
+    let y1 = ((top + geo) / 256.0).floor() as i64;
+    let mut tiles = Vec::new();
+    for ty in y0..=y1 {
+        if ty < 0 || ty >= n {
+            continue;
+        }
+        for tx in x0..=x1 {
+            let wrapped = tx.rem_euclid(n);
+            tiles.push(MapTile {
+                x: wrapped as u32,
+                y: ty as u32,
+                left: (tx as f64 * 256.0 - left) * scale,
+                top: (ty as f64 * 256.0 - top) * scale,
+                edge: 256.0 * scale,
+            });
+        }
+    }
+    MapWindow {
+        zoom,
+        width: width as u32,
+        height: width as u32,
+        scale,
+        tiles,
+    }
+}
+
+fn pixels_for_view(latitude: f64, zoom: u32) -> f64 {
+    VIEW_SIDE_METERS / meters_per_pixel(latitude, zoom)
+}
+
+fn meters_per_pixel(latitude: f64, zoom: u32) -> f64 {
+    let cosine = latitude.to_radians().cos().abs().max(0.01);
+    156_543.03392804097 * cosine / f64::from(1_u32 << zoom)
+}
+
+fn world_pixel(latitude: f64, longitude: f64, zoom: u32) -> (f64, f64) {
+    let span = f64::from(1_u32 << zoom) * 256.0;
+    let x = (longitude + 180.0) / 360.0 * span;
+    let latitude = latitude.to_radians().clamp(-MERCATOR_LIMIT, MERCATOR_LIMIT);
+    let y =
+        (1.0 - (latitude.tan() + 1.0 / latitude.cos()).ln() / std::f64::consts::PI) / 2.0 * span;
+    (x, y)
+}
+
+/// A mark on a note. The same set is offered on every note from a contact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reaction {
+    Love,
+    Yes,
+    Down,
+    Ha,
+    Oh,
+    Ask,
+}
+
+impl Reaction {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Love => "love",
+            Self::Yes => "yes",
+            Self::Down => "down",
+            Self::Ha => "ha",
+            Self::Oh => "oh",
+            Self::Ask => "ask",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "love" => Self::Love,
+            "yes" => Self::Yes,
+            "down" => Self::Down,
+            "ha" => Self::Ha,
+            "oh" => Self::Oh,
+            "ask" => Self::Ask,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Note {
     pub id: u64,
@@ -29,6 +213,12 @@ pub struct Note {
     pub mine: bool,
     /// A note we just sent stays grey until the other side acknowledges it.
     pub settled: bool,
+    /// Set when the note still carried [`PLACEHOLDER`] at send time.
+    pub place: Option<Place>,
+    /// When the note was written, as the bits of a Unix-seconds float.
+    /// Zero means the note was saved before reactions, so a mark stays on this device.
+    pub written_at: u64,
+    pub reaction: Option<Reaction>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -123,7 +313,12 @@ pub fn sample_people() -> Vec<Person> {
 }
 
 pub fn write_note(person: &mut Person, words: &str) -> Option<u64> {
-    push_note(person, words, true, false)
+    push_note(person, words, None, true, false)
+}
+
+/// A note that also carries a place, when the placeholder is still in the words.
+pub fn write_placed_note(person: &mut Person, words: &str, place: Option<Place>) -> Option<u64> {
+    push_note(person, words, place, true, false)
 }
 
 /// The other side has acknowledged this note, so it can turn from grey to ink.
@@ -168,14 +363,22 @@ pub fn remember_call(person: &mut Person, seconds: u64, outgoing: bool) {
         words,
         mine: outgoing,
         settled: true,
+        place: None,
+        written_at: 0,
+        reaction: None,
     });
 }
 
 /// A note that arrived from this contact, stamped with the time it was written.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub fn note_from_them(person: &mut Person, words: &str, written_at_unix: f64) {
+pub fn note_from_them(
+    person: &mut Person,
+    words: &str,
+    written_at_unix: f64,
+    place: Option<Place>,
+) {
     let words = words.trim();
-    if words.is_empty() {
+    if words.is_empty() && place.is_none() {
         return;
     }
     let (day, time) = stamp_at(written_at_unix);
@@ -187,11 +390,21 @@ pub fn note_from_them(person: &mut Person, words: &str, written_at_unix: f64) {
         words: words.to_string(),
         mine: false,
         settled: true,
+        place,
+        written_at: written_at_unix.to_bits(),
+        reaction: None,
     });
 }
 
-fn push_note(person: &mut Person, words: &str, mine: bool, settled: bool) -> Option<u64> {
+fn push_note(
+    person: &mut Person,
+    words: &str,
+    place: Option<Place>,
+    mine: bool,
+    settled: bool,
+) -> Option<u64> {
     let words = words.trim();
+    let place = place.filter(|_| words.contains(PLACEHOLDER));
     if words.is_empty() {
         return None;
     }
@@ -205,6 +418,9 @@ fn push_note(person: &mut Person, words: &str, mine: bool, settled: bool) -> Opt
         words: words.to_string(),
         mine,
         settled: settled || cfg!(target_arch = "wasm32"),
+        place,
+        written_at: unix_now().to_bits(),
+        reaction: None,
     });
     Some(id)
 }
@@ -243,7 +459,70 @@ fn kept(kind: NoteKind, day: &str, time: &str, words: &str, mine: bool) -> Note 
         words: words.to_string(),
         mine,
         settled: true,
+        place: None,
+        written_at: 0,
+        reaction: None,
     }
+}
+
+/// Marks a note from this contact. The same mark again clears it.
+/// The returned bits are the time the note was written, or zero when that time was not kept.
+pub fn react_to_note(person: &mut Person, note_id: u64, choice: Reaction) -> Option<u64> {
+    let note = person.notes.iter_mut().find(|note| note.id == note_id)?;
+    if note.mine || note.kind != NoteKind::Text {
+        return None;
+    }
+    if note.reaction == Some(choice) {
+        note.reaction = None;
+    } else {
+        note.reaction = Some(choice);
+    }
+    Some(note.written_at)
+}
+
+/// A reaction that arrived for a note. The time it was written wins. Notes saved
+/// before that time was kept are matched by their words, on the note this person wrote.
+pub fn apply_reaction(
+    person: &mut Person,
+    written_at: f64,
+    words: &str,
+    reaction: Option<Reaction>,
+) -> bool {
+    let bits = written_at.to_bits();
+    let words = words.trim();
+    let index = if bits != 0 {
+        person.notes.iter().position(|note| note.written_at == bits)
+    } else {
+        None
+    };
+    let index = index.or_else(|| note_with_words(person, words));
+    let Some(index) = index else {
+        return false;
+    };
+    if person.notes[index].reaction == reaction {
+        return false;
+    }
+    person.notes[index].reaction = reaction;
+    true
+}
+
+fn note_with_words(person: &Person, words: &str) -> Option<usize> {
+    if words.is_empty() {
+        return None;
+    }
+    let same = |note: &Note| note.kind == NoteKind::Text && note.words.trim() == words;
+    person
+        .notes
+        .iter()
+        .rposition(|note| same(note) && note.mine)
+        .or_else(|| person.notes.iter().rposition(same))
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Consecutive notes that share a day, in the order they were written.
@@ -258,22 +537,13 @@ pub fn group_by_day(notes: &[Note]) -> Vec<(String, Vec<Note>)> {
     groups
 }
 
-/// How a contact can be reached, after each live interface has been tried.
+/// The interface the stack chose for a contact, and what a sample on that path can carry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reach {
     pub pending: bool,
     pub ways: OfferedWays,
-    /// One row per interface while the mesh is being searched, and after.
-    pub lines: Vec<ReachLine>,
-    /// The interface the search kept, once it has finished.
+    /// The interface the stack's path uses, once one is known.
     pub winner: Option<String>,
-}
-
-/// One interface on the search table.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReachLine {
-    pub name: String,
-    pub status: String,
 }
 
 impl Reach {
@@ -281,38 +551,25 @@ impl Reach {
         Self {
             pending: true,
             ways: OfferedWays::none(),
-            lines: Vec::new(),
             winner: None,
         }
     }
 }
 
-/// Where one interface is in the search.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MeshStep {
-    Finding,
-    NoPath,
-    Testing,
-    TimedOut,
-    /// Round trip of the 400-byte sample, in milliseconds.
-    Rate(u64),
-}
-
-/// The words shown for one interface row.
-pub fn mesh_status(step: MeshStep) -> String {
-    match step {
-        MeshStep::Finding => "Finding path".to_string(),
-        MeshStep::NoPath => "none found".to_string(),
-        MeshStep::Testing => "Testing speed".to_string(),
-        MeshStep::TimedOut => "timed out".to_string(),
-        MeshStep::Rate(round_trip_ms) => format!("{}bps", bits_per_second(round_trip_ms)),
+/// The words under a contact's name. A known path names its interface. A search still running says so. A finished search with no path is isolated.
+pub fn path_label(real: bool, pending: bool, winner: Option<&str>) -> String {
+    if let Some(winner) = winner.map(str::trim).filter(|winner| !winner.is_empty()) {
+        return winner.to_string();
     }
-}
-
-/// Bits per second implied by carrying the 400-byte sample in `round_trip_ms`.
-pub fn bits_per_second(round_trip_ms: u64) -> u64 {
-    const SAMPLE_BYTES: u64 = 400;
-    SAMPLE_BYTES.saturating_mul(8).saturating_mul(1_000) / round_trip_ms.max(1)
+    if !real {
+        return String::new();
+    }
+    // Indexed, not a plain else. A release build was dropping the else literal.
+    let labels = [
+        std::hint::black_box("searching the mesh"),
+        std::hint::black_box("isolated"),
+    ];
+    labels[usize::from(!pending)].to_string()
 }
 
 /// Ways the both-ways packet says this conversation can use.
@@ -349,11 +606,6 @@ pub fn ways_for_ack(round_trip_ms: Option<u64>) -> OfferedWays {
         voice: round_trip_ms <= 200,
         video: round_trip_ms <= VIDEO_ROUND_TRIP_MS,
     }
-}
-
-/// The sample came back quickly enough that this path can carry video.
-pub fn enough_for_video(round_trip_ms: u64) -> bool {
-    ways_for_ack(Some(round_trip_ms)).video
 }
 
 /// Stand-in for the packet exchanged when a person is opened.
@@ -414,9 +666,18 @@ pub fn add_person(people: &mut Vec<Person>, next_id: &mut u64, name: &str, ident
     true
 }
 
+/// Drops the contact and every note shared with them.
+pub fn remove_person(people: &mut Vec<Person>, id: u64) -> bool {
+    let before = people.len();
+    people.retain(|person| person.id != id);
+    people.len() != before
+}
+
 /// The contact book, written as one line per field so a note can contain more than one line.
+/// Version 2 adds a place line after each note. Version 3 adds the time it was written
+/// and a reaction. A version 1 or 2 book still opens.
 pub fn encode_contacts(people: &[Person]) -> String {
-    let mut out = String::from("journal-contacts 1\n");
+    let mut out = String::from("journal-contacts 3\n");
     out.push_str(&people.len().to_string());
     out.push('\n');
     for person in people {
@@ -432,6 +693,22 @@ pub fn encode_contacts(people: &[Person]) -> String {
             line(&mut out, if note.mine { "1" } else { "0" });
             line(&mut out, if note.settled { "1" } else { "0" });
             line(&mut out, &escape_field(&note.words));
+            line(
+                &mut out,
+                &match note.place {
+                    Some(place) => escape_field(&place.text()),
+                    None => "-".to_string(),
+                },
+            );
+            line(
+                &mut out,
+                &if note.written_at == 0 {
+                    "-".to_string()
+                } else {
+                    format!("{:016x}", note.written_at)
+                },
+            );
+            line(&mut out, note.reaction.map(Reaction::name).unwrap_or("-"));
         }
     }
     out
@@ -440,9 +717,12 @@ pub fn encode_contacts(people: &[Person]) -> String {
 /// Reads a book written by `encode_contacts`. Anything else is left unread.
 pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
     let mut lines = text.lines();
-    if lines.next()? != "journal-contacts 1" {
-        return None;
-    }
+    let version = match lines.next()? {
+        "journal-contacts 1" => 1,
+        "journal-contacts 2" => 2,
+        "journal-contacts 3" => 3,
+        _ => return None,
+    };
     let count: usize = lines.next()?.parse().ok()?;
     let mut people = Vec::with_capacity(count);
     for _ in 0..count {
@@ -460,6 +740,24 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
                 mine: parse_flag(lines.next()?)?,
                 settled: parse_flag(lines.next()?)?,
                 words: unescape_field(lines.next()?)?,
+                place: if version >= 2 {
+                    read_place(lines.next()?)?
+                } else {
+                    None
+                },
+                written_at: if version >= 3 {
+                    read_stamp(lines.next()?)?
+                } else {
+                    0
+                },
+                reaction: if version >= 3 {
+                    match lines.next()? {
+                        "-" => None,
+                        name => Reaction::parse(name),
+                    }
+                } else {
+                    None
+                },
             });
         }
         people.push(Person {
@@ -515,6 +813,22 @@ fn parse_flag(text: &str) -> Option<bool> {
     }
 }
 
+fn read_place(text: &str) -> Option<Option<Place>> {
+    let text = unescape_field(text)?;
+    if text == "-" {
+        Some(None)
+    } else {
+        Some(Place::parse(&text))
+    }
+}
+
+fn read_stamp(text: &str) -> Option<u64> {
+    if text == "-" {
+        return Some(0);
+    }
+    u64::from_str_radix(text, 16).ok()
+}
+
 fn escape_field(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -564,11 +878,21 @@ pub fn code_mark(payload: &str) -> Option<(usize, Vec<(usize, usize)>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_person, bits_per_second, can_call, code_mark, contact_code, decode_contacts,
-        encode_contacts, enough_for_video, group_by_day, mesh_status, next_person_id,
-        note_ids_from, offered_ways, remember_call, sample_people, settle_note, ways_for_ack,
-        write_note, MeshStep, Note, NoteKind, OfferedWays, Person, VIDEO_ROUND_TRIP_MS,
+        add_person, apply_reaction, can_call, code_mark, contact_code, decode_contacts,
+        encode_contacts, group_by_day, next_person_id, note_ids_from, offered_ways, path_label,
+        react_to_note, remember_call, remove_person, sample_people, settle_note, ways_for_ack,
+        write_note, Note, NoteKind, OfferedWays, Person, Place, Reaction, PLACEHOLDER,
+        VIDEO_ROUND_TRIP_MS,
     };
+
+    #[test]
+    fn a_contact_with_no_path_is_isolated() {
+        assert_eq!(path_label(true, true, None), "searching the mesh");
+        assert_eq!(path_label(true, false, None), "isolated");
+        assert_eq!(path_label(true, false, Some("  ")), "isolated");
+        assert_eq!(path_label(true, false, Some("USB")), "USB");
+        assert_eq!(path_label(false, false, None), "");
+    }
 
     #[test]
     fn a_contact_code_is_the_name_and_the_identity() {
@@ -674,16 +998,16 @@ mod tests {
     }
 
     #[test]
-    fn a_search_row_names_each_step() {
-        assert_eq!(mesh_status(MeshStep::Finding), "Finding path");
-        assert_eq!(mesh_status(MeshStep::NoPath), "none found");
-        assert_eq!(mesh_status(MeshStep::Testing), "Testing speed");
-        assert_eq!(mesh_status(MeshStep::TimedOut), "timed out");
-        assert_eq!(mesh_status(MeshStep::Rate(200)), "16000bps");
-        assert_eq!(bits_per_second(0), bits_per_second(1));
-        assert_eq!(bits_per_second(VIDEO_ROUND_TRIP_MS), 160_000);
-        assert!(enough_for_video(VIDEO_ROUND_TRIP_MS));
-        assert!(!enough_for_video(VIDEO_ROUND_TRIP_MS + 1));
+    fn removing_a_contact_drops_their_notes() {
+        let mut people = sample_people();
+        let id = people[0].id;
+        assert!(!people[0].notes.is_empty());
+        assert!(remove_person(&mut people, id));
+        assert!(people.iter().all(|person| person.id != id));
+        let read = decode_contacts(&encode_contacts(&people)).expect("the book");
+        assert!(read.iter().all(|person| person.id != id));
+        assert!(read.iter().all(|person| person.name != "Mara"));
+        assert!(!remove_person(&mut people, id));
     }
 
     #[test]
@@ -766,6 +1090,9 @@ mod tests {
                 words: "Line one.\nLine \\ two.".into(),
                 mine: true,
                 settled: false,
+                place: Some(Place::from_degrees(40.7484, -73.9857).expect("place")),
+                written_at: 1_700_000_000.0f64.to_bits(),
+                reaction: Some(Reaction::Love),
             }],
         }];
         let stored = encode_contacts(&people);
@@ -773,11 +1100,153 @@ mod tests {
         assert_eq!(encode_contacts(&read), stored);
         assert_eq!(read[0].notes[0].words, "Line one.\nLine \\ two.");
         assert!(!read[0].notes[0].settled);
+        assert_eq!(
+            read[0].notes[0].place,
+            Place::from_degrees(40.7484, -73.9857)
+        );
+        assert_eq!(read[0].notes[0].written_at, 1_700_000_000.0f64.to_bits());
+        assert_eq!(read[0].notes[0].reaction, Some(Reaction::Love));
         assert!(decode_contacts("not a book").is_none());
+        let older = "\
+journal-contacts 1
+1
+7
+Alex
+ab
+1
+40
+text
+Monday
+9:14
+1
+0
+Hello
+";
+        let older = decode_contacts(older).expect("version 1");
+        assert_eq!(older[0].notes[0].words, "Hello");
+        assert!(older[0].notes[0].place.is_none());
+        assert_eq!(older[0].notes[0].written_at, 0);
+        assert!(older[0].notes[0].reaction.is_none());
+        let version_two = "\
+journal-contacts 2
+1
+7
+Alex
+ab
+1
+40
+text
+Monday
+9:14
+0
+1
+Hello
+-
+";
+        let version_two = decode_contacts(version_two).expect("version 2");
+        assert!(version_two[0].notes[0].place.is_none());
+        assert_eq!(version_two[0].notes[0].written_at, 0);
+        assert!(version_two[0].notes[0].reaction.is_none());
         assert_eq!(next_person_id(&read), 8);
         note_ids_from(&read);
         let mut again = read;
         let id = write_note(&mut again[0], "still here").expect("a note");
         assert!(id > 40);
+        assert!(again[0].notes[1].place.is_none());
+        let placed = write_note(&mut again[0], &format!("Meet me {PLACEHOLDER}"));
+        assert!(placed.is_some());
+        assert!(again[0].notes.last().unwrap().place.is_none());
+        let kept = super::write_placed_note(
+            &mut again[0],
+            &format!("Meet me {PLACEHOLDER}"),
+            Place::from_degrees(41.0, -73.0),
+        );
+        assert!(kept.is_some());
+        assert!(again[0].notes.last().unwrap().place.is_some());
+        let dropped =
+            super::write_placed_note(&mut again[0], "Meet me", Place::from_degrees(41.0, -73.0));
+        assert!(dropped.is_some());
+        assert!(again[0].notes.last().unwrap().place.is_none());
+    }
+
+    #[test]
+    fn a_reaction_marks_their_note_and_the_same_mark_clears_it() {
+        let mut person = Person {
+            id: 1,
+            name: "Alex".into(),
+            identity: "ab".into(),
+            notes: vec![Note {
+                id: 4,
+                kind: NoteKind::Text,
+                day: "Monday".into(),
+                time: "9:14".into(),
+                words: "The pears are ready.".into(),
+                mine: false,
+                settled: true,
+                place: None,
+                written_at: 1_700_000_000.0f64.to_bits(),
+                reaction: None,
+            }],
+        };
+        assert_eq!(
+            react_to_note(&mut person, 4, Reaction::Ha),
+            Some(1_700_000_000.0f64.to_bits())
+        );
+        assert_eq!(person.notes[0].reaction, Some(Reaction::Ha));
+        assert_eq!(
+            react_to_note(&mut person, 4, Reaction::Ha),
+            Some(person.notes[0].written_at)
+        );
+        assert!(person.notes[0].reaction.is_none());
+        person.notes[0].mine = true;
+        assert!(react_to_note(&mut person, 4, Reaction::Yes).is_none());
+        person.notes[0].mine = false;
+        assert!(apply_reaction(
+            &mut person,
+            1_700_000_000.0,
+            "",
+            Some(Reaction::Oh)
+        ));
+        assert_eq!(person.notes[0].reaction, Some(Reaction::Oh));
+        assert!(!apply_reaction(
+            &mut person,
+            1_700_000_000.0,
+            "",
+            Some(Reaction::Oh)
+        ));
+        assert!(apply_reaction(&mut person, 1_700_000_000.0, "", None));
+        assert!(person.notes[0].reaction.is_none());
+        person.notes[0].written_at = 0;
+        person.notes[0].mine = true;
+        assert!(apply_reaction(
+            &mut person,
+            0.0,
+            "The pears are ready.",
+            Some(Reaction::Down)
+        ));
+        assert_eq!(person.notes[0].reaction, Some(Reaction::Down));
+    }
+
+    #[test]
+    fn a_place_map_covers_about_five_hundred_square_meters() {
+        let place = Place::from_degrees(40.7484, -73.9857).expect("place");
+        let window = super::map_window(place);
+        let side = (f64::from(window.width) / window.scale)
+            * super::meters_per_pixel(place.latitude(), window.zoom);
+        let area = side * side;
+        assert!((area - 500.0).abs() < 1.0, "{area}");
+        assert!(!window.tiles.is_empty());
+        let center_x = f64::from(window.width) / 2.0;
+        let center_y = f64::from(window.height) / 2.0;
+        assert!(window.tiles.iter().any(|tile| {
+            center_x >= tile.left
+                && center_x < tile.left + tile.edge
+                && center_y >= tile.top
+                && center_y < tile.top + tile.edge
+        }));
+        assert_eq!(
+            super::shown_words(&format!("See you {PLACEHOLDER} there"), Some(place)),
+            "See you there"
+        );
     }
 }
