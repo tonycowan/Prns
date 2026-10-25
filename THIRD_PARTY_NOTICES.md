@@ -2,7 +2,7 @@
 
 This checked bundle covers the shipped and qualification Rust, JavaScript, and Android product graphs.
 It was generated with `cargo-about 0.9.1` by `./tools/prns repo notices generate`.
-Notice input fingerprint: `sha256:5530f01d9153c2fb94c144635321e3944567ab251f93b2ed7cde2707dd88eaef`.
+Notice input fingerprint: `sha256:4030945ecfe2d1be821cb6e5d7f324a8d9a2cee5dcaa84e2ceaf731c1abe26ad`.
 Each locked Rust manifest closure is fetched into a fresh isolated Cargo home before cargo-about reads its target-filtered packaged license material offline.
 Entries are deduplicated by SPDX identifier and canonical notice text; line endings, trailing space, and repeated blank lines are normalized without changing legal words.
 
@@ -3042,7 +3042,7 @@ express Statement of Purpose.
 
 License: Community Data License Agreement Permissive 2.0
 
-Used by: `webpki-roots 1.0.9`
+Used by: `webpki-roots 1.0.11`
 
 Release graphs: engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
@@ -5550,7 +5550,7 @@ SOFTWARE.
 
 License: MIT License
 
-Used by: `tokio 1.52.3`, `tokio 1.53.1`, `tokio-stream 0.1.18`, `tokio-stream 0.1.19`, `tokio-util 0.7.18`, `tokio-util 0.7.19`
+Used by: `tokio 1.54.1`, `tokio-stream 0.1.18`, `tokio-stream 0.1.19`, `tokio-util 0.7.18`, `tokio-util 0.7.19`
 
 Release graphs: Android, HaLoW headless, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, iOS, website Rust/WASM
 
