@@ -57,7 +57,9 @@ pub fn contact_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<(String
 }
 
 /// A camera frame is BGRA, one pixel per four bytes, with `stride` bytes per row.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Only the Windows camera produces these frames. The tests build one too.
+#[cfg(all(not(target_arch = "wasm32"), any(windows, test)))]
 pub fn contact_from_bgra(
     bgra: &[u8],
     width: u32,
@@ -88,7 +90,7 @@ pub fn contact_from_bgra(
     contact_from_luma(&image)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(windows, test)))]
 fn fit_edge(width: u32, height: u32, edge: u32) -> (u32, u32) {
     let longest = width.max(height);
     if longest <= edge {
