@@ -51,7 +51,7 @@ std::thread_local! {
 pub fn mark_outgoing_link_frame(payload: &[u8]) {
     #[cfg(feature = "std")]
     OUTGOING_PICTURE.with(|flag| {
-        flag.set(matches!(payload, [b'F', 1 | 2 | 3, ..]));
+        flag.set(matches!(payload, [b'F', 1..=3, ..]));
     });
     #[cfg(not(feature = "std"))]
     let _ = payload;
