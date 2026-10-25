@@ -204,6 +204,45 @@ fn forwarded_slot_move_respects_unavailable_lane_isolation() {
 }
 
 #[test]
+fn voice_overtakes_a_picture_already_waiting_on_the_lane() {
+    let id = InterfaceId::new([0x91; 8]);
+    let (producer, mut consumer) = tokio_grant_lane(64, 2);
+    let mut egress = Egress::new(std::vec![(id, producer)]);
+    let mut picture = [0u8; 19];
+    picture[0] = 0xF1;
+    picture[18] = WireContext::None.to_byte();
+    let mut voice = [0u8; 19];
+    voice[0] = 0xA1;
+    voice[18] = WireContext::None.to_byte();
+    let mut discard = [0u8; 64];
+
+    prns_core::routing::links::data::mark_outgoing_link_frame(&[b'F', 2]);
+    egress.emit(
+        id,
+        19,
+        &mut |slot| {
+            slot[..19].copy_from_slice(&picture);
+            Some(19)
+        },
+        &mut discard,
+    );
+    prns_core::routing::links::data::mark_outgoing_link_frame(&[b'V', 2]);
+    egress.emit(
+        id,
+        19,
+        &mut |slot| {
+            slot[..19].copy_from_slice(&voice);
+            Some(19)
+        },
+        &mut discard,
+    );
+
+    assert_eq!(consumer.try_peek().unwrap().frame()[0], 0xA1);
+    consumer.release();
+    assert_eq!(consumer.try_peek().unwrap().frame()[0], 0xF1);
+}
+
+#[test]
 fn link_traffic_overtakes_buffered_resource_parts() {
     let id = InterfaceId::new([0x90; 8]);
     let (producer, mut consumer) = tokio_grant_lane(64, 2);

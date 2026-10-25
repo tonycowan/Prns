@@ -44,6 +44,9 @@ class MainActivity : WryActivity() {
     private var placeGranted: Boolean = false
     private var wifi: WifiLan? = null
     private var scanner: CodeScan? = null
+    private var film: Film? = null
+    private var filmLatch: CountDownLatch? = null
+    private var filmResult: AtomicInteger? = null
     private var ble: BleLink? = null
     private var usb: UsbLink? = null
     private var earLock: PowerManager.WakeLock? = null
@@ -57,6 +60,19 @@ class MainActivity : WryActivity() {
                 openScanner()
             } else {
                 finishScan(null, DENIED)
+            }
+        }
+
+    private val filmPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            val result = filmResult
+            val latch = filmLatch
+            filmLatch = null
+            filmResult = null
+            if (granted && result != null && latch != null) {
+                startFilm(result, latch)
+            } else {
+                latch?.countDown()
             }
         }
 
@@ -220,6 +236,21 @@ class MainActivity : WryActivity() {
 
     fun machineName(): String = Build.MODEL ?: ""
 
+    fun beginVideoCall() {
+        val latch = CountDownLatch(1)
+        runOnUiThread {
+            try {
+                val audio = getSystemService(AUDIO_SERVICE) as AudioManager
+                audio.mode = AudioManager.MODE_IN_COMMUNICATION
+                @Suppress("DEPRECATION")
+                audio.isSpeakerphoneOn = true
+            } finally {
+                latch.countDown()
+            }
+        }
+        latch.await()
+    }
+
     fun beginCall() {
         val latch = CountDownLatch(1)
         runOnUiThread {
@@ -258,6 +289,8 @@ class MainActivity : WryActivity() {
                 earLock = null
                 val audio = getSystemService(AUDIO_SERVICE) as AudioManager
                 audio.mode = AudioManager.MODE_NORMAL
+                @Suppress("DEPRECATION")
+                audio.isSpeakerphoneOn = false
             } finally {
                 latch.countDown()
             }
@@ -406,6 +439,55 @@ class MainActivity : WryActivity() {
                 finishScan(null, UNAVAILABLE)
             },
         )
+    }
+
+    fun beginFilm(): Int {
+        if (scanner != null) {
+            return 1
+        }
+        val latch = CountDownLatch(1)
+        val result = AtomicInteger(1)
+        runOnUiThread {
+            val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                startFilm(result, latch)
+            } else {
+                filmResult = result
+                filmLatch = latch
+                try {
+                    filmPermission.launch(Manifest.permission.CAMERA)
+                } catch (_: IllegalStateException) {
+                    latch.countDown()
+                }
+            }
+        }
+        latch.await(60, TimeUnit.SECONDS)
+        return result.get()
+    }
+
+    fun endFilm() {
+        runOnUiThread {
+            film?.stop()
+            film = null
+        }
+    }
+
+    fun decodeFilm(frame: ByteArray): ByteArray? = film?.decode(frame)
+
+    private fun startFilm(result: AtomicInteger, latch: CountDownLatch) {
+        film?.stop()
+        val next = Film(this)
+        next.start { ok ->
+            if (ok) {
+                film = next
+                result.set(0)
+            } else {
+                next.stop()
+                film = null
+            }
+            latch.countDown()
+        }
     }
 
     fun finishScan(text: String?, outcome: Int) {

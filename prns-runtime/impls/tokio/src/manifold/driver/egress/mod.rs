@@ -147,6 +147,16 @@ fn egress_queue(frame: &[u8]) -> EgressQueue {
     }
 }
 
+/// Voice stays on the expedited lane. A picture just written on this thread
+/// takes the bulk lane, so a waiting voice packet goes out before it.
+fn queue_after_fill(frame: &[u8]) -> EgressQueue {
+    if prns_core::routing::links::data::take_outgoing_picture() {
+        EgressQueue::Bulk
+    } else {
+        egress_queue(frame)
+    }
+}
+
 impl Egress {
     #[must_use]
     pub fn new(lanes: std::vec::Vec<(InterfaceId, TokioGrantProducer)>) -> Self {
@@ -583,6 +593,7 @@ impl Egress {
     ) {
         let Some(index) = self.lanes.index_of(&target) else {
             let _fill_result = fill(discard);
+            let _ = prns_core::routing::links::data::take_outgoing_picture();
             #[cfg(feature = "runtime-metrics")]
             if _fill_result.is_some() {
                 self.metrics.missing_lane_drops = self.metrics.missing_lane_drops.saturating_add(1);
@@ -593,6 +604,7 @@ impl Egress {
             if fill(discard).is_some() {
                 self.record_generic_enqueue_outcome(EgressEnqueueOutcome::Unavailable);
             }
+            let _ = prns_core::routing::links::data::take_outgoing_picture();
             return;
         }
 
@@ -605,7 +617,7 @@ impl Egress {
                 }
                 if let Some(len) = fill(&mut slot.bytes[..hint]) {
                     slot.len = len.min(hint);
-                    match egress_queue(slot.frame()) {
+                    match queue_after_fill(slot.frame()) {
                         EgressQueue::Expedited => lane.producer.commit_expedited(),
                         EgressQueue::Bulk => lane.producer.commit(),
                     }
@@ -614,6 +626,8 @@ impl Egress {
                         self.metrics.enqueued_frames =
                             self.metrics.enqueued_frames.saturating_add(1);
                     }
+                } else {
+                    let _ = prns_core::routing::links::data::take_outgoing_picture();
                 }
                 return;
             }
@@ -621,7 +635,7 @@ impl Egress {
         let fill_result = fill(discard);
         if let Some(len) = fill_result {
             let len = len.min(discard.len());
-            let queue = egress_queue(&discard[..len]);
+            let queue = queue_after_fill(&discard[..len]);
             let outcome = self.defer(index, &discard[..len], queue);
             self.record_generic_enqueue_outcome(outcome);
         }
@@ -971,7 +985,7 @@ fn emit_for_wire(
     match ifac_for(ifacs, target) {
         Some(entry) => {
             if let Some(len) = fill(&mut scratch.emit) {
-                let queue = egress_queue(&scratch.emit[..len]);
+                let queue = queue_after_fill(&scratch.emit[..len]);
                 if let Ok(masked_len) = entry
                     .context
                     .try_mask_outbound(&scratch.emit[..len], &mut scratch.masked)
@@ -980,6 +994,8 @@ fn emit_for_wire(
                 } else {
                     egress.record_ifac_rejection();
                 }
+            } else {
+                let _ = prns_core::routing::links::data::take_outgoing_picture();
             }
         }
         None => egress.emit(target, size_hint, fill, &mut scratch.emit),

@@ -20,6 +20,10 @@ mod viewfinder;
 mod viewfinder_windows;
 #[cfg(target_os = "windows")]
 use viewfinder_windows as viewfinder;
+#[cfg(target_os = "macos")]
+mod film;
+#[cfg(any(target_os = "macos", target_os = "android"))]
+mod video;
 #[cfg(not(target_arch = "wasm32"))]
 mod voice;
 
@@ -589,6 +593,16 @@ input.who.rename {
   text-underline-offset: 4px;
   min-height: 44px;
   padding: 12px 0;
+}
+.film {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(100%, 240px);
+  max-height: 240px;
+  margin: 8px 0 0 auto;
+  object-fit: contain;
+  background: #e7e1d4;
 }
 .photo {
   position: relative;
@@ -1302,6 +1316,7 @@ struct VoiceLine {
     kind: u8,
     words: String,
     ticket: u64,
+    video: bool,
 }
 
 impl VoiceLine {
@@ -1311,6 +1326,7 @@ impl VoiceLine {
             kind: 0,
             words: String::new(),
             ticket: 0,
+            video: false,
         }
     }
 }
@@ -1328,25 +1344,50 @@ fn voice_line() -> VoiceLine {
                 "Answering…".to_string()
             },
             ticket: 0,
+            video: session::call_is_video(),
         },
-        session::CallFace::Live { identity } => VoiceLine {
-            identity,
-            kind: 2,
-            words: "On a call".to_string(),
-            ticket: 0,
-        },
+        session::CallFace::Live { identity } => {
+            let video = session::call_is_video();
+            VoiceLine {
+                identity,
+                kind: 2,
+                words: if video {
+                    "On video".to_string()
+                } else {
+                    "On a call".to_string()
+                },
+                ticket: 0,
+                video,
+            }
+        }
         session::CallFace::Failed { identity, words } => VoiceLine {
             identity,
             kind: 3,
             words: words.to_string(),
             ticket: 0,
+            video: false,
         },
         session::CallFace::Ringing { identity, ticket } => VoiceLine {
             identity,
             kind: 4,
             words: String::new(),
             ticket,
+            video: false,
         },
+    }
+}
+
+fn shown_picture(show: bool) -> Option<String> {
+    if !show {
+        return None;
+    }
+    #[cfg(any(target_os = "macos", target_os = "android"))]
+    {
+        return session::video_picture();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    {
+        None
     }
 }
 
@@ -1434,6 +1475,7 @@ fn App() -> Element {
     let mut visit = use_signal(|| 0_u64);
     let mut wires = use_signal(read_wires);
     let mut voice = use_signal(VoiceLine::quiet);
+    let mut film_at = use_signal(|| 0u32);
     let mut reach = use_signal(Reach::unknown);
     let mut tail = use_signal(|| 0_u64);
 
@@ -1532,8 +1574,19 @@ fn App() -> Element {
                     let next = voice_line();
                     chime::ring(next.kind == 4);
                     voice::ringback(session::caller_is_waiting());
+                    // The call line stays "On video" while new frames arrive, so the
+                    // picture has its own tick. Without it the first look happens
+                    // before a frame exists and the window never shows one.
+                    #[cfg(any(target_os = "macos", target_os = "android"))]
+                    let fresh = next.video
+                        && (next.kind == 1 || next.kind == 2)
+                        && session::video_picture().is_some();
                     if voice() != next {
                         voice.set(next);
+                    }
+                    #[cfg(any(target_os = "macos", target_os = "android"))]
+                    if fresh {
+                        film_at.set(film_at().wrapping_add(1));
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Page::Journal(id) = page() {
@@ -1686,6 +1739,7 @@ fn App() -> Element {
                                     person: person.clone(),
                                     draft: draft_note(),
                                     voice: voice(),
+                                    film_at: film_at(),
                                     reach: reach(),
                                     place_epoch: place_epoch,
                                     tail: tail(),
@@ -2837,6 +2891,7 @@ fn JournalPage(
     person: Person,
     draft: String,
     voice: VoiceLine,
+    film_at: u32,
     reach: Reach,
     place_epoch: Signal<u64>,
     tail: u64,
@@ -2864,8 +2919,14 @@ fn JournalPage(
     let identity = person.identity.clone();
     let on_this = this_call(&identity, &voice);
     let kind = voice.kind;
-    let ending = on_this && (kind == 1 || kind == 2);
+    let on_call = on_this && (kind == 1 || kind == 2);
+    let ending = on_call && !voice.video;
     let label = if ending { "end" } else { "voice" };
+    let video_up = on_call && voice.video;
+    let video_label = if video_up { "end" } else { "video" };
+    let video_identity = identity.clone();
+    let _refresh = film_at;
+    let film = shown_picture(video_up);
     let hint = if on_this && kind == 4 {
         "is calling".to_string()
     } else if on_this && kind != 0 {
@@ -2948,7 +3009,7 @@ fn JournalPage(
                 }
             }
             div { class: "dock",
-            if writing() {
+            if writing() && !on_call {
                 div { class: "write-row",
                     div { class: "embed",
                         div {
@@ -3029,17 +3090,20 @@ fn JournalPage(
                 }
             } else {
                 div { class: "call-line",
+                    if let Some(film) = film {
+                        img { class: "film", src: "{film}", alt: "video" }
+                    }
                     if !hint.is_empty() {
                         p { class: "hint", "{hint}" }
                     }
                     div { class: "offers",
-                        if can_note {
+                        if can_note && !on_call {
                             button {
                                 onclick: move |_| writing.set(true),
                                 "note"
                             }
                         }
-                        if can_voice && !(on_this && kind == 4) {
+                        if (ending || can_voice) && !video_up && !(on_this && kind == 4) {
                             button {
                                 onclick: move |_| {
                                     #[cfg(not(target_arch = "wasm32"))]
@@ -3058,8 +3122,24 @@ fn JournalPage(
                                 "{label}"
                             }
                         }
-                        if ways.video {
-                            button { "video" }
+                        if (video_up || ways.video) && !ending && !(on_this && kind == 4) {
+                            button {
+                                onclick: move |_| {
+                                    #[cfg(any(target_os = "macos", target_os = "android"))]
+                                    {
+                                        if video_up {
+                                            session::hang_up();
+                                        } else if !ending {
+                                            session::place_video(&video_identity);
+                                        }
+                                    }
+                                    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+                                    {
+                                        let _ = (&video_identity, video_up, ending);
+                                    }
+                                },
+                                "{video_label}"
+                            }
                         }
                     }
                 }

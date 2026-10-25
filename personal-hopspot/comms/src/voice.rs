@@ -125,6 +125,11 @@ pub fn take_one() -> Option<Vec<u8>> {
     outbox().pop_front()
 }
 
+/// A moment is waiting to go out. The picture stays back while this is true.
+pub fn waiting() -> bool {
+    !outbox().is_empty()
+}
+
 /// Joins the pieces of one moment and queues it for the speaker.
 pub fn hear(bytes: &[u8]) {
     if kind(bytes) != VoiceKind::Audio {

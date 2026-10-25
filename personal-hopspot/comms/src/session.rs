@@ -1587,6 +1587,11 @@ fn accept_words(link_id: LinkId, bytes: &[u8]) {
         accept_voice(link_id, bytes);
         return;
     }
+    if bytes.first() == Some(&b'F') {
+        #[cfg(any(target_os = "macos", target_os = "android"))]
+        accept_film(link_id, bytes);
+        return;
+    }
     if let Some(fragment) = crate::lxmf::open_fragment(bytes) {
         accept_fragment(link_id, fragment);
         return;
@@ -1720,6 +1725,8 @@ pub struct IncomingCall {
 
 struct Call {
     face: CallFace,
+    /// The open call is a picture, not voice.
+    video: bool,
     generation: u64,
     outgoing: bool,
     /// The other person has answered. Audio stays quiet until then.
@@ -1738,6 +1745,8 @@ struct Held {
     identity: Option<String>,
     hello: bool,
     invited: bool,
+    /// The buffered packets are picture frames, not voice.
+    video: bool,
     packets: Vec<Vec<u8>>,
 }
 
@@ -1747,6 +1756,7 @@ fn calls() -> std::sync::MutexGuard<'static, Call> {
     CALL.get_or_init(|| {
         Mutex::new(Call {
             face: CallFace::Quiet,
+            video: false,
             generation: 0,
             outgoing: false,
             answered: false,
@@ -1765,6 +1775,15 @@ fn calls() -> std::sync::MutexGuard<'static, Call> {
 
 pub fn call_face() -> CallFace {
     calls().face.clone()
+}
+
+pub fn call_is_video() -> bool {
+    calls().video
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+pub fn video_picture() -> Option<String> {
+    crate::video::picture()
 }
 
 /// The outbound side is still waiting for the other person to accept or reject.
@@ -1795,12 +1814,12 @@ pub fn place_call(identity: &str) {
         fail_now(&identity, crate::voice::DIDNT_CONNECT);
         return;
     };
-    let Some(generation) = begin_call(&identity, true) else {
+    let Some(generation) = begin_call(&identity, true, false) else {
         return;
     };
     let ours = OURS.get().copied();
     runtime.spawn(async move {
-        if !prepare_voice(generation, &identity).await {
+        if !prepare_voice(generation, &identity, false).await {
             return;
         }
         let _ = seek_path(&handle, destination).await;
@@ -1866,6 +1885,95 @@ pub fn place_call(identity: &str) {
     });
 }
 
+#[cfg(any(target_os = "macos", target_os = "android"))]
+pub fn place_video(identity: &str) {
+    let identity = identity.trim().to_string();
+    let Some(destination) = destination_for_contact(&identity) else {
+        return;
+    };
+    let Some(runtime) = RUNTIME.get().cloned() else {
+        fail_now(&identity, crate::voice::DIDNT_CONNECT);
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        fail_now(&identity, crate::voice::DIDNT_CONNECT);
+        return;
+    };
+    let Some(generation) = begin_call(&identity, true, true) else {
+        return;
+    };
+    let ours = OURS.get().copied();
+    runtime.spawn(async move {
+        if !prepare_voice(generation, &identity, true).await {
+            return;
+        }
+        if !prepare_video(generation, &identity).await {
+            return;
+        }
+        let _ = seek_path(&handle, destination).await;
+        if !still(generation) {
+            stop_voice();
+            return;
+        }
+        let Ok(link) = handle.establish_link(destination).await else {
+            stop_voice();
+            fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
+            return;
+        };
+        if let Some(ours) = ours {
+            let _ = handle.identify(link, ours).await;
+        }
+        if !bind_link(generation, link) {
+            stop_voice();
+            let _ = handle
+                .send_link_packet(link, &crate::video::bye_packet())
+                .await;
+            return;
+        }
+        let hello = handle
+            .send_link_packet(link, &crate::video::hello_packet())
+            .await;
+        if !call_can_continue(hello) {
+            stop_voice();
+            fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
+            let _ = handle
+                .send_link_packet(link, &crate::video::bye_packet())
+                .await;
+            return;
+        }
+        loop {
+            if !still(generation) {
+                stop_voice();
+                let _ = handle
+                    .send_link_packet(link, &crate::video::bye_packet())
+                    .await;
+                return;
+            }
+            if crate::video::stopped() {
+                fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
+                let _ = handle
+                    .send_link_packet(link, &crate::video::bye_packet())
+                    .await;
+                return;
+            }
+            if peer_answered(generation) {
+                break;
+            }
+            rest(50).await;
+        }
+        release_held(link);
+        if !mark_live(generation, &identity, link) {
+            stop_voice();
+            let _ = handle
+                .send_link_packet(link, &crate::video::bye_packet())
+                .await;
+            return;
+        }
+        crate::voice::stage_hello();
+        show_and_speak(handle, link, generation, identity, true).await;
+    });
+}
+
 pub fn answer(ticket: u64) {
     let taken = {
         let mut call = calls();
@@ -1881,9 +1989,11 @@ pub fn answer(ticket: u64) {
         } else {
             let held = call.held.remove(&link).unwrap_or_default();
             let identity = held.identity.clone().unwrap_or_default();
+            let video = held.video;
             call.generation = call.generation.wrapping_add(1);
             let generation = call.generation;
             call.outgoing = false;
+            call.video = video;
             call.answered = true;
             call.started = None;
             call.link = Some(link);
@@ -1891,12 +2001,12 @@ pub fn answer(ticket: u64) {
                 identity: identity.clone(),
                 outgoing: false,
             };
-            Some(Ok((link, identity, generation)))
+            Some(Ok((link, identity, generation, video)))
         }
     };
     match taken {
         Some(Err(link)) => send_bye(link),
-        Some(Ok((link, identity, generation))) => {
+        Some(Ok((link, identity, generation, video))) => {
             let Some(runtime) = RUNTIME.get().cloned() else {
                 fail_if(generation, &identity, crate::voice::DIDNT_CONNECT);
                 return;
@@ -1906,7 +2016,17 @@ pub fn answer(ticket: u64) {
                 return;
             };
             runtime.spawn(async move {
-                if !prepare_voice(generation, &identity).await {
+                if video {
+                    #[cfg(any(target_os = "macos", target_os = "android"))]
+                    answer_film(handle, link, generation, identity).await;
+                    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+                    {
+                        let _ = (handle, generation, identity);
+                        send_bye(link);
+                    }
+                    return;
+                }
+                if !prepare_voice(generation, &identity, false).await {
                     send_bye(link);
                     return;
                 }
@@ -1985,6 +2105,7 @@ pub fn hang_up() {
         });
     }
     call.generation = call.generation.wrapping_add(1);
+    call.video = false;
     call.face = CallFace::Quiet;
     call.link = None;
     drop(call);
@@ -1993,20 +2114,39 @@ pub fn hang_up() {
 
 fn stop_voice() {
     crate::voice::stop();
+    #[cfg(any(target_os = "macos", target_os = "android"))]
+    crate::video::stop();
     #[cfg(target_os = "android")]
     hold_to_ear(false);
 }
 
 #[cfg(target_os = "android")]
 fn hold_to_ear(on: bool) {
-    let method = if on { "beginCall" } else { "endCall" };
+    route_call(on, false);
+}
+
+/// A video call stays on the loudspeaker, with the screen left on.
+#[cfg(target_os = "android")]
+fn play_aloud(on: bool) {
+    route_call(on, true);
+}
+
+#[cfg(target_os = "android")]
+fn route_call(on: bool, aloud: bool) {
+    let method = if !on {
+        "endCall"
+    } else if aloud {
+        "beginVideoCall"
+    } else {
+        "beginCall"
+    };
     let _ = with_android_context(|env, context| {
         env.call_method(context, method, "()V", &[])?;
         Ok(())
     });
 }
 
-async fn prepare_voice(generation: u64, identity: &str) -> bool {
+async fn prepare_voice(generation: u64, identity: &str, aloud: bool) -> bool {
     if !still(generation) {
         return false;
     }
@@ -2020,7 +2160,13 @@ async fn prepare_voice(generation: u64, identity: &str) -> bool {
         return false;
     };
     #[cfg(target_os = "android")]
-    hold_to_ear(true);
+    if aloud {
+        play_aloud(true);
+    } else {
+        hold_to_ear(true);
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = aloud;
     let opened = runtime.spawn_blocking(crate::voice::start).await;
     if !still(generation) {
         stop_voice();
@@ -2047,6 +2193,14 @@ async fn speak(
     identity: String,
     outgoing: bool,
 ) {
+    send_voice(&handle, link, generation).await;
+    let _ = handle
+        .send_link_packet(link, &crate::voice::bye_packet())
+        .await;
+    finish_call(generation, &identity, outgoing);
+}
+
+async fn send_voice(handle: &PrnsNodeHandle, link: LinkId, generation: u64) {
     loop {
         if !still(generation) || crate::voice::stopped() {
             break;
@@ -2061,25 +2215,151 @@ async fn speak(
         // The side that opened the link never proves data that comes back, so a
         // receipt for the return voice does not arrive until it times out. Waiting
         // for that receipt held the responder to one moment per timeout.
-        if let Some(sent) = hand_to_link(&handle, link, &packet).await {
+        if let Some(sent) = hand_to_link(handle, link, &packet).await {
             if !call_can_continue(sent) {
                 stop_voice();
                 break;
             }
         }
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+async fn prepare_video(generation: u64, identity: &str) -> bool {
+    if !still(generation) {
+        return false;
+    }
+    let Some(runtime) = RUNTIME.get() else {
+        fail_if(generation, identity, crate::voice::DIDNT_CONNECT);
+        return false;
+    };
+    let opened = runtime.spawn_blocking(crate::video::start).await;
+    if !still(generation) {
+        stop_voice();
+        return false;
+    }
+    match opened {
+        Ok(Ok(())) if !crate::video::stopped() => true,
+        Ok(Err(words)) => {
+            fail_if(generation, identity, words);
+            false
+        }
+        _ => {
+            stop_voice();
+            fail_if(generation, identity, crate::voice::DIDNT_CONNECT);
+            false
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+async fn answer_film(handle: PrnsNodeHandle, link: LinkId, generation: u64, identity: String) {
+    if !prepare_video(generation, &identity).await {
+        let _ = handle
+            .send_link_packet(link, &crate::video::bye_packet())
+            .await;
+        return;
+    }
+    if !prepare_voice(generation, &identity, true).await {
+        let _ = handle
+            .send_link_packet(link, &crate::video::bye_packet())
+            .await;
+        return;
+    }
+    if !still(generation) {
+        stop_voice();
+        let _ = handle
+            .send_link_packet(link, &crate::video::bye_packet())
+            .await;
+        return;
+    }
+    release_held(link);
+    if !mark_live(generation, &identity, link) {
+        stop_voice();
+        let _ = handle
+            .send_link_packet(link, &crate::video::bye_packet())
+            .await;
+        return;
+    }
+    crate::video::stage_hello();
+    crate::voice::stage_hello();
+    show_and_speak(handle, link, generation, identity, false).await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+async fn show_and_speak(
+    handle: PrnsNodeHandle,
+    link: LinkId,
+    generation: u64,
+    identity: String,
+    outgoing: bool,
+) {
+    tokio::join!(
+        send_voice(&handle, link, generation),
+        send_picture(&handle, link, generation, outgoing),
+    );
     let _ = handle
         .send_link_packet(link, &crate::voice::bye_packet())
+        .await;
+    let _ = handle
+        .send_link_packet(link, &crate::video::bye_packet())
         .await;
     finish_call(generation, &identity, outgoing);
 }
 
-fn begin_call(identity: &str, outgoing: bool) -> Option<u64> {
+#[cfg(any(target_os = "macos", target_os = "android"))]
+async fn send_picture(handle: &PrnsNodeHandle, link: LinkId, generation: u64, outgoing: bool) {
+    loop {
+        if !still(generation) || crate::video::stopped() {
+            break;
+        }
+        // Sound is one short moment at a time. A picture piece waits while a
+        // moment is already queued, so the microphone is not stuck behind it.
+        if crate::voice::waiting() {
+            rest(5).await;
+            continue;
+        }
+        let Some(packet) = crate::video::take_one() else {
+            rest(15).await;
+            continue;
+        };
+        if !still(generation) || crate::video::stopped() {
+            break;
+        }
+        // The opener is proved for each packet, so the next piece waits until
+        // this one is accepted. A burst of a key frame was arriving with its
+        // tail missing, and the picture cannot start without that first frame.
+        // The side that answered gets no proof back; waiting there stalls the
+        // call for a whole timeout per piece, so that side still sends ahead,
+        // one piece at a time, with a gap a voice moment can use.
+        if outgoing {
+            match handle.send_link_packet(link, &packet).await {
+                Ok(_) => {}
+                Err(personal_rns::SendError::NodeStopped) => {
+                    stop_voice();
+                    break;
+                }
+                Err(_) => {}
+            }
+        } else {
+            match hand_to_link(handle, link, &packet).await {
+                Some(sent) if !call_can_continue(sent) => {
+                    stop_voice();
+                    break;
+                }
+                Some(_) | None => rest(20).await,
+            }
+        }
+    }
+}
+
+fn begin_call(identity: &str, outgoing: bool, video: bool) -> Option<u64> {
     let mut call = calls();
     if !matches!(call.face, CallFace::Quiet | CallFace::Failed { .. }) {
         return None;
     }
     call.generation = call.generation.wrapping_add(1);
+    call.video = video;
     call.outgoing = outgoing;
     call.answered = false;
     call.started = None;
@@ -2185,6 +2465,7 @@ fn finish_call(generation: u64, identity: &str, outgoing: bool) {
         }
     }
     call.generation = call.generation.wrapping_add(1);
+    call.video = false;
     call.face = CallFace::Quiet;
     call.link = None;
     stop_voice();
@@ -2207,6 +2488,7 @@ fn fail_if(generation: u64, identity: &str, words: &'static str) {
         return;
     }
     stop_voice();
+    call.video = false;
     call.face = CallFace::Failed {
         identity: identity.to_string(),
         words,
@@ -2230,12 +2512,19 @@ fn send_bye(link: LinkId) {
 
 fn release_held(link: LinkId) {
     crate::voice::ringback(false);
-    let packets = {
+    let taken = {
         let mut call = calls();
-        call.held.remove(&link).map(|held| held.packets)
+        call.held.remove(&link)
     };
-    for packet in packets.unwrap_or_default() {
-        crate::voice::hear(&packet);
+    for packet in taken.map(|held| held.packets).unwrap_or_default() {
+        match packet.first().copied() {
+            Some(b'F') => {
+                #[cfg(any(target_os = "macos", target_os = "android"))]
+                crate::video::hear(&packet);
+            }
+            Some(b'V') => crate::voice::hear(&packet),
+            _ => {}
+        }
     }
 }
 
@@ -2246,6 +2535,52 @@ fn accept_voice(link_id: LinkId, bytes: &[u8]) {
         crate::voice::VoiceKind::Audio => note_audio(link_id, bytes, peer),
         crate::voice::VoiceKind::Bye => note_bye(link_id),
         crate::voice::VoiceKind::Other => {}
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn accept_film(link_id: LinkId, bytes: &[u8]) {
+    let peer = mail().peers.get(&link_id).copied();
+    match crate::video::kind(bytes) {
+        crate::video::FilmKind::Hello => {
+            note_hello(link_id, peer);
+            let mut call = calls();
+            if let Some(held) = call.held.get_mut(&link_id) {
+                held.video = true;
+            }
+            if call.link == Some(link_id) {
+                call.video = true;
+            }
+        }
+        crate::video::FilmKind::Frame => note_film(link_id, bytes, peer),
+        crate::video::FilmKind::Bye => note_bye(link_id),
+        crate::video::FilmKind::Other => {}
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+fn note_film(link_id: LinkId, bytes: &[u8], peer: Option<IdentityHash>) {
+    let play_now = {
+        let mut call = calls();
+        if call.link == Some(link_id) && crate::video::running() && call.answered {
+            true
+        } else {
+            let held = call.held.entry(link_id).or_default();
+            held.video = true;
+            if held.packets.len() >= 64 {
+                held.packets.remove(0);
+            }
+            held.packets.push(bytes.to_vec());
+            if held.identity.is_none() {
+                if let Some(peer) = peer {
+                    held.identity = Some(hex_encode(peer.as_bytes()));
+                }
+            }
+            false
+        }
+    };
+    if play_now {
+        crate::video::hear(bytes);
     }
 }
 

@@ -38,6 +38,37 @@ pub const fn link_mdu(mtu: usize) -> usize {
 
 pub const LINK_MDU: usize = link_mdu(BROADCAST_MTU);
 
+// Set on the thread that is writing one link frame. A picture yields the host
+// lane to voice; the bytes on the wire stay ordinary link data. The host that
+// queues the frame reads this once.
+#[cfg(feature = "std")]
+std::thread_local! {
+    static OUTGOING_PICTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `payload` is a picture when it is one of our picture packets (`F` and a
+/// hello, a frame, or a goodbye). Anything else, including voice, keeps its place.
+pub fn mark_outgoing_link_frame(payload: &[u8]) {
+    #[cfg(feature = "std")]
+    OUTGOING_PICTURE.with(|flag| {
+        flag.set(matches!(payload, [b'F', 1 | 2 | 3, ..]));
+    });
+    #[cfg(not(feature = "std"))]
+    let _ = payload;
+}
+
+/// Whether the frame just written is a picture. Clears the mark.
+pub fn take_outgoing_picture() -> bool {
+    #[cfg(feature = "std")]
+    {
+        OUTGOING_PICTURE.with(|flag| flag.replace(false))
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        false
+    }
+}
+
 pub const fn link_data_frame_ceiling(plaintext_len: usize) -> usize {
     HEADER_MIN_LEN + IFAC_MIN_LEN + TOKEN_OVERHEAD + ((plaintext_len / 16) + 1) * 16
 }
@@ -186,6 +217,7 @@ impl<S: StorageLayout> EngineState<S> {
             WireContext::None,
             &buf[HEADER_MIN_LEN..wire_bytes],
         );
+        mark_outgoing_link_frame(&send.payload);
         let culled = self.receipts.track(OutstandingReceipt {
             packet_hash,
             command_id: id,
@@ -245,6 +277,16 @@ mod tests {
             &X25519PublicKey(a32(RESPONDER_PUBLIC)),
         );
         LinkKey::derive(&LinkId::new(a16(LINK_ID)), &shared)
+    }
+
+    #[test]
+    fn a_picture_frame_is_the_one_voice_may_pass() {
+        mark_outgoing_link_frame(&[b'F', 2, 0, 1]);
+        assert!(take_outgoing_picture());
+        mark_outgoing_link_frame(&[b'V', 2, 0, 1]);
+        assert!(!take_outgoing_picture());
+        mark_outgoing_link_frame(&[b'F', 9]);
+        assert!(!take_outgoing_picture());
     }
 
     #[test]
