@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-pub const NEEDS_MICROPHONE: &str = "TouchBase needs the microphone for a voice call.";
+pub const NEEDS_MICROPHONE: &str = "Optio needs the microphone for a voice call.";
 pub const DIDNT_CONNECT: &str = "The call didn't connect.";
 pub const WASNT_ANSWERED: &str = "The call wasn't answered.";
 

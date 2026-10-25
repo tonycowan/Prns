@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+mod banner;
 #[cfg(target_os = "android")]
 mod camera;
 #[cfg(not(target_arch = "wasm32"))]
@@ -14,6 +16,10 @@ mod scan;
 mod session;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod viewfinder;
+#[cfg(target_os = "windows")]
+mod viewfinder_windows;
+#[cfg(target_os = "windows")]
+use viewfinder_windows as viewfinder;
 #[cfg(not(target_arch = "wasm32"))]
 mod voice;
 
@@ -30,13 +36,14 @@ use model::note_from_them;
 use model::remember_call;
 #[cfg(target_arch = "wasm32")]
 use model::sample_people;
-#[cfg(not(target_arch = "wasm32"))]
-use model::settle_note;
 use model::{
-    add_person, can_call, code_mark, contact_code, group_by_day, map_window, offered_ways,
-    path_label, react_to_note, remove_person, shown_words, write_note, write_placed_note, NoteKind,
-    OfferedWays, Page, Person, Place, Reach, Reaction, PLACEHOLDER, YOUR_PUBLIC_KEY,
+    add_person, can_call, code_mark, contact_code, group_by_day, has_unread, map_window, mark_read,
+    offered_ways, path_label, react_to_note, remove_person, rename_person, retry_note, shown_words,
+    write_note, write_placed_note, NoteKind, OfferedWays, Page, Person, Place, Reach, Reaction,
+    PLACEHOLDER, YOUR_PUBLIC_KEY,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use model::{fail_note, settle_note};
 
 const KEEP_KEYBOARD: &str = r#"
 if (!window.__touchbaseKeepKeyboard) {
@@ -51,6 +58,69 @@ if (!window.__touchbaseKeepKeyboard) {
     document.addEventListener("touchstart", keep, {capture: true, passive: false});
     document.addEventListener("mousedown", keep, true);
   }
+}
+"#;
+
+// Android takes a downward drag at the top of the list as scrolling. This follows
+// that drag and opens the seam without calling preventDefault, so a sideways
+// slide can still reveal rename and remove. 56 matches `SEAM`.
+#[cfg(target_os = "android")]
+const SEAM_TOUCH: &str = r#"
+if (!window.__touchbaseSeam) {
+  window.__touchbaseSeam = true;
+  var startX = 0;
+  var startY = 0;
+  var active = false;
+  var sideways = false;
+  var opened = false;
+  var root = document.documentElement;
+  var maxSeam = 56;
+  function pageOf(event) {
+    var node = event.target;
+    if (!node || !node.closest) return null;
+    return node.closest(".page.people");
+  }
+  function closeSeam() {
+    active = false;
+    sideways = false;
+    if (!opened) return;
+    opened = false;
+    root.style.setProperty("--seam-move", "180ms ease");
+    requestAnimationFrame(function () {
+      root.style.setProperty("--seam", "0px");
+      setTimeout(function () {
+        root.style.removeProperty("--seam");
+        root.style.removeProperty("--seam-move");
+      }, 220);
+    });
+  }
+  document.addEventListener("touchstart", function (event) {
+    if (event.touches.length !== 1) return;
+    var page = pageOf(event);
+    sideways = false;
+    if (!page || page.scrollTop > 1) {
+      active = false;
+      return;
+    }
+    startX = event.touches[0].clientX;
+    startY = event.touches[0].clientY;
+    active = true;
+  }, {capture: true, passive: true});
+  document.addEventListener("touchmove", function (event) {
+    if (!active || sideways || event.touches.length !== 1) return;
+    var dx = event.touches[0].clientX - startX;
+    var dy = event.touches[0].clientY - startY;
+    if (Math.abs(dx) > 8 && Math.abs(dx) >= dy) {
+      sideways = true;
+      return;
+    }
+    if (dy < 18 || dy <= Math.abs(dx)) return;
+    opened = true;
+    root.style.setProperty("--seam-move", "none");
+    root.style.setProperty("--seam", Math.min(dy, maxSeam) + "px");
+  }, {capture: true, passive: true});
+  document.addEventListener("touchend", closeSeam, {capture: true, passive: true});
+  document.addEventListener("touchcancel", closeSeam, {capture: true, passive: true});
 }
 "#;
 
@@ -104,6 +174,39 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
     var(--edge-left);
   background: var(--paper);
 }
+.page.people {
+  position: relative;
+  overscroll-behavior-y: none;
+  overflow-anchor: none;
+}
+.seam {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  height: var(--seam, 0px);
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  transition: height 180ms ease;
+  pointer-events: none;
+}
+.people-body {
+  transform: translateY(var(--seam, 0px));
+  transition: transform 180ms ease;
+}
+.page.people.pulling .seam,
+.page.people.pulling .people-body { transition: none; }
+.seam span {
+  padding-bottom: 10px;
+  color: var(--pencil);
+  font-family: var(--book);
+  font-size: 15px;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  user-select: none;
+}
 .wires {
   position: fixed;
   z-index: 3;
@@ -119,6 +222,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: 15px;
   line-height: 1;
   letter-spacing: 0.08em;
+  transform: translateY(var(--seam, 0px));
+  transition: transform var(--seam-move, 180ms ease);
 }
 .wires .live { color: var(--ink); }
 .wires .quiet { color: var(--pencil); opacity: 0.35; }
@@ -135,6 +240,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   margin: 0;
   padding: 2px max(20px, env(safe-area-inset-right)) 6px max(20px, env(safe-area-inset-left));
   background: var(--paper);
+  transform: translateY(var(--seam, 0px));
+  transition: transform var(--seam-move, 180ms ease);
 }
 .incoming p {
   margin: 0;
@@ -168,6 +275,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   min-height: 44px;
   padding: 12px 0;
 }
+.empty-book {
+  margin: 18vh calc(-1 * var(--edge-right)) 0 calc(-1 * var(--edge-left));
+  padding: 0 36px;
+  text-align: center;
+  color: var(--ink);
+  font-size: 28px;
+  line-height: 1.35;
+}
 .names { list-style: none; margin: 12px 0 0; padding: 0; }
 .names li { border-bottom: 1px solid var(--rule); }
 .names .who, .save {
@@ -190,30 +305,36 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   min-width: 0;
   user-select: none;
 }
-.remove-reveal {
-  flex: 0 0 var(--reveal, 0px);
+.names .fresh { margin-right: 0.35em; }
+.name-config, .name-remove {
   overflow: hidden;
+  display: flex;
+  flex: 0 0 0px;
   transition: flex-basis 180ms ease;
 }
-.remove-reveal button {
+.name-config { flex-basis: var(--config, 0px); justify-content: flex-end; }
+.name-remove { flex-basis: var(--remove, 0px); justify-content: flex-end; }
+.name-config button, .name-remove button {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  flex: 0 0 84px;
   width: 84px;
   height: 100%;
   box-sizing: border-box;
-  padding: 0 0 0 12px;
   color: var(--pencil);
   font-family: var(--book);
   font-size: 16px;
   line-height: 1;
   text-decoration: underline;
   text-underline-offset: 4px;
-  transform: translateX(calc(84px - var(--reveal, 0px)));
-  transition: transform 180ms ease;
 }
-.name-swipe.live .remove-reveal,
-.name-swipe.live .remove-reveal button { transition: none; }
+.name-config button { justify-content: flex-end; padding: 0 12px 0 0; }
+.name-remove button { justify-content: flex-end; padding: 0 0 0 12px; }
+.name-swipe.live .name-config,
+.name-swipe.live .name-remove { transition: none; }
+input.who.rename {
+  border-bottom: 1px solid var(--pencil);
+}
 .confirm-remove { padding: 12px 0 8px; }
 .confirm-remove p {
   margin: 0;
@@ -395,6 +516,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: var(--pencil);
   color: var(--paper);
   border-radius: 8px;
+}
+.failed {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0;
+}
+.failed button {
+  font-family: var(--book);
+  font-size: 14px;
+  line-height: 1;
+  color: var(--paper);
+  background: var(--pencil);
+  border-radius: 8px;
+  padding: 6px 8px;
 }
 .reacts {
   display: flex;
@@ -709,6 +844,15 @@ fn initial_next_id() -> u64 {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn read_if_open(person: &mut Person, page: Page) {
+    if let Page::Journal(open) = page {
+        if person.id == open {
+            mark_read(person);
+        }
+    }
+}
+
 fn commit_people(mut people: Signal<Vec<Person>>, listed: Vec<Person>) {
     #[cfg(not(target_arch = "wasm32"))]
     session::save_contacts(&listed);
@@ -967,6 +1111,15 @@ fn adopt_scene_lifecycle() {
         scene: *mut std::ffi::c_void,
     ) {
         remember_scene(scene);
+        banner::became_active();
+    }
+
+    unsafe extern "C" fn scene_did_enter_background(
+        _this: *mut std::ffi::c_void,
+        _cmd: *mut std::ffi::c_void,
+        _scene: *mut std::ffi::c_void,
+    ) {
+        banner::schedule_refresh();
     }
 
     fn remember_scene(scene: *mut std::ffi::c_void) {
@@ -1000,12 +1153,12 @@ fn adopt_scene_lifecycle() {
 
     watch_for_windows();
 
-    // SAFETY: the class is registered before UIKit starts, and both methods match the
+    // SAFETY: the class is registered before UIKit starts, and the methods match the
     // scene-delegate selectors UIKit calls. The type strings are the Objective-C encodings
     // for those selectors.
     unsafe {
         let superclass = objc_getClass(c"UIResponder".as_ptr());
-        let class = objc_allocateClassPair(superclass, c"TouchBaseSceneDelegate".as_ptr(), 0);
+        let class = objc_allocateClassPair(superclass, c"OptioSceneDelegate".as_ptr(), 0);
         assert!(
             !class.is_null(),
             "the scene delegate class could not be created"
@@ -1036,6 +1189,18 @@ fn adopt_scene_lifecycle() {
             c"v@:@".as_ptr(),
         );
         assert!(added != 0, "the scene activation method could not be added");
+        let added = class_addMethod(
+            class,
+            sel_registerName(c"sceneDidEnterBackground:".as_ptr()),
+            scene_did_enter_background
+                as unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *mut std::ffi::c_void,
+                    *mut std::ffi::c_void,
+                ) as *mut std::ffi::c_void,
+            c"v@:@".as_ptr(),
+        );
+        assert!(added != 0, "the scene background method could not be added");
         for protocol_name in [c"UISceneDelegate", c"UIWindowSceneDelegate"] {
             let protocol = objc_getProtocol(protocol_name.as_ptr());
             assert!(
@@ -1108,7 +1273,7 @@ fn main() {
             .with_cfg(
                 Config::new().with_window(
                     WindowBuilder::new()
-                        .with_title("TouchBase")
+                        .with_title("Optio")
                         .with_inner_size(dioxus::desktop::LogicalSize::new(440.0, 760.0)),
                 ),
             )
@@ -1119,6 +1284,7 @@ fn main() {
         #[cfg(target_os = "ios")]
         {
             note_objc_exceptions();
+            banner::install();
             adopt_scene_lifecycle();
         }
         eprintln!("touchbase: starting the journal");
@@ -1236,8 +1402,25 @@ fn IncomingBar(voice: VoiceLine, people: Vec<Person>) -> Element {
     }
 }
 
+#[cfg(feature = "desktop")]
+fn watch_focus() {
+    use dioxus::desktop::tao::event::{Event, WindowEvent};
+    use dioxus::desktop::use_wry_event_handler;
+    use_wry_event_handler(|event, _| {
+        if let Event::WindowEvent {
+            event: WindowEvent::Focused(focused),
+            ..
+        } = event
+        {
+            banner::set_in_front(*focused);
+        }
+    });
+}
+
 #[allow(non_snake_case)]
 fn App() -> Element {
+    #[cfg(feature = "desktop")]
+    watch_focus();
     let mut page = use_signal(|| Page::People);
     let mut cover = use_signal(|| Page::People);
     let mut your_name = use_signal(machine_name);
@@ -1269,14 +1452,22 @@ fn App() -> Element {
                         if let Some(person) = listed.iter_mut().find(|person| {
                             session::same_contact(&person.identity, &arrived.identity)
                         }) {
-                            note_from_them(
+                            if note_from_them(
                                 person,
                                 &arrived.words,
                                 arrived.written_at,
                                 arrived.place,
-                            );
-                            commit_people(people, listed);
-                            chime::arrived();
+                            ) {
+                                let name = person.name.clone();
+                                let words = shown_words(&arrived.words, arrived.place);
+                                read_if_open(person, page());
+                                commit_people(people, listed);
+                                if banner::in_front() {
+                                    chime::arrived();
+                                } else {
+                                    banner::note(&name, &words);
+                                }
+                            }
                         }
                     }
                     for arrived in session::drain_reactions() {
@@ -1316,6 +1507,17 @@ fn App() -> Element {
                             commit_people(people, listed);
                         }
                     }
+                    let failed = session::drain_failures();
+                    if !failed.is_empty() {
+                        let mut listed = people();
+                        let mut changed = false;
+                        for id in failed {
+                            changed |= fail_note(&mut listed, id);
+                        }
+                        if changed {
+                            commit_people(people, listed);
+                        }
+                    }
                     if let Some(done) = session::take_finished() {
                         let mut listed = people();
                         if let Some(person) = listed
@@ -1323,6 +1525,7 @@ fn App() -> Element {
                             .find(|person| session::same_contact(&person.identity, &done.identity))
                         {
                             remember_call(person, done.seconds, done.outgoing);
+                            read_if_open(person, page());
                             commit_people(people, listed);
                         }
                     }
@@ -1336,6 +1539,7 @@ fn App() -> Element {
                     if let Page::Journal(id) = page() {
                         if let Some(person) = people().iter().find(|person| person.id == id) {
                             session::measure(&person.identity);
+                            session::watch(&person.identity);
                             let next = session::reach_for(&person.identity);
                             if reach() != next {
                                 reach.set(next);
@@ -1355,6 +1559,8 @@ fn App() -> Element {
         div { class: "notebook",
             onmounted: move |_| {
                 document::eval(KEEP_KEYBOARD);
+                #[cfg(target_os = "macos")]
+                banner::became_active();
             },
             WireLetters { wires: wires() }
             IncomingBar { voice: voice(), people: people() }
@@ -1364,9 +1570,19 @@ fn App() -> Element {
                     draft_note.set(String::new());
                     visit.set(visit() + 1);
                     reach.set(Reach::unknown());
+                    let mut listed = people();
+                    let identity = listed
+                        .iter()
+                        .find(|person| person.id == id)
+                        .map(|person| person.identity.clone());
+                    if let Some(person) = listed.iter_mut().find(|person| person.id == id) {
+                        if mark_read(person) {
+                            commit_people(people, listed);
+                        }
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(person) = people().iter().find(|person| person.id == id) {
-                        session::forget(&person.identity);
+                    if let Some(identity) = identity {
+                        session::forget(&identity);
                     }
                     let next = Page::Journal(id);
                     cover.set(next);
@@ -1381,6 +1597,12 @@ fn App() -> Element {
                     draft_code.set(String::new());
                     cover.set(Page::Add);
                     page.set(Page::Add);
+                },
+                on_rename: move |(id, name): (u64, String)| {
+                    let mut listed = people();
+                    if rename_person(&mut listed, id, &name) {
+                        commit_people(people, listed);
+                    }
                 },
                 on_remove: move |id| {
                     let mut listed = people();
@@ -1483,6 +1705,33 @@ fn App() -> Element {
                                         }
                                     },
                                     on_back: move |_| page.set(Page::People),
+                                    on_retry: move |note_id: u64| {
+                                        let mut listed = people();
+                                        let Some(person) =
+                                            listed.iter_mut().find(|person| person.id == id)
+                                        else {
+                                            return;
+                                        };
+                                        let Some((words, written_at, place)) =
+                                            retry_note(person, note_id)
+                                        else {
+                                            return;
+                                        };
+                                        let identity = person.identity.clone();
+                                        commit_people(people, listed);
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        session::send_note(
+                                            &identity,
+                                            &words,
+                                            note_id,
+                                            written_at,
+                                            place,
+                                        );
+                                        #[cfg(target_arch = "wasm32")]
+                                        {
+                                            let _ = (identity, words, written_at, place, note_id);
+                                        }
+                                    },
                                     on_react: move |(note_id, choice): (u64, Reaction)| {
                                         let mut listed = people();
                                         let Some(person) =
@@ -1603,61 +1852,325 @@ fn WireLetters(wires: Wires) -> Element {
     }
 }
 
+const SEAM: f64 = 56.0;
+
+fn people_page_class(live: bool) -> &'static str {
+    match (cfg!(target_os = "android"), live) {
+        (true, true) => "page people pulling android",
+        (true, false) => "page people android",
+        (false, true) => "page people pulling",
+        (false, false) => "page people",
+    }
+}
+
+fn close_seam(
+    mut pull: Signal<Option<(f64, f64)>>,
+    mut pulling: Signal<bool>,
+    mut wheeling: Signal<bool>,
+    mut wheel_mark: Signal<u64>,
+    mut seam: Signal<f64>,
+) {
+    pull.set(None);
+    pulling.set(false);
+    wheeling.set(false);
+    wheel_mark.set(wheel_mark() + 1);
+    seam.set(0.0);
+}
+
+fn release_seam(
+    pull: Signal<Option<(f64, f64)>>,
+    pulling: Signal<bool>,
+    wheeling: Signal<bool>,
+    wheel_mark: Signal<u64>,
+    seam: Signal<f64>,
+    mut pulled: Signal<bool>,
+) {
+    let opened = pulling();
+    close_seam(pull, pulling, wheeling, wheel_mark, seam);
+    if !opened {
+        return;
+    }
+    // The click that follows a pull would otherwise open Add or the QR page.
+    spawn(async move {
+        let mut eval = document::eval("setTimeout(function () { dioxus.send(true); }, 0);");
+        let _ = eval.recv::<bool>().await;
+        pulled.set(false);
+    });
+}
+
+fn wheel_pull(delta: dioxus::html::geometry::WheelDelta) -> f64 {
+    match delta {
+        dioxus::html::geometry::WheelDelta::Pixels(v) => v.y,
+        dioxus::html::geometry::WheelDelta::Lines(v) => v.y * 28.0,
+        dioxus::html::geometry::WheelDelta::Pages(v) => v.y * SEAM,
+    }
+}
+
+fn app_version() -> String {
+    env!("TOUCHBASE_VERSION").to_string()
+}
+
 #[component]
 fn PeoplePage(
     people: Vec<Person>,
     on_open: EventHandler<u64>,
     on_code: EventHandler<()>,
     on_add: EventHandler<()>,
+    on_rename: EventHandler<(u64, String)>,
     on_remove: EventHandler<u64>,
 ) -> Element {
     let mut confirming = use_signal(|| None::<u64>);
+    let mut renaming = use_signal(|| None::<u64>);
+    let mut draft = use_signal(String::new);
+    let mut at_top = use_signal(|| true);
+    let mut seam = use_signal(|| 0.0);
+    let mut pulling = use_signal(|| false);
+    let mut pull = use_signal(|| None::<(f64, f64)>);
+    let mut pulled = use_signal(|| false);
+    let mut wheeling = use_signal(|| false);
+    let mut wheel_mark = use_signal(|| 0u64);
+    let version = app_version();
+    let motion = if pulling() || wheeling() {
+        "none"
+    } else {
+        "180ms ease"
+    };
+    let people_class = people_page_class(pulling() || wheeling());
     rsx! {
-        div { class: "page",
-            div { class: "actions",
-                button { class: "action", onclick: move |_| on_add.call(()), "Add a contact" }
-                button { class: "action", onclick: move |_| on_code.call(()), "Your QR code" }
+        style { ":root {{ --seam: {seam()}px; --seam-move: {motion}; }}" }
+        div {
+            class: "{people_class}",
+            onmounted: move |_| {
+                #[cfg(target_os = "android")]
+                document::eval(SEAM_TOUCH);
+            },
+            onscroll: move |event| {
+                let top = event.data().scroll_top() <= 0.5;
+                at_top.set(top);
+                if !top {
+                    close_seam(pull, pulling, wheeling, wheel_mark, seam);
+                }
+            },
+            onpointerdown: move |event| {
+                wheel_mark.set(wheel_mark() + 1);
+                wheeling.set(false);
+                if !at_top() {
+                    return;
+                }
+                let point = event.client_coordinates();
+                pull.set(Some((point.x, point.y)));
+                pulling.set(false);
+            },
+            onpointermove: move |event| {
+                let Some((start_x, start_y)) = pull() else {
+                    return;
+                };
+                let point = event.client_coordinates();
+                let dx = point.x - start_x;
+                let dy = point.y - start_y;
+                if !pulling() {
+                    if dx.abs() < 18.0 && dy < 18.0 {
+                        return;
+                    }
+                    // A sideways slide still belongs to the contact row.
+                    if dy <= dx.abs() {
+                        pull.set(None);
+                        return;
+                    }
+                    pulling.set(true);
+                    pulled.set(true);
+                }
+                if !at_top() {
+                    close_seam(pull, pulling, wheeling, wheel_mark, seam);
+                    return;
+                }
+                event.prevent_default();
+                seam.set(dy.clamp(0.0, SEAM));
+            },
+            onpointerup: move |_| release_seam(pull, pulling, wheeling, wheel_mark, seam, pulled),
+            onpointercancel: move |_| {
+                release_seam(pull, pulling, wheeling, wheel_mark, seam, pulled);
+            },
+            onpointerleave: move |_| {
+                if pulling() {
+                    release_seam(pull, pulling, wheeling, wheel_mark, seam, pulled);
+                } else {
+                    pull.set(None);
+                }
+            },
+            onwheel: move |event| {
+                if pulling() {
+                    return;
+                }
+                let dy = wheel_pull(event.delta());
+                if dy >= 0.0 {
+                    if seam() > 0.0 {
+                        event.prevent_default();
+                        let next = (seam() - dy).max(0.0);
+                        seam.set(next);
+                        if next == 0.0 {
+                            wheeling.set(false);
+                        }
+                    }
+                    return;
+                }
+                if !at_top() {
+                    return;
+                }
+                event.prevent_default();
+                wheeling.set(true);
+                seam.set((seam() - dy).min(SEAM));
+                let mark = wheel_mark() + 1;
+                wheel_mark.set(mark);
+                spawn(async move {
+                    let mut eval = document::eval(
+                        "setTimeout(function () { dioxus.send(true); }, 180);",
+                    );
+                    let _ = eval.recv::<bool>().await;
+                    if wheel_mark() == mark {
+                        wheeling.set(false);
+                        seam.set(0.0);
+                    }
+                });
+            },
+            div { class: "seam",
+                span { "{version}" }
             }
+            div { class: "people-body",
+            div { class: "actions",
+                button {
+                    class: "action",
+                    onclick: move |_| {
+                        if pulled() {
+                            pulled.set(false);
+                            return;
+                        }
+                        on_add.call(());
+                    },
+                    "Add a contact"
+                }
+                button {
+                    class: "action",
+                    onclick: move |_| {
+                        if pulled() {
+                            pulled.set(false);
+                            return;
+                        }
+                        on_code.call(());
+                    },
+                    "Your QR code"
+                }
+            }
+            if people.is_empty() {
+                p { class: "empty-book", "Add a contact by scanning their QR code" }
+            } else {
             ul { class: "names",
                 for person in people {
                     PersonRow {
                         key: "{person.id}",
                         id: person.id,
                         name: person.name.clone(),
+                        unread: has_unread(&person),
                         confirming: confirming() == Some(person.id),
+                        editing: renaming() == Some(person.id),
+                        draft: draft(),
                         on_open: move |id| {
                             confirming.set(None);
+                            renaming.set(None);
                             on_open.call(id);
                         },
-                        on_ask: move |id| confirming.set(Some(id)),
+                        on_ask: move |id| {
+                            renaming.set(None);
+                            confirming.set(Some(id));
+                        },
                         on_keep: move |_| confirming.set(None),
                         on_remove: move |id| {
                             confirming.set(None);
                             on_remove.call(id);
                         },
+                        on_edit: {
+                            let current = person.name.clone();
+                            move |id| {
+                                confirming.set(None);
+                                draft.set(current.clone());
+                                renaming.set(Some(id));
+                            }
+                        },
+                        on_draft: move |value| draft.set(value),
+                        on_named: move |(id, name)| {
+                            renaming.set(None);
+                            on_rename.call((id, name));
+                        },
+                        on_cancel: move |_| renaming.set(None),
                     }
                 }
+            }
+            }
             }
         }
     }
 }
 
-const REMOVE: f64 = 84.0;
+const ACTION: f64 = 84.0;
 
 #[component]
 fn PersonRow(
     id: u64,
     name: String,
+    unread: bool,
     confirming: bool,
+    editing: bool,
+    draft: String,
     on_open: EventHandler<u64>,
     on_ask: EventHandler<u64>,
     on_keep: EventHandler<()>,
     on_remove: EventHandler<u64>,
+    on_edit: EventHandler<u64>,
+    on_draft: EventHandler<String>,
+    on_named: EventHandler<(u64, String)>,
+    on_cancel: EventHandler<()>,
 ) -> Element {
     let mut reveal = use_signal(|| 0.0);
     let mut drag = use_signal(|| None::<(f64, f64, f64)>);
     let mut dragged = use_signal(|| false);
+    let mut dismissed = use_signal(|| false);
     let ask = name.clone();
+    if editing {
+        let on_key = draft.clone();
+        let on_leave = draft.clone();
+        return rsx! {
+            li {
+                input {
+                    class: "who rename",
+                    aria_label: "Name",
+                    value: "{draft}",
+                    onmounted: move |event| {
+                        spawn(async move {
+                            let _ = event.set_focus(true).await;
+                        });
+                    },
+                    oninput: move |event| on_draft.call(event.value()),
+                    onkeydown: move |event| {
+                        if event.key() == Key::Escape {
+                            dismissed.set(true);
+                            on_cancel.call(());
+                        } else if event.key() == Key::Enter {
+                            event.prevent_default();
+                            dismissed.set(true);
+                            finish_rename(id, &on_key, on_named, on_cancel);
+                        }
+                    },
+                    onblur: move |_| {
+                        if dismissed() {
+                            dismissed.set(false);
+                            return;
+                        }
+                        finish_rename(id, &on_leave, on_named, on_cancel);
+                    },
+                }
+            }
+        };
+    }
     if confirming {
         return rsx! {
             li {
@@ -1671,11 +2184,13 @@ fn PersonRow(
             }
         };
     }
+    let config = if reveal() < 0.0 { -reveal() } else { 0.0 };
+    let remove = if reveal() > 0.0 { reveal() } else { 0.0 };
     rsx! {
         li {
             div {
                 class: if drag().is_some() { "name-swipe live" } else { "name-swipe" },
-                style: "--reveal: {reveal()}px",
+                style: "--config: {config}px; --remove: {remove}px",
                 onpointerdown: move |event| {
                     let point = event.client_coordinates();
                     drag.set(Some((point.x, point.y, reveal())));
@@ -1686,12 +2201,13 @@ fn PersonRow(
                         return;
                     };
                     let point = event.client_coordinates();
-                    let dx = start_x - point.x;
+                    let travel = point.x - start_x;
                     let dy = point.y - start_y;
-                    if dx.abs() < 8.0 && dy.abs() > dx.abs() {
+                    if travel.abs() < 8.0 && dy.abs() > travel.abs() {
                         return;
                     }
-                    reveal.set((start_reveal + dx).clamp(0.0, REMOVE));
+                    // A pull to the right opens the actions on the left. A pull to the left opens removal.
+                    reveal.set((start_reveal - travel).clamp(-ACTION, ACTION));
                 },
                 onpointerup: move |event| {
                     let tap = drag().is_some_and(|(start_x, start_y, _)| {
@@ -1705,6 +2221,19 @@ fn PersonRow(
                 },
                 onpointercancel: move |_| release_row(drag, reveal),
                 onpointerleave: move |_| release_row(drag, reveal),
+                div { class: "name-config",
+                    button {
+                        aria_label: "Rename",
+                        onpointerdown: move |event| event.stop_propagation(),
+                        onpointerup: move |event| event.stop_propagation(),
+                        onclick: move |event| {
+                            event.stop_propagation();
+                            reveal.set(0.0);
+                            on_edit.call(id);
+                        },
+                        "rename"
+                    }
+                }
                 button {
                     class: "who",
                     onclick: move |_| {
@@ -1714,15 +2243,19 @@ fn PersonRow(
                         }
                         on_open.call(id);
                     },
+                    if unread {
+                        span { class: "fresh", "*" }
+                    }
                     "{name}"
                 }
-                div { class: "remove-reveal",
+                div { class: "name-remove",
                     button {
                         aria_label: "Remove",
                         onpointerdown: move |event| event.stop_propagation(),
                         onpointerup: move |event| event.stop_propagation(),
                         onclick: move |event| {
                             event.stop_propagation();
+                            reveal.set(0.0);
                             on_ask.call(id);
                         },
                         "remove"
@@ -1738,8 +2271,29 @@ fn release_row(mut drag: Signal<Option<(f64, f64, f64)>>, mut reveal: Signal<f64
         return;
     }
     drag.set(None);
-    let next = if reveal() > REMOVE / 2.0 { REMOVE } else { 0.0 };
+    let value = reveal();
+    let next = if value > ACTION / 2.0 {
+        ACTION
+    } else if value < -ACTION / 2.0 {
+        -ACTION
+    } else {
+        0.0
+    };
     reveal.set(next);
+}
+
+fn finish_rename(
+    id: u64,
+    draft: &str,
+    on_named: EventHandler<(u64, String)>,
+    on_cancel: EventHandler<()>,
+) {
+    let name = draft.trim();
+    if name.is_empty() {
+        on_cancel.call(());
+    } else {
+        on_named.call((id, name.to_string()));
+    }
 }
 
 fn machine_name() -> String {
@@ -1887,12 +2441,48 @@ fn write_clipboard(text: &str) -> bool {
     session::copy_to_clipboard(text)
 }
 
+#[cfg(not(target_os = "android"))]
+#[component]
+fn PhotoFile(on_scanned: EventHandler<(String, String)>, notice: Signal<String>) -> Element {
+    rsx! {
+        label { class: "photo",
+            "Take a photo"
+            input {
+                r#type: "file",
+                accept: "image/*",
+                capture: "environment",
+                aria_label: "Take a photo of their QR code",
+                onchange: move |event| {
+                    let Some(file) = event.files().into_iter().next() else {
+                        return;
+                    };
+                    let on_scanned = on_scanned;
+                    let mut notice = notice;
+                    spawn(async move {
+                        let Ok(bytes) = file.read_bytes().await else {
+                            notice.set(UNREADABLE.into());
+                            return;
+                        };
+                        accept_image(&bytes, on_scanned, notice);
+                    });
+                },
+            }
+        }
+    }
+}
+
 #[component]
 fn PhotoControl(on_scanned: EventHandler<(String, String)>, mut notice: Signal<String>) -> Element {
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
     {
         let mut scanning = use_signal(|| false);
         let mut frame = use_signal(String::new);
+        #[cfg(target_os = "windows")]
+        let mut use_file = use_signal(|| false);
+        #[cfg(target_os = "windows")]
+        let show_file = use_file();
+        #[cfg(not(target_os = "windows"))]
+        let show_file = false;
         use_drop(|| viewfinder::stop());
         let picture = frame();
         return rsx! {
@@ -1952,13 +2542,17 @@ fn PhotoControl(on_scanned: EventHandler<(String, String)>, mut notice: Signal<S
                                         viewfinder::stop();
                                         scanning.set(false);
                                         frame.set(String::new());
-                                        notice.set("TouchBase needs the camera to photograph a code.".into());
+                                        #[cfg(target_os = "windows")]
+                                        use_file.set(true);
+                                        notice.set("Optio needs the camera to photograph a code.".into());
                                         break;
                                     }
                                     viewfinder::View::Unavailable => {
                                         viewfinder::stop();
                                         scanning.set(false);
                                         frame.set(String::new());
+                                        #[cfg(target_os = "windows")]
+                                        use_file.set(true);
                                         notice.set("The camera didn't open.".into());
                                         break;
                                     }
@@ -1969,6 +2563,9 @@ fn PhotoControl(on_scanned: EventHandler<(String, String)>, mut notice: Signal<S
                         });
                     },
                     "Scan their code"
+                }
+                if show_file {
+                    PhotoFile { on_scanned, notice }
                 }
             }
         };
@@ -1992,7 +2589,7 @@ fn PhotoControl(on_scanned: EventHandler<(String, String)>, mut notice: Signal<S
                                 }
                             }
                             session::PhotoCapture::Denied => {
-                                notice.set("TouchBase needs the camera to photograph a code.".into());
+                                notice.set("Optio needs the camera to photograph a code.".into());
                             }
                             session::PhotoCapture::Unavailable => {
                                 notice.set("The camera didn't open.".into());
@@ -2005,31 +2602,14 @@ fn PhotoControl(on_scanned: EventHandler<(String, String)>, mut notice: Signal<S
             }
         };
     }
-    #[cfg(not(any(target_os = "android", target_os = "macos", target_os = "ios")))]
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    )))]
     rsx! {
-        label { class: "photo",
-            "Take a photo"
-            input {
-                r#type: "file",
-                accept: "image/*",
-                capture: "environment",
-                aria_label: "Take a photo of their QR code",
-                onchange: move |event| {
-                    let Some(file) = event.files().into_iter().next() else {
-                        return;
-                    };
-                    let on_scanned = on_scanned;
-                    let mut notice = notice;
-                    spawn(async move {
-                        let Ok(bytes) = file.read_bytes().await else {
-                            notice.set(UNREADABLE.into());
-                            return;
-                        };
-                        accept_image(&bytes, on_scanned, notice);
-                    });
-                },
-            }
-        }
+        PhotoFile { on_scanned, notice }
     }
 }
 
@@ -2264,6 +2844,7 @@ fn JournalPage(
     on_place: EventHandler<Place>,
     on_back: EventHandler<()>,
     on_react: EventHandler<(u64, Reaction)>,
+    on_retry: EventHandler<u64>,
     on_write: EventHandler<()>,
 ) -> Element {
     let name = person.name.clone();
@@ -2313,7 +2894,7 @@ fn JournalPage(
             }
         }
     }
-    let under_name = path_label(real, reach.pending, reach.winner.as_deref());
+    let under_name = path_label(real, reach.pending, reach.winner.as_deref(), reach.hops);
     rsx! {
         div { class: "page journal",
             div { class: "title-row",
@@ -2356,10 +2937,12 @@ fn JournalPage(
                             time: note.time,
                             mine: note.mine,
                             settled: note.settled,
+                            failed: note.failed,
                             place: note.place,
                             reaction: note.reaction,
                             can_react: !note.mine && note.kind == NoteKind::Text,
                             on_react: move |choice| on_react.call((note.id, choice)),
+                            on_retry: move |_| on_retry.call(note.id),
                         }
                     }
                 }
@@ -2519,10 +3102,12 @@ fn NoteRow(
     time: String,
     mine: bool,
     settled: bool,
+    failed: bool,
     place: Option<Place>,
     reaction: Option<Reaction>,
     can_react: bool,
     on_react: EventHandler<Reaction>,
+    on_retry: EventHandler<()>,
 ) -> Element {
     let mut reveal = use_signal(|| 0.0);
     let mut drag = use_signal(|| None::<(f64, f64, f64)>);
@@ -2574,7 +3159,20 @@ fn NoteRow(
                         if !shown.is_empty() {
                             p { class: "{words_class}", "{shown}" }
                         }
-                        if can_react && choosing() {
+                        if failed {
+                            div { class: "failed",
+                                button {
+                                    aria_label: "Failed. Tap to try again.",
+                                    onpointerdown: move |event| event.stop_propagation(),
+                                    onpointerup: move |event| event.stop_propagation(),
+                                    onclick: move |event| {
+                                        event.stop_propagation();
+                                        on_retry.call(());
+                                    },
+                                    "Failed"
+                                }
+                            }
+                        } else if can_react && choosing() {
                             ReactChoices {
                                 chosen: reaction,
                                 on_react: move |choice| {

@@ -213,6 +213,8 @@ pub struct Note {
     pub mine: bool,
     /// A note we just sent stays grey until the other side acknowledges it.
     pub settled: bool,
+    /// Set after this note has been tried three times and is no longer sending itself.
+    pub failed: bool,
     /// Set when the note still carried [`PLACEHOLDER`] at send time.
     pub place: Option<Place>,
     /// When the note was written, as the bits of a Unix-seconds float.
@@ -227,6 +229,9 @@ pub struct Person {
     pub name: String,
     pub identity: String,
     pub notes: Vec<Note>,
+    /// The newest note id this journal has been opened through.
+    /// A later note from them is still unread.
+    pub seen: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -243,11 +248,12 @@ pub fn contact_code(name: &str, identity: &str) -> String {
 
 #[cfg(any(test, target_arch = "wasm32"))]
 pub fn sample_people() -> Vec<Person> {
-    vec![
+    let mut people = vec![
         Person {
             id: 1,
             name: "Mara".into(),
             identity: "19ab44c0e8d15f2076c3aa91b0d4e6f2".into(),
+            seen: 0,
             notes: vec![
                 kept(
                     NoteKind::Text,
@@ -277,6 +283,7 @@ pub fn sample_people() -> Vec<Person> {
             id: 2,
             name: "Sam".into(),
             identity: "77c0de12a9b4f6530188e2d4c6ab5190".into(),
+            seen: 0,
             notes: vec![
                 kept(
                     NoteKind::Video,
@@ -298,6 +305,7 @@ pub fn sample_people() -> Vec<Person> {
             id: 3,
             name: "Jo".into(),
             identity: "05f8a1d6c3b94720e4d1aa78c2b6e093".into(),
+            seen: 0,
             notes: vec![
                 kept(
                     NoteKind::Text,
@@ -309,7 +317,11 @@ pub fn sample_people() -> Vec<Person> {
                 kept(NoteKind::Text, "Friday", "18:44", "I'll be there.", true),
             ],
         },
-    ]
+    ];
+    for person in &mut people {
+        mark_read(person);
+    }
+    people
 }
 
 pub fn write_note(person: &mut Person, words: &str) -> Option<u64> {
@@ -326,10 +338,39 @@ pub fn settle_note(people: &mut [Person], id: u64) -> bool {
     for person in people {
         if let Some(note) = person.notes.iter_mut().find(|note| note.id == id) {
             note.settled = true;
+            note.failed = false;
             return true;
         }
     }
     false
+}
+
+/// This note was tried three times and will not send itself again.
+pub fn fail_note(people: &mut [Person], id: u64) -> bool {
+    for person in people {
+        if let Some(note) = person.notes.iter_mut().find(|note| note.id == id) {
+            if note.settled || note.failed || !note.mine {
+                return false;
+            }
+            note.failed = true;
+            return true;
+        }
+    }
+    false
+}
+
+/// The user asked to send a failed note again. The words go back out for three more tries.
+pub fn retry_note(person: &mut Person, id: u64) -> Option<(String, f64, Option<Place>)> {
+    let note = person.notes.iter_mut().find(|note| note.id == id)?;
+    if !note.mine || !note.failed || note.kind != NoteKind::Text {
+        return None;
+    }
+    note.failed = false;
+    Some((
+        note.words.clone(),
+        f64::from_bits(note.written_at),
+        note.place,
+    ))
 }
 
 /// The voice button is shown for a real contact, and for the sample conversations
@@ -363,6 +404,7 @@ pub fn remember_call(person: &mut Person, seconds: u64, outgoing: bool) {
         words,
         mine: outgoing,
         settled: true,
+        failed: false,
         place: None,
         written_at: 0,
         reaction: None,
@@ -370,16 +412,30 @@ pub fn remember_call(person: &mut Person, seconds: u64, outgoing: bool) {
 }
 
 /// A note that arrived from this contact, stamped with the time it was written.
+/// A second copy of a note already in this journal stays the one entry.
+/// Returns whether this copy was written into the journal.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[must_use]
 pub fn note_from_them(
     person: &mut Person,
     words: &str,
     written_at_unix: f64,
     place: Option<Place>,
-) {
+) -> bool {
     let words = words.trim();
     if words.is_empty() && place.is_none() {
-        return;
+        return false;
+    }
+    let written_at = written_at_unix.to_bits();
+    let already = person.notes.iter().any(|note| {
+        note.kind == NoteKind::Text
+            && !note.mine
+            && note.written_at == written_at
+            && note.words.trim() == words
+            && note.place == place
+    });
+    if already {
+        return false;
     }
     let (day, time) = stamp_at(written_at_unix);
     person.notes.push(Note {
@@ -390,10 +446,12 @@ pub fn note_from_them(
         words: words.to_string(),
         mine: false,
         settled: true,
+        failed: false,
         place,
-        written_at: written_at_unix.to_bits(),
+        written_at,
         reaction: None,
     });
+    true
 }
 
 fn push_note(
@@ -418,6 +476,7 @@ fn push_note(
         words: words.to_string(),
         mine,
         settled: settled || cfg!(target_arch = "wasm32"),
+        failed: false,
         place,
         written_at: unix_now().to_bits(),
         reaction: None,
@@ -459,6 +518,7 @@ fn kept(kind: NoteKind, day: &str, time: &str, words: &str, mine: bool) -> Note 
         words: words.to_string(),
         mine,
         settled: true,
+        failed: false,
         place: None,
         written_at: 0,
         reaction: None,
@@ -544,6 +604,8 @@ pub struct Reach {
     pub ways: OfferedWays,
     /// The interface the stack's path uses, once one is known.
     pub winner: Option<String>,
+    /// How many hops that path takes, once one is known.
+    pub hops: Option<u8>,
 }
 
 impl Reach {
@@ -552,14 +614,21 @@ impl Reach {
             pending: true,
             ways: OfferedWays::none(),
             winner: None,
+            hops: None,
         }
     }
 }
 
-/// The words under a contact's name. A known path names its interface. A search still running says so. A finished search with no path is isolated.
-pub fn path_label(real: bool, pending: bool, winner: Option<&str>) -> String {
+/// The words under a contact's name. A known path names its interface. One hop, with nobody in between, is direct. A longer path says how many hops it takes. A search still running says so. A finished search with no path is isolated.
+pub fn path_label(real: bool, pending: bool, winner: Option<&str>, hops: Option<u8>) -> String {
     if let Some(winner) = winner.map(str::trim).filter(|winner| !winner.is_empty()) {
-        return winner.to_string();
+        let Some(hops) = hops else {
+            return winner.to_string();
+        };
+        if hops <= 1 {
+            return format!("{winner} : direct");
+        }
+        return format!("{winner} : {hops} hops");
     }
     if !real {
         return String::new();
@@ -662,6 +731,7 @@ pub fn add_person(people: &mut Vec<Person>, next_id: &mut u64, name: &str, ident
         name: name.to_string(),
         identity: identity.to_string(),
         notes: Vec::new(),
+        seen: 0,
     });
     true
 }
@@ -673,17 +743,55 @@ pub fn remove_person(people: &mut Vec<Person>, id: u64) -> bool {
     people.len() != before
 }
 
+/// The name shown in the list. An empty name is refused, and the notes stay.
+pub fn rename_person(people: &mut [Person], id: u64, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let Some(person) = people.iter_mut().find(|person| person.id == id) else {
+        return false;
+    };
+    if person.name == name {
+        return false;
+    }
+    person.name = name.to_string();
+    true
+}
+
+/// A note from them that arrived after this journal was last opened.
+pub fn has_unread(person: &Person) -> bool {
+    person
+        .notes
+        .iter()
+        .any(|note| !note.mine && note.id > person.seen)
+}
+
+/// The journal is open, so every note already in it has been seen.
+pub fn mark_read(person: &mut Person) -> bool {
+    let Some(latest) = person.notes.iter().map(|note| note.id).max() else {
+        return false;
+    };
+    if latest <= person.seen {
+        return false;
+    }
+    person.seen = latest;
+    true
+}
+
 /// The contact book, written as one line per field so a note can contain more than one line.
 /// Version 2 adds a place line after each note. Version 3 adds the time it was written
-/// and a reaction. A version 1 or 2 book still opens.
+/// and a reaction. Version 4 adds how far the journal has been read. Version 5 adds
+/// whether a note we sent has given up. An older book still opens, and its notes are already read.
 pub fn encode_contacts(people: &[Person]) -> String {
-    let mut out = String::from("journal-contacts 3\n");
+    let mut out = String::from("journal-contacts 5\n");
     out.push_str(&people.len().to_string());
     out.push('\n');
     for person in people {
         line(&mut out, &person.id.to_string());
         line(&mut out, &escape_field(&person.name));
         line(&mut out, &escape_field(&person.identity));
+        line(&mut out, &person.seen.to_string());
         line(&mut out, &person.notes.len().to_string());
         for note in &person.notes {
             line(&mut out, &note.id.to_string());
@@ -709,6 +817,7 @@ pub fn encode_contacts(people: &[Person]) -> String {
                 },
             );
             line(&mut out, note.reaction.map(Reaction::name).unwrap_or("-"));
+            line(&mut out, if note.failed { "1" } else { "0" });
         }
     }
     out
@@ -721,6 +830,8 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
         "journal-contacts 1" => 1,
         "journal-contacts 2" => 2,
         "journal-contacts 3" => 3,
+        "journal-contacts 4" => 4,
+        "journal-contacts 5" => 5,
         _ => return None,
     };
     let count: usize = lines.next()?.parse().ok()?;
@@ -729,6 +840,11 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
         let id = lines.next()?.parse().ok()?;
         let name = unescape_field(lines.next()?)?;
         let identity = unescape_field(lines.next()?)?;
+        let seen = if version >= 4 {
+            Some(lines.next()?.parse().ok()?)
+        } else {
+            None
+        };
         let notes_len: usize = lines.next()?.parse().ok()?;
         let mut notes = Vec::with_capacity(notes_len);
         for _ in 0..notes_len {
@@ -739,6 +855,7 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
                 time: unescape_field(lines.next()?)?,
                 mine: parse_flag(lines.next()?)?,
                 settled: parse_flag(lines.next()?)?,
+                failed: false,
                 words: unescape_field(lines.next()?)?,
                 place: if version >= 2 {
                     read_place(lines.next()?)?
@@ -759,12 +876,17 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
                     None
                 },
             });
+            if version >= 5 {
+                notes.last_mut().expect("the note").failed = parse_flag(lines.next()?)?;
+            }
         }
+        let seen = seen.unwrap_or_else(|| notes.iter().map(|note| note.id).max().unwrap_or(0));
         people.push(Person {
             id,
             name,
             identity,
             notes,
+            seen,
         });
     }
     if lines.next().is_some() {
@@ -879,19 +1001,28 @@ pub fn code_mark(payload: &str) -> Option<(usize, Vec<(usize, usize)>)> {
 mod tests {
     use super::{
         add_person, apply_reaction, can_call, code_mark, contact_code, decode_contacts,
-        encode_contacts, group_by_day, next_person_id, note_ids_from, offered_ways, path_label,
-        react_to_note, remember_call, remove_person, sample_people, settle_note, ways_for_ack,
+        encode_contacts, fail_note, group_by_day, has_unread, mark_read, next_person_id,
+        note_from_them, note_ids_from, offered_ways, path_label, react_to_note, remember_call,
+        remove_person, rename_person, retry_note, sample_people, settle_note, ways_for_ack,
         write_note, Note, NoteKind, OfferedWays, Person, Place, Reaction, PLACEHOLDER,
         VIDEO_ROUND_TRIP_MS,
     };
 
     #[test]
     fn a_contact_with_no_path_is_isolated() {
-        assert_eq!(path_label(true, true, None), "searching the mesh");
-        assert_eq!(path_label(true, false, None), "isolated");
-        assert_eq!(path_label(true, false, Some("  ")), "isolated");
-        assert_eq!(path_label(true, false, Some("USB")), "USB");
-        assert_eq!(path_label(false, false, None), "");
+        assert_eq!(path_label(true, true, None, None), "searching the mesh");
+        assert_eq!(path_label(true, false, None, None), "isolated");
+        assert_eq!(path_label(true, false, Some("  "), None), "isolated");
+        assert_eq!(path_label(true, false, Some("USB"), None), "USB");
+        assert_eq!(
+            path_label(true, false, Some("Bluetooth"), Some(1)),
+            "Bluetooth : direct"
+        );
+        assert_eq!(
+            path_label(true, false, Some("Bluetooth"), Some(2)),
+            "Bluetooth : 2 hops"
+        );
+        assert_eq!(path_label(false, false, None, None), "");
     }
 
     #[test]
@@ -951,6 +1082,7 @@ mod tests {
             name: "Ned".into(),
             identity: "ab".repeat(64),
             notes: Vec::new(),
+            seen: 0,
         };
         assert!(can_call(&real));
     }
@@ -1008,6 +1140,23 @@ mod tests {
         assert!(read.iter().all(|person| person.id != id));
         assert!(read.iter().all(|person| person.name != "Mara"));
         assert!(!remove_person(&mut people, id));
+    }
+
+    #[test]
+    fn renaming_a_contact_keeps_their_notes() {
+        let mut people = sample_people();
+        let id = people[0].id;
+        let notes = people[0].notes.clone();
+        assert!(!rename_person(&mut people, id, "   "));
+        assert_eq!(people[0].name, "Mara");
+        assert!(!rename_person(&mut people, id, "Mara"));
+        assert!(!rename_person(&mut people, 99, "Ned"));
+        assert!(rename_person(&mut people, id, "  Ned  "));
+        assert_eq!(people[0].name, "Ned");
+        assert!(people[0].notes == notes);
+        let read = decode_contacts(&encode_contacts(&people)).expect("the book");
+        assert_eq!(read[0].name, "Ned");
+        assert!(read[0].notes == notes);
     }
 
     #[test]
@@ -1082,6 +1231,7 @@ mod tests {
             id: 7,
             name: "Alex \\ the gate".into(),
             identity: "ab".repeat(64),
+            seen: 40,
             notes: vec![Note {
                 id: 40,
                 kind: NoteKind::Text,
@@ -1090,6 +1240,7 @@ mod tests {
                 words: "Line one.\nLine \\ two.".into(),
                 mine: true,
                 settled: false,
+                failed: true,
                 place: Some(Place::from_degrees(40.7484, -73.9857).expect("place")),
                 written_at: 1_700_000_000.0f64.to_bits(),
                 reaction: Some(Reaction::Love),
@@ -1100,12 +1251,14 @@ mod tests {
         assert_eq!(encode_contacts(&read), stored);
         assert_eq!(read[0].notes[0].words, "Line one.\nLine \\ two.");
         assert!(!read[0].notes[0].settled);
+        assert!(read[0].notes[0].failed);
         assert_eq!(
             read[0].notes[0].place,
             Place::from_degrees(40.7484, -73.9857)
         );
         assert_eq!(read[0].notes[0].written_at, 1_700_000_000.0f64.to_bits());
         assert_eq!(read[0].notes[0].reaction, Some(Reaction::Love));
+        assert_eq!(read[0].seen, 40);
         assert!(decode_contacts("not a book").is_none());
         let older = "\
 journal-contacts 1
@@ -1125,8 +1278,11 @@ Hello
         let older = decode_contacts(older).expect("version 1");
         assert_eq!(older[0].notes[0].words, "Hello");
         assert!(older[0].notes[0].place.is_none());
+        assert!(!older[0].notes[0].failed);
         assert_eq!(older[0].notes[0].written_at, 0);
         assert!(older[0].notes[0].reaction.is_none());
+        assert_eq!(older[0].seen, 40);
+        assert!(!has_unread(&older[0]));
         let version_two = "\
 journal-contacts 2
 1
@@ -1147,6 +1303,8 @@ Hello
         assert!(version_two[0].notes[0].place.is_none());
         assert_eq!(version_two[0].notes[0].written_at, 0);
         assert!(version_two[0].notes[0].reaction.is_none());
+        assert_eq!(version_two[0].seen, 40);
+        assert!(!has_unread(&version_two[0]));
         assert_eq!(next_person_id(&read), 8);
         note_ids_from(&read);
         let mut again = read;
@@ -1170,11 +1328,132 @@ Hello
     }
 
     #[test]
+    fn a_note_from_them_stays_unread_until_the_journal_is_opened() {
+        let mut person = Person {
+            id: 1,
+            name: "Alex".into(),
+            identity: "ab".into(),
+            seen: 0,
+            notes: Vec::new(),
+        };
+        write_note(&mut person, "I'm here.");
+        assert!(!has_unread(&person));
+        assert!(note_from_them(
+            &mut person,
+            "The pears are ready.",
+            1_700_000_000.0,
+            None
+        ));
+        assert!(has_unread(&person));
+        let read = decode_contacts(&encode_contacts(&[person.clone()])).expect("the book");
+        assert!(has_unread(&read[0]));
+        assert!(mark_read(&mut person));
+        assert!(!has_unread(&person));
+        assert!(!mark_read(&mut person));
+        let opened = decode_contacts(&encode_contacts(&[person])).expect("the opened book");
+        assert!(!has_unread(&opened[0]));
+        let older = "\
+journal-contacts 3
+1
+1
+Alex
+ab
+1
+4
+text
+Monday
+9:14
+0
+1
+Hello
+-
+-
+-
+";
+        let older = decode_contacts(older).expect("version 3");
+        assert_eq!(older[0].seen, 4);
+        assert!(!has_unread(&older[0]));
+    }
+
+    #[test]
+    fn a_second_copy_of_their_note_stays_one_entry() {
+        let mut person = Person {
+            id: 1,
+            name: "Alex".into(),
+            identity: "ab".into(),
+            seen: 0,
+            notes: Vec::new(),
+        };
+        assert!(note_from_them(
+            &mut person,
+            "The pears are ready.",
+            1_700_000_000.0,
+            None
+        ));
+        person.notes[0].reaction = Some(Reaction::Yes);
+        assert!(!note_from_them(
+            &mut person,
+            "  The pears are ready.  ",
+            1_700_000_000.0,
+            None
+        ));
+        assert_eq!(person.notes.len(), 1);
+        assert_eq!(person.notes[0].reaction, Some(Reaction::Yes));
+        assert!(note_from_them(
+            &mut person,
+            "The pears are ready.",
+            1_700_000_001.0,
+            None
+        ));
+        assert_eq!(person.notes.len(), 2);
+        let place = Place::from_degrees(41.0, -73.0);
+        assert!(note_from_them(
+            &mut person,
+            "Meet me here.",
+            1_700_000_002.0,
+            place
+        ));
+        assert!(!note_from_them(
+            &mut person,
+            "Meet me here.",
+            1_700_000_002.0,
+            place
+        ));
+        assert_eq!(person.notes.len(), 3);
+    }
+
+    #[test]
+    fn a_note_that_gives_up_can_be_sent_again() {
+        let mut people = vec![Person {
+            id: 1,
+            name: "Alex".into(),
+            identity: "ab".into(),
+            seen: 0,
+            notes: Vec::new(),
+        }];
+        let id = write_note(&mut people[0], "The pears are ready.").expect("a note");
+        assert!(fail_note(&mut people, id));
+        assert!(people[0].notes[0].failed);
+        assert!(!fail_note(&mut people, id));
+        assert!(settle_note(&mut people, id));
+        assert!(!people[0].notes[0].failed);
+        people[0].notes[0].settled = false;
+        people[0].notes[0].failed = true;
+        let mut person = people.pop().expect("the contact");
+        let (words, _, place) = retry_note(&mut person, id).expect("another try");
+        assert_eq!(words, "The pears are ready.");
+        assert!(place.is_none());
+        assert!(!person.notes[0].failed);
+        assert!(retry_note(&mut person, id).is_none());
+    }
+
+    #[test]
     fn a_reaction_marks_their_note_and_the_same_mark_clears_it() {
         let mut person = Person {
             id: 1,
             name: "Alex".into(),
             identity: "ab".into(),
+            seen: 0,
             notes: vec![Note {
                 id: 4,
                 kind: NoteKind::Text,
@@ -1183,6 +1462,7 @@ Hello
                 words: "The pears are ready.".into(),
                 mine: false,
                 settled: true,
+                failed: false,
                 place: None,
                 written_at: 1_700_000_000.0f64.to_bits(),
                 reaction: None,

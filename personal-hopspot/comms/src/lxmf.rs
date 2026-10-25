@@ -74,6 +74,110 @@ pub fn pack_reaction(
     out
 }
 
+/// The most bytes one link packet can carry.
+const LINK_PACKET: usize = 431;
+const FRAGMENT_MARK: u8 = 0xF1;
+const FRAGMENT_HEADER: usize = 13;
+const MAX_FRAGMENTS: usize = 48;
+
+/// One piece of a note that did not fit in a single packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fragment {
+    pub group: u64,
+    pub index: u16,
+    pub count: u16,
+    pub bytes: Vec<u8>,
+}
+
+/// Splits a packed note into link packets. A note that already fits is left as one packet.
+pub fn link_packets(packed: &[u8]) -> Vec<Vec<u8>> {
+    if packed.is_empty() {
+        return Vec::new();
+    }
+    if packed.len() <= LINK_PACKET {
+        return vec![packed.to_vec()];
+    }
+    let room = LINK_PACKET - FRAGMENT_HEADER;
+    let count = packed.len().div_ceil(room);
+    if count > MAX_FRAGMENTS {
+        return Vec::new();
+    }
+    let group = group_id(packed);
+    let mut packets = Vec::with_capacity(count);
+    for (index, chunk) in packed.chunks(room).enumerate() {
+        let mut packet = Vec::with_capacity(FRAGMENT_HEADER + chunk.len());
+        packet.push(FRAGMENT_MARK);
+        packet.extend_from_slice(&group.to_be_bytes());
+        packet.extend_from_slice(&(index as u16).to_be_bytes());
+        packet.extend_from_slice(&(count as u16).to_be_bytes());
+        packet.extend_from_slice(chunk);
+        packets.push(packet);
+    }
+    packets
+}
+
+/// Opens one piece of a split note. A whole note is left closed.
+pub fn open_fragment(bytes: &[u8]) -> Option<Fragment> {
+    if bytes.first() != Some(&FRAGMENT_MARK) || bytes.len() <= FRAGMENT_HEADER {
+        return None;
+    }
+    let group = u64::from_be_bytes(bytes[1..9].try_into().ok()?);
+    let index = u16::from_be_bytes(bytes[9..11].try_into().ok()?);
+    let count = u16::from_be_bytes(bytes[11..13].try_into().ok()?);
+    let count_usize = usize::from(count);
+    if count_usize == 0 || count_usize > MAX_FRAGMENTS || usize::from(index) >= count_usize {
+        return None;
+    }
+    let piece = bytes[FRAGMENT_HEADER..].to_vec();
+    if piece.is_empty() || piece.len() > LINK_PACKET - FRAGMENT_HEADER {
+        return None;
+    }
+    Some(Fragment {
+        group,
+        index,
+        count,
+        bytes: piece,
+    })
+}
+
+/// Pieces of one note, joined when every piece has arrived.
+#[derive(Debug, Default)]
+pub struct Assembly {
+    count: u16,
+    parts: Vec<Option<Vec<u8>>>,
+}
+
+impl Assembly {
+    /// Stores this piece. The packed note comes back once every piece is here.
+    pub fn offer(&mut self, fragment: Fragment) -> Option<Vec<u8>> {
+        let count = usize::from(fragment.count);
+        if self.count != fragment.count || self.parts.len() != count {
+            self.count = fragment.count;
+            self.parts = vec![None; count];
+        }
+        self.parts[usize::from(fragment.index)] = Some(fragment.bytes);
+        if self.parts.iter().any(Option::is_none) {
+            return None;
+        }
+        let mut whole = Vec::new();
+        for part in &mut self.parts {
+            whole.extend(part.take().unwrap_or_default());
+        }
+        self.count = 0;
+        self.parts.clear();
+        Some(whole)
+    }
+}
+
+fn group_id(packed: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in packed {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 struct ReadMessage {
     words: String,
     written_at: f64,
@@ -404,6 +508,35 @@ mod tests {
         assert_eq!(packed[0], 0x94);
         assert_eq!(packed[1], 0xcb);
         assert_eq!(*packed.last().unwrap(), 0x80);
+    }
+
+    #[test]
+    fn a_long_note_travels_as_packets_and_comes_back_together() {
+        let words = "a".repeat(1400);
+        let packed = pack_note(&words, 1_700_000_000.0);
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(
+            LINK_PACKET,
+            personal_rns::engine::MAX_SEND_TO_LINK_PLAINTEXT_LEN
+        );
+        assert!(packed.len() > LINK_PACKET);
+        let packets = link_packets(&packed);
+        assert!(packets.len() > 1);
+        assert!(packets.iter().all(|packet| packet.len() <= LINK_PACKET));
+        assert!(open_note(&packets[0]).is_none());
+        let mut assembly = Assembly::default();
+        let mut whole = None;
+        for packet in &packets {
+            let fragment = open_fragment(packet).expect("a piece");
+            whole = assembly.offer(fragment);
+        }
+        let whole = whole.expect("the note");
+        assert_eq!(whole, packed);
+        let note = open_note(&whole).expect("note");
+        assert_eq!(note.words, words);
+        let short = pack_note("The pears are ready.", 1_700_000_000.0);
+        let one = link_packets(&short);
+        assert_eq!(one, vec![short]);
     }
 
     #[test]

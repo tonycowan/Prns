@@ -1,10 +1,10 @@
 [package]
 name = "personal-hopspot-comms"
-version = "0.1.0"
+version = "0.1.10"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "TouchBase, a private journal shared with people you have added."
+description = "Optio, a private journal shared with people you have added."
 
 [workspace]
 resolver = "2"
@@ -85,6 +85,20 @@ personal-rns = { path = "../../personal-rns", version = "0.3.8", default-feature
 prns-ffi = { path = "../../prns-ffi", version = "0.3.8", default-features = false }
 jni = "0.21"
 ndk-context = "0.1"
+
+# Linux and Windows use the same four interfaces as macOS. DNS-SD is the
+# Bonjour counterpart, BlueZ or WinRT is the Bluetooth counterpart, and the
+# USB host scans serial cables the same way the Mac app does.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+personal-rns = { path = "../../personal-rns", version = "0.3.8", default-features = false, features = ["wifi-auto-mdns", "bluetooth-auto", "usb"] }
+notify-rust = "4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

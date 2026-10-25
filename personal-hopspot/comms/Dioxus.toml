@@ -1,11 +1,11 @@
 [application]
-name = "TouchBase"
+name = "Optio"
 default_platform = "desktop"
 android_min_sdk_version = 30
 android_main_activity = "android/MainActivity.kt"
 
 [web.app]
-title = "TouchBase"
+title = "Optio"
 
 [bundle]
 identifier = "org.personal.prns.comms"
@@ -13,7 +13,7 @@ publisher = "Personal PRNS"
 short_description = "A private journal shared with people you have added"
 
 [permissions]
-location = { precision = "fine", description = "TouchBase uses your location when you add it to a note." }
+location = { precision = "fine", description = "Optio uses your location when you add it to a note." }
 
 [android]
 min_sdk = 30
@@ -35,6 +35,8 @@ manifest = """
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />

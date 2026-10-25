@@ -3,4 +3,8 @@
     <usb-device
         vendor-id="4617"
         product-id="1" />
+    <!-- Espressif USB-Serial-JTAG, 0x303A/0x1001. Heltec V4 speaks through this port. -->
+    <usb-device
+        vendor-id="12346"
+        product-id="4097" />
 </resources>

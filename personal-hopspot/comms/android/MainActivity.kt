@@ -12,15 +12,23 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.media.AudioManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
+import android.view.View
+import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.personal.prns.controller.BleLink
 import org.personal.prns.controller.UsbLink
@@ -39,6 +47,9 @@ class MainActivity : WryActivity() {
     private var ble: BleLink? = null
     private var usb: UsbLink? = null
     private var earLock: PowerManager.WakeLock? = null
+
+    @Volatile
+    private var open: Boolean = false
 
     private val permission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -69,7 +80,13 @@ class MainActivity : WryActivity() {
             startRadios()
         }
 
+    private val notesPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            askBattery()
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        process = applicationContext
         bindToWifi()
         super.onCreate(savedInstanceState)
         instance = this
@@ -78,11 +95,55 @@ class MainActivity : WryActivity() {
         wifi = lan
         startRadios()
         requestRadioPermissions()
+        askNotes()
+    }
+
+    override fun onWebViewCreate(webView: WebView) {
+        webView.overScrollMode = View.OVER_SCROLL_NEVER
     }
 
     override fun onResume() {
         super.onResume()
+        open = true
         startRadios()
+    }
+
+    override fun onPause() {
+        open = false
+        super.onPause()
+    }
+
+    fun showing(): Boolean = open
+
+    fun showNote(name: String, words: String) {
+        postNote(name, words)
+    }
+
+    private fun askNotes() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notesPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            askBattery()
+        }
+    }
+
+    private fun askBattery() {
+        if (askedPower) {
+            return
+        }
+        askedPower = true
+        val power = getSystemService(PowerManager::class.java) ?: return
+        if (power.isIgnoringBatteryOptimizations(packageName)) {
+            return
+        }
+        val intent = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:$packageName"),
+        )
+        runCatching { startActivity(intent) }
     }
 
     private fun startRadios() {
@@ -371,8 +432,60 @@ class MainActivity : WryActivity() {
         @JvmField
         var status: Int = UNAVAILABLE
 
+        private val NOTE_IDS = AtomicInteger(0)
+
+        @Volatile
+        private var askedPower = false
+
         @Volatile
         private var instance: MainActivity? = null
+
+        @Volatile
+        private var process: Context? = null
+
+        @JvmStatic
+        fun onScreen(): Boolean = instance?.showing() == true
+
+        @JvmStatic
+        fun postNote(name: String, words: String) {
+            val context = process ?: return
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            val channelId = "notes"
+            val channel = NotificationChannel(
+                channelId,
+                "Notes",
+                NotificationManager.IMPORTANCE_HIGH,
+            )
+            manager.createNotificationChannel(channel)
+            val launch = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pending = PendingIntent.getActivity(
+                context,
+                0,
+                launch,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val icon = context.applicationInfo.icon.takeIf { it != 0 }
+                ?: android.R.drawable.stat_notify_chat
+            val title = name.ifBlank { "Someone" }
+            val text = words.ifBlank { "A new note" }
+            val notification = Notification.Builder(context, channelId)
+                .setSmallIcon(icon)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(Notification.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .build()
+            manager.notify(NOTE_IDS.incrementAndGet(), notification)
+        }
 
         @JvmStatic
         fun showPlace(query: String) {

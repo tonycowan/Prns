@@ -56,6 +56,51 @@ pub fn contact_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<(String
     contact_from_luma(&DynamicImage::ImageRgba8(image).to_luma8())
 }
 
+/// A camera frame is BGRA, one pixel per four bytes, with `stride` bytes per row.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn contact_from_bgra(
+    bgra: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Option<(String, String)> {
+    if width == 0 || height == 0 || stride < width.saturating_mul(4) {
+        return None;
+    }
+    if u64::from(width) * u64::from(height) > 16_000_000 {
+        return None;
+    }
+    let (out_w, out_h) = fit_edge(width, height, 1280);
+    let mut luma = Vec::with_capacity((out_w as usize) * (out_h as usize));
+    for y in 0..out_h {
+        let sy = (u64::from(y) * u64::from(height) / u64::from(out_h)) as usize;
+        for x in 0..out_w {
+            let sx = (u64::from(x) * u64::from(width) / u64::from(out_w)) as usize;
+            let from = sy * stride as usize + sx * 4;
+            let pixel = bgra.get(from..from + 4)?;
+            let blue = u32::from(pixel[0]);
+            let green = u32::from(pixel[1]);
+            let red = u32::from(pixel[2]);
+            luma.push(((red * 77 + green * 150 + blue * 29) >> 8) as u8);
+        }
+    }
+    let image = GrayImage::from_raw(out_w, out_h, luma)?;
+    contact_from_luma(&image)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fit_edge(width: u32, height: u32, edge: u32) -> (u32, u32) {
+    let longest = width.max(height);
+    if longest <= edge {
+        (width, height)
+    } else {
+        (
+            ((u64::from(width) * u64::from(edge) / u64::from(longest)).max(1) as u32),
+            ((u64::from(height) * u64::from(edge) / u64::from(longest)).max(1) as u32),
+        )
+    }
+}
+
 #[cfg(test)]
 pub fn code_png(payload: &str) -> Option<Vec<u8>> {
     let code = QrCode::new(payload.as_bytes()).ok()?;
@@ -93,6 +138,8 @@ pub fn code_png(payload: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::contact_from_bgra;
     use super::{code_png, contact_from_code, contact_from_image, contact_from_luma};
     use crate::model::contact_code;
 
@@ -101,6 +148,32 @@ mod tests {
         let payload = contact_code("Mara", "19ab44c0e8d15f2076c3aa91b0d4e6f2");
         let png = code_png(&payload).expect("the mark encodes");
         let (name, identity) = contact_from_image(&png).expect("the photo reads back");
+        assert_eq!(name, "Mara");
+        assert_eq!(identity, "19ab44c0e8d15f2076c3aa91b0d4e6f2");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_camera_frame_of_a_code_is_the_name_and_the_identity() {
+        let payload = contact_code("Mara", "19ab44c0e8d15f2076c3aa91b0d4e6f2");
+        let png = code_png(&payload).expect("the mark encodes");
+        let gray = image::load_from_memory(&png).expect("png").into_luma8();
+        let width = gray.width();
+        let height = gray.height();
+        let stride = width * 4 + 16;
+        let mut bgra = vec![255u8; stride as usize * height as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let value = gray.get_pixel(x, y)[0];
+                let at = y as usize * stride as usize + x as usize * 4;
+                bgra[at] = value;
+                bgra[at + 1] = value;
+                bgra[at + 2] = value;
+                bgra[at + 3] = 255;
+            }
+        }
+        let (name, identity) =
+            contact_from_bgra(&bgra, width, height, stride).expect("the frame reads back");
         assert_eq!(name, "Mara");
         assert_eq!(identity, "19ab44c0e8d15f2076c3aa91b0d4e6f2");
     }

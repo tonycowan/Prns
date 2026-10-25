@@ -353,17 +353,29 @@ class UsbLink(private val context: Context) {
         val productId = NativeBridge.nativeUsbAutoProductId()
         return usbManager.deviceList.values
             .asSequence()
-            .filter { it.vendorId == vendorId && it.productId == productId }
+            .filter { device ->
+                (device.vendorId == vendorId && device.productId == productId) ||
+                    isEspressifSerialJtag(device)
+            }
             .mapNotNull { device ->
                 findBulkEndpoints(device)?.let { UsbCandidate.Bulk(device, it) }
             }
             .firstOrNull()
     }
 
+    private fun isEspressifSerialJtag(device: UsbDevice): Boolean =
+        device.vendorId == ESPRESSIF_VENDOR_ID &&
+            device.productId == ESPRESSIF_SERIAL_JTAG_PRODUCT_ID
+
     private fun findBulkEndpoints(device: UsbDevice): BulkEndpoints? {
+        val wantedClass = if (isEspressifSerialJtag(device)) {
+            UsbConstants.USB_CLASS_CDC_DATA
+        } else {
+            UsbConstants.USB_CLASS_VENDOR_SPEC
+        }
         for (interfaceIndex in 0 until device.interfaceCount) {
             val usbInterface = device.getInterface(interfaceIndex)
-            if (usbInterface.interfaceClass != UsbConstants.USB_CLASS_VENDOR_SPEC) {
+            if (usbInterface.interfaceClass != wantedClass) {
                 continue
             }
             val inEndpoint = findBulkEndpoint(usbInterface, UsbConstants.USB_DIR_IN)
@@ -489,6 +501,8 @@ class UsbLink(private val context: Context) {
 
     companion object {
         private const val TAG = "ControllerUsb"
+        private const val ESPRESSIF_VENDOR_ID = 0x303A
+        private const val ESPRESSIF_SERIAL_JTAG_PRODUCT_ID = 0x1001
         private const val ACTION_USB_PERMISSION = "org.personal.prns.comms.USB_PERMISSION"
         private const val RX_CAPACITY = 16 * 1024
         private const val TX_CAPACITY = 4 * 1024

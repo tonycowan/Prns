@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    stamp_version();
     println!("cargo:rerun-if-changed=android");
     let Ok(kotlin_dir) = std::env::var("WRY_ANDROID_KOTLIN_FILES_OUT_DIR") else {
         return;
@@ -45,6 +46,61 @@ fn main() {
     let manifest = app_main.join("AndroidManifest.xml");
     ensure_photo_provider(&manifest);
     ensure_usb_attachment(&manifest);
+}
+
+/// Release builds show `v` plus the crate version. Everything else adds the commit.
+fn stamp_version() {
+    println!("cargo:rerun-if-env-changed=TOUCHBASE_RELEASE");
+    watch_git_head();
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+    let shown = if release_build() {
+        format!("v{version}")
+    } else {
+        match commit_id() {
+            Some(commit) => format!("v{version}+{commit}"),
+            None => format!("v{version}"),
+        }
+    };
+    println!("cargo:rustc-env=TOUCHBASE_VERSION={shown}");
+}
+
+fn release_build() -> bool {
+    matches!(
+        std::env::var("TOUCHBASE_RELEASE").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+fn watch_git_head() {
+    let git = Path::new("../../.git");
+    let head = git.join("HEAD");
+    if !head.is_file() {
+        return;
+    }
+    println!("cargo:rerun-if-changed={}", head.display());
+    let Ok(text) = fs::read_to_string(&head) else {
+        return;
+    };
+    if let Some(reference) = text.trim().strip_prefix("ref: ") {
+        println!("cargo:rerun-if-changed={}", git.join(reference).display());
+    }
+}
+
+fn commit_id() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?;
+    let sha = sha.trim();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha.to_string())
+    }
 }
 
 fn ensure_photo_provider(manifest: &Path) {

@@ -20,6 +20,8 @@ use personal_rns::routing::delivery::Delivery;
 use personal_rns::routing::links::LinkId;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use personal_rns::wifi_auto::{apple_service_discovery, AutoWifi};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use personal_rns::wifi_auto::{native_service_discovery, AutoWifi, AutoWifiDevicePolicy};
 #[cfg(target_os = "android")]
 use personal_rns::wifi_auto::{
     native_service_discovery_with_host_lan, AutoWifi, AutoWifiDevicePolicy,
@@ -45,6 +47,12 @@ struct Mail {
     marks: Vec<ArrivedReaction>,
     /// Notes whose link receipt has come back.
     acked: Vec<u64>,
+    /// Notes that were tried three times and will not send themselves again.
+    failed: Vec<u64>,
+    /// Pieces of a long note that arrived before the other person was known.
+    waiting_parts: HashMap<LinkId, Vec<crate::lxmf::Fragment>>,
+    /// Pieces of a long note, joined when every piece has arrived.
+    assemblies: HashMap<(String, u64), crate::lxmf::Assembly>,
 }
 
 /// A note that arrived on a link, still waiting for the contact list.
@@ -292,7 +300,11 @@ fn prepare_contacts() {
 fn queue_unsent(people: &[crate::model::Person]) {
     for person in people {
         for note in &person.notes {
-            if note.mine && !note.settled && note.kind == crate::model::NoteKind::Text {
+            if note.mine
+                && !note.settled
+                && !note.failed
+                && note.kind == crate::model::NoteKind::Text
+            {
                 send_note(
                     &person.identity,
                     &note.words,
@@ -396,7 +408,7 @@ pub struct ClipboardContents {
 
 #[cfg(target_os = "android")]
 pub fn read_clipboard() -> Option<ClipboardContents> {
-    with_android_context(|env, context| {
+    with_process(|env, context| {
         let clipboard = system_service(env, context, "clipboard")?;
         if clipboard.is_null() {
             return Ok(ClipboardContents {
@@ -553,7 +565,7 @@ fn system_service<'local>(
 
 #[cfg(target_os = "android")]
 pub fn copy_to_clipboard(text: &str) -> bool {
-    with_android_context(|env, context| {
+    with_process(|env, context| {
         let clipboard_service = env.new_string("clipboard")?;
         let clipboard = env
             .call_method(
@@ -589,7 +601,11 @@ pub fn copy_to_clipboard(text: &str) -> bool {
 
 #[cfg(target_os = "android")]
 fn android_files_dir() -> Option<PathBuf> {
-    with_android_context(|env, context| {
+    static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(directory) = DIRECTORY.get() {
+        return Some(directory.clone());
+    }
+    let directory = with_process(|env, context| {
         let file = env
             .call_method(context, "getFilesDir", "()Ljava/io/File;", &[])?
             .l()?;
@@ -599,7 +615,8 @@ fn android_files_dir() -> Option<PathBuf> {
         let path: String = env.get_string(&jni::objects::JString::from(path))?.into();
         Ok(PathBuf::from(path).join("journal"))
     })
-    .ok()
+    .ok()?;
+    Some(DIRECTORY.get_or_init(|| directory).clone())
 }
 
 #[cfg(target_os = "android")]
@@ -626,6 +643,77 @@ pub fn machine_label(model: &str) -> String {
 }
 
 #[cfg(target_os = "android")]
+struct AndroidProcess {
+    vm: jni::JavaVM,
+    app: jni::objects::GlobalRef,
+    class: jni::objects::GlobalRef,
+}
+
+/// The process context and the activity class, taken once while the activity is alive.
+/// Later calls use these owned references. The activity reference published by the
+/// binding is deleted when that activity is destroyed.
+#[cfg(target_os = "android")]
+fn android_process() -> jni::errors::Result<&'static AndroidProcess> {
+    static PROCESS: OnceLock<AndroidProcess> = OnceLock::new();
+    if let Some(process) = PROCESS.get() {
+        return Ok(process);
+    }
+    let loaded = load_android_process()?;
+    Ok(PROCESS.get_or_init(|| loaded))
+}
+
+#[cfg(target_os = "android")]
+fn load_android_process() -> jni::errors::Result<AndroidProcess> {
+    let ctx = ndk_context::android_context();
+    if ctx.vm().is_null() || ctx.context().is_null() {
+        return Err(jni::errors::Error::NullPtr("android context"));
+    }
+    // SAFETY: The Dioxus Android binding installs this process JavaVM before `main`.
+    // `JavaVM::from_raw` only wraps that pointer; dropping the wrapper does not destroy the VM.
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }?;
+    let (app, class) = {
+        let mut env = vm.attach_current_thread()?;
+        // SAFETY: The same binding publishes the activity as a live JNI context reference.
+        // `JObject` does not delete that reference when dropped.
+        let activity = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
+        let app = env
+            .call_method(
+                &activity,
+                "getApplicationContext",
+                "()Landroid/content/Context;",
+                &[],
+            )?
+            .l()?;
+        if app.is_null() {
+            return Err(jni::errors::Error::NullPtr("application context"));
+        }
+        let app = env.new_global_ref(app)?;
+        let class = env.get_object_class(&activity)?;
+        let class = env.new_global_ref(class)?;
+        (app, class)
+    };
+    Ok(AndroidProcess { vm, app, class })
+}
+
+#[cfg(target_os = "android")]
+fn with_process<T>(
+    body: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JObject) -> jni::errors::Result<T>,
+) -> jni::errors::Result<T> {
+    let process = android_process()?;
+    let mut env = process.vm.attach_current_thread()?;
+    body(&mut env, process.app.as_obj())
+}
+
+#[cfg(target_os = "android")]
+fn with_activity_class<T>(
+    body: impl FnOnce(&mut jni::JNIEnv, &jni::objects::GlobalRef) -> jni::errors::Result<T>,
+) -> jni::errors::Result<T> {
+    let process = android_process()?;
+    let mut env = process.vm.attach_current_thread()?;
+    body(&mut env, &process.class)
+}
+
+#[cfg(target_os = "android")]
 fn with_android_context<T>(
     body: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JObject) -> jni::errors::Result<T>,
 ) -> jni::errors::Result<T> {
@@ -638,6 +726,34 @@ fn with_android_context<T>(
     // `JObject` does not delete that reference when dropped.
     let context = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
     body(&mut env, &context)
+}
+
+/// The journal activity is on screen. A paused or destroyed activity counts as away.
+#[cfg(target_os = "android")]
+pub(crate) fn screen_is_on() -> bool {
+    with_activity_class(|env, class| {
+        Ok(env.call_static_method(class, "onScreen", "()Z", &[])?.z()?)
+    })
+    .unwrap_or(false)
+}
+
+/// Posts a banner for a note that arrived while the journal was in the background.
+#[cfg(target_os = "android")]
+pub(crate) fn show_banner(name: &str, words: &str) {
+    let _ = with_activity_class(|env, class| {
+        let name = env.new_string(name)?;
+        let words = env.new_string(words)?;
+        env.call_static_method(
+            class,
+            "postNote",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                jni::objects::JValue::Object(&name),
+                jni::objects::JValue::Object(&words),
+            ],
+        )?;
+        Ok(())
+    });
 }
 
 #[cfg(target_os = "android")]
@@ -745,6 +861,7 @@ pub fn send_note(
         destination,
         packed,
         note_id,
+        tries: 0,
     });
     nudge_delivery();
 }
@@ -767,14 +884,19 @@ pub fn send_reaction(
         destination,
         packed: crate::lxmf::pack_reaction(written_at, words, reaction),
         note_id: 0,
+        tries: 0,
     });
     nudge_delivery();
 }
+
+/// How many times a note is sent before it is marked failed.
+const GIVE_UP_AFTER: u8 = 3;
 
 struct QueuedNote {
     destination: personal_rns::wire::DestinationHash,
     packed: Vec<u8>,
     note_id: u64,
+    tries: u8,
 }
 
 fn note_queue() -> std::sync::MutexGuard<'static, Vec<QueuedNote>> {
@@ -808,23 +930,34 @@ fn nudge_delivery() {
                 continue;
             }
             let mut again = Vec::new();
-            for note in batch {
+            for mut note in batch {
                 if deliver_note(&note).await {
                     if note.note_id != 0 {
                         mail().acked.push(note.note_id);
                     }
                 } else {
-                    again.push(note);
+                    note.tries = note.tries.saturating_add(1);
+                    if note.tries >= GIVE_UP_AFTER {
+                        if note.note_id != 0 {
+                            mail().failed.push(note.note_id);
+                        }
+                    } else {
+                        again.push(note);
+                    }
                 }
             }
             if !again.is_empty() {
-                {
+                let pause = {
                     let mut queue = note_queue();
                     let fresh = std::mem::take(&mut *queue);
-                    *queue = again;
-                    queue.extend(fresh);
+                    let pause = fresh.is_empty();
+                    *queue = fresh;
+                    queue.extend(again);
+                    pause
+                };
+                if pause {
+                    rest(5_000).await;
                 }
-                rest(5_000).await;
             }
         }
     });
@@ -834,6 +967,10 @@ async fn deliver_note(note: &QueuedNote) -> bool {
     let Some(handle) = HANDLE.get().cloned() else {
         return false;
     };
+    let packets = crate::lxmf::link_packets(&note.packed);
+    if packets.is_empty() {
+        return false;
+    }
     let ours = OURS.get().copied();
     let attempt = async {
         let _ = seek_path(&handle, note.destination).await;
@@ -843,11 +980,15 @@ async fn deliver_note(note: &QueuedNote) -> bool {
         if let Some(ours) = ours {
             let _ = handle.identify(link, ours).await;
         }
-        handle.send_link_packet(link, &note.packed).await.is_ok()
+        for packet in &packets {
+            if handle.send_link_packet(link, packet).await.is_err() {
+                return false;
+            }
+        }
+        true
     };
-    tokio::time::timeout(Duration::from_secs(20), attempt)
-        .await
-        .unwrap_or(false)
+    let budget = Duration::from_secs(20u64.saturating_mul(packets.len() as u64));
+    tokio::time::timeout(budget, attempt).await.unwrap_or(false)
 }
 
 /// Which of the four wires currently has a peer.
@@ -906,8 +1047,17 @@ pub use crate::model::Reach;
 struct ReachState {
     generation: u64,
     path: Option<String>,
+    hops: Option<u8>,
     ways: crate::model::OfferedWays,
     done: bool,
+    /// The last time this journal read the stack's current path.
+    looked_at: Instant,
+    /// An announce or a removed route for this contact arrived after that read.
+    due: bool,
+    /// The path changed while a call was up, so the sample waits until the call is quiet.
+    sample_due: bool,
+    /// A read of the stack's current path, or the sample on it, is already running.
+    looking: bool,
 }
 
 fn reach_map() -> std::sync::MutexGuard<'static, HashMap<String, ReachState>> {
@@ -923,11 +1073,13 @@ pub fn reach_for(identity: &str) -> Reach {
             pending: !state.done,
             ways: state.ways,
             winner: state.path.clone(),
+            hops: state.hops,
         },
         None => Reach {
             pending: false,
             ways: crate::model::OfferedWays::none(),
             winner: None,
+            hops: None,
         },
     }
 }
@@ -937,6 +1089,7 @@ pub fn forget(identity: &str) {
 }
 
 /// Lets the stack choose a path, names that interface, then times one sample on it.
+/// One search per visit. [`watch`] follows later changes to that path.
 pub fn measure(identity: &str) {
     let identity = identity.trim().to_string();
     if destination_for_contact(&identity).is_none() {
@@ -956,8 +1109,13 @@ pub fn measure(identity: &str) {
             ReachState {
                 generation,
                 path: None,
+                hops: None,
                 ways: crate::model::OfferedWays::none(),
                 done: false,
+                looked_at: Instant::now(),
+                due: false,
+                sample_due: false,
+                looking: false,
             },
         );
     }
@@ -980,7 +1138,12 @@ pub fn measure(identity: &str) {
             .is_ok()
         {
             if let Some(route) = handle.route(destination).await {
-                remember_path(&identity, generation, interface_name(route.interface));
+                remember_path(
+                    &identity,
+                    generation,
+                    interface_name(route.interface),
+                    route.hops,
+                );
             }
         }
         let ways = crate::model::ways_for_ack(send_probe(&handle, destination, ours).await);
@@ -993,7 +1156,7 @@ fn next_search() -> u64 {
     SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-fn remember_path(identity: &str, generation: u64, path: String) {
+fn remember_path(identity: &str, generation: u64, path: String, hops: u8) {
     let mut map = reach_map();
     let Some(state) = map.get_mut(identity) else {
         return;
@@ -1002,6 +1165,7 @@ fn remember_path(identity: &str, generation: u64, path: String) {
         return;
     }
     state.path = Some(path);
+    state.hops = Some(hops);
 }
 
 fn finish_search(identity: &str, generation: u64, ways: crate::model::OfferedWays) {
@@ -1014,6 +1178,181 @@ fn finish_search(identity: &str, generation: u64, ways: crate::model::OfferedWay
     }
     state.ways = ways;
     state.done = true;
+    state.looked_at = Instant::now();
+    state.due = false;
+    state.sample_due = false;
+    state.looking = false;
+}
+
+/// How often an open journal re-reads the path the stack is using, when no announce has arrived.
+const ROUTE_LOOK: Duration = Duration::from_secs(2);
+
+/// Re-reads the path the stack is using for an open journal.
+/// A different path that is still a path gets a new sample, so note, voice, and video follow it.
+pub fn watch(identity: &str) {
+    let identity = identity.trim().to_string();
+    let quiet = call_is_quiet();
+    let generation = {
+        let mut map = reach_map();
+        let Some(state) = map.get_mut(&identity) else {
+            return;
+        };
+        if !state.done || state.looking {
+            return;
+        }
+        let route_due = state.due || state.looked_at.elapsed() >= ROUTE_LOOK;
+        if !route_due && !(state.sample_due && quiet) {
+            return;
+        }
+        state.due = false;
+        state.looking = true;
+        state.looked_at = Instant::now();
+        state.generation
+    };
+    let Some(runtime) = RUNTIME.get().cloned() else {
+        apply_watched_route(&identity, generation, RouteLook::Skipped, true);
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        apply_watched_route(&identity, generation, RouteLook::Skipped, true);
+        return;
+    };
+    let ours = OURS.get().copied();
+    runtime.spawn(async move {
+        let look = match destination_for_contact(&identity) {
+            Some(destination) => match handle.route(destination).await {
+                Some(route) => RouteLook::Known(interface_name(route.interface), route.hops),
+                None => RouteLook::Gone,
+            },
+            None => RouteLook::Skipped,
+        };
+        let follow = apply_watched_route(&identity, generation, look, call_is_quiet());
+        if !matches!(follow, SampleNext::Now) {
+            return;
+        }
+        if !call_is_quiet() {
+            postpone_sample(&identity, generation);
+            return;
+        }
+        let ways = match destination_for_contact(&identity) {
+            Some(destination) => {
+                crate::model::ways_for_ack(send_probe(&handle, destination, ours).await)
+            }
+            None => crate::model::OfferedWays::none(),
+        };
+        finish_sample(&identity, generation, ways);
+    });
+}
+
+enum RouteLook {
+    Known(String, u8),
+    Gone,
+    Skipped,
+}
+
+enum SampleNext {
+    Now,
+    AfterCall,
+    None,
+}
+
+/// A known path that is not the one already shown needs a new sample. An isolated path does not.
+fn path_needs_sample(path: Option<&str>, hops: Option<u8>, look: &RouteLook) -> bool {
+    let RouteLook::Known(next, next_hops) = look else {
+        return false;
+    };
+    path != Some(next.as_str()) || hops != Some(*next_hops)
+}
+
+fn apply_watched_route(
+    identity: &str,
+    generation: u64,
+    look: RouteLook,
+    quiet: bool,
+) -> SampleNext {
+    let mut map = reach_map();
+    let Some(state) = map.get_mut(identity) else {
+        return SampleNext::None;
+    };
+    if state.generation != generation || !state.done {
+        return SampleNext::None;
+    }
+    let changed = path_needs_sample(state.path.as_deref(), state.hops, &look);
+    let wanted = changed || (state.sample_due && matches!(look, RouteLook::Known(_, _)));
+    match look {
+        RouteLook::Known(path, hops) => {
+            state.path = Some(path);
+            state.hops = Some(hops);
+        }
+        RouteLook::Gone => {
+            state.path = None;
+            state.hops = None;
+            state.sample_due = false;
+            state.looking = false;
+            return SampleNext::None;
+        }
+        RouteLook::Skipped => {
+            state.looking = false;
+            return SampleNext::None;
+        }
+    }
+    if !wanted {
+        state.looking = false;
+        return SampleNext::None;
+    }
+    if !quiet {
+        state.sample_due = true;
+        state.looking = false;
+        return SampleNext::AfterCall;
+    }
+    state.sample_due = false;
+    state.ways = crate::model::OfferedWays::none();
+    state.looking = true;
+    SampleNext::Now
+}
+
+fn postpone_sample(identity: &str, generation: u64) {
+    let mut map = reach_map();
+    let Some(state) = map.get_mut(identity) else {
+        return;
+    };
+    if state.generation != generation || !state.done {
+        return;
+    }
+    state.sample_due = true;
+    state.looking = false;
+}
+
+fn finish_sample(identity: &str, generation: u64, ways: crate::model::OfferedWays) {
+    let mut map = reach_map();
+    let Some(state) = map.get_mut(identity) else {
+        return;
+    };
+    if state.generation != generation || !state.done {
+        return;
+    }
+    state.ways = ways;
+    state.looking = false;
+    state.looked_at = Instant::now();
+}
+
+fn call_is_quiet() -> bool {
+    matches!(call_face(), CallFace::Quiet | CallFace::Failed { .. })
+}
+
+fn note_route_churn(destination: DestinationHash) {
+    let mut map = reach_map();
+    for (identity, state) in map.iter_mut() {
+        if !state.done {
+            continue;
+        }
+        let Some(theirs) = destination_for_contact(identity) else {
+            continue;
+        };
+        if theirs == destination {
+            state.due = true;
+        }
+    }
 }
 
 /// How long the journal waits on a path request, and on the sample, before it moves on.
@@ -1072,18 +1411,11 @@ fn is_gateway_client(interface: personal_rns::interfaces::InterfaceId) -> bool {
 }
 
 fn gateway_client_id() -> Option<personal_rns::interfaces::InterfaceId> {
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
-    {
-        let target = tcp_dial_target(&default_directory());
-        Some(personal_rns::interfaces::InterfaceId::from_channel_tag(
-            personal_rns::interfaces::InterfaceKind::TcpClient,
-            target.as_bytes(),
-        ))
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
-    {
-        None
-    }
+    let target = tcp_dial_target(&default_directory());
+    Some(personal_rns::interfaces::InterfaceId::from_channel_tag(
+        personal_rns::interfaces::InterfaceKind::TcpClient,
+        target.as_bytes(),
+    ))
 }
 
 async fn send_probe(
@@ -1138,6 +1470,11 @@ pub fn drain_acks() -> Vec<u64> {
     std::mem::take(&mut mail().acked)
 }
 
+/// Notes that were tried three times and will not send themselves again.
+pub fn drain_failures() -> Vec<u64> {
+    std::mem::take(&mut mail().failed)
+}
+
 pub fn same_contact(stored_identity: &str, identity_hash_hex: &str) -> bool {
     let stored = stored_identity.trim();
     if stored.eq_ignore_ascii_case(identity_hash_hex) {
@@ -1176,6 +1513,10 @@ fn on_journal_event(event: PrnsEvent<'_>, _: &NoRemoteControlHostControls) {
         PrnsEvent::Diagnostic(Diagnostic::PeerIdentified { link_id, identity }) => {
             remember_peer(link_id, identity);
         }
+        PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, .. })
+        | PrnsEvent::Diagnostic(Diagnostic::RouteRemoved { destination, .. }) => {
+            note_route_churn(destination);
+        }
         PrnsEvent::Message(Message::Delivered(Delivery::Link(delivery))) => {
             accept_words(delivery.link_id, delivery.plaintext);
         }
@@ -1192,6 +1533,9 @@ fn mail() -> std::sync::MutexGuard<'static, Mail> {
             inbox: Vec::new(),
             marks: Vec::new(),
             acked: Vec::new(),
+            failed: Vec::new(),
+            waiting_parts: HashMap::new(),
+            assemblies: HashMap::new(),
         })
     })
     .lock()
@@ -1223,6 +1567,17 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
                 });
             }
         }
+        if let Some(parts) = mail.waiting_parts.remove(&link_id) {
+            let mut wholes = Vec::new();
+            for fragment in parts {
+                if let Some(whole) = offer_piece(&mut mail, &identity_hex, fragment) {
+                    wholes.push(whole);
+                }
+            }
+            for whole in wholes {
+                stage_message(&mut mail, &identity_hex, &whole);
+            }
+        }
     }
     note_peer_on_call(link_id, &identity_hex);
 }
@@ -1232,6 +1587,65 @@ fn accept_words(link_id: LinkId, bytes: &[u8]) {
         accept_voice(link_id, bytes);
         return;
     }
+    if let Some(fragment) = crate::lxmf::open_fragment(bytes) {
+        accept_fragment(link_id, fragment);
+        return;
+    }
+    accept_message(link_id, bytes);
+}
+
+fn accept_fragment(link_id: LinkId, fragment: crate::lxmf::Fragment) {
+    let mut mail = mail();
+    let Some(identity) = mail.peers.get(&link_id).copied() else {
+        mail.waiting_parts
+            .entry(link_id)
+            .or_default()
+            .push(fragment);
+        return;
+    };
+    let identity_hex = hex_encode(identity.as_bytes());
+    let Some(whole) = offer_piece(&mut mail, &identity_hex, fragment) else {
+        return;
+    };
+    stage_message(&mut mail, &identity_hex, &whole);
+}
+
+fn offer_piece(
+    mail: &mut Mail,
+    identity: &str,
+    fragment: crate::lxmf::Fragment,
+) -> Option<Vec<u8>> {
+    let key = (identity.to_string(), fragment.group);
+    let whole = mail
+        .assemblies
+        .entry(key.clone())
+        .or_default()
+        .offer(fragment)?;
+    mail.assemblies.remove(&key);
+    Some(whole)
+}
+
+fn stage_message(mail: &mut Mail, identity_hex: &str, bytes: &[u8]) {
+    if let Some(letter) = crate::lxmf::open_reaction(bytes) {
+        mail.marks.push(ArrivedReaction {
+            identity: identity_hex.to_string(),
+            written_at: letter.written_at,
+            words: letter.words,
+            reaction: letter.reaction,
+        });
+        return;
+    }
+    if let Some(letter) = crate::lxmf::open_note(bytes) {
+        mail.inbox.push(ArrivedNote {
+            identity: identity_hex.to_string(),
+            words: letter.words,
+            written_at: letter.written_at,
+            place: letter.place,
+        });
+    }
+}
+
+fn accept_message(link_id: LinkId, bytes: &[u8]) {
     if let Some(letter) = crate::lxmf::open_reaction(bytes) {
         let mut mail = mail();
         if let Some(identity) = mail.peers.get(&link_id).copied() {
@@ -2005,18 +2419,9 @@ fn stand_up_live<F>(
 where
     F: FnMut(PrnsEvent<'_>, &NoRemoteControlHostControls),
 {
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
-    {
-        stand_up_on_lan(remote_directory, home, secret, on_event)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
-    {
-        let _ = home;
-        stand_up(remote_directory, secret, on_event)
-    }
+    stand_up_on_lan(remote_directory, home, secret, on_event)
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn stand_up_on_lan<F>(
     remote_directory: &Path,
     home: &Path,
@@ -2042,19 +2447,20 @@ where
     }))
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn attach_interfaces(handle: &PrnsNodeHandle, home: &Path) {
     attach_wifi(handle);
     attach_internet(handle, home);
     attach_ble(handle, home);
-    #[cfg(any(target_os = "macos", target_os = "android"))]
+    #[cfg(not(target_os = "ios"))]
     attach_usb(handle);
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn attach_wifi(handle: &PrnsNodeHandle) {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let wifi = AutoWifi::default().with_host_discovery(apple_service_discovery());
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let wifi = AutoWifi::default()
+        .with_native_host_discovery(native_service_discovery(AutoWifiDevicePolicy::default()));
     #[cfg(target_os = "android")]
     let wifi =
         AutoWifi::default().with_native_host_discovery(native_service_discovery_with_host_lan(
@@ -2067,16 +2473,15 @@ fn attach_wifi(handle: &PrnsNodeHandle) {
 }
 
 /// The built-in internet gateway. A saved `tcp-target`, or `JOURNAL_TCP`, can name another.
-const BUILT_IN_TCP: &str = "67.212.78.132:4242";
+/// Every build dials the home node.
+const BUILT_IN_TCP: &str = "touchbase.viewdns.net:4242";
 
 /// A TCP client dials the built-in gateway unless `JOURNAL_TCP` or a saved `tcp-target` names another `host:port`.
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn attach_internet(handle: &PrnsNodeHandle, home: &Path) {
     let target = tcp_dial_target(home);
     handle.attach(TcpClientInterface::new(target));
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn tcp_dial_target(home: &Path) -> String {
     if let Some(target) = std::env::var("JOURNAL_TCP")
         .ok()
@@ -2094,7 +2499,6 @@ fn tcp_dial_target(home: &Path) -> String {
     BUILT_IN_TCP.to_string()
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn parse_tcp_target(value: &str) -> Option<String> {
     let value = value.trim();
     let (host, port) = value.rsplit_once(':')?;
@@ -2106,12 +2510,16 @@ fn parse_tcp_target(value: &str) -> Option<String> {
     Some(format!("{host}:{port}"))
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn attach_ble(handle: &PrnsNodeHandle, home: &Path) {
     let Ok(identity) = personal_rns::load_or_create_ble_identity(&home.join("ble")) else {
         return;
     };
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "windows"
+    ))]
     {
         let _attached = handle.attach(personal_rns::AutoBle::new(identity));
     }
@@ -2138,9 +2546,9 @@ fn attach_ble(handle: &PrnsNodeHandle, home: &Path) {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "android"))]
+#[cfg(not(target_os = "ios"))]
 fn attach_usb(handle: &PrnsNodeHandle) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         use std::sync::Arc;
 
@@ -2186,7 +2594,7 @@ fn attach_usb(handle: &PrnsNodeHandle) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn open_usb_target(
     candidate: personal_rns::usb_auto::UsbAutoCandidate,
 ) -> std::io::Result<personal_rns::usb_auto::NativeUsbAutoStream> {
@@ -2197,10 +2605,7 @@ async fn open_usb_target(
     .await
 }
 
-#[cfg(any(
-    test,
-    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
-))]
+#[cfg(test)]
 fn stand_up<F>(
     remote_directory: &Path,
     secret: Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>,
@@ -2268,14 +2673,132 @@ mod tests {
     };
 
     use super::{
-        call_can_continue, delivery_destination, gateway_client_id, interface_name, machine_label,
-        marks_from, parse_tcp_target, stand_up, JournalIdentity, WireMarks, BUILT_IN_TCP, MAC_USB,
-        PHONE_USB, STEP_WAIT,
+        apply_watched_route, call_can_continue, delivery_destination, finish_sample, forget,
+        gateway_client_id, interface_name, machine_label, marks_from, parse_tcp_target, reach_for,
+        reach_map, stand_up, JournalIdentity, ReachState, RouteLook, SampleNext, WireMarks,
+        BUILT_IN_TCP, MAC_USB, PHONE_USB, ROUTE_LOOK, STEP_WAIT,
     };
 
     #[test]
     fn a_search_step_moves_on_after_five_seconds() {
         assert_eq!(STEP_WAIT, Duration::from_secs(5));
+        assert_eq!(ROUTE_LOOK, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_open_journal_follows_a_changed_path() {
+        let identity = "watch-test-contact";
+        reach_map().insert(
+            identity.to_string(),
+            ReachState {
+                generation: 7,
+                path: Some("Bluetooth".to_string()),
+                hops: Some(1),
+                ways: crate::model::OfferedWays::none(),
+                done: true,
+                looked_at: std::time::Instant::now(),
+                due: false,
+                sample_due: false,
+                looking: true,
+            },
+        );
+        let follow =
+            apply_watched_route(identity, 7, RouteLook::Known("Wi-Fi".to_string(), 3), true);
+        assert!(matches!(follow, SampleNext::Now));
+        let reach = reach_for(identity);
+        assert_eq!(reach.winner.as_deref(), Some("Wi-Fi"));
+        assert_eq!(reach.hops, Some(3));
+        assert_eq!(reach.ways, crate::model::OfferedWays::none());
+        assert!(!reach.pending);
+
+        let follow = apply_watched_route(
+            identity,
+            6,
+            RouteLook::Known("Internet".to_string(), 9),
+            true,
+        );
+        assert!(matches!(follow, SampleNext::None));
+        let reach = reach_for(identity);
+        assert_eq!(reach.winner.as_deref(), Some("Wi-Fi"));
+        assert_eq!(reach.hops, Some(3));
+
+        let same = apply_watched_route(identity, 7, RouteLook::Known("Wi-Fi".to_string(), 3), true);
+        assert!(matches!(same, SampleNext::None));
+
+        let follow = apply_watched_route(identity, 7, RouteLook::Gone, true);
+        assert!(matches!(follow, SampleNext::None));
+        let reach = reach_for(identity);
+        assert_eq!(reach.winner, None);
+        assert_eq!(reach.hops, None);
+        assert!(!reach.pending);
+
+        reach_map().get_mut(identity).expect("the contact").done = false;
+        let follow = apply_watched_route(identity, 7, RouteLook::Known("USB".to_string(), 2), true);
+        assert!(matches!(follow, SampleNext::None));
+        let reach = reach_for(identity);
+        assert!(reach.pending);
+        assert_eq!(reach.winner, None);
+
+        forget(identity);
+    }
+
+    #[test]
+    fn a_changed_path_asks_for_another_sample() {
+        let identity = "sample-again-contact";
+        let voice = crate::model::OfferedWays {
+            note: true,
+            voice: true,
+            video: false,
+        };
+        reach_map().insert(
+            identity.to_string(),
+            ReachState {
+                generation: 4,
+                path: Some("Bluetooth".to_string()),
+                hops: Some(1),
+                ways: voice,
+                done: true,
+                looked_at: std::time::Instant::now(),
+                due: false,
+                sample_due: false,
+                looking: true,
+            },
+        );
+
+        let follow = apply_watched_route(
+            identity,
+            4,
+            RouteLook::Known("Internet".to_string(), 2),
+            false,
+        );
+        assert!(matches!(follow, SampleNext::AfterCall));
+        let reach = reach_for(identity);
+        assert_eq!(reach.winner.as_deref(), Some("Internet"));
+        assert_eq!(reach.hops, Some(2));
+        assert_eq!(reach.ways, voice);
+        assert!(reach_map().get(identity).expect("the contact").sample_due);
+
+        let follow = apply_watched_route(
+            identity,
+            4,
+            RouteLook::Known("Internet".to_string(), 2),
+            true,
+        );
+        assert!(matches!(follow, SampleNext::Now));
+        let reach = reach_for(identity);
+        assert_eq!(reach.ways, crate::model::OfferedWays::none());
+        assert!(!reach_map().get(identity).expect("the contact").sample_due);
+
+        let measured = crate::model::OfferedWays {
+            note: true,
+            voice: true,
+            video: true,
+        };
+        finish_sample(identity, 4, measured);
+        assert_eq!(reach_for(identity).ways, measured);
+        assert!(!reach_map().get(identity).expect("the contact").looking);
+
+        forget(identity);
     }
 
     #[test]
