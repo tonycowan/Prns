@@ -89,7 +89,13 @@ yanked = "deny"
 # Real security VULNERABILITIES are always denied,
 # regardless of this setting.
 unmaintained = "workspace"
-ignore = []
+ignore = [
+    # object 0.39.1, required by espflash 4.5.0, depends on ruzstd ^0.8. The
+    # decompression-bomb fix is ruzstd 0.9.1, and only object 0.40 accepts that.
+    # No published espflash release allows object 0.40. The decoder reads local
+    # firmware objects while packaging, not untrusted network input.
+    "RUSTSEC-2026-0344",
+]
 
 [bans]
 # Duplicate versions bloat embedded binaries — surface them (warn), don't block yet.

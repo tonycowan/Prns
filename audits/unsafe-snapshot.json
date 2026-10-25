@@ -4821,7 +4821,7 @@
         "impls": 0,
         "tokens": 0
       },
-      "version": "0.4.2"
+      "version": "0.4.5"
     },
     {
       "graphs": {
@@ -28583,7 +28583,7 @@
         "impls": 0,
         "tokens": 0
       },
-      "version": "0.23.45"
+      "version": "0.23.46"
     },
     {
       "graphs": {
@@ -28732,7 +28732,7 @@
         "impls": 0,
         "tokens": 0
       },
-      "version": "0.103.15"
+      "version": "0.103.16"
     },
     {
       "graphs": {
@@ -38031,18 +38031,14 @@
           "Win32_Devices_Communication",
           "Win32_Devices_DeviceAndDriverInstallation",
           "Win32_Foundation",
-          "Win32_Networking",
-          "Win32_Networking_WinSock",
           "Win32_Security",
           "Win32_Storage",
           "Win32_Storage_FileSystem",
           "Win32_System",
-          "Win32_System_Console",
           "Win32_System_Diagnostics",
           "Win32_System_Diagnostics_Debug",
           "Win32_System_IO",
           "Win32_System_Registry",
-          "Win32_System_SystemInformation",
           "Win32_System_SystemServices",
           "Win32_System_Threading",
           "default"
@@ -38057,17 +38053,10 @@
           "Win32_Graphics_Dwm",
           "Win32_Graphics_Gdi",
           "Win32_Media",
-          "Win32_Networking",
-          "Win32_Networking_WinSock",
           "Win32_Security",
-          "Win32_Storage",
-          "Win32_Storage_FileSystem",
           "Win32_System",
           "Win32_System_Com",
           "Win32_System_Com_StructuredStorage",
-          "Win32_System_Console",
-          "Win32_System_Diagnostics",
-          "Win32_System_Diagnostics_Debug",
           "Win32_System_LibraryLoader",
           "Win32_System_Ole",
           "Win32_System_SystemInformation",
@@ -38086,21 +38075,6 @@
           "Win32_UI_Shell",
           "Win32_UI_TextServices",
           "Win32_UI_WindowsAndMessaging",
-          "default"
-        ],
-        "host-c-windows": [
-          "Win32",
-          "Win32_Foundation",
-          "Win32_Networking",
-          "Win32_Networking_WinSock",
-          "Win32_Storage",
-          "Win32_Storage_FileSystem",
-          "Win32_System",
-          "Win32_System_Console",
-          "Win32_System_Diagnostics",
-          "Win32_System_Diagnostics_Debug",
-          "Win32_System_SystemInformation",
-          "Win32_System_Threading",
           "default"
         ]
       },
@@ -38134,8 +38108,11 @@
           "Win32_System",
           "Win32_System_Com",
           "Win32_System_Console",
+          "Win32_System_Diagnostics",
+          "Win32_System_Diagnostics_Debug",
           "Win32_System_IO",
           "Win32_System_Memory",
+          "Win32_System_SystemInformation",
           "Win32_System_SystemServices",
           "Win32_System_Threading",
           "Win32_UI",
@@ -38160,8 +38137,11 @@
           "Win32_System",
           "Win32_System_Com",
           "Win32_System_Console",
+          "Win32_System_Diagnostics",
+          "Win32_System_Diagnostics_Debug",
           "Win32_System_IO",
           "Win32_System_Memory",
+          "Win32_System_SystemInformation",
           "Win32_System_Threading",
           "Win32_UI",
           "Win32_UI_Shell",
@@ -38189,9 +38169,15 @@
           "Win32_NetworkManagement_Ndis",
           "Win32_Networking",
           "Win32_Networking_WinSock",
+          "Win32_Storage",
+          "Win32_Storage_FileSystem",
           "Win32_System",
+          "Win32_System_Console",
+          "Win32_System_Diagnostics",
+          "Win32_System_Diagnostics_Debug",
           "Win32_System_IO",
           "Win32_System_Memory",
+          "Win32_System_SystemInformation",
           "Win32_System_Threading",
           "default"
         ]

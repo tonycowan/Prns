@@ -2,7 +2,7 @@
 
 This checked bundle covers the shipped and qualification Rust, JavaScript, and Android product graphs.
 It was generated with `cargo-about 0.9.1` by `./tools/prns repo notices generate`.
-Notice input fingerprint: `sha256:4030945ecfe2d1be821cb6e5d7f324a8d9a2cee5dcaa84e2ceaf731c1abe26ad`.
+Notice input fingerprint: `sha256:324be46c100ae24c1212410d8257d1d11d2d3300cc493c1c398be3289fab2712`.
 Each locked Rust manifest closure is fetched into a fresh isolated Cargo home before cargo-about reads its target-filtered packaged license material offline.
 Entries are deduplicated by SPDX identifier and canonical notice text; line endings, trailing space, and repeated blank lines are normalized without changing legal words.
 
@@ -3138,7 +3138,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 License: ISC License
 
-Used by: `rustls-webpki 0.103.15`
+Used by: `rustls-webpki 0.103.16`
 
 Release graphs: Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, daemon Linux, daemon Windows, daemon macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
@@ -5894,7 +5894,7 @@ DEALINGS IN THE SOFTWARE.
 
 License: MIT License
 
-Used by: `ctutils 0.4.2`
+Used by: `ctutils 0.4.5`
 
 Release graphs: Android, ESP32-C6, ESP32-S3 Heltec, ESP32-S3 Heltec E290, ESP32-S3 Heltec R8, ESP32-S3 Heltec V3, ESP32-S3 Heltec Wireless Stick Lite V3, ESP32-S3 T-Beam, ESP32-S3 XIAO Wio-SX1262, HaLoW appliance manager, HaLoW headless, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, WASM, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64, iOS, nRF52840, website Rust/WASM
 
@@ -8967,7 +8967,7 @@ License: MIT License
 
 Used by: `getrandom 0.4.2`, `getrandom 0.4.3`
 
-Release graphs: HaLoW appliance manager, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, controller Linux, controller macOS, daemon Linux, desktop Linux, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: HaLoW appliance manager, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, controller Linux, daemon Linux, desktop Linux, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 Copyright (c) 2018-2026 The rust-random Project Developers
@@ -9577,7 +9577,7 @@ THE SOFTWARE.
 
 License: MIT License
 
-Used by: `rustls 0.23.45`, `rustls-native-certs 0.8.4`
+Used by: `rustls 0.23.46`, `rustls-native-certs 0.8.4`
 
 Release graphs: Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, daemon Linux, daemon Windows, daemon macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
