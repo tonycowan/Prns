@@ -23,7 +23,11 @@ impl HaLowSocket {
     pub fn bind(interface: &str, protocol: EtherType) -> io::Result<Self> {
         let device = NetworkDeviceName::new(interface)?;
         // Subscribe before binding so deletion/recreation during setup remains observable.
+        // Each socket owns its descriptor for the `AsyncFd`'s whole life. The
+        // replacement constructor is unsafe, and this crate forbids unsafe code.
+        #[allow(deprecated)]
         let monitor = AsyncFd::new(LinkMonitor::new()?)?;
+        #[allow(deprecated)]
         let packet = AsyncFd::new(PacketSocket::bind(interface, protocol)?)?;
         Ok(Self {
             packet,

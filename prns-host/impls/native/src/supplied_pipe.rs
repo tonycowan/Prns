@@ -475,9 +475,11 @@ pub(crate) struct FdStream {
 
 impl FdStream {
     fn supplied(fd: OwnedFd) -> io::Result<Self> {
-        Ok(Self {
-            fd: AsyncFd::new(File::from(fd))?,
-        })
+        // `File` owns this descriptor for the `AsyncFd`'s whole life. The
+        // replacement constructor is unsafe, and this crate forbids unsafe code.
+        #[allow(deprecated)]
+        let fd = AsyncFd::new(File::from(fd))?;
+        Ok(Self { fd })
     }
 }
 
