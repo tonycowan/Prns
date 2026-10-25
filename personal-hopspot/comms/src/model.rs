@@ -578,6 +578,7 @@ fn note_with_words(person: &Person, words: &str) -> Option<usize> {
         .or_else(|| person.notes.iter().rposition(same))
 }
 
+/// Seconds since 1970-01-01 00:00:00 UTC. This is the instant that is sent.
 fn unix_now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -586,15 +587,29 @@ fn unix_now() -> f64 {
 }
 
 /// Consecutive notes that share a day, in the order they were written.
+///
+/// A note that carries a UTC instant is shown in the device's local time.
+/// The stored day and clock are only the fallback for a note that has no instant.
 pub fn group_by_day(notes: &[Note]) -> Vec<(String, Vec<Note>)> {
     let mut groups: Vec<(String, Vec<Note>)> = Vec::new();
     for note in notes {
+        let mut note = note.clone();
+        let (day, time) = shown_stamp(&note);
+        note.day = day.clone();
+        note.time = time;
         match groups.last_mut() {
-            Some((day, grouped)) if day == &note.day => grouped.push(note.clone()),
-            _ => groups.push((note.day.clone(), vec![note.clone()])),
+            Some((heading, grouped)) if heading == &day => grouped.push(note),
+            _ => groups.push((day, vec![note])),
         }
     }
     groups
+}
+
+fn shown_stamp(note: &Note) -> (String, String) {
+    if note.written_at == 0 {
+        return (note.day.clone(), note.time.clone());
+    }
+    stamp_at(f64::from_bits(note.written_at))
 }
 
 /// The interface the stack chose for a contact, and what a sample on that path can carry.
@@ -703,6 +718,7 @@ fn local_stamp() -> (String, String) {
     stamp_of(chrono::Local::now())
 }
 
+/// The weekday and clock for a UTC instant, shifted by the device's current offset.
 fn stamp_at(unix_secs: f64) -> (String, String) {
     let secs = unix_secs.floor() as i64;
     let Some(utc) = chrono::DateTime::from_timestamp(secs, 0) else {
@@ -1069,6 +1085,32 @@ mod tests {
         assert_eq!(groups[1].1.len(), 2);
         assert!(!groups[0].1[0].mine);
         assert!(groups[0].1[1].mine);
+    }
+
+    #[test]
+    fn a_sent_instant_is_shown_in_local_time() {
+        use chrono::Timelike;
+        let unix = 1_700_000_000.0f64;
+        let utc = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("instant");
+        let local = utc.with_timezone(&chrono::Local);
+        let mut note = super::kept(
+            NoteKind::Text,
+            "Monday",
+            "22:13",
+            "The pears are ready.",
+            false,
+        );
+        note.written_at = unix.to_bits();
+        let groups = group_by_day(&[note]);
+        let shown = &groups[0].1[0];
+        assert_eq!(groups[0].0, local.format("%A").to_string());
+        assert_eq!(
+            shown.time,
+            format!("{}:{:02}", local.hour(), local.minute())
+        );
+        if local.offset().local_minus_utc() != 0 {
+            assert_ne!(shown.time, format!("{}:{:02}", utc.hour(), utc.minute()));
+        }
     }
 
     #[test]

@@ -237,6 +237,7 @@ pub fn open_reaction(bytes: &[u8]) -> Option<ReactionLetter> {
     })
 }
 
+/// Seconds since 1970-01-01 00:00:00 UTC.
 pub fn unix_now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
