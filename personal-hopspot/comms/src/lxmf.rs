@@ -1,8 +1,9 @@
 //! An LXMF note: the time it was written, an empty title, the words, and fields.
 //!
 //! A place, when the note still has one, is a `loc` field. Direct delivery is
-//! the packed message on a link. The link's own receipt is the acknowledgement.
-//! Propagation is not used here.
+//! the packed message on a link. The link's own receipt settles that note.
+//! A note left on the mailbox is not settled until an `ack` field comes back
+//! carrying the hash of these packed bytes. That acknowledgement is not a note.
 
 use crate::model::Place;
 
@@ -87,6 +88,11 @@ pub struct Fragment {
     pub index: u16,
     pub count: u16,
     pub bytes: Vec<u8>,
+}
+
+/// A packed note small enough to travel as one link packet.
+pub fn fits_one_link_packet(packed: &[u8]) -> bool {
+    !packed.is_empty() && packed.len() <= LINK_PACKET
 }
 
 /// Splits a packed note into link packets. A note that already fits is left as one packet.
@@ -187,6 +193,7 @@ struct ReadMessage {
 struct MessageFields {
     place: Option<Place>,
     reaction: Option<(f64, String, Option<crate::model::Reaction>)>,
+    ack: Option<[u8; 32]>,
 }
 
 fn read_message(bytes: &[u8]) -> Option<ReadMessage> {
@@ -213,10 +220,37 @@ fn read_message(bytes: &[u8]) -> Option<ReadMessage> {
     })
 }
 
+/// An acknowledgement of a mailbox note. The field is the hash of the packed note.
+/// Empty words keep an older app from showing it as a note.
+pub fn pack_ack(digest: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(0x94);
+    out.push(0xcb);
+    out.extend_from_slice(&unix_now().to_be_bytes());
+    push_bin(&mut out, b"");
+    push_bin(&mut out, b"");
+    out.push(0x81);
+    push_bin(&mut out, b"ack");
+    push_bin(&mut out, digest);
+    out
+}
+
+/// The hash an acknowledgement names. A note, and a reaction, are left closed.
+pub fn open_ack(bytes: &[u8]) -> Option<[u8; 32]> {
+    let read = read_message(bytes)?;
+    if !read.words.is_empty() || read.fields.reaction.is_some() || read.fields.place.is_some() {
+        return None;
+    }
+    read.fields.ack
+}
+
 /// Opens a packed LXMF message. Anything that is not one is left closed.
 pub fn open_note(bytes: &[u8]) -> Option<NoteLetter> {
     let read = read_message(bytes)?;
-    if read.fields.reaction.is_some() || (read.words.is_empty() && read.fields.place.is_none()) {
+    if read.fields.ack.is_some()
+        || read.fields.reaction.is_some()
+        || (read.words.is_empty() && read.fields.place.is_none())
+    {
         return None;
     }
     Some(NoteLetter {
@@ -325,12 +359,14 @@ impl<'a> Reader<'a> {
             return Some(MessageFields {
                 place: None,
                 reaction: None,
+                ack: None,
             });
         };
         let mut place = None;
         let mut mark = None;
         let mut on = None;
         let mut of = String::new();
+        let mut ack = None;
         for _ in 0..pairs {
             match self.text_or_skip()? {
                 Some(key) if key == b"loc" => {
@@ -359,6 +395,13 @@ impl<'a> Reader<'a> {
                         }
                     }
                 }
+                Some(key) if key == b"ack" => {
+                    if let Some(value) = self.text_or_skip()? {
+                        if let Ok(digest) = <[u8; 32]>::try_from(value) {
+                            ack = Some(digest);
+                        }
+                    }
+                }
                 _ => self.skip()?,
             }
         }
@@ -374,7 +417,11 @@ impl<'a> Reader<'a> {
             }
             None => None,
         };
-        Some(MessageFields { place, reaction })
+        Some(MessageFields {
+            place,
+            reaction,
+            ack,
+        })
     }
 
     fn text_or_skip(&mut self) -> Option<Option<Vec<u8>>> {
@@ -543,6 +590,15 @@ mod tests {
     #[test]
     fn plain_words_are_not_a_message() {
         assert!(open_note(b"The pears are ready.").is_none());
+    }
+
+    #[test]
+    fn an_acknowledgement_names_the_hash_and_is_not_a_note() {
+        let digest = [0xab; 32];
+        let packed = pack_ack(&digest);
+        assert!(open_note(&packed).is_none());
+        assert!(open_reaction(&packed).is_none());
+        assert_eq!(open_ack(&packed), Some(digest));
     }
 
     #[test]

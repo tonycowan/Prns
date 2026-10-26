@@ -12,12 +12,16 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use personal_rns::crypto::{sha256, Ed25519Signature};
 use personal_rns::identity::in_memory::InMemoryNodeIdentity;
-use personal_rns::identity::{IdentityHash, IdentitySigner, PublicIdentityMaterial};
+use personal_rns::identity::{
+    IdentityHash, IdentitySigner, PrivateIdentityMaterial, PublicIdentityMaterial,
+};
 use personal_rns::prelude::*;
 use personal_rns::routing::announce::derive_single_destination_hash;
 use personal_rns::routing::delivery::Delivery;
 use personal_rns::routing::links::LinkId;
+use personal_rns::routing::request_handlers::RequestPathHash;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use personal_rns::wifi_auto::{apple_service_discovery, AutoWifi};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -37,6 +41,8 @@ static RUNNING: OnceLock<RunningJournal> = OnceLock::new();
 static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 static HANDLE: OnceLock<PrnsNodeHandle> = OnceLock::new();
 static OURS: OnceLock<IdentityHash> = OnceLock::new();
+static OUR_DELIVERY: OnceLock<DestinationHash> = OnceLock::new();
+static SIGNING: OnceLock<Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>> = OnceLock::new();
 static MAIL: OnceLock<Mutex<Mail>> = OnceLock::new();
 
 struct Mail {
@@ -49,10 +55,19 @@ struct Mail {
     acked: Vec<u64>,
     /// Notes that were tried three times and will not send themselves again.
     failed: Vec<u64>,
+    /// Notes the mailbox accepted, with the hash of the packed note.
+    posted: Vec<(u64, [u8; 32])>,
     /// Pieces of a long note that arrived before the other person was known.
     waiting_parts: HashMap<LinkId, Vec<crate::lxmf::Fragment>>,
     /// Pieces of a long note, joined when every piece has arrived.
     assemblies: HashMap<(String, u64), crate::lxmf::Assembly>,
+    /// Pieces of one resource, joined when every piece has arrived.
+    resources: HashMap<(LinkId, [u8; 32]), IncomingResource>,
+}
+
+struct IncomingResource {
+    total: u64,
+    parts: Vec<Option<Vec<u8>>>,
 }
 
 /// A note that arrived on a link, still waiting for the contact list.
@@ -61,6 +76,10 @@ pub struct ArrivedNote {
     pub words: String,
     pub written_at: f64,
     pub place: Option<crate::model::Place>,
+    /// The note was collected from the mailbox, so the sender is still waiting for an acknowledgement.
+    pub from_mailbox: bool,
+    /// sha256 of the packed note. Set when `from_mailbox` is true.
+    pub digest: [u8; 32],
 }
 
 /// A reaction that arrived on a link, still waiting for the contact list.
@@ -147,6 +166,8 @@ impl RunningJournal {
         let secret = identity.secret.clone();
         let destination = identity.destination();
         let _ = OURS.set(identity.hash);
+        let _ = OUR_DELIVERY.set(destination);
+        let _ = SIGNING.set(identity.secret.clone());
         let home = directory.to_path_buf();
         let remote_directory = home.join("remote-control");
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -198,12 +219,22 @@ impl RunningJournal {
                             }
                         }
                     });
+                    let collector = tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(8)).await;
+                        let mut ticker = tokio::time::interval(Duration::from_secs(25));
+                        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        loop {
+                            ticker.tick().await;
+                            collect_mailbox().await;
+                        }
+                    });
                     let _ = node
                         .run_until(async move {
                             let _ = shutdown_rx.await;
                         })
                         .await;
                     announce.abort();
+                    collector.abort();
                 });
             })
             .map_err(SessionError::Io)?;
@@ -294,7 +325,19 @@ fn prepare_contacts() {
     }
     let saved = book.people.clone();
     drop(book);
+    remember_digests(&saved);
     queue_unsent(&saved);
+}
+
+fn remember_digests(people: &[crate::model::Person]) {
+    let mut sent = sent_notes();
+    for person in people {
+        for note in &person.notes {
+            if let Some(digest) = note.digest {
+                sent.insert(note.id, digest);
+            }
+        }
+    }
 }
 
 fn queue_unsent(people: &[crate::model::Person]) {
@@ -303,6 +346,7 @@ fn queue_unsent(people: &[crate::model::Person]) {
             if note.mine
                 && !note.settled
                 && !note.failed
+                && !note.posted
                 && note.kind == crate::model::NoteKind::Text
             {
                 send_note(
@@ -850,18 +894,51 @@ pub fn send_note(
     if words.is_empty() {
         return;
     }
-    let Some(destination) = destination_for_contact(contact_identity) else {
+    let Some(recipient) = contact_material(contact_identity) else {
+        return;
+    };
+    let Some(destination) = address_for(&recipient) else {
         return;
     };
     let packed = match place {
         Some(place) => crate::lxmf::pack_placed_note(&words, written_at, Some(place)),
         None => crate::lxmf::pack_note(&words, written_at),
     };
+    if note_id != 0 {
+        sent_notes().insert(note_id, sha256(&packed));
+    }
     note_queue().push(QueuedNote {
         destination,
+        recipient,
+        identity: contact_identity.trim().to_string(),
         packed,
         note_id,
         tries: 0,
+        kind: OutboundKind::Note,
+        stage: OutboundStage::Person,
+        mailbox_bytes: None,
+    });
+    nudge_delivery();
+}
+
+/// Tells the sender of a mailbox note that it is in the journal. The hash is of the packed note.
+pub fn send_ack(contact_identity: &str, digest: &[u8; 32]) {
+    let Some(recipient) = contact_material(contact_identity) else {
+        return;
+    };
+    let Some(destination) = address_for(&recipient) else {
+        return;
+    };
+    note_queue().push(QueuedNote {
+        destination,
+        recipient,
+        identity: contact_identity.trim().to_string(),
+        packed: crate::lxmf::pack_ack(digest),
+        note_id: 0,
+        tries: 0,
+        kind: OutboundKind::Ack,
+        stage: OutboundStage::Person,
+        mailbox_bytes: None,
     });
     nudge_delivery();
 }
@@ -877,26 +954,64 @@ pub fn send_reaction(
     if written_at.to_bits() == 0 && words.trim().is_empty() {
         return;
     }
-    let Some(destination) = destination_for_contact(contact_identity) else {
+    let Some(recipient) = contact_material(contact_identity) else {
+        return;
+    };
+    let Some(destination) = address_for(&recipient) else {
         return;
     };
     note_queue().push(QueuedNote {
         destination,
+        recipient,
+        identity: contact_identity.trim().to_string(),
         packed: crate::lxmf::pack_reaction(written_at, words, reaction),
         note_id: 0,
         tries: 0,
+        kind: OutboundKind::Reaction,
+        stage: OutboundStage::Person,
+        mailbox_bytes: None,
     });
     nudge_delivery();
 }
 
-/// How many times a note is sent before it is marked failed.
+/// How many times a direct-only send is tried before it is marked failed.
 const GIVE_UP_AFTER: u8 = 3;
+
+/// A note the person cannot take is posted to the mailbox by this time.
+const UNTIL_POSTED: Duration = Duration::from_secs(15);
+
+/// Direct delivery may use this much of [`UNTIL_POSTED`]. The rest is the mailbox.
+const PERSON_SLICE: Duration = Duration::from_secs(8);
+
+enum OutboundKind {
+    Note,
+    Ack,
+    Reaction,
+}
+
+enum OutboundStage {
+    Person,
+    Mailbox,
+}
+
+enum DeliveryOutcome {
+    Settled,
+    Posted,
+    Again,
+    Failed,
+}
 
 struct QueuedNote {
     destination: personal_rns::wire::DestinationHash,
+    recipient: PublicIdentityMaterial,
+    identity: String,
     packed: Vec<u8>,
     note_id: u64,
     tries: u8,
+    kind: OutboundKind,
+    stage: OutboundStage,
+    /// The sealed mailbox packet, kept so a retry does not stamp the note again.
+    mailbox_bytes: Option<Vec<u8>>,
 }
 
 fn note_queue() -> std::sync::MutexGuard<'static, Vec<QueuedNote>> {
@@ -931,18 +1046,31 @@ fn nudge_delivery() {
             }
             let mut again = Vec::new();
             for mut note in batch {
-                if deliver_note(&note).await {
-                    if note.note_id != 0 {
-                        mail().acked.push(note.note_id);
+                match deliver_note(&mut note).await {
+                    DeliveryOutcome::Settled => {
+                        if matches!(note.kind, OutboundKind::Note) && note.note_id != 0 {
+                            mail().acked.push(note.note_id);
+                        }
                     }
-                } else {
-                    note.tries = note.tries.saturating_add(1);
-                    if note.tries >= GIVE_UP_AFTER {
-                        if note.note_id != 0 {
+                    DeliveryOutcome::Posted => {
+                        if matches!(note.kind, OutboundKind::Note) && note.note_id != 0 {
+                            mail().posted.push((note.note_id, sha256(&note.packed)));
+                        }
+                    }
+                    DeliveryOutcome::Again => {
+                        note.tries = note.tries.saturating_add(1);
+                        if note.tries >= GIVE_UP_AFTER {
+                            if matches!(note.kind, OutboundKind::Note) && note.note_id != 0 {
+                                mail().failed.push(note.note_id);
+                            }
+                        } else {
+                            again.push(note);
+                        }
+                    }
+                    DeliveryOutcome::Failed => {
+                        if matches!(note.kind, OutboundKind::Note) && note.note_id != 0 {
                             mail().failed.push(note.note_id);
                         }
-                    } else {
-                        again.push(note);
                     }
                 }
             }
@@ -963,32 +1091,443 @@ fn nudge_delivery() {
     });
 }
 
-async fn deliver_note(note: &QueuedNote) -> bool {
-    let Some(handle) = HANDLE.get().cloned() else {
+async fn deliver_note(note: &mut QueuedNote) -> DeliveryOutcome {
+    let can_post = !matches!(note.kind, OutboundKind::Reaction) && mailbox_address().is_some();
+    if !can_post {
+        return if deliver_to_person(note, None).await {
+            DeliveryOutcome::Settled
+        } else {
+            DeliveryOutcome::Again
+        };
+    }
+    let started = Instant::now();
+    let label = note_label(note);
+    if opens_at_the_mailbox(contact_is_isolated(&note.identity), true) {
+        delivery_log(&format!(
+            "{label} contact is isolated, posting to the mailbox"
+        ));
+    } else {
+        let person = PERSON_SLICE.min(UNTIL_POSTED.saturating_sub(started.elapsed()));
+        delivery_log(&format!(
+            "{label} trying the person for {}ms",
+            person.as_millis()
+        ));
+        if deliver_to_person(note, Some(person)).await {
+            return DeliveryOutcome::Settled;
+        }
+    }
+    note.stage = OutboundStage::Mailbox;
+    let left = UNTIL_POSTED.saturating_sub(started.elapsed());
+    if deliver_to_mailbox(note, left).await {
+        DeliveryOutcome::Posted
+    } else {
+        delivery_log(&format!(
+            "{label} failed after {}ms",
+            started.elapsed().as_millis()
+        ));
+        DeliveryOutcome::Failed
+    }
+}
+
+/// A finished search with no path. A contact that has not been measured yet is not isolated.
+fn contact_is_isolated(identity: &str) -> bool {
+    let identity = identity.trim();
+    if identity.is_empty() {
+        return false;
+    }
+    let map = reach_map();
+    let Some(state) = map.get(identity) else {
         return false;
     };
-    let packets = crate::lxmf::link_packets(&note.packed);
-    if packets.is_empty() {
+    state.done
+        && state
+            .path
+            .as_ref()
+            .map(|path| path.trim().is_empty())
+            .unwrap_or(true)
+}
+
+fn opens_at_the_mailbox(isolated: bool, can_post: bool) -> bool {
+    isolated && can_post
+}
+
+fn note_label(note: &QueuedNote) -> String {
+    match note.kind {
+        OutboundKind::Note => format!("note {}", note.note_id),
+        OutboundKind::Ack => "ack".to_string(),
+        OutboundKind::Reaction => "reaction".to_string(),
+    }
+}
+
+fn hash_hex(hash: &personal_rns::wire::DestinationHash) -> String {
+    hash.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn delivery_log(message: &str) {
+    let when = chrono::Local::now().format("%H:%M:%S%.3f");
+    let line = format!("{when} {message}\n");
+    let path = default_directory().join("delivery.log");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(line.as_bytes())
+        });
+}
+
+async fn deliver_to_person(note: &QueuedNote, budget: Option<Duration>) -> bool {
+    let label = note_label(note);
+    let Some(handle) = HANDLE.get().cloned() else {
+        delivery_log(&format!("{label} person skipped: the node is not running"));
+        return false;
+    };
+    if note.packed.is_empty() {
+        delivery_log(&format!("{label} person skipped: nothing to send"));
+        return false;
+    }
+    let one_packet = crate::lxmf::fits_one_link_packet(&note.packed);
+    if !one_packet {
+        let carry = carry_for_identity(&note.identity);
+        if !carry.allows(note.packed.len() as u64) {
+            delivery_log(&format!(
+                "{label} person skipped: {} bytes is more than this path will carry ({})",
+                note.packed.len(),
+                carry_label(carry)
+            ));
+            return false;
+        }
+    }
+    let ours = OURS.get().copied();
+    let destination = note.destination;
+    let attempt = async {
+        let _ = seek_path(&handle, destination).await;
+        let link = handle
+            .establish_link(destination)
+            .await
+            .map_err(|err| format!("link {err:?}"))?;
+        if let Some(ours) = ours {
+            if let Err(err) = handle.identify(link, ours).await {
+                delivery_log(&format!("{label} person identify {err:?}"));
+            }
+        }
+        if one_packet {
+            handle
+                .send_link_packet(link, &note.packed)
+                .await
+                .map_err(|err| format!("packet {err:?}"))?;
+        } else {
+            let total = note.packed.len() as u64;
+            let cursor = std::io::Cursor::new(note.packed.clone());
+            handle
+                .send_resource(link, total, cursor)
+                .await
+                .map_err(|err| format!("resource {err:?}"))?;
+        }
+        Ok::<(), String>(())
+    };
+    let budget = budget.unwrap_or(Duration::from_secs(20));
+    let started = Instant::now();
+    match tokio::time::timeout(budget, attempt).await {
+        Ok(Ok(())) => {
+            delivery_log(&format!(
+                "{label} person accepted in {}ms",
+                started.elapsed().as_millis()
+            ));
+            true
+        }
+        Ok(Err(reason)) => {
+            delivery_log(&format!(
+                "{label} person missed ({reason}) in {}ms",
+                started.elapsed().as_millis()
+            ));
+            false
+        }
+        Err(_) => {
+            delivery_log(&format!(
+                "{label} person timed out after {}ms",
+                started.elapsed().as_millis()
+            ));
+            false
+        }
+    }
+}
+
+async fn deliver_to_mailbox(note: &mut QueuedNote, budget: Duration) -> bool {
+    let label = note_label(note);
+    let Some(mailbox) = mailbox_address() else {
+        delivery_log(&format!("{label} mailbox skipped: no address"));
+        return false;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        delivery_log(&format!("{label} mailbox skipped: the node is not running"));
+        return false;
+    };
+    let started = Instant::now();
+    if note.mailbox_bytes.is_none() {
+        let Some(ours) = signing_material() else {
+            delivery_log(&format!("{label} mailbox skipped: no signing key"));
+            return false;
+        };
+        let Some(packet) = tokio::task::spawn_blocking({
+            let recipient = note.recipient;
+            let packed = note.packed.clone();
+            move || crate::mailbox::propagation_packet(&ours, &recipient, &packed)
+        })
+        .await
+        .ok()
+        .flatten() else {
+            delivery_log(&format!(
+                "{label} mailbox could not seal the note in {}ms",
+                started.elapsed().as_millis()
+            ));
+            return false;
+        };
+        delivery_log(&format!(
+            "{label} mailbox sealed {} bytes in {}ms",
+            packet.len(),
+            started.elapsed().as_millis()
+        ));
+        note.mailbox_bytes = Some(packet);
+    }
+    let Some(packet) = note.mailbox_bytes.clone() else {
+        return false;
+    };
+    let left = budget.saturating_sub(started.elapsed());
+    if left < Duration::from_millis(200) {
+        delivery_log(&format!(
+            "{label} mailbox had {}ms left after sealing",
+            left.as_millis()
+        ));
         return false;
     }
     let ours = OURS.get().copied();
+    let mailbox_hex = hash_hex(&mailbox);
     let attempt = async {
-        let _ = seek_path(&handle, note.destination).await;
-        let Ok(link) = handle.establish_link(note.destination).await else {
-            return false;
-        };
-        if let Some(ours) = ours {
-            let _ = handle.identify(link, ours).await;
+        let _ = seek_path(&handle, mailbox).await;
+        let route = handle.route(mailbox).await;
+        match &route {
+            Some(route) => delivery_log(&format!(
+                "{label} mailbox {mailbox_hex} route {} {} hops",
+                interface_name(route.interface),
+                route.hops
+            )),
+            None => delivery_log(&format!("{label} mailbox {mailbox_hex} has no route")),
         }
-        for packet in &packets {
-            if handle.send_link_packet(link, packet).await.is_err() {
-                return false;
+        if !crate::lxmf::fits_one_link_packet(&packet) {
+            let carry = match &route {
+                Some(route) => carry_for_path(&interface_name(route.interface), None),
+                None => crate::model::resource_carry(None, false),
+            };
+            if !carry.allows(packet.len() as u64) {
+                return Err(format!(
+                    "{} bytes is more than the mailbox path will carry ({})",
+                    packet.len(),
+                    carry_label(carry)
+                ));
             }
         }
-        true
+        let link = handle
+            .establish_link(mailbox)
+            .await
+            .map_err(|err| format!("link {err:?}"))?;
+        if let Some(ours) = ours {
+            if let Err(err) = handle.identify(link, ours).await {
+                handle.close_link(link);
+                return Err(format!("identify {err:?}"));
+            }
+        } else {
+            handle.close_link(link);
+            return Err("no identity to present".to_string());
+        }
+        let accepted = if crate::lxmf::fits_one_link_packet(&packet) {
+            handle
+                .send_link_packet(link, &packet)
+                .await
+                .map(|_| "link packet")
+                .map_err(|err| format!("link packet {err:?}"))
+        } else {
+            let total = packet.len() as u64;
+            let cursor = std::io::Cursor::new(packet);
+            handle
+                .send_resource(link, total, cursor)
+                .await
+                .map(|_| "resource")
+                .map_err(|err| format!("resource {err:?}"))
+        };
+        handle.close_link(link);
+        accepted
     };
-    let budget = Duration::from_secs(20u64.saturating_mul(packets.len() as u64));
-    tokio::time::timeout(budget, attempt).await.unwrap_or(false)
+    match tokio::time::timeout(left, attempt).await {
+        Ok(Ok(how)) => {
+            delivery_log(&format!(
+                "{label} mailbox accepted the {how} in {}ms",
+                started.elapsed().as_millis()
+            ));
+            true
+        }
+        Ok(Err(reason)) => {
+            delivery_log(&format!(
+                "{label} mailbox missed ({reason}) in {}ms",
+                started.elapsed().as_millis()
+            ));
+            false
+        }
+        Err(_) => {
+            delivery_log(&format!(
+                "{label} mailbox timed out after {}ms",
+                started.elapsed().as_millis()
+            ));
+            false
+        }
+    }
+}
+
+fn mailbox_address() -> Option<personal_rns::wire::DestinationHash> {
+    crate::mailbox::configured(&default_directory())
+}
+
+fn signing_material() -> Option<PrivateIdentityMaterial> {
+    let secret = SIGNING.get()?;
+    PrivateIdentityMaterial::from_slice(&secret[..]).ok()
+}
+
+async fn collect_mailbox() {
+    if DELIVERING.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(mailbox) = mailbox_address() else {
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        return;
+    };
+    let Some(ours) = signing_material() else {
+        return;
+    };
+    let Some(delivery) = OUR_DELIVERY.get().copied() else {
+        return;
+    };
+    let Some(identity) = OURS.get().copied() else {
+        return;
+    };
+    let attempt = async {
+        let _ = seek_path(&handle, mailbox).await;
+        let Ok(link) = handle.establish_link(mailbox).await else {
+            return;
+        };
+        if handle.identify(link, identity).await.is_err() {
+            handle.close_link(link);
+            return;
+        }
+        let path = RequestPathHash::of("/get");
+        let Ok((listed, _)) = handle
+            .request(link, path, &crate::mailbox::list_query())
+            .await
+        else {
+            handle.close_link(link);
+            return;
+        };
+        let Some(ids) = crate::mailbox::read_ids(&listed) else {
+            handle.close_link(link);
+            return;
+        };
+        if ids.is_empty() {
+            handle.close_link(link);
+            return;
+        }
+        let Ok((bodies, _)) = handle
+            .request(link, path, &crate::mailbox::fetch_query(&ids))
+            .await
+        else {
+            handle.close_link(link);
+            return;
+        };
+        let Some(messages) = crate::mailbox::read_bins(&bodies) else {
+            handle.close_link(link);
+            return;
+        };
+        let mut haves = Vec::new();
+        for message in &messages {
+            haves.push(sha256(message));
+            if let Some(opened) = crate::mailbox::open_lxmf(&ours, &delivery, message) {
+                stage_mailbox(&opened);
+            }
+        }
+        if !haves.is_empty() {
+            let _ = handle
+                .request(link, path, &crate::mailbox::purge_query(&haves))
+                .await;
+        }
+        handle.close_link(link);
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(60), attempt).await;
+}
+
+fn stage_mailbox(opened: &crate::mailbox::OpenedMail) {
+    if !signature_matches(opened) {
+        return;
+    }
+    let identity = hex_encode(&opened.source);
+    if let Some(digest) = crate::lxmf::open_ack(&opened.payload) {
+        note_receipt_into(&mut mail(), digest);
+        return;
+    }
+    if let Some(letter) = crate::lxmf::open_reaction(&opened.payload) {
+        mail().marks.push(ArrivedReaction {
+            identity,
+            written_at: letter.written_at,
+            words: letter.words,
+            reaction: letter.reaction,
+        });
+        return;
+    }
+    if let Some(letter) = crate::lxmf::open_note(&opened.payload) {
+        mail().inbox.push(ArrivedNote {
+            identity,
+            words: letter.words,
+            written_at: letter.written_at,
+            place: letter.place,
+            from_mailbox: true,
+            digest: sha256(&opened.payload),
+        });
+    }
+}
+
+fn signature_matches(opened: &crate::mailbox::OpenedMail) -> bool {
+    for person in opening_contacts() {
+        let Some(material) = contact_material(&person.identity) else {
+            continue;
+        };
+        if material.identity_hash().as_bytes() != &opened.source {
+            continue;
+        }
+        return material
+            .verify(&opened.signed, &Ed25519Signature(opened.signature))
+            .is_ok();
+    }
+    false
+}
+
+fn note_receipt_into(mail: &mut Mail, digest: [u8; 32]) {
+    let id = sent_notes()
+        .iter()
+        .find(|(_, stored)| **stored == digest)
+        .map(|(id, _)| *id);
+    if let Some(id) = id {
+        mail.acked.push(id);
+    }
+}
+
+fn sent_notes() -> std::sync::MutexGuard<'static, HashMap<u64, [u8; 32]>> {
+    static SENT: OnceLock<Mutex<HashMap<u64, [u8; 32]>>> = OnceLock::new();
+    SENT.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Which of the four wires currently has a peer.
@@ -1035,7 +1574,7 @@ fn marks_from(snapshots: &[personal_rns::interfaces::InterfaceSnapshot]) -> Wire
             Some(Wire::Internet) => marks.internet = true,
             Some(Wire::Bluetooth) => marks.ble = true,
             Some(Wire::Usb) => marks.usb = true,
-            None => {}
+            Some(Wire::Lora) | None => {}
         }
     }
     marks
@@ -1049,6 +1588,8 @@ struct ReachState {
     path: Option<String>,
     hops: Option<u8>,
     ways: crate::model::OfferedWays,
+    /// Round trip of the 400-byte sample, once one has been timed.
+    round_trip_ms: Option<u64>,
     done: bool,
     /// The last time this journal read the stack's current path.
     looked_at: Instant,
@@ -1111,6 +1652,7 @@ pub fn measure(identity: &str) {
                 path: None,
                 hops: None,
                 ways: crate::model::OfferedWays::none(),
+                round_trip_ms: None,
                 done: false,
                 looked_at: Instant::now(),
                 due: false,
@@ -1120,17 +1662,32 @@ pub fn measure(identity: &str) {
         );
     }
     let Some(runtime) = RUNTIME.get().cloned() else {
-        finish_search(&identity, generation, crate::model::OfferedWays::none());
+        finish_search(
+            &identity,
+            generation,
+            crate::model::OfferedWays::none(),
+            None,
+        );
         return;
     };
     let Some(handle) = HANDLE.get().cloned() else {
-        finish_search(&identity, generation, crate::model::OfferedWays::none());
+        finish_search(
+            &identity,
+            generation,
+            crate::model::OfferedWays::none(),
+            None,
+        );
         return;
     };
     let ours = OURS.get().copied();
     runtime.spawn(async move {
         let Some(destination) = destination_for_contact(&identity) else {
-            finish_search(&identity, generation, crate::model::OfferedWays::none());
+            finish_search(
+                &identity,
+                generation,
+                crate::model::OfferedWays::none(),
+                None,
+            );
             return;
         };
         if tokio::time::timeout(STEP_WAIT, handle.request_path(destination))
@@ -1146,8 +1703,13 @@ pub fn measure(identity: &str) {
                 );
             }
         }
-        let ways = crate::model::ways_for_ack(send_probe(&handle, destination, ours).await);
-        finish_search(&identity, generation, ways);
+        let sample = send_probe(&handle, destination, ours).await;
+        finish_search(
+            &identity,
+            generation,
+            crate::model::ways_for_ack(sample),
+            sample,
+        );
     });
 }
 
@@ -1168,7 +1730,12 @@ fn remember_path(identity: &str, generation: u64, path: String, hops: u8) {
     state.hops = Some(hops);
 }
 
-fn finish_search(identity: &str, generation: u64, ways: crate::model::OfferedWays) {
+fn finish_search(
+    identity: &str,
+    generation: u64,
+    ways: crate::model::OfferedWays,
+    round_trip_ms: Option<u64>,
+) {
     let mut map = reach_map();
     let Some(state) = map.get_mut(identity) else {
         return;
@@ -1177,6 +1744,7 @@ fn finish_search(identity: &str, generation: u64, ways: crate::model::OfferedWay
         return;
     }
     state.ways = ways;
+    state.round_trip_ms = round_trip_ms;
     state.done = true;
     state.looked_at = Instant::now();
     state.due = false;
@@ -1234,13 +1802,16 @@ pub fn watch(identity: &str) {
             postpone_sample(&identity, generation);
             return;
         }
-        let ways = match destination_for_contact(&identity) {
-            Some(destination) => {
-                crate::model::ways_for_ack(send_probe(&handle, destination, ours).await)
-            }
-            None => crate::model::OfferedWays::none(),
+        let sample = match destination_for_contact(&identity) {
+            Some(destination) => send_probe(&handle, destination, ours).await,
+            None => None,
         };
-        finish_sample(&identity, generation, ways);
+        finish_sample(
+            &identity,
+            generation,
+            crate::model::ways_for_ack(sample),
+            sample,
+        );
     });
 }
 
@@ -1281,12 +1852,16 @@ fn apply_watched_route(
     let wanted = changed || (state.sample_due && matches!(look, RouteLook::Known(_, _)));
     match look {
         RouteLook::Known(path, hops) => {
+            if state.path.as_deref() != Some(path.as_str()) {
+                state.round_trip_ms = None;
+            }
             state.path = Some(path);
             state.hops = Some(hops);
         }
         RouteLook::Gone => {
             state.path = None;
             state.hops = None;
+            state.round_trip_ms = None;
             state.sample_due = false;
             state.looking = false;
             return SampleNext::None;
@@ -1323,7 +1898,12 @@ fn postpone_sample(identity: &str, generation: u64) {
     state.looking = false;
 }
 
-fn finish_sample(identity: &str, generation: u64, ways: crate::model::OfferedWays) {
+fn finish_sample(
+    identity: &str,
+    generation: u64,
+    ways: crate::model::OfferedWays,
+    round_trip_ms: Option<u64>,
+) {
     let mut map = reach_map();
     let Some(state) = map.get_mut(identity) else {
         return;
@@ -1332,6 +1912,7 @@ fn finish_sample(identity: &str, generation: u64, ways: crate::model::OfferedWay
         return;
     }
     state.ways = ways;
+    state.round_trip_ms = round_trip_ms;
     state.looking = false;
     state.looked_at = Instant::now();
 }
@@ -1368,9 +1949,71 @@ fn interface_name(interface: personal_rns::interfaces::InterfaceId) -> String {
         Some(Wire::Internet) => "Internet",
         Some(Wire::Bluetooth) => "Bluetooth",
         Some(Wire::Usb) => "USB",
+        Some(Wire::Lora) => "LoRa",
         None => "Link",
     }
     .to_string()
+}
+
+fn carry_for_identity(identity: &str) -> crate::model::ResourceCarry {
+    let map = reach_map();
+    let Some(state) = map.get(identity) else {
+        return crate::model::resource_carry(None, false);
+    };
+    let path = state.path.clone().unwrap_or_default();
+    carry_for_path(&path, state.round_trip_ms)
+}
+
+fn carry_for_hash(identity: &IdentityHash) -> crate::model::ResourceCarry {
+    let hex = hex_encode(identity.as_bytes());
+    let found = reach_map().iter().find_map(|(stored, state)| {
+        same_contact(stored, &hex)
+            .then(|| (state.path.clone().unwrap_or_default(), state.round_trip_ms))
+    });
+    match found {
+        Some((path, sample)) => carry_for_path(&path, sample),
+        None => crate::model::resource_carry(None, false),
+    }
+}
+
+/// A measured sample wins. Without one, a fast wire is treated as open until the sample returns, Bluetooth takes a middle step, and anything else stays small. LoRa never leaves the smallest attachment.
+fn carry_for_path(path: &str, round_trip_ms: Option<u64>) -> crate::model::ResourceCarry {
+    if path == "LoRa" {
+        return crate::model::resource_carry(None, true);
+    }
+    if let Some(round_trip_ms) = round_trip_ms {
+        return crate::model::resource_carry(crate::model::bits_per_second(round_trip_ms), false);
+    }
+    match path {
+        "Wi-Fi" | "Internet" | "USB" => crate::model::ResourceCarry::Open,
+        "Bluetooth" => crate::model::resource_carry(Some(32_000), false),
+        _ => crate::model::resource_carry(None, false),
+    }
+}
+
+fn carry_label(carry: crate::model::ResourceCarry) -> String {
+    match carry {
+        crate::model::ResourceCarry::Open => "no limit".to_string(),
+        crate::model::ResourceCarry::Limited(bytes) => format!("{bytes} bytes"),
+    }
+}
+
+fn admit_link(link_id: LinkId, carry: crate::model::ResourceCarry) {
+    let Some(handle) = HANDLE.get() else {
+        return;
+    };
+    let max_uncompressed_bytes = match carry {
+        crate::model::ResourceCarry::Open => u64::MAX,
+        crate::model::ResourceCarry::Limited(bytes) => bytes,
+    };
+    let _ = handle.admit_resource_offers(
+        link_id,
+        personal_rns::runtime::ResourceOfferAdmission {
+            peer: personal_rns::runtime::ResourceAdmissionPeer::Any,
+            max_uncompressed_bytes,
+            accept_compressed: true,
+        },
+    );
 }
 
 enum Wire {
@@ -1378,6 +2021,7 @@ enum Wire {
     Internet,
     Bluetooth,
     Usb,
+    Lora,
 }
 
 /// The USB cable is attached under a fixed id that carries no kind byte.
@@ -1402,6 +2046,7 @@ fn wire_of(interface: personal_rns::interfaces::InterfaceId) -> Option<Wire> {
         Some(InterfaceKind::TcpServer) => Some(Wire::Internet),
         Some(InterfaceKind::BluetoothAuto | InterfaceKind::BluetoothPeer) => Some(Wire::Bluetooth),
         Some(InterfaceKind::UsbAutoHost | InterfaceKind::UsbAutoDevice) => Some(Wire::Usb),
+        Some(InterfaceKind::LoRa | InterfaceKind::Rnode) => Some(Wire::Lora),
         _ => None,
     }
 }
@@ -1470,6 +2115,11 @@ pub fn drain_acks() -> Vec<u64> {
     std::mem::take(&mut mail().acked)
 }
 
+/// Notes the mailbox accepted, still waiting for the other person.
+pub fn drain_posted() -> Vec<(u64, [u8; 32])> {
+    std::mem::take(&mut mail().posted)
+}
+
 /// Notes that were tried three times and will not send themselves again.
 pub fn drain_failures() -> Vec<u64> {
     std::mem::take(&mut mail().failed)
@@ -1510,6 +2160,18 @@ pub async fn rest(millis: u64) {
 
 fn on_journal_event(event: PrnsEvent<'_>, _: &NoRemoteControlHostControls) {
     match event {
+        PrnsEvent::Diagnostic(Diagnostic::LinkEstablished(link)) => {
+            admit_link(
+                link.link_id,
+                crate::model::ResourceCarry::Limited(crate::model::SMALLEST_ATTACHMENT),
+            );
+        }
+        PrnsEvent::Diagnostic(Diagnostic::LinkClosed { link_id, .. }) => {
+            if let Some(handle) = HANDLE.get() {
+                handle.deny_resource_offers(link_id);
+            }
+            mail().resources.retain(|(id, _), _| *id != link_id);
+        }
         PrnsEvent::Diagnostic(Diagnostic::PeerIdentified { link_id, identity }) => {
             remember_peer(link_id, identity);
         }
@@ -1519,6 +2181,19 @@ fn on_journal_event(event: PrnsEvent<'_>, _: &NoRemoteControlHostControls) {
         }
         PrnsEvent::Message(Message::Delivered(Delivery::Link(delivery))) => {
             accept_words(delivery.link_id, delivery.plaintext);
+        }
+        PrnsEvent::Message(Message::Resource { link_id, data, .. }) => {
+            accept_words(link_id, data);
+        }
+        PrnsEvent::Message(Message::ResourceSegment {
+            link_id,
+            original_hash,
+            segment_index,
+            total_segments,
+            data,
+            ..
+        }) => {
+            accept_resource_piece(link_id, original_hash, segment_index, total_segments, data);
         }
         _ => {}
     }
@@ -1534,8 +2209,10 @@ fn mail() -> std::sync::MutexGuard<'static, Mail> {
             marks: Vec::new(),
             acked: Vec::new(),
             failed: Vec::new(),
+            posted: Vec::new(),
             waiting_parts: HashMap::new(),
             assemblies: HashMap::new(),
+            resources: HashMap::new(),
         })
     })
     .lock()
@@ -1554,6 +2231,8 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
                     words: letter.words,
                     written_at: letter.written_at,
                     place: letter.place,
+                    from_mailbox: false,
+                    digest: [0; 32],
                 });
             }
         }
@@ -1580,6 +2259,7 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
         }
     }
     note_peer_on_call(link_id, &identity_hex);
+    admit_link(link_id, carry_for_hash(&identity));
 }
 
 fn accept_words(link_id: LinkId, bytes: &[u8]) {
@@ -1597,6 +2277,47 @@ fn accept_words(link_id: LinkId, bytes: &[u8]) {
         return;
     }
     accept_message(link_id, bytes);
+}
+
+fn accept_resource_piece(
+    link_id: LinkId,
+    hash: personal_rns::routing::links::resources::ResourceHash,
+    index: u64,
+    total: u64,
+    data: &[u8],
+) {
+    if total == 0 || total > 4_096 || index >= total {
+        return;
+    }
+    let key = (link_id, *hash.as_bytes());
+    let mut mail = mail();
+    let incoming = mail
+        .resources
+        .entry(key)
+        .or_insert_with(|| IncomingResource {
+            total,
+            parts: vec![None; total as usize],
+        });
+    if incoming.total != total {
+        return;
+    }
+    if let Some(slot) = incoming.parts.get_mut(index as usize) {
+        if slot.is_none() {
+            *slot = Some(data.to_vec());
+        }
+    }
+    if incoming.parts.iter().any(|part| part.is_none()) {
+        return;
+    }
+    let Some(done) = mail.resources.remove(&key) else {
+        return;
+    };
+    drop(mail);
+    let mut whole = Vec::new();
+    for part in done.parts.into_iter().flatten() {
+        whole.extend(part);
+    }
+    accept_words(link_id, &whole);
 }
 
 fn accept_fragment(link_id: LinkId, fragment: crate::lxmf::Fragment) {
@@ -1631,6 +2352,10 @@ fn offer_piece(
 }
 
 fn stage_message(mail: &mut Mail, identity_hex: &str, bytes: &[u8]) {
+    if let Some(digest) = crate::lxmf::open_ack(bytes) {
+        note_receipt_into(mail, digest);
+        return;
+    }
     if let Some(letter) = crate::lxmf::open_reaction(bytes) {
         mail.marks.push(ArrivedReaction {
             identity: identity_hex.to_string(),
@@ -1646,11 +2371,17 @@ fn stage_message(mail: &mut Mail, identity_hex: &str, bytes: &[u8]) {
             words: letter.words,
             written_at: letter.written_at,
             place: letter.place,
+            from_mailbox: false,
+            digest: [0; 32],
         });
     }
 }
 
 fn accept_message(link_id: LinkId, bytes: &[u8]) {
+    if let Some(digest) = crate::lxmf::open_ack(bytes) {
+        note_receipt_into(&mut mail(), digest);
+        return;
+    }
     if let Some(letter) = crate::lxmf::open_reaction(bytes) {
         let mut mail = mail();
         if let Some(identity) = mail.peers.get(&link_id).copied() {
@@ -1675,16 +2406,25 @@ fn accept_message(link_id: LinkId, bytes: &[u8]) {
             words: letter.words,
             written_at: letter.written_at,
             place: letter.place,
+            from_mailbox: false,
+            digest: [0; 32],
         });
     } else {
         mail.waiting.entry(link_id).or_default().push(letter);
     }
 }
 
-fn destination_for_contact(stored_identity: &str) -> Option<DestinationHash> {
+fn contact_material(stored_identity: &str) -> Option<PublicIdentityMaterial> {
     let bytes = decode_hex(stored_identity.trim())?;
-    let material = PublicIdentityMaterial::from_slice(&bytes).ok()?;
+    PublicIdentityMaterial::from_slice(&bytes).ok()
+}
+
+fn address_for(material: &PublicIdentityMaterial) -> Option<DestinationHash> {
     derive_single_destination_hash(&material.identity_hash(), DELIVERY_APP, DELIVERY_ASPECTS).ok()
+}
+
+fn destination_for_contact(stored_identity: &str) -> Option<DestinationHash> {
+    address_for(&contact_material(stored_identity)?)
 }
 
 /// What the open journal shows for the voice button.
@@ -2976,7 +3716,7 @@ fn delivery_destination<'a>(
         proof: ProofStrategy::ProveAll,
         link_requests: LinkRequestPolicy::AcceptAll,
         ratchet: RatchetPolicy::Ratcheted,
-        resource_strategy: ResourceStrategy::AcceptNone,
+        resource_strategy: ResourceStrategy::AcceptIf,
         maximum_request_bytes: Default::default(),
         request_endpoints: ServeMyRequestEndpoints::No,
     }
@@ -3008,16 +3748,50 @@ mod tests {
     };
 
     use super::{
-        apply_watched_route, call_can_continue, delivery_destination, finish_sample, forget,
-        gateway_client_id, interface_name, machine_label, marks_from, parse_tcp_target, reach_for,
-        reach_map, stand_up, JournalIdentity, ReachState, RouteLook, SampleNext, WireMarks,
-        BUILT_IN_TCP, MAC_USB, PHONE_USB, ROUTE_LOOK, STEP_WAIT,
+        apply_watched_route, call_can_continue, contact_is_isolated, delivery_destination,
+        finish_sample, forget, gateway_client_id, interface_name, machine_label, marks_from,
+        opens_at_the_mailbox, parse_tcp_target, reach_for, reach_map, stand_up, JournalIdentity,
+        ReachState, RouteLook, SampleNext, WireMarks, BUILT_IN_TCP, MAC_USB, PERSON_SLICE,
+        PHONE_USB, ROUTE_LOOK, STEP_WAIT, UNTIL_POSTED,
     };
 
     #[test]
     fn a_search_step_moves_on_after_five_seconds() {
         assert_eq!(STEP_WAIT, Duration::from_secs(5));
         assert_eq!(ROUTE_LOOK, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_isolated_contact_is_posted_without_waiting_on_them() {
+        assert_eq!(UNTIL_POSTED, Duration::from_secs(15));
+        assert!(PERSON_SLICE < UNTIL_POSTED);
+        assert!(!opens_at_the_mailbox(false, true));
+        assert!(opens_at_the_mailbox(true, true));
+        assert!(!opens_at_the_mailbox(true, false));
+
+        let identity = "isolated-delivery-test";
+        reach_map().insert(
+            identity.to_string(),
+            ReachState {
+                generation: 1,
+                path: None,
+                hops: None,
+                ways: crate::model::OfferedWays::none(),
+                round_trip_ms: None,
+                done: false,
+                looked_at: std::time::Instant::now(),
+                due: false,
+                sample_due: false,
+                looking: true,
+            },
+        );
+        assert!(!contact_is_isolated(identity));
+        reach_map().get_mut(identity).unwrap().done = true;
+        assert!(contact_is_isolated(identity));
+        reach_map().get_mut(identity).unwrap().path = Some("Internet".to_string());
+        assert!(!contact_is_isolated(identity));
+        reach_map().remove(identity);
+        assert!(!contact_is_isolated("never-measured"));
     }
 
     #[test]
@@ -3030,6 +3804,7 @@ mod tests {
                 path: Some("Bluetooth".to_string()),
                 hops: Some(1),
                 ways: crate::model::OfferedWays::none(),
+                round_trip_ms: None,
                 done: true,
                 looked_at: std::time::Instant::now(),
                 due: false,
@@ -3092,6 +3867,7 @@ mod tests {
                 path: Some("Bluetooth".to_string()),
                 hops: Some(1),
                 ways: voice,
+                round_trip_ms: None,
                 done: true,
                 looked_at: std::time::Instant::now(),
                 due: false,
@@ -3129,7 +3905,7 @@ mod tests {
             voice: true,
             video: true,
         };
-        finish_sample(identity, 4, measured);
+        finish_sample(identity, 4, measured, Some(20));
         assert_eq!(reach_for(identity).ways, measured);
         assert!(!reach_map().get(identity).expect("the contact").looking);
 

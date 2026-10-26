@@ -215,6 +215,10 @@ pub struct Note {
     pub settled: bool,
     /// Set after this note has been tried three times and is no longer sending itself.
     pub failed: bool,
+    /// The mailbox accepted this note. It stays grey until the other person acknowledges it.
+    pub posted: bool,
+    /// sha256 of the packed note, so an acknowledgement can find it after a restart.
+    pub digest: Option<[u8; 32]>,
     /// Set when the note still carried [`PLACEHOLDER`] at send time.
     pub place: Option<Place>,
     /// When the note was written, as the bits of a Unix-seconds float.
@@ -339,6 +343,7 @@ pub fn settle_note(people: &mut [Person], id: u64) -> bool {
         if let Some(note) = person.notes.iter_mut().find(|note| note.id == id) {
             note.settled = true;
             note.failed = false;
+            note.posted = false;
             return true;
         }
     }
@@ -349,10 +354,26 @@ pub fn settle_note(people: &mut [Person], id: u64) -> bool {
 pub fn fail_note(people: &mut [Person], id: u64) -> bool {
     for person in people {
         if let Some(note) = person.notes.iter_mut().find(|note| note.id == id) {
-            if note.settled || note.failed || !note.mine {
+            if note.settled || note.failed || note.posted || !note.mine {
                 return false;
             }
             note.failed = true;
+            return true;
+        }
+    }
+    false
+}
+
+/// The mailbox accepted this note. It is not delivered yet.
+pub fn post_note(people: &mut [Person], id: u64, digest: [u8; 32]) -> bool {
+    for person in people {
+        if let Some(note) = person.notes.iter_mut().find(|note| note.id == id) {
+            if note.settled || !note.mine {
+                return false;
+            }
+            note.posted = true;
+            note.failed = false;
+            note.digest = Some(digest);
             return true;
         }
     }
@@ -405,6 +426,8 @@ pub fn remember_call(person: &mut Person, seconds: u64, outgoing: bool) {
         mine: outgoing,
         settled: true,
         failed: false,
+        posted: false,
+        digest: None,
         place: None,
         written_at: 0,
         reaction: None,
@@ -447,6 +470,8 @@ pub fn note_from_them(
         mine: false,
         settled: true,
         failed: false,
+        posted: false,
+        digest: None,
         place,
         written_at,
         reaction: None,
@@ -477,6 +502,8 @@ fn push_note(
         mine,
         settled: settled || cfg!(target_arch = "wasm32"),
         failed: false,
+        posted: false,
+        digest: None,
         place,
         written_at: unix_now().to_bits(),
         reaction: None,
@@ -519,6 +546,8 @@ fn kept(kind: NoteKind, day: &str, time: &str, words: &str, mine: bool) -> Note 
         mine,
         settled: true,
         failed: false,
+        posted: false,
+        digest: None,
         place: None,
         written_at: 0,
         reaction: None,
@@ -678,6 +707,66 @@ impl OfferedWays {
 /// A 400-byte sample back in 20 ms is 160,000 bps. A video session needs that much.
 pub const VIDEO_ROUND_TRIP_MS: u64 = 20;
 
+/// The sample a path measurement times, in bytes.
+pub const PROBE_BYTES: u64 = 400;
+
+/// At this rate, and above it, a resource has no size limit.
+pub const OPEN_PATH_BPS: u64 = 150_000;
+
+/// The most a LoRa path, or any path this slow, will carry beyond a single packet.
+pub const SMALLEST_ATTACHMENT: u64 = 2_048;
+
+/// How much of a note that does not fit in one packet a path will carry.
+/// `Open` is no limit. A LoRa hop stays at [`SMALLEST_ATTACHMENT`] however fast the sample looked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceCarry {
+    Open,
+    Limited(u64),
+}
+
+impl ResourceCarry {
+    pub const fn allows(self, bytes: u64) -> bool {
+        match self {
+            Self::Open => true,
+            Self::Limited(limit) => bytes <= limit,
+        }
+    }
+}
+
+/// Bits per second implied by a 400-byte sample. A zero time is not a measurement.
+pub fn bits_per_second(round_trip_ms: u64) -> Option<u64> {
+    if round_trip_ms == 0 {
+        return None;
+    }
+    Some(PROBE_BYTES.saturating_mul(8).saturating_mul(1_000) / round_trip_ms)
+}
+
+/// The resource budget for a measured rate. No measurement, and anything under 8 kb/s, is the smallest attachment.
+pub fn resource_carry(bits_per_second: Option<u64>, lora: bool) -> ResourceCarry {
+    if lora {
+        return ResourceCarry::Limited(SMALLEST_ATTACHMENT);
+    }
+    let Some(bits_per_second) = bits_per_second else {
+        return ResourceCarry::Limited(SMALLEST_ATTACHMENT);
+    };
+    if bits_per_second >= OPEN_PATH_BPS {
+        return ResourceCarry::Open;
+    }
+    if bits_per_second >= 64_000 {
+        return ResourceCarry::Limited(1_000_000);
+    }
+    if bits_per_second >= 32_000 {
+        return ResourceCarry::Limited(256 * 1024);
+    }
+    if bits_per_second >= 16_000 {
+        return ResourceCarry::Limited(64 * 1024);
+    }
+    if bits_per_second >= 8_000 {
+        return ResourceCarry::Limited(16 * 1024);
+    }
+    ResourceCarry::Limited(SMALLEST_ATTACHMENT)
+}
+
 /// What a 400-byte acknowledgement is quick enough to carry.
 /// A note is one message. Voice needs the answer back inside a fifth of a second.
 /// Video needs 160 kbps.
@@ -798,9 +887,10 @@ pub fn mark_read(person: &mut Person) -> bool {
 /// The contact book, written as one line per field so a note can contain more than one line.
 /// Version 2 adds a place line after each note. Version 3 adds the time it was written
 /// and a reaction. Version 4 adds how far the journal has been read. Version 5 adds
-/// whether a note we sent has given up. An older book still opens, and its notes are already read.
+/// whether a note we sent has given up. Version 6 adds whether the mailbox has it,
+/// and the hash an acknowledgement will name. An older book still opens.
 pub fn encode_contacts(people: &[Person]) -> String {
-    let mut out = String::from("journal-contacts 5\n");
+    let mut out = String::from("journal-contacts 6\n");
     out.push_str(&people.len().to_string());
     out.push('\n');
     for person in people {
@@ -834,6 +924,8 @@ pub fn encode_contacts(people: &[Person]) -> String {
             );
             line(&mut out, note.reaction.map(Reaction::name).unwrap_or("-"));
             line(&mut out, if note.failed { "1" } else { "0" });
+            line(&mut out, if note.posted { "1" } else { "0" });
+            line(&mut out, &digest_field(note.digest));
         }
     }
     out
@@ -848,6 +940,7 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
         "journal-contacts 3" => 3,
         "journal-contacts 4" => 4,
         "journal-contacts 5" => 5,
+        "journal-contacts 6" => 6,
         _ => return None,
     };
     let count: usize = lines.next()?.parse().ok()?;
@@ -872,6 +965,8 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
                 mine: parse_flag(lines.next()?)?,
                 settled: parse_flag(lines.next()?)?,
                 failed: false,
+                posted: false,
+                digest: None,
                 words: unescape_field(lines.next()?)?,
                 place: if version >= 2 {
                     read_place(lines.next()?)?
@@ -894,6 +989,11 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
             });
             if version >= 5 {
                 notes.last_mut().expect("the note").failed = parse_flag(lines.next()?)?;
+            }
+            if version >= 6 {
+                let note = notes.last_mut().expect("the note");
+                note.posted = parse_flag(lines.next()?)?;
+                note.digest = read_digest(lines.next()?)?;
             }
         }
         let seen = seen.unwrap_or_else(|| notes.iter().map(|note| note.id).max().unwrap_or(0));
@@ -960,6 +1060,27 @@ fn read_place(text: &str) -> Option<Option<Place>> {
     }
 }
 
+fn digest_field(digest: Option<[u8; 32]>) -> String {
+    let Some(digest) = digest else {
+        return "-".to_string();
+    };
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn read_digest(text: &str) -> Option<Option<[u8; 32]>> {
+    if text == "-" {
+        return Some(None);
+    }
+    if text.len() != 64 {
+        return None;
+    }
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(Some(digest))
+}
+
 fn read_stamp(text: &str) -> Option<u64> {
     if text == "-" {
         return Some(0);
@@ -1016,11 +1137,12 @@ pub fn code_mark(payload: &str) -> Option<(usize, Vec<(usize, usize)>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_person, apply_reaction, can_call, code_mark, contact_code, decode_contacts,
-        encode_contacts, fail_note, group_by_day, has_unread, mark_read, next_person_id,
-        note_from_them, note_ids_from, offered_ways, path_label, react_to_note, remember_call,
-        remove_person, rename_person, retry_note, sample_people, settle_note, ways_for_ack,
-        write_note, Note, NoteKind, OfferedWays, Person, Place, Reaction, PLACEHOLDER,
+        add_person, apply_reaction, bits_per_second, can_call, code_mark, contact_code,
+        decode_contacts, encode_contacts, fail_note, group_by_day, has_unread, mark_read,
+        next_person_id, note_from_them, note_ids_from, offered_ways, path_label, react_to_note,
+        remember_call, remove_person, rename_person, resource_carry, retry_note, sample_people,
+        settle_note, ways_for_ack, write_note, Note, NoteKind, OfferedWays, Person, Place,
+        Reaction, ResourceCarry, OPEN_PATH_BPS, PLACEHOLDER, SMALLEST_ATTACHMENT,
         VIDEO_ROUND_TRIP_MS,
     };
 
@@ -1239,6 +1361,47 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_path_carries_any_resource_and_lora_stays_small() {
+        assert_eq!(bits_per_second(0), None);
+        assert!(bits_per_second(21).expect("a sample") >= OPEN_PATH_BPS);
+        assert!(bits_per_second(22).expect("a sample") < OPEN_PATH_BPS);
+        assert_eq!(
+            resource_carry(bits_per_second(21), false),
+            ResourceCarry::Open
+        );
+        assert_eq!(
+            resource_carry(Some(OPEN_PATH_BPS), true),
+            ResourceCarry::Limited(SMALLEST_ATTACHMENT)
+        );
+        assert_eq!(
+            resource_carry(Some(64_000), false),
+            ResourceCarry::Limited(1_000_000)
+        );
+        assert_eq!(
+            resource_carry(Some(32_000), false),
+            ResourceCarry::Limited(256 * 1024)
+        );
+        assert_eq!(
+            resource_carry(Some(16_000), false),
+            ResourceCarry::Limited(64 * 1024)
+        );
+        assert_eq!(
+            resource_carry(Some(8_000), false),
+            ResourceCarry::Limited(16 * 1024)
+        );
+        assert_eq!(
+            resource_carry(Some(7_999), false),
+            ResourceCarry::Limited(SMALLEST_ATTACHMENT)
+        );
+        assert_eq!(
+            resource_carry(None, false),
+            ResourceCarry::Limited(SMALLEST_ATTACHMENT)
+        );
+        assert!(ResourceCarry::Open.allows(u64::MAX));
+        assert!(!ResourceCarry::Limited(SMALLEST_ATTACHMENT).allows(SMALLEST_ATTACHMENT + 1));
+    }
+
+    #[test]
     fn opening_a_person_offers_only_the_ways_the_packet_allows() {
         let mara = offered_ways(1);
         assert!(mara.note && mara.voice && mara.video);
@@ -1283,6 +1446,8 @@ mod tests {
                 mine: true,
                 settled: false,
                 failed: true,
+                posted: true,
+                digest: Some([0x11; 32]),
                 place: Some(Place::from_degrees(40.7484, -73.9857).expect("place")),
                 written_at: 1_700_000_000.0f64.to_bits(),
                 reaction: Some(Reaction::Love),
@@ -1294,6 +1459,8 @@ mod tests {
         assert_eq!(read[0].notes[0].words, "Line one.\nLine \\ two.");
         assert!(!read[0].notes[0].settled);
         assert!(read[0].notes[0].failed);
+        assert!(read[0].notes[0].posted);
+        assert_eq!(read[0].notes[0].digest, Some([0x11; 32]));
         assert_eq!(
             read[0].notes[0].place,
             Place::from_degrees(40.7484, -73.9857)
@@ -1505,6 +1672,8 @@ Hello
                 mine: false,
                 settled: true,
                 failed: false,
+                posted: false,
+                digest: None,
                 place: None,
                 written_at: 1_700_000_000.0f64.to_bits(),
                 reaction: None,

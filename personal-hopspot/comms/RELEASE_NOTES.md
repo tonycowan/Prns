@@ -2,8 +2,12 @@
 
 Since the last release.
 
-A note's time is shown in your local time.
+If someone cannot take a note right now, it can be posted for them to collect. It stays marked Posted until they have it.
 
-On Mac and Android, a video call shows the other person's picture in the shape their camera sent, and you can hear them.
+A long note goes through when the path is fast enough. A slow path only carries a short one, and a radio path stays short.
 
-While you are on a call, the only button is end.
+You can copy a note, or the part you have selected.
+
+A long word wraps onto the next line instead of running off the page.
+
+Your notes and their notes are written in different hands.

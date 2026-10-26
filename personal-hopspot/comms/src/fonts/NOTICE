@@ -1,0 +1,17 @@
+These faces are embedded so the journal does not depend on a network font service
+or on fonts that ship only with macOS.
+
+Kalam Regular (latin)
+Copyright (c) 2014, Indian Type Foundry (info@indiantypefoundry.com).
+https://github.com/google/fonts/tree/main/ofl/kalam
+
+Patrick Hand Regular (latin)
+Copyright (c) 2010-2012 Patrick Wagesreiter (mail@patrickwagesreiter.at)
+https://github.com/google/fonts/tree/main/ofl/patrickhand
+
+Libre Baskerville Regular (latin)
+Copyright 2012 The Libre Baskerville Project Authors (https://github.com/impallari/Libre-Baskerville)
+Reserved Font Name: Libre Baskerville.
+https://github.com/google/fonts/tree/main/ofl/librebaskerville
+
+All three are licensed under the SIL Open Font License, Version 1.1. The license text is OFL.txt.

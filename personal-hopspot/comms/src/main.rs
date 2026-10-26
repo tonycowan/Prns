@@ -10,6 +10,8 @@ mod lan;
 mod links;
 mod location;
 mod lxmf;
+#[cfg(not(target_arch = "wasm32"))]
+mod mailbox;
 mod model;
 mod scan;
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,7 +49,7 @@ use model::{
     PLACEHOLDER, YOUR_PUBLIC_KEY,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use model::{fail_note, settle_note};
+use model::{fail_note, post_note, settle_note};
 
 const KEEP_KEYBOARD: &str = r#"
 if (!window.__touchbaseKeepKeyboard) {
@@ -129,7 +131,6 @@ if (!window.__touchbaseSeam) {
 "#;
 
 const PAPER: &str = r#"
-@import url("https://fonts.googleapis.com/css2?family=Kalam:wght@400&family=Patrick+Hand&display=swap");
 :root {
   color-scheme: light;
   --paper: #f3efe4;
@@ -139,7 +140,7 @@ const PAPER: &str = r#"
   --rule: rgba(92, 78, 58, 0.28);
   --hand: "Kalam", Noteworthy, "Segoe Print", cursive;
   --their-hand: "Patrick Hand", "Segoe Script", cursive;
-  --book: "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --book: "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", "Libre Baskerville", Georgia, serif;
 }
 * { box-sizing: border-box; }
 html, body, #main {
@@ -470,6 +471,11 @@ input.who.rename {
   margin: 0;
   font-size: 22px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+  touch-action: auto;
 }
 .words.hand { font-size: 19.5px; color: var(--note); }
 .theirs .words.hand { font-family: var(--their-hand); font-size: 22px; }
@@ -526,7 +532,8 @@ input.who.rename {
   justify-content: flex-end;
   margin-top: 0;
 }
-.failed button {
+.failed button,
+.posted span {
   font-family: var(--book);
   font-size: 14px;
   line-height: 1;
@@ -534,6 +541,11 @@ input.who.rename {
   background: var(--pencil);
   border-radius: 8px;
   padding: 6px 8px;
+}
+.posted {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0;
 }
 .reacts {
   display: flex;
@@ -554,6 +566,22 @@ input.who.rename {
   opacity: 0.4;
 }
 .reacts button.chosen { opacity: 1; }
+.reacts button.copy {
+  align-items: center;
+  align-self: flex-start;
+  opacity: 1;
+  box-sizing: content-box;
+  height: 26px;
+  min-height: 26px;
+  min-width: 0;
+  padding: 3px 8px;
+  font-family: var(--book);
+  font-size: 14px;
+  line-height: 1;
+  color: var(--paper);
+  background: var(--pencil);
+  border-radius: 8px;
+}
 .when {
   flex: 0 0 var(--reveal, 0px);
   overflow: hidden;
@@ -835,6 +863,71 @@ input.who.rename {
   user-select: all;
 }
 "#;
+
+/// Your notes are Kalam. Their notes are Patrick Hand. The page is Iowan Old Style where the
+/// system has it, and Libre Baskerville on a phone that does not.
+fn paper_css() -> &'static str {
+    static CSS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CSS.get_or_init(|| {
+        let mut css = String::new();
+        css.push_str(&font_face(
+            "Kalam",
+            include_bytes!("fonts/Kalam-Regular.woff2"),
+        ));
+        css.push_str(&font_face(
+            "Patrick Hand",
+            include_bytes!("fonts/PatrickHand-Regular.woff2"),
+        ));
+        css.push_str(&font_face(
+            "Libre Baskerville",
+            include_bytes!("fonts/LibreBaskerville-Regular.woff2"),
+        ));
+        css.push_str(PAPER);
+        css
+    })
+    .as_str()
+}
+
+fn font_face(family: &str, bytes: &[u8]) -> String {
+    format!(
+        "@font-face {{ font-family: \"{family}\"; font-style: normal; font-weight: 400; font-display: swap; src: url(data:font/woff2;base64,{}) format(\"woff2\"); }}\n",
+        base64(bytes)
+    )
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let value = ((bytes[index] as u32) << 16)
+            | ((bytes[index + 1] as u32) << 8)
+            | (bytes[index + 2] as u32);
+        out.push(TABLE[((value >> 18) & 63) as usize] as char);
+        out.push(TABLE[((value >> 12) & 63) as usize] as char);
+        out.push(TABLE[((value >> 6) & 63) as usize] as char);
+        out.push(TABLE[(value & 63) as usize] as char);
+        index += 3;
+    }
+    match bytes.len() - index {
+        1 => {
+            let value = (bytes[index] as u32) << 16;
+            out.push(TABLE[((value >> 18) & 63) as usize] as char);
+            out.push(TABLE[((value >> 12) & 63) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let value = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8);
+            out.push(TABLE[((value >> 18) & 63) as usize] as char);
+            out.push(TABLE[((value >> 12) & 63) as usize] as char);
+            out.push(TABLE[((value >> 6) & 63) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
 
 fn initial_people() -> Vec<Person> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -1494,6 +1587,9 @@ fn App() -> Element {
                         if let Some(person) = listed.iter_mut().find(|person| {
                             session::same_contact(&person.identity, &arrived.identity)
                         }) {
+                            if arrived.from_mailbox {
+                                session::send_ack(&person.identity, &arrived.digest);
+                            }
                             if note_from_them(
                                 person,
                                 &arrived.words,
@@ -1536,6 +1632,17 @@ fn App() -> Element {
                             session::offer_incoming(invite);
                         } else {
                             session::decline(invite.ticket);
+                        }
+                    }
+                    let posted = session::drain_posted();
+                    if !posted.is_empty() {
+                        let mut listed = people();
+                        let mut changed = false;
+                        for (id, digest) in posted {
+                            changed |= post_note(&mut listed, id, digest);
+                        }
+                        if changed {
+                            commit_people(people, listed);
                         }
                     }
                     let acks = session::drain_acks();
@@ -1608,7 +1715,7 @@ fn App() -> Element {
     let open = !matches!(page(), Page::People);
 
     rsx! {
-        style { {PAPER} }
+        style { {paper_css()} }
         div { class: "notebook",
             onmounted: move |_| {
                 document::eval(KEEP_KEYBOARD);
@@ -2456,6 +2563,49 @@ fn Mark(mark: Option<(usize, Vec<(usize, usize)>)>, on_copy: EventHandler<()>) -
     }
 }
 
+/// The clipboard text for a note: the highlighted portion, or the whole note when nothing is highlighted.
+fn copied_text(full: &str, selected: &str) -> String {
+    let selected = selected.trim();
+    if selected.is_empty() {
+        full.trim().to_string()
+    } else {
+        selected.to_string()
+    }
+}
+
+/// The highlighted text when it sits inside this note. Anything else is empty.
+async fn selection_inside(note_id: u64) -> String {
+    let script = format!(
+        r#"(function () {{
+  var node = document.getElementById("note-{note_id}");
+  var sel = window.getSelection && window.getSelection();
+  if (!node || !sel || sel.rangeCount === 0 || sel.isCollapsed) {{
+    dioxus.send("");
+    return;
+  }}
+  var inside = false;
+  for (var i = 0; i < sel.rangeCount; i++) {{
+    var range = sel.getRangeAt(i);
+    if (node.contains(range.startContainer) && node.contains(range.endContainer)) inside = true;
+  }}
+  dioxus.send(inside ? sel.toString() : "");
+}})();"#
+    );
+    let mut eval = document::eval(&script);
+    eval.recv::<String>().await.unwrap_or_default()
+}
+
+async fn put_on_clipboard(text: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        write_clipboard(text).await
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        write_clipboard(text)
+    }
+}
+
 fn copy_text(text: String, mut copied: Signal<bool>) {
     #[cfg(target_arch = "wasm32")]
     {
@@ -2993,12 +3143,14 @@ fn JournalPage(
                     li { class: "day", "{day}" }
                     for note in notes {
                         NoteRow {
+                            note_id: note.id,
                             kind: note.kind,
                             words: note.words,
                             time: note.time,
                             mine: note.mine,
                             settled: note.settled,
                             failed: note.failed,
+                            posted: note.posted,
                             place: note.place,
                             reaction: note.reaction,
                             can_react: !note.mine && note.kind == NoteKind::Text,
@@ -3177,12 +3329,14 @@ fn jump_to_latest(data: std::rc::Rc<MountedData>) {
 
 #[component]
 fn NoteRow(
+    note_id: u64,
     kind: NoteKind,
     words: String,
     time: String,
     mine: bool,
     settled: bool,
     failed: bool,
+    posted: bool,
     place: Option<Place>,
     reaction: Option<Reaction>,
     can_react: bool,
@@ -3192,6 +3346,8 @@ fn NoteRow(
     let mut reveal = use_signal(|| 0.0);
     let mut drag = use_signal(|| None::<(f64, f64, f64)>);
     let mut choosing = use_signal(|| false);
+    let mut copied = use_signal(|| false);
+    let mut text_down = use_signal(|| None::<(f64, f64)>);
     let words_class = if kind == NoteKind::Text {
         "words hand"
     } else {
@@ -3200,6 +3356,7 @@ fn NoteRow(
     let side = if mine { "mine" } else { "theirs" };
     let tone = if settled { "" } else { "waiting" };
     let shown = shown_words(&words, place);
+    let can_copy = kind == NoteKind::Text && !shown.is_empty();
     rsx! {
         li { class: "note {note_class(kind)} {side} {tone}",
             div {
@@ -3225,7 +3382,8 @@ fn NoteRow(
                         dx * dx + dy * dy < 18.0 * 18.0
                     });
                     release_note(drag, reveal);
-                    if tap && can_react {
+                    if tap && (can_react || can_copy) {
+                        copied.set(false);
                         choosing.set(!choosing());
                     }
                 },
@@ -3237,9 +3395,42 @@ fn NoteRow(
                     }
                     div { class: "pack",
                         if !shown.is_empty() {
-                            p { class: "{words_class}", "{shown}" }
+                            p {
+                                id: "note-{note_id}",
+                                class: "{words_class}",
+                                onpointerdown: move |event| {
+                                    event.stop_propagation();
+                                    let point = event.client_coordinates();
+                                    text_down.set(Some((point.x, point.y)));
+                                },
+                                onpointerup: move |event| {
+                                    event.stop_propagation();
+                                    let point = event.client_coordinates();
+                                    let small = text_down().is_some_and(|(x, y)| {
+                                        let dx = point.x - x;
+                                        let dy = point.y - y;
+                                        dx * dx + dy * dy < 18.0 * 18.0
+                                    });
+                                    text_down.set(None);
+                                    spawn(async move {
+                                        let selected = selection_inside(note_id).await;
+                                        if !selected.trim().is_empty() {
+                                            choosing.set(true);
+                                        } else if small && (can_react || can_copy) {
+                                            copied.set(false);
+                                            choosing.set(!choosing());
+                                        }
+                                    });
+                                },
+                                onpointercancel: move |_| text_down.set(None),
+                                "{shown}"
+                            }
                         }
-                        if failed {
+                        if posted && !settled {
+                            div { class: "posted",
+                                span { "Posted" }
+                            }
+                        } else if failed {
                             div { class: "failed",
                                 button {
                                     aria_label: "Failed. Tap to try again.",
@@ -3252,17 +3443,33 @@ fn NoteRow(
                                     "Failed"
                                 }
                             }
-                        } else if can_react && choosing() {
+                        } else if let Some(reaction) = reaction.filter(|_| !(choosing() && can_react)) {
+                            span { class: "reaction", aria_label: "Reaction",
+                                ReactionGlyph { kind: reaction }
+                            }
+                        }
+                        if choosing() && (can_react || can_copy) {
                             ReactChoices {
                                 chosen: reaction,
+                                marks: can_react,
+                                copied: copied(),
                                 on_react: move |choice| {
                                     choosing.set(false);
                                     on_react.call(choice);
                                 },
-                            }
-                        } else if let Some(reaction) = reaction {
-                            span { class: "reaction", aria_label: "Reaction",
-                                ReactionGlyph { kind: reaction }
+                                on_copy: move |_| {
+                                    let full = shown.clone();
+                                    spawn(async move {
+                                        let selected = selection_inside(note_id).await;
+                                        let text = copied_text(&full, &selected);
+                                        if text.is_empty() {
+                                            return;
+                                        }
+                                        if put_on_clipboard(&text).await {
+                                            copied.set(true);
+                                        }
+                                    });
+                                },
                             }
                         }
                     }
@@ -3276,13 +3483,20 @@ fn NoteRow(
 }
 
 #[component]
-fn ReactChoices(chosen: Option<Reaction>, on_react: EventHandler<Reaction>) -> Element {
+fn ReactChoices(
+    chosen: Option<Reaction>,
+    marks: bool,
+    copied: bool,
+    on_react: EventHandler<Reaction>,
+    on_copy: EventHandler<()>,
+) -> Element {
     rsx! {
         div {
             class: "reacts",
             onpointerdown: move |event| event.stop_propagation(),
             onpointerup: move |event| event.stop_propagation(),
-            button {
+            if marks {
+                button {
                 class: if chosen == Some(Reaction::Love) { "chosen" } else { "" },
                 aria_label: "Love",
                 onclick: move |event| {
@@ -3335,6 +3549,16 @@ fn ReactChoices(chosen: Option<Reaction>, on_react: EventHandler<Reaction>) -> E
                     on_react.call(Reaction::Ask);
                 },
                 ReactionGlyph { kind: Reaction::Ask }
+                }
+            }
+            button {
+                class: "copy",
+                aria_label: "Copy",
+                onclick: move |event| {
+                    event.stop_propagation();
+                    on_copy.call(());
+                },
+                if copied { "Copied" } else { "Copy" }
             }
         }
     }
@@ -3462,5 +3686,41 @@ fn note_class(kind: NoteKind) -> &'static str {
         NoteKind::Text => "",
         NoteKind::Voice => "voice",
         NoteKind::Video => "video",
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::{base64, paper_css};
+
+    #[test]
+    fn the_journal_carries_its_own_faces() {
+        assert_eq!(base64(b"Man"), "TWFu");
+        assert_eq!(base64(b"Ma"), "TWE=");
+        assert_eq!(base64(b"M"), "TQ==");
+        let css = paper_css();
+        assert!(css.contains("font-family: \"Kalam\""));
+        assert!(css.contains("font-family: \"Patrick Hand\""));
+        assert!(css.contains("font-family: \"Libre Baskerville\""));
+        assert!(css.contains("data:font/woff2;base64,"));
+        assert!(!css.contains("fonts.googleapis.com"));
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::copied_text;
+
+    #[test]
+    fn a_copy_uses_the_highlighted_portion_when_there_is_one() {
+        assert_eq!(
+            copied_text("The pears are ready.", ""),
+            "The pears are ready."
+        );
+        assert_eq!(
+            copied_text("The pears are ready.", "   "),
+            "The pears are ready."
+        );
+        assert_eq!(copied_text("The pears are ready.", " pears "), "pears");
     }
 }
