@@ -13,9 +13,7 @@ use std::path::Path;
 use personal_rns::crypto::{
     hkdf_sha256, sha256, sha256_chunks, Sha256PrefixState, X25519SecretKey, SHA256_OUTPUT_LEN,
 };
-use personal_rns::identity::{
-    PrivateIdentityMaterial, PublicIdentityMaterial, ENCRYPTION_IV_LEN, IDENTITY_SECRET_KEY_LEN,
-};
+use personal_rns::identity::{PrivateIdentityMaterial, PublicIdentityMaterial, ENCRYPTION_IV_LEN};
 use personal_rns::routing::announce::derive_single_destination_hash;
 use personal_rns::wire::DestinationHash;
 
@@ -366,6 +364,7 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use personal_rns::crypto::Ed25519Signature;
+    use personal_rns::identity::IDENTITY_SECRET_KEY_LEN;
 
     fn secret(encryption: u8, signing: u8) -> PrivateIdentityMaterial {
         let mut bytes = [0u8; IDENTITY_SECRET_KEY_LEN];

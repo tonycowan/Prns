@@ -96,6 +96,8 @@ pub fn fits_one_link_packet(packed: &[u8]) -> bool {
 }
 
 /// Splits a packed note into link packets. A note that already fits is left as one packet.
+/// Tests still rebuild an older split note. A new note is one packet or one resource.
+#[cfg(test)]
 pub fn link_packets(packed: &[u8]) -> Vec<Vec<u8>> {
     if packed.is_empty() {
         return Vec::new();
@@ -175,6 +177,7 @@ impl Assembly {
     }
 }
 
+#[cfg(test)]
 fn group_id(packed: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in packed {
