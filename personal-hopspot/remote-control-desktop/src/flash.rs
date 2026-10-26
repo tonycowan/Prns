@@ -1886,7 +1886,10 @@ fn extract_zip_archive(zip_path: &Path, dest: &Path) -> Result<(), FlashError> {
             continue;
         };
         let out_path = dest.join(&enclosed);
-        if entry.name().ends_with('/') {
+        let is_directory = entry.name().map_err(|error| {
+            FlashError::Message(format!("could not read zip entry name: {error}"))
+        })?;
+        if is_directory.ends_with('/') {
             fs::create_dir_all(&out_path).map_err(|error| {
                 FlashError::Message(format!("could not create {}: {error}", out_path.display()))
             })?;
