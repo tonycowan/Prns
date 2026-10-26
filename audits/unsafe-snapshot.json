@@ -2896,6 +2896,7 @@
     {
       "graphs": {
         "controller-linux": [],
+        "controller-macos": [],
         "halow-headless": [],
         "host-c-linux": []
       },
@@ -11416,24 +11417,30 @@
       "graphs": {
         "controller-linux": [
           "any_impl",
+          "any_zlib",
           "default",
           "miniz_oxide",
           "runtime_detection",
-          "rust_backend"
+          "rust_backend",
+          "zlib-rs"
         ],
         "controller-macos": [
           "any_impl",
+          "any_zlib",
           "default",
           "miniz_oxide",
           "runtime_detection",
-          "rust_backend"
+          "rust_backend",
+          "zlib-rs"
         ],
         "controller-windows": [
           "any_impl",
+          "any_zlib",
           "default",
           "miniz_oxide",
           "runtime_detection",
-          "rust_backend"
+          "rust_backend",
+          "zlib-rs"
         ]
       },
       "name": "flate2",
@@ -13943,13 +13950,16 @@
       "graphs": {
         "android": [],
         "controller-linux": [
-          "std"
+          "std",
+          "wasm_js"
         ],
         "controller-macos": [
-          "std"
+          "std",
+          "wasm_js"
         ],
         "controller-windows": [
-          "std"
+          "std",
+          "wasm_js"
         ],
         "daemon-linux": [
           "std"
@@ -19406,6 +19416,12 @@
     {
       "graphs": {
         "controller-linux": [
+          "fs",
+          "process",
+          "sched"
+        ],
+        "controller-macos": [
+          "fs",
           "process",
           "sched"
         ],
@@ -35576,6 +35592,23 @@
     },
     {
       "graphs": {
+        "controller-linux": [],
+        "controller-macos": [],
+        "controller-windows": []
+      },
+      "name": "typed-path",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "unsafe": {
+        "blocks": 26,
+        "externs": 0,
+        "functions": 6,
+        "impls": 0,
+        "tokens": 32
+      },
+      "version": "0.13.0"
+    },
+    {
+      "graphs": {
         "engine": [
           "const-generics"
         ],
@@ -38094,7 +38127,6 @@
         "controller-windows": [
           "Win32",
           "Win32_Foundation",
-          "Win32_Globalization",
           "Win32_Graphics",
           "Win32_Graphics_Gdi",
           "Win32_NetworkManagement",
@@ -38102,17 +38134,9 @@
           "Win32_NetworkManagement_Ndis",
           "Win32_Networking",
           "Win32_Networking_WinSock",
-          "Win32_Security",
-          "Win32_Storage",
-          "Win32_Storage_FileSystem",
           "Win32_System",
-          "Win32_System_Com",
-          "Win32_System_Console",
-          "Win32_System_Diagnostics",
-          "Win32_System_Diagnostics_Debug",
           "Win32_System_IO",
           "Win32_System_Memory",
-          "Win32_System_SystemInformation",
           "Win32_System_SystemServices",
           "Win32_System_Threading",
           "Win32_UI",
@@ -38197,27 +38221,13 @@
       "graphs": {
         "controller-windows": [
           "Win32",
-          "Win32_Devices",
-          "Win32_Devices_DeviceAndDriverInstallation",
-          "Win32_Devices_Properties",
-          "Win32_Devices_Usb",
           "Win32_Foundation",
           "Win32_Globalization",
           "Win32_Graphics",
           "Win32_Graphics_Gdi",
-          "Win32_Networking",
-          "Win32_Networking_WinSock",
-          "Win32_Security",
-          "Win32_Storage",
-          "Win32_Storage_FileSystem",
           "Win32_System",
-          "Win32_System_Com",
-          "Win32_System_IO",
           "Win32_System_LibraryLoader",
-          "Win32_System_Registry",
           "Win32_System_SystemServices",
-          "Win32_System_Threading",
-          "Win32_System_WindowsProgramming",
           "Win32_UI",
           "Win32_UI_Accessibility",
           "Win32_UI_Controls",
@@ -38252,7 +38262,11 @@
           "Win32",
           "Win32_Devices",
           "Win32_Devices_Communication",
+          "Win32_Devices_DeviceAndDriverInstallation",
+          "Win32_Devices_Properties",
+          "Win32_Devices_Usb",
           "Win32_Foundation",
+          "Win32_Globalization",
           "Win32_NetworkManagement",
           "Win32_NetworkManagement_IpHelper",
           "Win32_NetworkManagement_Ndis",
@@ -38261,12 +38275,16 @@
           "Win32_Security",
           "Win32_Security_Authentication",
           "Win32_Security_Authentication_Identity",
+          "Win32_Security_Authorization",
           "Win32_Security_Credentials",
           "Win32_Security_Cryptography",
           "Win32_Storage",
           "Win32_Storage_FileSystem",
           "Win32_System",
           "Win32_System_Com",
+          "Win32_System_Console",
+          "Win32_System_Diagnostics",
+          "Win32_System_Diagnostics_Debug",
           "Win32_System_IO",
           "Win32_System_LibraryLoader",
           "Win32_System_Memory",
@@ -39917,37 +39935,34 @@
           "_deflate-any",
           "deflate",
           "deflate-flate2",
-          "deflate-zopfli",
-          "flate2",
-          "zopfli"
+          "deflate-flate2-zlib-rs",
+          "deflate-zopfli"
         ],
         "controller-macos": [
           "_deflate-any",
           "deflate",
           "deflate-flate2",
-          "deflate-zopfli",
-          "flate2",
-          "zopfli"
+          "deflate-flate2-zlib-rs",
+          "deflate-zopfli"
         ],
         "controller-windows": [
           "_deflate-any",
           "deflate",
           "deflate-flate2",
-          "deflate-zopfli",
-          "flate2",
-          "zopfli"
+          "deflate-flate2-zlib-rs",
+          "deflate-zopfli"
         ]
       },
       "name": "zip",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "unsafe": {
-        "blocks": 9,
+        "blocks": 24,
         "externs": 0,
-        "functions": 2,
-        "impls": 6,
-        "tokens": 18
+        "functions": 6,
+        "impls": 7,
+        "tokens": 38
       },
-      "version": "2.4.2"
+      "version": "9.1.1"
     },
     {
       "graphs": {
