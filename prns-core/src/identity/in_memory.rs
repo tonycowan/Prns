@@ -76,18 +76,20 @@ impl InMemoryNodeIdentity {
         }
         out[..ciphertext_token.len()].copy_from_slice(ciphertext_token);
         let out_start = out.as_ptr() as usize;
-        let opened = super::decrypt_token_in_place_with_ratchets(
-            ratchet_secrets,
-            &self.encryption_secret,
-            &self.hash,
-            super::IdentityKeyFallback::Permitted,
-            &mut out[..ciphertext_token.len()],
-        )?;
-        let opened_len = opened.plaintext.len();
-        let offset = (opened.plaintext.as_ptr() as usize)
-            .checked_sub(out_start)
-            .ok_or(DecryptError::InvalidToken)?;
-        drop(opened);
+        let (opened_len, offset) = {
+            let opened = super::decrypt_token_in_place_with_ratchets(
+                ratchet_secrets,
+                &self.encryption_secret,
+                &self.hash,
+                super::IdentityKeyFallback::Permitted,
+                &mut out[..ciphertext_token.len()],
+            )?;
+            let opened_len = opened.plaintext.len();
+            let offset = (opened.plaintext.as_ptr() as usize)
+                .checked_sub(out_start)
+                .ok_or(DecryptError::InvalidToken)?;
+            (opened_len, offset)
+        };
         if offset.saturating_add(opened_len) > out.len() {
             return Err(DecryptError::InvalidToken);
         }
