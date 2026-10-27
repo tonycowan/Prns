@@ -1465,6 +1465,10 @@ fn main() {
                 Config::new().with_window(
                     WindowBuilder::new()
                         .with_title("N10A")
+                        .with_window_icon(Some(
+                            dioxus::desktop::icon_from_memory(include_bytes!("../icons/n10a.png"))
+                                .expect("the journal icon"),
+                        ))
                         .with_inner_size(dioxus::desktop::LogicalSize::new(440.0, 760.0)),
                 ),
             )

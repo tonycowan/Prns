@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=N10A
+Comment=A private journal shared with people you have added
+Exec=touchbase
+Icon=n10a
+Terminal=false
+Categories=Network;

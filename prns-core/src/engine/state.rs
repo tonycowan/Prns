@@ -178,7 +178,12 @@ impl TransportState {
     }
 }
 
+// The host keeps a long trace of a transfer. A radio keeps a short one so the
+// engine still fits in the smallest board's memory.
+#[cfg(feature = "std")]
 const RESOURCE_ROUND_NOTES: usize = 128;
+#[cfg(not(feature = "std"))]
+const RESOURCE_ROUND_NOTES: usize = 8;
 
 pub struct EngineState<S: StorageLayout> {
     pub(crate) ingested_packet_count: u64,

@@ -763,8 +763,7 @@ class MainActivity : WryActivity() {
                 launch,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            val icon = context.applicationInfo.icon.takeIf { it != 0 }
-                ?: android.R.drawable.stat_notify_chat
+            val icon = org.personal.prns.comms.R.drawable.ic_stat_n10a
             val title = name.ifBlank { "Someone" }
             val text = words.ifBlank { "A new note" }
             val notification = Notification.Builder(context, channelId)
