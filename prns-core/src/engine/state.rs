@@ -744,10 +744,7 @@ impl<S: StorageLayout> EngineState<S> {
 
     /// Hands the recorded rounds to the caller, oldest first, and returns how many were dropped
     /// since the previous drain.
-    pub fn drain_resource_rounds(
-        &mut self,
-        mut visit: impl FnMut(super::ResourceRoundNote),
-    ) -> u32 {
+    pub fn drain_resource_rounds(&mut self, visit: impl FnMut(super::ResourceRoundNote)) -> u32 {
         #[cfg(not(feature = "std"))]
         {
             let _ = visit;
@@ -755,6 +752,7 @@ impl<S: StorageLayout> EngineState<S> {
         }
         #[cfg(feature = "std")]
         {
+            let mut visit = visit;
             let dropped = self.round_notes_dropped;
             self.round_notes_dropped = 0;
             let mut index = (self.round_note_cursor + RESOURCE_ROUND_NOTES - self.round_note_count)
