@@ -178,12 +178,10 @@ impl TransportState {
     }
 }
 
-// The host keeps a long trace of a transfer. A radio keeps a short one so the
-// engine still fits in the smallest board's memory.
+/// The host keeps a long trace of a transfer. A radio does not store one: the
+/// trace is for the journal, and the smallest boards have no bytes to spare.
 #[cfg(feature = "std")]
 const RESOURCE_ROUND_NOTES: usize = 128;
-#[cfg(not(feature = "std"))]
-const RESOURCE_ROUND_NOTES: usize = 8;
 
 pub struct EngineState<S: StorageLayout> {
     pub(crate) ingested_packet_count: u64,
@@ -254,9 +252,13 @@ pub struct EngineState<S: StorageLayout> {
     pub(crate) resource_part_hash_lane: ResourcePartHashLane,
     pub(crate) resource_open_lane: ResourceOpenLane,
     pub(crate) incoming_assemblies: IncomingAssemblies<S::IncomingAssemblies>,
+    #[cfg(feature = "std")]
     round_notes: [super::ResourceRoundNote; RESOURCE_ROUND_NOTES],
+    #[cfg(feature = "std")]
     round_note_cursor: usize,
+    #[cfg(feature = "std")]
     round_note_count: usize,
+    #[cfg(feature = "std")]
     round_notes_dropped: u32,
     pub(crate) outgoing_assemblies: OutgoingAssemblies<S::OutgoingAssemblies>,
     pub(crate) channels: S::Channels,
@@ -332,9 +334,13 @@ impl<S: StorageLayout> Default for EngineState<S> {
             resource_part_hash_lane: ResourcePartHashLane::default(),
             resource_open_lane: ResourceOpenLane::default(),
             incoming_assemblies: IncomingAssemblies::default(),
+            #[cfg(feature = "std")]
             round_notes: [super::ResourceRoundNote::empty(); RESOURCE_ROUND_NOTES],
+            #[cfg(feature = "std")]
             round_note_cursor: 0,
+            #[cfg(feature = "std")]
             round_note_count: 0,
+            #[cfg(feature = "std")]
             round_notes_dropped: 0,
             outgoing_assemblies: OutgoingAssemblies::default(),
             channels: Default::default(),
@@ -447,12 +453,16 @@ impl<S: StorageLayout> EngineState<S> {
             write!(resource_part_hash_lane, ResourcePartHashLane::default());
             write!(resource_open_lane, ResourceOpenLane::default());
             write!(incoming_assemblies, IncomingAssemblies::default());
+            #[cfg(feature = "std")]
             write!(
                 round_notes,
                 [super::ResourceRoundNote::empty(); RESOURCE_ROUND_NOTES]
             );
+            #[cfg(feature = "std")]
             write!(round_note_cursor, 0);
+            #[cfg(feature = "std")]
             write!(round_note_count, 0);
+            #[cfg(feature = "std")]
             write!(round_notes_dropped, 0);
             write!(outgoing_assemblies, OutgoingAssemblies::default());
             write!(channels, Default::default());
@@ -716,13 +726,20 @@ impl<S: StorageLayout> EngineState<S> {
     }
 
     pub(crate) fn push_resource_round(&mut self, note: super::ResourceRoundNote) {
-        if self.round_note_count == RESOURCE_ROUND_NOTES {
-            self.round_notes_dropped = self.round_notes_dropped.saturating_add(1);
-        } else {
-            self.round_note_count += 1;
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = note;
         }
-        self.round_notes[self.round_note_cursor] = note;
-        self.round_note_cursor = (self.round_note_cursor + 1) % RESOURCE_ROUND_NOTES;
+        #[cfg(feature = "std")]
+        {
+            if self.round_note_count == RESOURCE_ROUND_NOTES {
+                self.round_notes_dropped = self.round_notes_dropped.saturating_add(1);
+            } else {
+                self.round_note_count += 1;
+            }
+            self.round_notes[self.round_note_cursor] = note;
+            self.round_note_cursor = (self.round_note_cursor + 1) % RESOURCE_ROUND_NOTES;
+        }
     }
 
     /// Hands the recorded rounds to the caller, oldest first, and returns how many were dropped
@@ -731,16 +748,24 @@ impl<S: StorageLayout> EngineState<S> {
         &mut self,
         mut visit: impl FnMut(super::ResourceRoundNote),
     ) -> u32 {
-        let dropped = self.round_notes_dropped;
-        self.round_notes_dropped = 0;
-        let mut index = (self.round_note_cursor + RESOURCE_ROUND_NOTES - self.round_note_count)
-            % RESOURCE_ROUND_NOTES;
-        for _ in 0..self.round_note_count {
-            visit(self.round_notes[index]);
-            index = (index + 1) % RESOURCE_ROUND_NOTES;
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = visit;
+            return 0;
         }
-        self.round_note_count = 0;
-        dropped
+        #[cfg(feature = "std")]
+        {
+            let dropped = self.round_notes_dropped;
+            self.round_notes_dropped = 0;
+            let mut index = (self.round_note_cursor + RESOURCE_ROUND_NOTES - self.round_note_count)
+                % RESOURCE_ROUND_NOTES;
+            for _ in 0..self.round_note_count {
+                visit(self.round_notes[index]);
+                index = (index + 1) % RESOURCE_ROUND_NOTES;
+            }
+            self.round_note_count = 0;
+            dropped
+        }
     }
 
     /// Interface, round trip, frame size, and last requested window for a live link.

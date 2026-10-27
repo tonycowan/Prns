@@ -60,11 +60,18 @@ struct CarriedCeiling {
     window_max: usize,
 }
 
+/// A radio assembles one transfer at a time. The host can remember several.
+#[cfg(feature = "std")]
+const CARRIED_CEILINGS: usize = 16;
+#[cfg(not(feature = "std"))]
+const CARRIED_CEILINGS: usize = 1;
+
 #[derive(Debug, Default)]
 pub struct IncomingAssemblies<C: IncomingAssemblyTable> {
     table: C,
     /// The window ceiling the previous segment of a split transfer ended with, keyed by that transfer.
-    carried: heapless::Vec<CarriedCeiling, 16>,
+    /// A radio keeps one, matching its single assembly slot. The host keeps a handful.
+    carried: heapless::Vec<CarriedCeiling, CARRIED_CEILINGS>,
 }
 
 impl<C: IncomingAssemblyTable> IncomingAssemblies<C> {
