@@ -1,6 +1,7 @@
 use crate::engine::EngineState;
 use crate::identity::IdentityHash;
 use crate::interfaces::{AttachedInterfaces, InterfaceId};
+use crate::routing::links::resources::ResourceHash;
 use crate::routing::links::LinkId;
 use crate::routing::routes::{NextHop, RouteEntry, RouteRetention};
 use crate::routing::warmth::WarmestOf;
@@ -14,6 +15,102 @@ pub struct AnnounceRateState {
     pub last_allowed_announce_at: InstantMillis,
     pub blocked_until: InstantMillis,
     pub rate_violations: u16,
+}
+
+/// One segment of a resource that is still crossing a link.
+///
+/// `whole_bytes` is the full transfer, the same figure on every segment.
+/// `parts_done` counts only this segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceSegmentProgress {
+    pub link_id: LinkId,
+    pub incoming: bool,
+    pub mark: ResourceHash,
+    pub segment_index: u64,
+    pub total_segments: u64,
+    pub parts_done: u64,
+    pub part_count: u64,
+    pub whole_bytes: u64,
+    /// The interface this link is attached to. Zero when the link is already gone.
+    pub interface: InterfaceId,
+    pub rtt_millis: u64,
+    pub mtu: u32,
+    /// Bytes of one resource part on this link.
+    pub sdu: u32,
+    /// The receiver's part window. On an outgoing row this is the last window the peer asked for.
+    pub window: u32,
+    /// The receiver's window ceiling. Zero on an outgoing row.
+    pub ceiling: u32,
+}
+
+/// One request round, drained by the host while a transfer is moving.
+///
+/// Times are milliseconds inside the round, not a wall clock. `span_ms` is from the request
+/// to the event. `first_ms` is from the request to the first part, and only a completed round sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceRoundNote {
+    pub kind: ResourceRoundKind,
+    pub incoming: bool,
+    pub segment_index: u32,
+    pub total_segments: u32,
+    pub part_at: u32,
+    pub asked: u16,
+    pub moved: u16,
+    pub window: u16,
+    pub ceiling: u16,
+    pub fast_rounds: u8,
+    pub hashmap_height: u32,
+    /// A pull sets this when it has run off the names it has. An admit sets this when the ceiling
+    /// was kept from the previous segment of the same transfer. A proof uses [`Self::PROOF_OUT`]
+    /// and the `PROOF_IN_*` values.
+    pub flag: u8,
+    pub first_ms: u32,
+    pub span_ms: u32,
+}
+
+impl ResourceRoundNote {
+    /// The receiver queued a segment proof toward the sender.
+    pub const PROOF_OUT: u8 = 0;
+    /// The sender accepted a segment proof.
+    pub const PROOF_IN_ACCEPTED: u8 = 1;
+    /// A proof reached the sender and did not match.
+    pub const PROOF_IN_INVALID: u8 = 2;
+    /// A proof packet reached the sender and could not be read.
+    pub const PROOF_IN_MALFORMED: u8 = 3;
+    /// A proof named a transfer the sender is not serving.
+    pub const PROOF_IN_MISSING: u8 = 4;
+    /// A proof named a segment that is not on the wire yet.
+    pub const PROOF_IN_OFF_WIRE: u8 = 5;
+
+    pub const fn empty() -> Self {
+        Self {
+            kind: ResourceRoundKind::Pull,
+            incoming: false,
+            segment_index: 0,
+            total_segments: 0,
+            part_at: 0,
+            asked: 0,
+            moved: 0,
+            window: 0,
+            ceiling: 0,
+            fast_rounds: 0,
+            hashmap_height: 0,
+            flag: 0,
+            first_ms: 0,
+            span_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ResourceRoundKind {
+    Pull = 1,
+    Round = 2,
+    Watchdog = 3,
+    Serve = 4,
+    Admit = 5,
+    Proof = 6,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +250,16 @@ impl<S: StorageLayout> EngineState<S> {
         self.routing_table
             .path_row_with_expiry(&destination, interfaces, &warmth)
             .map(|(entry, expires_at)| route_snapshot(destination, entry, expires_at))
+    }
+
+    /// The ratchet on the announce that installed this path. Absent when the path is unknown or the announce carried none.
+    #[must_use]
+    pub fn announced_ratchet(&self, destination: &DestinationHash) -> Option<[u8; 32]> {
+        self.routing_table
+            .stored_announce_for(destination)?
+            .announce
+            .ratchet
+            .map(|ratchet| *ratchet.as_bytes())
     }
 }
 

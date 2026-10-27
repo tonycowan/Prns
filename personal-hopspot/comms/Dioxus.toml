@@ -1,11 +1,11 @@
 [application]
-name = "Optio"
+name = "N10A"
 default_platform = "desktop"
 android_min_sdk_version = 30
 android_main_activity = "android/MainActivity.kt"
 
 [web.app]
-title = "Optio"
+title = "N10A"
 
 [bundle]
 identifier = "org.personal.prns.comms"
@@ -13,7 +13,7 @@ publisher = "Personal PRNS"
 short_description = "A private journal shared with people you have added"
 
 [permissions]
-location = { precision = "fine", description = "Optio uses your location when you add it to a note." }
+location = { precision = "fine", description = "N10A uses your location when you add it to a note." }
 
 [android]
 min_sdk = 30

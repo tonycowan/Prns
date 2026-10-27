@@ -6,7 +6,14 @@ use tokio::sync::oneshot;
 use crate::identity::{IdentityHash, PublicIdentityMaterial};
 use crate::wire::DestinationHash;
 
-pub use crate::engine::RouteSnapshot;
+pub use crate::engine::{ResourceRoundNote, ResourceSegmentProgress, RouteSnapshot};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceSegmentsSnapshot {
+    pub segments: Vec<ResourceSegmentProgress>,
+    pub rounds: Vec<ResourceRoundNote>,
+    pub rounds_dropped: u32,
+}
 
 type CoreInterfaceIfacSnapshot =
     prns_runtime::runtime::node_introspection::InterfaceIfacSnapshot<String>;
@@ -71,5 +78,13 @@ pub enum NodeIntrospectionRequest {
     },
     EngineSnapshot {
         reply: oneshot::Sender<EngineInspectionSnapshot>,
+    },
+    ResourceSegments {
+        reply: oneshot::Sender<ResourceSegmentsSnapshot>,
+    },
+    /// The ratchet on the stored announce for this destination, when the path is known.
+    AnnouncedRatchet {
+        destination: DestinationHash,
+        reply: oneshot::Sender<Option<[u8; 32]>>,
     },
 }

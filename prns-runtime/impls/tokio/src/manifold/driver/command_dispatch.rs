@@ -742,6 +742,22 @@ where
                             destination_identities,
                         });
                     }
+                    NodeIntrospectionRequest::AnnouncedRatchet { destination, reply } => {
+                        let _ = reply.send(engine.announced_ratchet(&destination));
+                    }
+                    NodeIntrospectionRequest::ResourceSegments { reply } => {
+                        let mut segments = std::vec::Vec::new();
+                        engine.visit_resource_segments(|row| segments.push(row));
+                        let mut rounds = std::vec::Vec::new();
+                        let rounds_dropped = engine.drain_resource_rounds(|note| rounds.push(note));
+                        let _ = reply.send(
+                            crate::runtime::node_introspection::ResourceSegmentsSnapshot {
+                                segments,
+                                rounds,
+                                rounds_dropped,
+                            },
+                        );
+                    }
                 }
                 CommandEffect::UNCHANGED
             }

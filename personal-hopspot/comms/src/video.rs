@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-pub const NEEDS_CAMERA: &str = "Optio needs the camera for a video call.";
+pub const NEEDS_CAMERA: &str = "N10A needs the camera for a video call.";
 
 /// The long side of a picture. The short side follows the camera, so a phone
 /// stays tall and a wide camera stays wide.
@@ -524,26 +524,26 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(target_os = "macos")]
 extern "C" {
-    fn optio_vpx_encoder(w: i32, h: i32, kbps: i32, fps: i32) -> *mut std::ffi::c_void;
-    fn optio_vpx_encode(
+    fn n10a_vpx_encoder(w: i32, h: i32, kbps: i32, fps: i32) -> *mut std::ffi::c_void;
+    fn n10a_vpx_encode(
         enc: *mut std::ffi::c_void,
         i420: *const u8,
         pts: i64,
         key: i32,
         out_len: *mut i32,
     ) -> *mut u8;
-    fn optio_vpx_encoder_free(enc: *mut std::ffi::c_void);
-    fn optio_vpx_decoder() -> *mut std::ffi::c_void;
-    fn optio_vpx_decode(
+    fn n10a_vpx_encoder_free(enc: *mut std::ffi::c_void);
+    fn n10a_vpx_decoder() -> *mut std::ffi::c_void;
+    fn n10a_vpx_decode(
         dec: *mut std::ffi::c_void,
         buf: *const u8,
         len: i32,
         w: *mut i32,
         h: *mut i32,
     ) -> *mut u8;
-    fn optio_vpx_error(dec: *mut std::ffi::c_void) -> *const std::ffi::c_char;
-    fn optio_vpx_decoder_free(dec: *mut std::ffi::c_void);
-    fn optio_vpx_free(bytes: *mut u8);
+    fn n10a_vpx_error(dec: *mut std::ffi::c_void) -> *const std::ffi::c_char;
+    fn n10a_vpx_decoder_free(dec: *mut std::ffi::c_void);
+    fn n10a_vpx_free(bytes: *mut u8);
 }
 
 #[cfg(target_os = "macos")]
@@ -568,9 +568,9 @@ impl Drop for Codec {
         // SAFETY: `raw` came from the matching open function and has not been freed.
         unsafe {
             if self.encode {
-                optio_vpx_encoder_free(self.raw);
+                n10a_vpx_encoder_free(self.raw);
             } else {
-                optio_vpx_decoder_free(self.raw);
+                n10a_vpx_decoder_free(self.raw);
             }
         }
         self.raw = std::ptr::null_mut();
@@ -581,7 +581,7 @@ impl Drop for Codec {
 impl Codec {
     fn encoder(width: u32, height: u32) -> Option<Self> {
         // SAFETY: the width, height, and rate are this call's picture size.
-        let raw = unsafe { optio_vpx_encoder(width as i32, height as i32, BITRATE_KBPS, FPS) };
+        let raw = unsafe { n10a_vpx_encoder(width as i32, height as i32, BITRATE_KBPS, FPS) };
         if raw.is_null() {
             None
         } else {
@@ -602,7 +602,7 @@ impl Codec {
         let mut len = 0i32;
         // SAFETY: `raw` is a live encoder. `i420` is the packed picture of the size it was opened with.
         let ptr =
-            unsafe { optio_vpx_encode(self.raw, i420.as_ptr(), pts, i32::from(key), &mut len) };
+            unsafe { n10a_vpx_encode(self.raw, i420.as_ptr(), pts, i32::from(key), &mut len) };
         owned_bytes(ptr, len)
     }
 
@@ -614,7 +614,7 @@ impl Codec {
         let mut height = 0i32;
         // SAFETY: `raw` is a live decoder. The frame is the joined link payload.
         let ptr = unsafe {
-            optio_vpx_decode(
+            n10a_vpx_decode(
                 self.raw,
                 frame.as_ptr(),
                 frame.len() as i32,
@@ -631,7 +631,7 @@ impl Codec {
 
     fn decode_error(&self) -> String {
         // SAFETY: `raw` is the live decoder. The text stays valid until the next decode.
-        let ptr = unsafe { optio_vpx_error(self.raw) };
+        let ptr = unsafe { n10a_vpx_error(self.raw) };
         if ptr.is_null() {
             return String::new();
         }
@@ -660,7 +660,7 @@ fn owned_bytes(ptr: *mut u8, len: i32) -> Option<Vec<u8>> {
     // before the shim frees it.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec();
     // SAFETY: this is the same pointer the shim allocated, freed once.
-    unsafe { optio_vpx_free(ptr) };
+    unsafe { n10a_vpx_free(ptr) };
     Some(bytes)
 }
 
@@ -670,7 +670,7 @@ static DECODER: Mutex<Option<Codec>> = Mutex::new(None);
 #[cfg(target_os = "macos")]
 fn open_decoder() -> Result<(), &'static str> {
     // SAFETY: a fresh decoder. Nothing else holds this pointer.
-    let raw = unsafe { optio_vpx_decoder() };
+    let raw = unsafe { n10a_vpx_decoder() };
     if raw.is_null() {
         return Err(crate::voice::DIDNT_CONNECT);
     }
@@ -977,7 +977,7 @@ mod tests {
         picture.extend(vec![200u8; (160 * 120 / 4) as usize]);
         let encoder = Codec::encoder(160, 120).expect("encoder");
         // SAFETY: a decoder used only by this test, freed when `Codec` drops.
-        let raw = unsafe { optio_vpx_decoder() };
+        let raw = unsafe { n10a_vpx_decoder() };
         let decoder = Codec {
             raw,
             encode: false,

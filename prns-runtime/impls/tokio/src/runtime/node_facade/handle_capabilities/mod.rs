@@ -12,6 +12,7 @@ use crate::node_introspection::{
 };
 use crate::routing::dedup::PacketHash;
 use crate::routing::BlackholedIdentity;
+use crate::runtime::node_introspection::ResourceSegmentsSnapshot;
 use crate::wire::{DestinationHash, TransportId};
 
 use super::super::identity_blackhole_commands::{settle_control, settle_source};
@@ -69,6 +70,13 @@ impl PrnsNodeHandle {
         .flatten()
     }
 
+    /// The ratchet from the announce that installed the path to `destination`.
+    pub async fn announced_ratchet(&self, destination: DestinationHash) -> Option<[u8; 32]> {
+        self.introspect(|reply| NodeIntrospectionRequest::AnnouncedRatchet { destination, reply })
+            .await
+            .flatten()
+    }
+
     pub async fn destination_identity(
         &self,
         query: DestinationIdentityQuery,
@@ -87,6 +95,17 @@ impl PrnsNodeHandle {
     pub async fn engine_inspection_snapshot(&self) -> Option<EngineInspectionSnapshot> {
         self.introspect(|reply| NodeIntrospectionRequest::EngineSnapshot { reply })
             .await
+    }
+
+    /// Segments of resources still crossing a link, plus the request rounds recorded since the last read.
+    pub async fn resource_segments(&self) -> ResourceSegmentsSnapshot {
+        self.introspect(|reply| NodeIntrospectionRequest::ResourceSegments { reply })
+            .await
+            .unwrap_or(ResourceSegmentsSnapshot {
+                segments: Vec::new(),
+                rounds: Vec::new(),
+                rounds_dropped: 0,
+            })
     }
 }
 

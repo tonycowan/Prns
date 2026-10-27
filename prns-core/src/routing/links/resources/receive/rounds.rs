@@ -87,6 +87,8 @@ impl<S: StorageLayout> EngineState<S> {
             let state = self.incoming_resources.state_mut(index);
             state.outstanding_part_count = requested_count;
             state.waiting_for_hmu = exhausted;
+            state.round_asked = u8::try_from(requested_count).unwrap_or(u8::MAX);
+            state.round_first_ms = 0;
         }
 
         let Some(LinkPhase::Active {
@@ -147,6 +149,25 @@ impl<S: StorageLayout> EngineState<S> {
         let state = *self.incoming_resources.state(index);
         self.incoming_resources
             .set_timeout_at(index, Some(part_round_deadline(&state, rtt_millis, now)));
+        self.push_resource_round(crate::engine::ResourceRoundNote {
+            kind: crate::engine::ResourceRoundKind::Pull,
+            incoming: true,
+            segment_index: u32::try_from(state.segment_index).unwrap_or(u32::MAX),
+            total_segments: u32::try_from(state.total_segments).unwrap_or(u32::MAX),
+            part_at: state
+                .consecutive_completed
+                .map(|height| u32::try_from(height.saturating_add(1)).unwrap_or(u32::MAX))
+                .unwrap_or(0),
+            asked: u16::try_from(requested_count).unwrap_or(u16::MAX),
+            moved: 0,
+            window: u16::try_from(state.window).unwrap_or(u16::MAX),
+            ceiling: u16::try_from(state.window_max).unwrap_or(u16::MAX),
+            fast_rounds: state.fast_rate_rounds,
+            hashmap_height: u32::try_from(state.hashmap_height).unwrap_or(u32::MAX),
+            flag: u8::from(exhausted),
+            first_ms: 0,
+            span_ms: 0,
+        });
         EmitResourcePullOutcome::Requested
     }
 
@@ -312,6 +333,10 @@ impl<S: StorageLayout> EngineState<S> {
             let state = self.incoming_resources.state_mut(index);
             state.received_byte_count = state.received_byte_count.saturating_add(part.len() as u64);
             if state.awaiting_round_first_response {
+                if let Some(sent) = state.request_sent_at {
+                    state.round_first_ms =
+                        u32::try_from(arrived_at.0.saturating_sub(sent.0)).unwrap_or(u32::MAX);
+                }
                 absorb_round_first_response(state, part.len(), arrived_at, link_rtt_ms);
             }
             state.retries_left = PART_REQUEST_MAX_RETRIES;
@@ -328,7 +353,31 @@ impl<S: StorageLayout> EngineState<S> {
             return ResourcePartHashLanding::Assembly { link_id, hash };
         }
         if state.outstanding_part_count == 0 && !state.waiting_for_hmu {
+            let span_ms = state
+                .request_sent_at
+                .map(|sent| u32::try_from(arrived_at.0.saturating_sub(sent.0)).unwrap_or(u32::MAX))
+                .unwrap_or(0);
             absorb_completed_round(self.incoming_resources.state_mut(index), arrived_at);
+            let after = *self.incoming_resources.state(index);
+            self.push_resource_round(crate::engine::ResourceRoundNote {
+                kind: crate::engine::ResourceRoundKind::Round,
+                incoming: true,
+                segment_index: u32::try_from(after.segment_index).unwrap_or(u32::MAX),
+                total_segments: u32::try_from(after.total_segments).unwrap_or(u32::MAX),
+                part_at: after
+                    .consecutive_completed
+                    .map(|height| u32::try_from(height.saturating_add(1)).unwrap_or(u32::MAX))
+                    .unwrap_or(0),
+                asked: u16::from(state.round_asked),
+                moved: u16::from(state.round_asked),
+                window: u16::try_from(after.window).unwrap_or(u16::MAX),
+                ceiling: u16::try_from(after.window_max).unwrap_or(u16::MAX),
+                fast_rounds: after.fast_rate_rounds,
+                hashmap_height: u32::try_from(after.hashmap_height).unwrap_or(u32::MAX),
+                flag: 0,
+                first_ms: state.round_first_ms,
+                span_ms,
+            });
             return ResourcePartHashLanding::Pull { link_id, hash };
         }
         ResourcePartHashLanding::DeadlineAdvanced { link_id, hash }

@@ -1,7 +1,10 @@
 package dev.dioxus.main
 
 import android.Manifest
+import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
 import android.content.Context
@@ -17,15 +20,20 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.os.Build
+import android.os.Environment
 import android.os.Bundle
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
+import android.webkit.MimeTypeMap
 import android.util.Log
 import android.view.View
 import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -42,6 +50,9 @@ class MainActivity : WryActivity() {
     private var micStatus: Int = 1
     private var placeWaiting: CountDownLatch? = null
     private var placeGranted: Boolean = false
+    private var fileLatch: CountDownLatch? = null
+    private var fileResult: AtomicReference<String?>? = null
+    private var fileLimit: Long = 0
     private var wifi: WifiLan? = null
     private var scanner: CodeScan? = null
     private var film: Film? = null
@@ -89,6 +100,27 @@ class MainActivity : WryActivity() {
                 || granted[Manifest.permission.ACCESS_COARSE_LOCATION] == true
             placeWaiting?.countDown()
             placeWaiting = null
+        }
+
+    private val openFile =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val saved = fileResult
+            val latch = fileLatch
+            val limit = fileLimit
+            fileResult = null
+            fileLatch = null
+            if (latch == null || saved == null) {
+                return@registerForActivityResult
+            }
+            val uri = if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
+            if (uri == null) {
+                latch.countDown()
+                return@registerForActivityResult
+            }
+            kotlin.concurrent.thread(name = "note-file") {
+                saved.set(copyChosen(uri, limit))
+                latch.countDown()
+            }
         }
 
     private val radios =
@@ -376,6 +408,183 @@ class MainActivity : WryActivity() {
 
     private fun format(location: Location) = "${location.latitude},${location.longitude}"
 
+    fun pickFile(maxBytes: Long): String? {
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<String?>(null)
+        runOnUiThread {
+            fileLatch = latch
+            fileResult = result
+            fileLimit = maxBytes
+            try {
+                // A MIME list of "*/*" makes the document picker keep a narrow type filter.
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                }
+                openFile.launch(intent)
+            } catch (_: Exception) {
+                latch.countDown()
+            }
+        }
+        if (!latch.await(10, TimeUnit.MINUTES)) {
+            return null
+        }
+        return result.get()
+    }
+
+    private fun copyChosen(uri: Uri, maxBytes: Long): String? {
+        val name = displayName(uri)
+        val dest = File(cacheDir, "note-${System.nanoTime()}")
+        var total = 0L
+        var tooBig = false
+        try {
+            val input = contentResolver.openInputStream(uri) ?: return "missing"
+            input.use { stream ->
+                dest.outputStream().use { output ->
+                    val buf = ByteArray(8192)
+                    while (true) {
+                        val n = stream.read(buf)
+                        if (n < 0) {
+                            break
+                        }
+                        total += n.toLong()
+                        if (maxBytes > 0L && total > maxBytes) {
+                            tooBig = true
+                            break
+                        }
+                        output.write(buf, 0, n)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            dest.delete()
+            return "missing"
+        }
+        if (tooBig || total == 0L) {
+            dest.delete()
+            return if (tooBig) "over" else "missing"
+        }
+        return "$name\n${dest.absolutePath}"
+    }
+
+    private fun displayName(uri: Uri): String {
+        val cursor = contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )
+        val raw = cursor?.use { rows ->
+            if (!rows.moveToFirst()) {
+                null
+            } else {
+                val index = rows.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index < 0) null else rows.getString(index)
+            }
+        }
+        val name = raw
+            ?.replace('\n', ' ')
+            ?.replace('\r', ' ')
+            ?.trim()
+            ?.substringAfterLast('/')
+            ?.substringAfterLast('\\')
+            ?.take(120)
+            ?.trim()
+            .orEmpty()
+        return name.ifBlank { "file" }
+    }
+
+    fun writeDownload(sourcePath: String, displayName: String): String? {
+        val source = File(sourcePath)
+        if (!source.isFile || source.length() == 0L) {
+            return null
+        }
+        val safe = displayName.replace('\n', ' ').replace('\r', ' ').trim().ifBlank { "file" }
+        for (n in 1 until 1000) {
+            val candidate = if (n == 1) safe else numberedDownload(safe, n)
+            val found = findDownload(candidate)
+            if (found == null) {
+                return if (insertDownload(source, candidate)) candidate else null
+            }
+            if (found.second == source.length()) {
+                return candidate
+            }
+        }
+        return null
+    }
+
+    fun viewDownload(displayName: String) {
+        val found = findDownload(displayName) ?: return
+        val mime = MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(File(displayName).extension.lowercase())
+            ?: "application/octet-stream"
+        val view = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(found.first, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { startActivity(Intent.createChooser(view, displayName)) }
+    }
+
+    private fun findDownload(name: String): Pair<Uri, Long>? {
+        val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        val cursor = runCatching {
+            contentResolver.query(
+                collection,
+                arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.SIZE),
+                "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+                arrayOf(name),
+                null,
+            )
+        }.getOrNull() ?: return null
+        cursor.use { rows ->
+            if (!rows.moveToFirst()) {
+                return null
+            }
+            val id = rows.getLong(0)
+            val size = rows.getLong(1)
+            return ContentUris.withAppendedId(collection, id) to size
+        }
+    }
+
+    private fun insertDownload(source: File, name: String): Boolean {
+        val mime = MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(File(name).extension.lowercase())
+            ?: "application/octet-stream"
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.SIZE, source.length())
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: return false
+        val wrote = runCatching {
+            val output = contentResolver.openOutputStream(uri) ?: return@runCatching false
+            output.use { out ->
+                source.inputStream().use { input -> input.copyTo(out) }
+            }
+            true
+        }.getOrDefault(false)
+        if (!wrote) {
+            contentResolver.delete(uri, null, null)
+            return false
+        }
+        values.clear()
+        values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+        contentResolver.update(uri, values, null, null)
+        return true
+    }
+
+    private fun numberedDownload(name: String, n: Int): String {
+        val dot = name.lastIndexOf('.')
+        if (dot <= 0 || dot == name.lastIndex) {
+            return "$name ($n)"
+        }
+        return "${name.substring(0, dot)} ($n)${name.substring(dot)}"
+    }
+
     fun openPlace(query: String) {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(query))
         runOnUiThread {
@@ -572,6 +781,19 @@ class MainActivity : WryActivity() {
         @JvmStatic
         fun showPlace(query: String) {
             instance?.openPlace(query)
+        }
+
+        @JvmStatic
+        fun chooseFile(maxBytes: Long): String? = instance?.pickFile(maxBytes)
+
+        @JvmStatic
+        fun saveDownload(sourcePath: String, displayName: String): String? =
+            instance?.writeDownload(sourcePath, displayName)
+
+        @JvmStatic
+        fun openDownload(displayName: String) {
+            val activity = instance ?: return
+            activity.runOnUiThread { activity.viewDownload(displayName) }
         }
 
         @JvmStatic

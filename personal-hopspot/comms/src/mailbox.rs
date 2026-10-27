@@ -1,6 +1,6 @@
 //! A note the other person could not take is left on one mailbox.
 //!
-//! The mailbox is an `lxmf.propagation` address. Every Optio app uses the same
+//! The mailbox is an `lxmf.propagation` address. Every N10A app uses the same
 //! one. A journal `mailbox` file, or `JOURNAL_MAILBOX`, overrides the built-in
 //! address. `lxmd` keeps the address only while its identity file is kept.
 //! Run it with `enable_node = yes` and `autopeer = no`, and do not give it peers.
@@ -11,7 +11,8 @@
 use std::path::Path;
 
 use personal_rns::crypto::{
-    hkdf_sha256, sha256, sha256_chunks, Sha256PrefixState, X25519SecretKey, SHA256_OUTPUT_LEN,
+    hkdf_sha256, sha256, sha256_chunks, Sha256PrefixState, X25519PublicKey, X25519SecretKey,
+    SHA256_OUTPUT_LEN,
 };
 use personal_rns::identity::{PrivateIdentityMaterial, PublicIdentityMaterial, ENCRYPTION_IV_LEN};
 use personal_rns::routing::announce::derive_single_destination_hash;
@@ -30,7 +31,7 @@ const STAMP_LEN: usize = 32;
 const HASH_LEN: usize = 16;
 const SIGNATURE_LEN: usize = 64;
 
-/// A mailbox message opened with our identity key.
+/// A mailbox message opened with a retained ratchet, or the identity key.
 pub struct OpenedMail {
     pub source: [u8; HASH_LEN],
     pub payload: Vec<u8>,
@@ -69,7 +70,7 @@ pub fn propagation_packet(
     recipient: &PublicIdentityMaterial,
     payload: &[u8],
 ) -> Option<Vec<u8>> {
-    let lxmf = seal_lxmf(ours, recipient, payload)?;
+    let lxmf = seal_for_delivery(ours, recipient, payload, None)?;
     let transient = sha256(&lxmf);
     let stamp = stamp_for(&transient, STAMP_COST, STAMP_ROUNDS)?;
     let mut stamped = lxmf;
@@ -78,10 +79,12 @@ pub fn propagation_packet(
 }
 
 /// Opens `lxmf_data` after the mailbox has stripped the stamp.
+/// `ratchets` are our secrets, newest first. A token none of them opens falls back to the identity key.
 pub fn open_lxmf(
     ours: &PrivateIdentityMaterial,
     our_delivery: &DestinationHash,
     lxmf_data: &[u8],
+    ratchets: &[X25519SecretKey],
 ) -> Option<OpenedMail> {
     if lxmf_data.len() < HASH_LEN + SIGNATURE_LEN {
         return None;
@@ -91,7 +94,9 @@ pub fn open_lxmf(
         return None;
     }
     let mut plain = vec![0u8; ciphertext.len()];
-    let len = ours.decrypt(ciphertext, &mut plain).ok()?;
+    let len = ours
+        .decrypt_with_ratchets(ratchets, ciphertext, &mut plain)
+        .ok()?;
     plain.truncate(len);
     if plain.len() < HASH_LEN + SIGNATURE_LEN {
         return None;
@@ -164,14 +169,16 @@ pub fn read_ids(bytes: &[u8]) -> Option<Vec<[u8; STAMP_LEN]>> {
     Some(ids)
 }
 
-fn seal_lxmf(
+/// Seals a note to `ratchet` when the path announced one, otherwise to the identity encryption key.
+pub(crate) fn seal_for_delivery(
     ours: &PrivateIdentityMaterial,
     recipient: &PublicIdentityMaterial,
     payload: &[u8],
+    ratchet: Option<&X25519PublicKey>,
 ) -> Option<Vec<u8>> {
     let ephemeral = X25519SecretKey::new(random_bytes()?);
     let iv = random_bytes()?;
-    seal_lxmf_with(ours, recipient, payload, &ephemeral, &iv)
+    seal_lxmf_with(ours, recipient, payload, &ephemeral, &iv, ratchet)
 }
 
 fn seal_lxmf_with(
@@ -180,6 +187,7 @@ fn seal_lxmf_with(
     payload: &[u8],
     ephemeral: &X25519SecretKey,
     iv: &[u8; ENCRYPTION_IV_LEN],
+    ratchet: Option<&X25519PublicKey>,
 ) -> Option<Vec<u8>> {
     let destination = derive_single_destination_hash(
         &recipient.identity_hash(),
@@ -200,9 +208,14 @@ fn seal_lxmf_with(
     plaintext.extend(signature.0);
     plaintext.extend(payload);
     let mut ciphertext = vec![0u8; plaintext.len() + 256];
-    let len = recipient
-        .encrypt(ephemeral, iv, &plaintext, &mut ciphertext)
-        .ok()?;
+    let len = match ratchet {
+        Some(ratchet) => recipient
+            .encrypt_to_ratchet(ratchet, ephemeral, iv, &plaintext, &mut ciphertext)
+            .ok()?,
+        None => recipient
+            .encrypt(ephemeral, iv, &plaintext, &mut ciphertext)
+            .ok()?,
+    };
     ciphertext.truncate(len);
     let mut lxmf = Vec::with_capacity(HASH_LEN + ciphertext.len());
     lxmf.extend(destination.as_bytes());
@@ -423,22 +436,87 @@ mod tests {
         let payload = crate::lxmf::pack_note("The pears are ready.", 1_700_000_000.0);
         let ephemeral = X25519SecretKey::new([0x55; 32]);
         let iv = [0x66; ENCRYPTION_IV_LEN];
-        let lxmf = seal_lxmf_with(&sender, &recipient.public(), &payload, &ephemeral, &iv)
-            .expect("sealed");
+        let lxmf = seal_lxmf_with(
+            &sender,
+            &recipient.public(),
+            &payload,
+            &ephemeral,
+            &iv,
+            None,
+        )
+        .expect("sealed");
         let delivery = derive_single_destination_hash(
             &recipient.identity_hash(),
             PROPAGATION_APP,
             PROPAGATION_ASPECTS,
         )
         .expect("delivery address");
-        let opened = open_lxmf(&recipient, &delivery, &lxmf).expect("opened");
+        let opened = open_lxmf(&recipient, &delivery, &lxmf, &[]).expect("opened");
         assert_eq!(opened.payload, payload);
         assert_eq!(opened.source, *sender.identity_hash().as_bytes());
         sender
             .public()
             .verify(&opened.signed, &Ed25519Signature(opened.signature))
             .expect("signature");
-        assert!(open_lxmf(&sender, &delivery, &lxmf).is_none());
+        assert!(open_lxmf(&sender, &delivery, &lxmf, &[]).is_none());
+    }
+
+    #[test]
+    fn a_note_sealed_to_a_ratchet_opens_only_with_that_secret() {
+        use personal_rns::crypto::x25519_public_key;
+
+        let sender = secret(0x44, 0x33);
+        let recipient = secret(0x22, 0x11);
+        let ratchet = X25519SecretKey::new([0x77; 32]);
+        let ratchet_public = x25519_public_key(&ratchet);
+        let payload = crate::lxmf::pack_note("The pears are ready.", 1_700_000_000.0);
+        let ephemeral = X25519SecretKey::new([0x55; 32]);
+        let iv = [0x66; ENCRYPTION_IV_LEN];
+        let lxmf = seal_lxmf_with(
+            &sender,
+            &recipient.public(),
+            &payload,
+            &ephemeral,
+            &iv,
+            Some(&ratchet_public),
+        )
+        .expect("sealed");
+        let delivery = derive_single_destination_hash(
+            &recipient.identity_hash(),
+            PROPAGATION_APP,
+            PROPAGATION_ASPECTS,
+        )
+        .expect("delivery address");
+        assert!(open_lxmf(&recipient, &delivery, &lxmf, &[]).is_none());
+        let opened = open_lxmf(&recipient, &delivery, &lxmf, &[ratchet]).expect("opened");
+        assert_eq!(opened.payload, payload);
+    }
+
+    #[test]
+    fn an_identity_key_seal_still_opens_beside_a_retained_ratchet() {
+        let sender = secret(0x44, 0x33);
+        let recipient = secret(0x22, 0x11);
+        let payload = crate::lxmf::pack_note("Left on the identity key.", 1_700_000_000.0);
+        let ephemeral = X25519SecretKey::new([0x55; 32]);
+        let iv = [0x66; ENCRYPTION_IV_LEN];
+        let lxmf = seal_lxmf_with(
+            &sender,
+            &recipient.public(),
+            &payload,
+            &ephemeral,
+            &iv,
+            None,
+        )
+        .expect("sealed");
+        let delivery = derive_single_destination_hash(
+            &recipient.identity_hash(),
+            PROPAGATION_APP,
+            PROPAGATION_ASPECTS,
+        )
+        .expect("delivery address");
+        let other = X25519SecretKey::new([0x77; 32]);
+        let opened = open_lxmf(&recipient, &delivery, &lxmf, &[other]).expect("opened");
+        assert_eq!(opened.payload, payload);
     }
 
     #[test]

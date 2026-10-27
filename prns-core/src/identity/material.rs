@@ -57,6 +57,17 @@ impl PrivateIdentityMaterial {
         self.identity().decrypt(ciphertext, out)
     }
 
+    /// Retained ratchet secrets, newest first, then this identity's encryption key.
+    pub fn decrypt_with_ratchets(
+        &self,
+        ratchet_secrets: &[X25519SecretKey],
+        ciphertext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, DecryptError> {
+        self.identity()
+            .decrypt_with_ratchets(ratchet_secrets, ciphertext, out)
+    }
+
     fn identity(&self) -> InMemoryNodeIdentity {
         InMemoryNodeIdentity::from_secret_key_bytes(&self.0)
     }
@@ -118,6 +129,25 @@ impl PublicIdentityMaterial {
     ) -> Result<usize, EncryptError> {
         let keys = self.public_keys();
         RemoteIdentity::from_public_keys(keys.encryption, keys.signing).encrypt(
+            ephemeral_secret,
+            iv,
+            plaintext,
+            out,
+        )
+    }
+
+    /// Same token as [`encrypt`](Self::encrypt), with the Diffie-Hellman target swapped for a ratchet.
+    pub fn encrypt_to_ratchet(
+        &self,
+        ratchet_public: &X25519PublicKey,
+        ephemeral_secret: &X25519SecretKey,
+        iv: &[u8; ENCRYPTION_IV_LEN],
+        plaintext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, EncryptError> {
+        let keys = self.public_keys();
+        RemoteIdentity::from_public_keys(keys.encryption, keys.signing).encrypt_to_ratchet(
+            ratchet_public,
             ephemeral_secret,
             iv,
             plaintext,

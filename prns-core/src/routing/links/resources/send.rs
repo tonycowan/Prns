@@ -1232,18 +1232,48 @@ impl<S: StorageLayout> EngineState<S> {
             return NotALocalLink;
         }
         let Ok((hash, proof)) = parse_proof_plaintext(payload) else {
+            self.note_resource_proof(
+                false,
+                0,
+                0,
+                crate::engine::ResourceRoundNote::PROOF_IN_MALFORMED,
+            );
             return Resolved(IngestPacketOutcome::Ignored(IgnoreReason::Malformed));
         };
         let Some(index) = self.outgoing_resources.lookup(&link_id, &hash) else {
+            self.note_resource_proof(
+                false,
+                0,
+                0,
+                crate::engine::ResourceRoundNote::PROOF_IN_MISSING,
+            );
             return Resolved(IngestPacketOutcome::Ignored(IgnoreReason::Superseded));
         };
         let state = *self.outgoing_resources.state(index);
         if state.status.is_off_wire() {
+            self.note_resource_proof(
+                false,
+                state.segment_index,
+                state.total_segments,
+                crate::engine::ResourceRoundNote::PROOF_IN_OFF_WIRE,
+            );
             return Resolved(IngestPacketOutcome::Ignored(IgnoreReason::Superseded));
         }
         if proof != state.expected_proof {
+            self.note_resource_proof(
+                false,
+                state.segment_index,
+                state.total_segments,
+                crate::engine::ResourceRoundNote::PROOF_IN_INVALID,
+            );
             return Resolved(IngestPacketOutcome::Ignored(IgnoreReason::ProofInvalid));
         }
+        self.note_resource_proof(
+            false,
+            state.segment_index,
+            state.total_segments,
+            crate::engine::ResourceRoundNote::PROOF_IN_ACCEPTED,
+        );
         let id = state.command_id;
         let correlation = state.correlation;
         let last_segment = state.segment_index >= state.total_segments;
@@ -1362,7 +1392,10 @@ impl<S: StorageLayout> EngineState<S> {
             .set_timeout_at(index, Some(transferring_deadline(now, rtt_millis)));
 
         let scope_start = self.outgoing_resources.state(index).scope_start;
+        let segment_index = self.outgoing_resources.state(index).segment_index;
+        let total_segments = self.outgoing_resources.state(index).total_segments;
         let mut originated_outbound = false;
+        let mut sent_parts: u16 = 0;
         #[cfg(feature = "runtime-metrics")]
         let mut first_frame_enqueued = false;
         for part in serve_part_indices(
@@ -1400,7 +1433,9 @@ impl<S: StorageLayout> EngineState<S> {
             if self.outgoing_resources.mark_sent(index, part) == PartSendOutcome::FirstSend {
                 originated_outbound = true;
             }
+            sent_parts = sent_parts.saturating_add(1);
         }
+        let asked = u16::try_from(requested.len() / MAP_HASH_LEN).unwrap_or(u16::MAX);
 
         if let Some(last_known) = last_known_map_hash {
             let plan = plan_hashmap_update(
@@ -1464,6 +1499,23 @@ impl<S: StorageLayout> EngineState<S> {
                 }
             }
         }
+
+        self.push_resource_round(crate::engine::ResourceRoundNote {
+            kind: crate::engine::ResourceRoundKind::Serve,
+            incoming: false,
+            segment_index: u32::try_from(segment_index).unwrap_or(u32::MAX),
+            total_segments: u32::try_from(total_segments).unwrap_or(u32::MAX),
+            part_at: u32::try_from(scope_start).unwrap_or(u32::MAX),
+            asked,
+            moved: sent_parts,
+            window: 0,
+            ceiling: 0,
+            fast_rounds: 0,
+            hashmap_height: 0,
+            flag: u8::from(last_known_map_hash.is_some()),
+            first_ms: 0,
+            span_ms: 0,
+        });
 
         #[cfg(feature = "runtime-metrics")]
         if first_frame_enqueued {

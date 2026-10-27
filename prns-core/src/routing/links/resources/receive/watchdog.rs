@@ -277,6 +277,14 @@ impl<S: StorageLayout> EngineState<S> {
                 self.fail_incoming_resource(&link_id, &hash, cause, sink);
                 continue;
             }
+            let span_ms = state
+                .request_sent_at
+                .map(|sent| u32::try_from(now.0.saturating_sub(sent.0)).unwrap_or(u32::MAX))
+                .unwrap_or(0);
+            let part_at = state
+                .consecutive_completed
+                .map(|height| u32::try_from(height.saturating_add(1)).unwrap_or(u32::MAX))
+                .unwrap_or(0);
             {
                 let state = self.incoming_resources.state_mut(index);
                 shrink_window_after_silent_round(state);
@@ -284,6 +292,23 @@ impl<S: StorageLayout> EngineState<S> {
                 state.outstanding_part_count = 0;
                 state.retries_left -= 1;
             }
+            let after = *self.incoming_resources.state(index);
+            self.push_resource_round(crate::engine::ResourceRoundNote {
+                kind: crate::engine::ResourceRoundKind::Watchdog,
+                incoming: true,
+                segment_index: u32::try_from(after.segment_index).unwrap_or(u32::MAX),
+                total_segments: u32::try_from(after.total_segments).unwrap_or(u32::MAX),
+                part_at,
+                asked: u16::from(after.round_asked),
+                moved: 0,
+                window: u16::try_from(after.window).unwrap_or(u16::MAX),
+                ceiling: u16::try_from(after.window_max).unwrap_or(u16::MAX),
+                fast_rounds: after.fast_rate_rounds,
+                hashmap_height: u32::try_from(after.hashmap_height).unwrap_or(u32::MAX),
+                flag: 0,
+                first_ms: after.round_first_ms,
+                span_ms,
+            });
             self.emit_resource_pull(&link_id, &hash, now, fill_random, sink);
         }
     }
@@ -299,6 +324,13 @@ impl<S: StorageLayout> EngineState<S> {
             let eifr = expected_inflight_bits_per_second(&state, link_rtt_ms);
             self.links
                 .note_resource_concluded(link_id, state.window, eifr);
+            if state.total_segments > 1 && state.segment_index < state.total_segments {
+                self.incoming_assemblies.note_carried_ceiling(
+                    *link_id,
+                    state.original_hash,
+                    state.window_max,
+                );
+            }
         }
         self.incoming_resources.remove(link_id, hash);
     }

@@ -39,6 +39,8 @@ pub use prns_runtime::runtime::{
 };
 
 #[cfg(feature = "alloc")]
+pub use prns_runtime::runtime::persistence_snapshots::self_ratchet_identity_label;
+#[cfg(feature = "alloc")]
 pub use prns_runtime::runtime::{
     PersistedStateSnapshot, SelfRatchetSnapshot, SelfRatchetsSnapshot,
 };

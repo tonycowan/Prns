@@ -23,7 +23,7 @@ use crate::routing::links::resources::streamed_open::ResourceOpenLane;
 use crate::routing::links::resources::table::{IncomingResources, OutgoingResources};
 #[cfg(feature = "alloc")]
 use crate::routing::links::resources::ResourceMemoryLimits;
-use crate::routing::links::table::Links;
+use crate::routing::links::table::{LinkPhase, Links};
 use crate::routing::links::transported::TransportedLinks;
 use crate::routing::links::LinkId;
 use crate::routing::path_requests::interface_path_request_limit::InterfacePathRequestLimits;
@@ -178,6 +178,8 @@ impl TransportState {
     }
 }
 
+const RESOURCE_ROUND_NOTES: usize = 128;
+
 pub struct EngineState<S: StorageLayout> {
     pub(crate) ingested_packet_count: u64,
     pub(crate) ingested_command_count: u64,
@@ -247,6 +249,10 @@ pub struct EngineState<S: StorageLayout> {
     pub(crate) resource_part_hash_lane: ResourcePartHashLane,
     pub(crate) resource_open_lane: ResourceOpenLane,
     pub(crate) incoming_assemblies: IncomingAssemblies<S::IncomingAssemblies>,
+    round_notes: [super::ResourceRoundNote; RESOURCE_ROUND_NOTES],
+    round_note_cursor: usize,
+    round_note_count: usize,
+    round_notes_dropped: u32,
     pub(crate) outgoing_assemblies: OutgoingAssemblies<S::OutgoingAssemblies>,
     pub(crate) channels: S::Channels,
     pub(crate) dirty_interfaces: S::DirtyInterfaces,
@@ -321,6 +327,10 @@ impl<S: StorageLayout> Default for EngineState<S> {
             resource_part_hash_lane: ResourcePartHashLane::default(),
             resource_open_lane: ResourceOpenLane::default(),
             incoming_assemblies: IncomingAssemblies::default(),
+            round_notes: [super::ResourceRoundNote::empty(); RESOURCE_ROUND_NOTES],
+            round_note_cursor: 0,
+            round_note_count: 0,
+            round_notes_dropped: 0,
             outgoing_assemblies: OutgoingAssemblies::default(),
             channels: Default::default(),
             dirty_interfaces: Default::default(),
@@ -432,6 +442,13 @@ impl<S: StorageLayout> EngineState<S> {
             write!(resource_part_hash_lane, ResourcePartHashLane::default());
             write!(resource_open_lane, ResourceOpenLane::default());
             write!(incoming_assemblies, IncomingAssemblies::default());
+            write!(
+                round_notes,
+                [super::ResourceRoundNote::empty(); RESOURCE_ROUND_NOTES]
+            );
+            write!(round_note_cursor, 0);
+            write!(round_note_count, 0);
+            write!(round_notes_dropped, 0);
             write!(outgoing_assemblies, OutgoingAssemblies::default());
             write!(channels, Default::default());
             write!(dirty_interfaces, Default::default());
@@ -614,6 +631,132 @@ impl<S: StorageLayout> EngineState<S> {
 
     pub fn link_count_via(&self, interface: InterfaceId) -> usize {
         self.links.link_count_via(interface)
+    }
+
+    /// Segments still on the wire, so a caller can draw how far a transfer has moved.
+    pub fn visit_resource_segments(&self, mut visit: impl FnMut(super::ResourceSegmentProgress)) {
+        for index in 0..self.outgoing_resources.len() {
+            let state = self.outgoing_resources.state(index);
+            if state.part_count == 0 || state.uncompressed_data_bytes == 0 {
+                continue;
+            }
+            let link_id = *self.outgoing_resources.link_at(index);
+            let (interface, rtt_millis, mtu, window) = self.link_wire(link_id);
+            visit(super::ResourceSegmentProgress {
+                link_id,
+                incoming: false,
+                mark: state.original_hash,
+                segment_index: state.segment_index.max(1),
+                total_segments: state.total_segments.max(1),
+                parts_done: state.sent_part_count as u64,
+                part_count: state.part_count as u64,
+                whole_bytes: state.uncompressed_data_bytes,
+                interface,
+                rtt_millis,
+                mtu,
+                sdu: state.sdu as u32,
+                window,
+                ceiling: 0,
+            });
+        }
+        for index in 0..self.incoming_resources.len() {
+            let state = self.incoming_resources.state(index);
+            if state.part_count == 0 || state.uncompressed_data_bytes == 0 {
+                continue;
+            }
+            let link_id = *self.incoming_resources.link_at(index);
+            let (interface, rtt_millis, mtu, _) = self.link_wire(link_id);
+            visit(super::ResourceSegmentProgress {
+                link_id,
+                incoming: true,
+                mark: state.original_hash,
+                segment_index: state.segment_index.max(1),
+                total_segments: state.total_segments.max(1),
+                parts_done: state.received_part_count as u64,
+                part_count: state.part_count as u64,
+                whole_bytes: state.uncompressed_data_bytes,
+                interface,
+                rtt_millis,
+                mtu,
+                sdu: state.sdu as u32,
+                window: state.window as u32,
+                ceiling: state.window_max as u32,
+            });
+        }
+    }
+
+    pub(crate) fn note_resource_proof(
+        &mut self,
+        incoming: bool,
+        segment_index: u64,
+        total_segments: u64,
+        flag: u8,
+    ) {
+        self.push_resource_round(super::ResourceRoundNote {
+            kind: super::ResourceRoundKind::Proof,
+            incoming,
+            segment_index: u32::try_from(segment_index).unwrap_or(u32::MAX),
+            total_segments: u32::try_from(total_segments).unwrap_or(u32::MAX),
+            part_at: 0,
+            asked: 0,
+            moved: 0,
+            window: 0,
+            ceiling: 0,
+            fast_rounds: 0,
+            hashmap_height: 0,
+            flag,
+            first_ms: 0,
+            span_ms: 0,
+        });
+    }
+
+    pub(crate) fn push_resource_round(&mut self, note: super::ResourceRoundNote) {
+        if self.round_note_count == RESOURCE_ROUND_NOTES {
+            self.round_notes_dropped = self.round_notes_dropped.saturating_add(1);
+        } else {
+            self.round_note_count += 1;
+        }
+        self.round_notes[self.round_note_cursor] = note;
+        self.round_note_cursor = (self.round_note_cursor + 1) % RESOURCE_ROUND_NOTES;
+    }
+
+    /// Hands the recorded rounds to the caller, oldest first, and returns how many were dropped
+    /// since the previous drain.
+    pub fn drain_resource_rounds(
+        &mut self,
+        mut visit: impl FnMut(super::ResourceRoundNote),
+    ) -> u32 {
+        let dropped = self.round_notes_dropped;
+        self.round_notes_dropped = 0;
+        let mut index = (self.round_note_cursor + RESOURCE_ROUND_NOTES - self.round_note_count)
+            % RESOURCE_ROUND_NOTES;
+        for _ in 0..self.round_note_count {
+            visit(self.round_notes[index]);
+            index = (index + 1) % RESOURCE_ROUND_NOTES;
+        }
+        self.round_note_count = 0;
+        dropped
+    }
+
+    /// Interface, round trip, frame size, and last requested window for a live link.
+    fn link_wire(&self, link_id: LinkId) -> (InterfaceId, u64, u32, u32) {
+        match self.links.phase_for(&link_id) {
+            Some(LinkPhase::Active {
+                attached_interface,
+                rtt,
+                mtu,
+                last_resource_window,
+                ..
+            }) => (
+                *attached_interface,
+                rtt.millis(),
+                u32::try_from(*mtu).unwrap_or(u32::MAX),
+                last_resource_window
+                    .map(|window| u32::try_from(window.get()).unwrap_or(u32::MAX))
+                    .unwrap_or(0),
+            ),
+            _ => (InterfaceId::new([0; 8]), 0, 0, 0),
+        }
     }
 
     pub fn responder_links_for_destination<'a>(

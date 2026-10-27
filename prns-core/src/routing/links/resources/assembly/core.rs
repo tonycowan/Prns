@@ -53,9 +53,18 @@ pub enum AssemblyProgress {
     Complete { total_size_bytes: u64 },
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CarriedCeiling {
+    link_id: LinkId,
+    original_hash: ResourceHash,
+    window_max: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct IncomingAssemblies<C: IncomingAssemblyTable> {
     table: C,
+    /// The window ceiling the previous segment of a split transfer ended with, keyed by that transfer.
+    carried: heapless::Vec<CarriedCeiling, 16>,
 }
 
 impl<C: IncomingAssemblyTable> IncomingAssemblies<C> {
@@ -72,6 +81,7 @@ impl<C: IncomingAssemblyTable> IncomingAssemblies<C> {
         if let Some(index) = self.index_of(&link_id) {
             self.table.swap_remove(index);
         }
+        self.forget_carried_ceiling(&link_id);
         if self.table.len() < self.table.capacity() {
             self.table.push(
                 link_id,
@@ -194,6 +204,49 @@ impl<C: IncomingAssemblyTable> IncomingAssemblies<C> {
     pub fn clear(&mut self, link_id: &LinkId) {
         if let Some(index) = self.index_of(link_id) {
             self.table.swap_remove(index);
+        }
+        self.forget_carried_ceiling(link_id);
+    }
+
+    /// Remember the ceiling a segment of this split transfer ended on, for the next segment.
+    pub(crate) fn note_carried_ceiling(
+        &mut self,
+        link_id: LinkId,
+        original_hash: ResourceHash,
+        window_max: usize,
+    ) {
+        if let Some(slot) = self.carried.iter_mut().find(|row| row.link_id == link_id) {
+            slot.original_hash = original_hash;
+            slot.window_max = window_max;
+            return;
+        }
+        let _ = self.carried.push(CarriedCeiling {
+            link_id,
+            original_hash,
+            window_max,
+        });
+    }
+
+    /// The ceiling kept for the next segment of this transfer. A different transfer does not match.
+    pub(crate) fn carried_window_max(
+        &self,
+        link_id: &LinkId,
+        original_hash: &ResourceHash,
+    ) -> Option<usize> {
+        self.carried.iter().find_map(|row| {
+            (row.link_id == *link_id && row.original_hash == *original_hash)
+                .then_some(row.window_max)
+        })
+    }
+
+    fn forget_carried_ceiling(&mut self, link_id: &LinkId) {
+        let mut index = 0;
+        while index < self.carried.len() {
+            if self.carried[index].link_id == *link_id {
+                self.carried.swap_remove(index);
+            } else {
+                index += 1;
+            }
         }
     }
 

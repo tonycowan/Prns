@@ -554,8 +554,9 @@ impl BleSink for GattSink {
             }
         }
         if let Some(l2cap) = &self.l2cap {
-            match l2cap.send(frame) {
+            match l2cap.send(frame).await {
                 Ok(()) => return Ok(()),
+                Err(MacosBleError::QueueFull) => return Err(MacosBleError::QueueFull),
                 Err(err) => {
                     self.l2cap = None;
                     if self.gatt.is_none() {

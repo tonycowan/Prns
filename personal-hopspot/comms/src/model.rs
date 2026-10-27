@@ -225,6 +225,10 @@ pub struct Note {
     /// Zero means the note was saved before reactions, so a mark stays on this device.
     pub written_at: u64,
     pub reaction: Option<Reaction>,
+    /// The file sent with this note. The bytes live beside the book, under `files/`.
+    pub file_name: Option<String>,
+    /// A file they sent has been copied into Downloads.
+    pub downloaded: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -329,12 +333,22 @@ pub fn sample_people() -> Vec<Person> {
 }
 
 pub fn write_note(person: &mut Person, words: &str) -> Option<u64> {
-    push_note(person, words, None, true, false)
+    push_note(person, words, None, true, false, None)
 }
 
 /// A note that also carries a place, when the placeholder is still in the words.
 pub fn write_placed_note(person: &mut Person, words: &str, place: Option<Place>) -> Option<u64> {
-    push_note(person, words, place, true, false)
+    push_note(person, words, place, true, false, None)
+}
+
+/// A note that also carries a file. The words may be empty. The place is kept when the placeholder is still in the words.
+pub fn write_file_note(
+    person: &mut Person,
+    words: &str,
+    place: Option<Place>,
+    file_name: &str,
+) -> Option<u64> {
+    push_note(person, words, place, true, false, Some(file_name))
 }
 
 /// The other side has acknowledged this note, so it can turn from grey to ink.
@@ -364,6 +378,39 @@ pub fn fail_note(people: &mut [Person], id: u64) -> bool {
     false
 }
 
+/// A file they named arrived, and the bytes did not. The note stays, marked failed.
+pub fn fail_their_file(person: &mut Person, written_at: f64, file_name: &str) -> bool {
+    let file_name = file_name_of(file_name);
+    let written_at = written_at.to_bits();
+    let Some(note) = person.notes.iter_mut().rev().find(|note| {
+        !note.mine
+            && note.kind == NoteKind::Text
+            && note.written_at == written_at
+            && note.file_name.as_deref() == Some(file_name.as_str())
+    }) else {
+        return false;
+    };
+    if note.failed || note.downloaded {
+        return false;
+    }
+    note.failed = true;
+    true
+}
+
+/// Their file was copied into Downloads. It is no longer a failed transfer.
+pub fn land_their_file(person: &mut Person, id: u64) -> bool {
+    let Some(note) = person.notes.iter_mut().find(|note| note.id == id) else {
+        return false;
+    };
+    if note.mine || note.file_name.as_ref().is_none_or(|name| name.is_empty()) {
+        return false;
+    }
+    let changed = !note.downloaded || note.failed;
+    note.failed = false;
+    note.downloaded = true;
+    changed
+}
+
 /// The mailbox accepted this note. It is not delivered yet.
 pub fn post_note(people: &mut [Person], id: u64, digest: [u8; 32]) -> bool {
     for person in people {
@@ -381,7 +428,10 @@ pub fn post_note(people: &mut [Person], id: u64, digest: [u8; 32]) -> bool {
 }
 
 /// The user asked to send a failed note again. The words go back out for three more tries.
-pub fn retry_note(person: &mut Person, id: u64) -> Option<(String, f64, Option<Place>)> {
+pub fn retry_note(
+    person: &mut Person,
+    id: u64,
+) -> Option<(String, f64, Option<Place>, Option<String>)> {
     let note = person.notes.iter_mut().find(|note| note.id == id)?;
     if !note.mine || !note.failed || note.kind != NoteKind::Text {
         return None;
@@ -391,6 +441,7 @@ pub fn retry_note(person: &mut Person, id: u64) -> Option<(String, f64, Option<P
         note.words.clone(),
         f64::from_bits(note.written_at),
         note.place,
+        note.file_name.clone(),
     ))
 }
 
@@ -431,6 +482,8 @@ pub fn remember_call(person: &mut Person, seconds: u64, outgoing: bool) {
         place: None,
         written_at: 0,
         reaction: None,
+        file_name: None,
+        downloaded: false,
     });
 }
 
@@ -444,9 +497,14 @@ pub fn note_from_them(
     words: &str,
     written_at_unix: f64,
     place: Option<Place>,
+    file_name: Option<&str>,
 ) -> bool {
     let words = words.trim();
-    if words.is_empty() && place.is_none() {
+    let file_name = file_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(file_name_of);
+    if words.is_empty() && place.is_none() && file_name.is_none() {
         return false;
     }
     let written_at = written_at_unix.to_bits();
@@ -456,6 +514,7 @@ pub fn note_from_them(
             && note.written_at == written_at
             && note.words.trim() == words
             && note.place == place
+            && note.file_name == file_name
     });
     if already {
         return false;
@@ -475,6 +534,8 @@ pub fn note_from_them(
         place,
         written_at,
         reaction: None,
+        file_name,
+        downloaded: false,
     });
     true
 }
@@ -485,10 +546,15 @@ fn push_note(
     place: Option<Place>,
     mine: bool,
     settled: bool,
+    file_name: Option<&str>,
 ) -> Option<u64> {
     let words = words.trim();
     let place = place.filter(|_| words.contains(PLACEHOLDER));
-    if words.is_empty() {
+    let file_name = file_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(file_name_of);
+    if words.is_empty() && file_name.is_none() {
         return None;
     }
     let (day, time) = local_stamp();
@@ -507,6 +573,8 @@ fn push_note(
         place,
         written_at: unix_now().to_bits(),
         reaction: None,
+        file_name,
+        downloaded: false,
     });
     Some(id)
 }
@@ -551,6 +619,8 @@ fn kept(kind: NoteKind, day: &str, time: &str, words: &str, mine: bool) -> Note 
         place: None,
         written_at: 0,
         reaction: None,
+        file_name: None,
+        downloaded: false,
     }
 }
 
@@ -650,6 +720,8 @@ pub struct Reach {
     pub winner: Option<String>,
     /// How many hops that path takes, once one is known.
     pub hops: Option<u8>,
+    /// The most bytes a file on this path may be. None means the path has no ceiling.
+    pub file_limit: Option<u64>,
 }
 
 impl Reach {
@@ -659,7 +731,66 @@ impl Reach {
             ways: OfferedWays::none(),
             winner: None,
             hops: None,
+            file_limit: Some(SMALLEST_ATTACHMENT),
         }
+    }
+}
+
+/// The label in the note menu. An open path says "file". A capped path names the ceiling.
+pub fn file_choice(limit: Option<u64>) -> String {
+    match limit {
+        None => "file".to_string(),
+        Some(bytes) => format!("file <{}", size_word(bytes)),
+    }
+}
+
+/// A short size for the menu and for the notice when a file is too big.
+pub fn size_word(bytes: u64) -> String {
+    if bytes >= 1_000_000 && bytes % 1_000_000 == 0 {
+        return format!("{}M", bytes / 1_000_000);
+    }
+    if bytes >= 1024 && bytes % 1024 == 0 {
+        return format!("{}k", bytes / 1024);
+    }
+    bytes.to_string()
+}
+
+/// What the composer says when the chosen file is past the path's ceiling.
+pub fn file_too_big(limit: Option<u64>) -> String {
+    match limit {
+        Some(bytes) => format!("That file is over {}.", size_word(bytes)),
+        None => "That file could not be read.".to_string(),
+    }
+}
+
+/// `window.xml` with `2` becomes `window (2).xml`. The first copy keeps the original name.
+/// Android names the public copy in the activity, so this helper is the desktop path.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+pub fn numbered_file_name(name: &str, n: u32) -> String {
+    if n <= 1 {
+        return name.to_string();
+    }
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
+            format!("{stem} ({n}).{ext}")
+        }
+        _ => format!("{name} ({n})"),
+    }
+}
+
+/// The last path piece, with control characters taken out, short enough to sit on a note.
+pub fn file_name_of(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
+    let name: String = base
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(120)
+        .collect();
+    let name = name.trim().trim_matches('.').trim();
+    if name.is_empty() {
+        "file".to_string()
+    } else {
+        name.to_string()
     }
 }
 
@@ -888,9 +1019,11 @@ pub fn mark_read(person: &mut Person) -> bool {
 /// Version 2 adds a place line after each note. Version 3 adds the time it was written
 /// and a reaction. Version 4 adds how far the journal has been read. Version 5 adds
 /// whether a note we sent has given up. Version 6 adds whether the mailbox has it,
-/// and the hash an acknowledgement will name. An older book still opens.
+/// and the hash an acknowledgement will name. Version 7 adds the file's name.
+/// Version 8 adds whether a file they sent landed in Downloads.
+/// The bytes stay in a file beside the book. An older book still opens.
 pub fn encode_contacts(people: &[Person]) -> String {
-    let mut out = String::from("journal-contacts 6\n");
+    let mut out = String::from("journal-contacts 8\n");
     out.push_str(&people.len().to_string());
     out.push('\n');
     for person in people {
@@ -926,6 +1059,14 @@ pub fn encode_contacts(people: &[Person]) -> String {
             line(&mut out, if note.failed { "1" } else { "0" });
             line(&mut out, if note.posted { "1" } else { "0" });
             line(&mut out, &digest_field(note.digest));
+            line(
+                &mut out,
+                &match &note.file_name {
+                    Some(name) if !name.is_empty() => escape_field(name),
+                    _ => "-".to_string(),
+                },
+            );
+            line(&mut out, if note.downloaded { "1" } else { "0" });
         }
     }
     out
@@ -941,6 +1082,8 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
         "journal-contacts 4" => 4,
         "journal-contacts 5" => 5,
         "journal-contacts 6" => 6,
+        "journal-contacts 7" => 7,
+        "journal-contacts 8" => 8,
         _ => return None,
     };
     let count: usize = lines.next()?.parse().ok()?;
@@ -967,6 +1110,7 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
                 failed: false,
                 posted: false,
                 digest: None,
+                downloaded: false,
                 words: unescape_field(lines.next()?)?,
                 place: if version >= 2 {
                     read_place(lines.next()?)?
@@ -986,6 +1130,7 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
                 } else {
                     None
                 },
+                file_name: None,
             });
             if version >= 5 {
                 notes.last_mut().expect("the note").failed = parse_flag(lines.next()?)?;
@@ -994,6 +1139,13 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
                 let note = notes.last_mut().expect("the note");
                 note.posted = parse_flag(lines.next()?)?;
                 note.digest = read_digest(lines.next()?)?;
+            }
+            if version >= 7 {
+                let note = notes.last_mut().expect("the note");
+                note.file_name = read_file_name(lines.next()?)?;
+            }
+            if version >= 8 {
+                notes.last_mut().expect("the note").downloaded = parse_flag(lines.next()?)?;
             }
         }
         let seen = seen.unwrap_or_else(|| notes.iter().map(|note| note.id).max().unwrap_or(0));
@@ -1048,6 +1200,14 @@ fn parse_flag(text: &str) -> Option<bool> {
         "1" => Some(true),
         "0" => Some(false),
         _ => None,
+    }
+}
+
+fn read_file_name(text: &str) -> Option<Option<String>> {
+    if text == "-" {
+        Some(None)
+    } else {
+        Some(Some(unescape_field(text)?))
     }
 }
 
@@ -1138,10 +1298,11 @@ pub fn code_mark(payload: &str) -> Option<(usize, Vec<(usize, usize)>)> {
 mod tests {
     use super::{
         add_person, apply_reaction, bits_per_second, can_call, code_mark, contact_code,
-        decode_contacts, encode_contacts, fail_note, group_by_day, has_unread, mark_read,
-        next_person_id, note_from_them, note_ids_from, offered_ways, path_label, react_to_note,
-        remember_call, remove_person, rename_person, resource_carry, retry_note, sample_people,
-        settle_note, ways_for_ack, write_note, Note, NoteKind, OfferedWays, Person, Place,
+        decode_contacts, encode_contacts, fail_note, fail_their_file, file_choice, file_name_of,
+        group_by_day, has_unread, land_their_file, mark_read, next_person_id, note_from_them,
+        note_ids_from, numbered_file_name, offered_ways, path_label, react_to_note, remember_call,
+        remove_person, rename_person, resource_carry, retry_note, sample_people, settle_note,
+        ways_for_ack, write_file_note, write_note, Note, NoteKind, OfferedWays, Person, Place,
         Reaction, ResourceCarry, OPEN_PATH_BPS, PLACEHOLDER, SMALLEST_ATTACHMENT,
         VIDEO_ROUND_TRIP_MS,
     };
@@ -1402,6 +1563,62 @@ mod tests {
     }
 
     #[test]
+    fn the_file_choice_names_the_allowance() {
+        assert_eq!(file_choice(Some(2_048)), "file <2k");
+        assert_eq!(file_choice(Some(16 * 1024)), "file <16k");
+        assert_eq!(file_choice(Some(64 * 1024)), "file <64k");
+        assert_eq!(file_choice(Some(256 * 1024)), "file <256k");
+        assert_eq!(file_choice(Some(1_000_000)), "file <1M");
+        assert_eq!(file_choice(None), "file");
+        assert_eq!(file_name_of("/tmp/../Pears.jpg"), "Pears.jpg");
+        assert_eq!(numbered_file_name("window.xml", 1), "window.xml");
+        assert_eq!(numbered_file_name("window.xml", 2), "window (2).xml");
+        assert_eq!(numbered_file_name("notes", 2), "notes (2)");
+        assert_eq!(file_name_of(r"C:\notes\Pears.jpg"), "Pears.jpg");
+        assert_eq!(file_name_of(".."), "file");
+    }
+
+    #[test]
+    fn a_file_can_be_a_note_on_its_own() {
+        let mut person = Person {
+            id: 1,
+            name: "Alex".into(),
+            identity: "ab".into(),
+            seen: 0,
+            notes: Vec::new(),
+        };
+        assert!(write_note(&mut person, "   ").is_none());
+        let id = write_file_note(&mut person, "  ", None, "/tmp/Pears.jpg").expect("a file");
+        assert_eq!(person.notes[0].words, "");
+        assert_eq!(person.notes[0].file_name.as_deref(), Some("Pears.jpg"));
+        let read = decode_contacts(&encode_contacts(&[person.clone()])).expect("the book");
+        assert_eq!(read[0].notes[0].file_name.as_deref(), Some("Pears.jpg"));
+        assert!(note_from_them(
+            &mut person,
+            "",
+            1_700_000_000.0,
+            None,
+            Some("Pears.jpg")
+        ));
+        assert_eq!(person.notes.len(), 2);
+        assert!(!note_from_them(
+            &mut person,
+            "",
+            1_700_000_000.0,
+            None,
+            Some("/elsewhere/Pears.jpg")
+        ));
+        assert!(!note_from_them(
+            &mut person,
+            "",
+            1_700_000_000.0,
+            None,
+            None
+        ));
+        let _ = id;
+    }
+
+    #[test]
     fn opening_a_person_offers_only_the_ways_the_packet_allows() {
         let mara = offered_ways(1);
         assert!(mara.note && mara.voice && mara.video);
@@ -1451,6 +1668,8 @@ mod tests {
                 place: Some(Place::from_degrees(40.7484, -73.9857).expect("place")),
                 written_at: 1_700_000_000.0f64.to_bits(),
                 reaction: Some(Reaction::Love),
+                file_name: Some("Pears.jpg".into()),
+                downloaded: false,
             }],
         }];
         let stored = encode_contacts(&people);
@@ -1467,6 +1686,8 @@ mod tests {
         );
         assert_eq!(read[0].notes[0].written_at, 1_700_000_000.0f64.to_bits());
         assert_eq!(read[0].notes[0].reaction, Some(Reaction::Love));
+        assert_eq!(read[0].notes[0].file_name.as_deref(), Some("Pears.jpg"));
+        assert!(!read[0].notes[0].downloaded);
         assert_eq!(read[0].seen, 40);
         assert!(decode_contacts("not a book").is_none());
         let older = "\
@@ -1551,6 +1772,7 @@ Hello
             &mut person,
             "The pears are ready.",
             1_700_000_000.0,
+            None,
             None
         ));
         assert!(has_unread(&person));
@@ -1597,6 +1819,7 @@ Hello
             &mut person,
             "The pears are ready.",
             1_700_000_000.0,
+            None,
             None
         ));
         person.notes[0].reaction = Some(Reaction::Yes);
@@ -1604,6 +1827,7 @@ Hello
             &mut person,
             "  The pears are ready.  ",
             1_700_000_000.0,
+            None,
             None
         ));
         assert_eq!(person.notes.len(), 1);
@@ -1612,6 +1836,7 @@ Hello
             &mut person,
             "The pears are ready.",
             1_700_000_001.0,
+            None,
             None
         ));
         assert_eq!(person.notes.len(), 2);
@@ -1620,13 +1845,15 @@ Hello
             &mut person,
             "Meet me here.",
             1_700_000_002.0,
-            place
+            place,
+            None
         ));
         assert!(!note_from_them(
             &mut person,
             "Meet me here.",
             1_700_000_002.0,
-            place
+            place,
+            None
         ));
         assert_eq!(person.notes.len(), 3);
     }
@@ -1649,11 +1876,46 @@ Hello
         people[0].notes[0].settled = false;
         people[0].notes[0].failed = true;
         let mut person = people.pop().expect("the contact");
-        let (words, _, place) = retry_note(&mut person, id).expect("another try");
+        let (words, _, place, file_name) = retry_note(&mut person, id).expect("another try");
         assert_eq!(words, "The pears are ready.");
         assert!(place.is_none());
+        assert!(file_name.is_none());
         assert!(!person.notes[0].failed);
         assert!(retry_note(&mut person, id).is_none());
+    }
+
+    #[test]
+    fn their_file_is_marked_failed_when_the_bytes_never_arrive() {
+        let mut person = Person {
+            id: 1,
+            name: "Alex".into(),
+            identity: "ab".into(),
+            seen: 0,
+            notes: Vec::new(),
+        };
+        assert!(note_from_them(
+            &mut person,
+            "this photo",
+            1_700_000_000.0,
+            None,
+            Some("Pears.jpg")
+        ));
+        assert!(fail_their_file(&mut person, 1_700_000_000.0, "Pears.jpg"));
+        assert!(person.notes[0].failed);
+        assert!(!fail_their_file(&mut person, 1_700_000_000.0, "Pears.jpg"));
+        assert!(!fail_their_file(&mut person, 1_700_000_000.0, "other.jpg"));
+        person.notes[0].mine = true;
+        person.notes[0].failed = false;
+        assert!(!fail_their_file(&mut person, 1_700_000_000.0, "Pears.jpg"));
+        person.notes[0].mine = false;
+        let id = person.notes[0].id;
+        assert!(land_their_file(&mut person, id));
+        assert!(person.notes[0].downloaded);
+        assert!(!person.notes[0].failed);
+        assert!(!fail_their_file(&mut person, 1_700_000_000.0, "Pears.jpg"));
+        let stored = encode_contacts(&[person.clone()]);
+        let read = decode_contacts(&stored).expect("the book");
+        assert!(read[0].notes[0].downloaded);
     }
 
     #[test]
@@ -1677,6 +1939,8 @@ Hello
                 place: None,
                 written_at: 1_700_000_000.0f64.to_bits(),
                 reaction: None,
+                file_name: None,
+                downloaded: false,
             }],
         };
         assert_eq!(

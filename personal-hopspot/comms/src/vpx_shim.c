@@ -1,7 +1,7 @@
 /* A small picture encoder and decoder for the journal call.
  *
  * libvpx is linked in. The buffers this file returns are owned by the caller
- * and freed with optio_vpx_free. One context is used from one thread at a time.
+ * and freed with n10a_vpx_free. One context is used from one thread at a time.
  */
 
 #include <stdint.h>
@@ -14,7 +14,7 @@
 #include <vpx/vpx_decoder.h>
 #include <vpx/vpx_encoder.h>
 
-struct OptioVpx {
+struct N10aVpx {
   vpx_codec_ctx_t ctx;
   vpx_image_t img;
   int encode;
@@ -37,8 +37,8 @@ static void copy_out(uint8_t *dst, const unsigned char *src, int stride, int w, 
   }
 }
 
-struct OptioVpx *optio_vpx_encoder(int w, int h, int kbps, int fps) {
-  struct OptioVpx *enc;
+struct N10aVpx *n10a_vpx_encoder(int w, int h, int kbps, int fps) {
+  struct N10aVpx *enc;
   vpx_codec_enc_cfg_t cfg;
   if (w < 16 || h < 16 || (w % 2) != 0 || (h % 2) != 0 || kbps < 1 || fps < 1) {
     return NULL;
@@ -81,7 +81,7 @@ struct OptioVpx *optio_vpx_encoder(int w, int h, int kbps, int fps) {
   return enc;
 }
 
-uint8_t *optio_vpx_encode(struct OptioVpx *enc, const uint8_t *i420, int64_t pts, int key,
+uint8_t *n10a_vpx_encode(struct N10aVpx *enc, const uint8_t *i420, int64_t pts, int key,
                          int *out_len) {
   const uint8_t *u;
   const uint8_t *v;
@@ -139,7 +139,7 @@ uint8_t *optio_vpx_encode(struct OptioVpx *enc, const uint8_t *i420, int64_t pts
   return out;
 }
 
-void optio_vpx_encoder_free(struct OptioVpx *enc) {
+void n10a_vpx_encoder_free(struct N10aVpx *enc) {
   if (enc == NULL) {
     return;
   }
@@ -148,8 +148,8 @@ void optio_vpx_encoder_free(struct OptioVpx *enc) {
   free(enc);
 }
 
-struct OptioVpx *optio_vpx_decoder(void) {
-  struct OptioVpx *dec;
+struct N10aVpx *n10a_vpx_decoder(void) {
+  struct N10aVpx *dec;
   vpx_codec_dec_cfg_t cfg;
   dec = calloc(1, sizeof(*dec));
   if (dec == NULL) {
@@ -165,7 +165,7 @@ struct OptioVpx *optio_vpx_decoder(void) {
   return dec;
 }
 
-uint8_t *optio_vpx_decode(struct OptioVpx *dec, const uint8_t *buf, int len, int *w, int *h) {
+uint8_t *n10a_vpx_decode(struct N10aVpx *dec, const uint8_t *buf, int len, int *w, int *h) {
   vpx_codec_iter_t iter;
   vpx_image_t *img;
   size_t y_size;
@@ -217,14 +217,14 @@ uint8_t *optio_vpx_decode(struct OptioVpx *dec, const uint8_t *buf, int len, int
   return out;
 }
 
-const char *optio_vpx_error(struct OptioVpx *dec) {
+const char *n10a_vpx_error(struct N10aVpx *dec) {
   if (dec == NULL) {
     return "";
   }
   return dec->error;
 }
 
-void optio_vpx_decoder_free(struct OptioVpx *dec) {
+void n10a_vpx_decoder_free(struct N10aVpx *dec) {
   if (dec == NULL) {
     return;
   }
@@ -232,4 +232,4 @@ void optio_vpx_decoder_free(struct OptioVpx *dec) {
   free(dec);
 }
 
-void optio_vpx_free(uint8_t *bytes) { free(bytes); }
+void n10a_vpx_free(uint8_t *bytes) { free(bytes); }

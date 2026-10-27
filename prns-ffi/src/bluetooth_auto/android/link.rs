@@ -16,6 +16,13 @@ use super::outbound::{BoundedByteQueue, BoundedMessageQueue, OutboundQueueError}
 use super::AndroidBleError;
 
 const L2CAP_SDU_LEN: usize = STREAM_FRAME_PREFIX_LEN + BLE_HW_MTU;
+/// `BleLink.kt` `L2CAP_CHUNK`. One socket read is one inbound message.
+const L2CAP_READ_MAX: usize = 2048;
+/// A partial SDU may already be buffered when the next read arrives. Two SDUs
+/// (1004 bytes) is smaller than one coalesced socket read of a resource window,
+/// so `absorb` failed, this task dropped the channel, and the phone tore the
+/// link down after every pair of parts.
+const L2CAP_DEFRAME_CAP: usize = L2CAP_READ_MAX + L2CAP_SDU_LEN;
 const GATT_REASSEMBLY_CAP: usize = 600;
 const GATT_FRAGMENT_PAYLOAD: usize = 180;
 const MERGED_IN_DEPTH: usize = 16;
@@ -137,8 +144,8 @@ impl BleLink for AndroidBleLink {
         if let Some(mut l2cap_in) = self.l2cap_in {
             let frames = merged_tx.clone();
             tokio::spawn(async move {
-                let mut deframer = StreamDeframer::<{ 2 * L2CAP_SDU_LEN }>::new();
-                let mut frame = std::vec![0u8; 2 * L2CAP_SDU_LEN];
+                let mut deframer = StreamDeframer::<L2CAP_DEFRAME_CAP>::new();
+                let mut frame = std::vec![0u8; L2CAP_SDU_LEN];
                 while let Some(chunk) = l2cap_in.recv().await {
                     if !deframer.absorb(&chunk) {
                         break;
@@ -244,5 +251,27 @@ mod receive_tests {
             Ok(BLE_WIRE_FRAME_LEN)
         ));
         assert_eq!(wire, [0x17; BLE_WIRE_FRAME_LEN]);
+    }
+
+    #[test]
+    fn a_coalesced_l2cap_read_larger_than_two_sdus_still_yields_every_frame() {
+        let frame = vec![0xAB; BLE_HW_MTU];
+        let mut encoded = Vec::new();
+        for _ in 0..3 {
+            let mut buf = [0u8; L2CAP_SDU_LEN];
+            let len = encode_stream_frame(&frame, &mut buf).expect("sdu");
+            encoded.extend_from_slice(&buf[..len]);
+        }
+        assert!(encoded.len() > 2 * L2CAP_SDU_LEN);
+        assert!(encoded.len() <= L2CAP_READ_MAX);
+        let mut partial = StreamDeframer::<L2CAP_DEFRAME_CAP>::new();
+        assert!(partial.absorb(&encoded[..L2CAP_SDU_LEN - 1]));
+        assert!(partial.absorb(&encoded[L2CAP_SDU_LEN - 1..]));
+        let mut out = vec![0u8; L2CAP_SDU_LEN];
+        for _ in 0..3 {
+            let len = partial.next_frame(&mut out).expect("frame");
+            assert_eq!(&out[..len], frame.as_slice());
+        }
+        assert!(partial.next_frame(&mut out).is_none());
     }
 }

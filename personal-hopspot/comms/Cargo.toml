@@ -1,10 +1,10 @@
 [package]
 name = "personal-hopspot-comms"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "Optio, a private journal shared with people you have added."
+description = "N10A, a private journal shared with people you have added."
 
 [workspace]
 resolver = "2"

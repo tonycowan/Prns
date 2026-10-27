@@ -524,6 +524,12 @@ impl<S: StorageLayout> EngineState<S> {
                 | AcceptIncomingResourceError::HashmapBeyondPartCount,
             ) => return AcceptedResourceAdmission::Ignored(IgnoreReason::Malformed),
         };
+        let carried = (total_segment_count > 1 && segment_index > 1)
+            .then(|| {
+                self.incoming_assemblies
+                    .carried_window_max(&link_id, &original_hash)
+            })
+            .flatten();
         {
             let state = self.incoming_resources.state_mut(index);
             state.retries_left = PART_REQUEST_MAX_RETRIES;
@@ -531,6 +537,30 @@ impl<S: StorageLayout> EngineState<S> {
                 state.window = window;
             }
             state.inherited_eifr = inherited.1;
+            // A later segment of this transfer keeps the ceiling the segment ahead ended with.
+            // The link still only remembers window and rate, so a different transfer starts at the slow ceiling.
+            if let Some(earned) = carried {
+                state.window_max = earned.max(state.window);
+            }
+        }
+        {
+            let state = *self.incoming_resources.state(index);
+            self.push_resource_round(crate::engine::ResourceRoundNote {
+                kind: crate::engine::ResourceRoundKind::Admit,
+                incoming: true,
+                segment_index: u32::try_from(state.segment_index).unwrap_or(u32::MAX),
+                total_segments: u32::try_from(state.total_segments).unwrap_or(u32::MAX),
+                part_at: 0,
+                asked: 0,
+                moved: 0,
+                window: u16::try_from(state.window).unwrap_or(u16::MAX),
+                ceiling: u16::try_from(state.window_max).unwrap_or(u16::MAX),
+                fast_rounds: state.fast_rate_rounds,
+                hashmap_height: 0,
+                flag: u8::from(carried.is_some()),
+                first_ms: 0,
+                span_ms: 0,
+            });
         }
         if total_segment_count > 1 && segment_index == 1 {
             self.incoming_assemblies.begin(
@@ -1906,5 +1936,121 @@ mod tests {
         let ignored = feed(&mut receiver, &tampered, 2_100);
         assert!(ignored.frames.is_empty());
         assert!(receiver.pending_resource_offers.is_empty());
+    }
+
+    #[test]
+    fn a_later_segment_keeps_the_ceiling_earned_by_the_segment_before_it() {
+        use crate::routing::links::resources::assembly::{
+            AssemblyBytes, AssemblyCorrelation, AssemblyProgress,
+        };
+        use crate::routing::links::resources::{
+            ResourceCompression, ResourceCorrelation, ResourceSegment, SaltNonce, WINDOW_MAX,
+            WINDOW_MAX_SLOW,
+        };
+        use crate::units::InstantMillis;
+
+        let original = ResourceHash::new([0x5A; 32]);
+        let mut receiver = engine_with_active_link();
+        receiver.incoming_assemblies.begin(
+            link_id(),
+            original,
+            2,
+            2000,
+            AssemblyCorrelation::Unsolicited,
+        );
+        assert_eq!(
+            receiver.incoming_assemblies.advance(
+                &link_id(),
+                &original,
+                ResourceSegment {
+                    index: 1,
+                    total_segments: 2,
+                    total_data_bytes: 2000,
+                },
+                AssemblyBytes {
+                    stream: 1000,
+                    value: 1000,
+                },
+                AssemblyCorrelation::Unsolicited,
+            ),
+            Some(AssemblyProgress::Assembling)
+        );
+        receiver
+            .incoming_assemblies
+            .note_carried_ceiling(link_id(), original, WINDOW_MAX);
+
+        let names = [1u8, 2, 3, 4];
+        let continued = receiver.admit_accepted_resource(
+            link_id(),
+            original,
+            AcceptedResource {
+                hash: ResourceHash::new([0x5B; 32]),
+                salt_nonce: SaltNonce::new([0; 4]),
+                compression: ResourceCompression::Uncompressed,
+                has_metadata: false,
+                uncompressed_data_bytes: 2000,
+                segment_index: 2,
+                sealed_transfer_bytes: 32,
+                sdu: 32,
+                correlation: ResourceCorrelation::Unsolicited,
+                part_count: 1,
+                total_segment_count: 2,
+                initial_names: &names,
+            },
+            InstantMillis(3000),
+        );
+        assert!(matches!(continued, AcceptedResourceAdmission::Pull { .. }));
+        let continued_index = receiver
+            .incoming_resources
+            .lookup(&link_id(), &ResourceHash::new([0x5B; 32]))
+            .expect("the next segment is admitted");
+        assert_eq!(
+            receiver
+                .incoming_resources
+                .state(continued_index)
+                .window_max,
+            WINDOW_MAX
+        );
+        let mut carried = false;
+        receiver.drain_resource_rounds(|note| {
+            if note.kind == crate::engine::ResourceRoundKind::Admit {
+                carried = note.flag == 1;
+                assert_eq!(note.ceiling, WINDOW_MAX as u16);
+            }
+        });
+        assert!(carried, "the admit note records that the ceiling was kept");
+
+        receiver
+            .incoming_resources
+            .remove(&link_id(), &ResourceHash::new([0x5B; 32]));
+        let fresh = receiver.admit_accepted_resource(
+            link_id(),
+            ResourceHash::new([0x5C; 32]),
+            AcceptedResource {
+                hash: ResourceHash::new([0x5D; 32]),
+                salt_nonce: SaltNonce::new([0; 4]),
+                compression: ResourceCompression::Uncompressed,
+                has_metadata: false,
+                uncompressed_data_bytes: 2000,
+                segment_index: 1,
+                sealed_transfer_bytes: 32,
+                sdu: 32,
+                correlation: ResourceCorrelation::Unsolicited,
+                part_count: 1,
+                total_segment_count: 2,
+                initial_names: &names,
+            },
+            InstantMillis(4000),
+        );
+        assert!(matches!(fresh, AcceptedResourceAdmission::Pull { .. }));
+        let fresh_index = receiver
+            .incoming_resources
+            .lookup(&link_id(), &ResourceHash::new([0x5D; 32]))
+            .expect("a new transfer is admitted");
+        assert_eq!(
+            receiver.incoming_resources.state(fresh_index).window_max,
+            WINDOW_MAX_SLOW,
+            "a transfer that is not a later segment starts at the slow ceiling"
+        );
     }
 }

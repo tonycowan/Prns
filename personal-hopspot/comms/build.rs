@@ -62,7 +62,7 @@ fn link_picture() {
     let libs = pkg_output(&pkg, &["--libs", "--static", "vpx"]);
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let obj = out.join("vpx_shim.o");
-    let archive = out.join("liboptio_vpx.a");
+    let archive = out.join("libn10a_vpx.a");
     let sdk = macos_sdk();
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "arm64".to_string());
     let mut compile = Command::new("cc");
@@ -96,7 +96,7 @@ fn link_picture() {
         panic!("the picture codec archive was not written");
     }
     println!("cargo:rustc-link-search=native={}", out.display());
-    println!("cargo:rustc-link-lib=static=optio_vpx");
+    println!("cargo:rustc-link-lib=static=n10a_vpx");
     for flag in libs.split_whitespace() {
         if let Some(dir) = flag.strip_prefix("-L") {
             println!("cargo:rustc-link-search=native={dir}");

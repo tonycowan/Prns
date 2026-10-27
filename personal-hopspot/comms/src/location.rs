@@ -1,7 +1,7 @@
 //! A fine-grained fix for a place embedded in a note.
 //!
 //! macOS and iOS need `NSLocationWhenInUseUsageDescription` in the app's Info.plist
-//! ("Optio uses your location when you add it to a note.") or the system
+//! ("N10A uses your location when you add it to a note.") or the system
 //! will not ask, and this returns nothing.
 
 use crate::model::Place;
@@ -192,7 +192,7 @@ struct LocationIvars {
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = AllocAnyThread]
-    #[name = "OptioLocationDelegate"]
+    #[name = "N10ALocationDelegate"]
     #[ivars = LocationIvars]
     struct LocationDelegate;
 

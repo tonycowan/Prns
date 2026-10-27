@@ -2,12 +2,8 @@
 
 Since the last release.
 
-If someone cannot take a note right now, it can be posted for them to collect. It stays marked Posted until they have it.
+The journal is now called N10A.
 
-A long note goes through when the path is fast enough. A slow path only carries a short one, and a radio path stays short.
+The note box stays on the page. Voice, video, and send sit under it.
 
-You can copy a note, or the part you have selected.
-
-A long word wraps onto the next line instead of running off the page.
-
-Your notes and their notes are written in different hands.
+You can attach a file. The choice tells you how large a file this path will take.

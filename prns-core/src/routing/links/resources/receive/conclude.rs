@@ -215,6 +215,7 @@ impl<S: StorageLayout> EngineState<S> {
         let original_hash = state.original_hash;
         let superseded = self.whole_response_lacks_delivery_claim(link_id, &state);
 
+        let mut queued_proof = false;
         let delivery = {
             let (transfer, streamed) = self
                 .incoming_resources
@@ -293,11 +294,13 @@ impl<S: StorageLayout> EngineState<S> {
                         if !matches!(&delivered, Err(SplitDeliveryFailure::ResponseTooLarge)) {
                             emit_proof(verified.prove, fire_on, sink);
                             self.links.note_outbound(link_id, now);
+                            queued_proof = true;
                         }
                         delivered
                     } else {
                         emit_proof(verified.prove, fire_on, sink);
                         self.links.note_outbound(link_id, now);
+                        queued_proof = true;
                         let request_permitted = request_is_permitted(
                             &self.request_handlers,
                             state.correlation,
@@ -330,6 +333,14 @@ impl<S: StorageLayout> EngineState<S> {
                 }
             }
         };
+        if queued_proof {
+            self.note_resource_proof(
+                true,
+                state.segment_index,
+                state.total_segments,
+                crate::engine::ResourceRoundNote::PROOF_OUT,
+            );
+        }
         match delivery {
             Err(SplitDeliveryFailure::Resource(cause)) => {
                 self.fail_incoming_resource(link_id, hash, cause, sink)
@@ -688,6 +699,12 @@ impl<S: StorageLayout> EngineState<S> {
             if !matches!(&delivered, Err(SplitDeliveryFailure::ResponseTooLarge)) {
                 emit_proof(prove, fire_on, sink);
                 self.links.note_outbound(&link_id, now);
+                self.note_resource_proof(
+                    true,
+                    state.segment_index,
+                    state.total_segments,
+                    crate::engine::ResourceRoundNote::PROOF_OUT,
+                );
             }
             let value = match delivered {
                 Ok(value) => value,
@@ -729,6 +746,12 @@ impl<S: StorageLayout> EngineState<S> {
         } else {
             emit_proof(prove, fire_on, sink);
             self.links.note_outbound(&link_id, now);
+            self.note_resource_proof(
+                true,
+                state.segment_index,
+                state.total_segments,
+                crate::engine::ResourceRoundNote::PROOF_OUT,
+            );
             let request_permitted = request_is_permitted(
                 &self.request_handlers,
                 state.correlation,

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use dispatch2::{DispatchQueue, DispatchRetained};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
@@ -8,12 +8,11 @@ use prns_core::interfaces::bluetooth_auto::{
     StreamDeframer, BLE_HW_MTU,
 };
 
-use super::data_plane::{flush, DataPlane, Outbound, PumpHandle, PumpPtr, L2CAP_SDU_LEN};
+use super::data_plane::{flush, DataPlane, OutboundQueue, PumpHandle, PumpPtr, L2CAP_SDU_LEN};
 use super::gatt_link::GattInboundReceiver;
 use super::MacosBleError;
 
 const GATT_REASSEMBLY_CAP: usize = BLE_HW_MTU;
-const L2CAP_OUTBOUND_CAP: usize = 8 * L2CAP_SDU_LEN;
 
 #[derive(Clone, Copy)]
 pub(super) enum FailurePolicy {
@@ -194,36 +193,40 @@ async fn receive_l2cap_frames(
 }
 
 pub(super) struct WriteHalf {
-    outbound: Arc<Mutex<Outbound>>,
+    outbound: Arc<OutboundQueue>,
     queue: DispatchRetained<DispatchQueue>,
     pump_ptr: PumpPtr,
     _pump: Arc<PumpHandle>,
 }
 
 impl WriteHalf {
-    pub(super) fn send(&self, frame: &[u8]) -> Result<(), MacosBleError> {
+    /// Queues this frame and returns. A full queue waits, so only a few frames sit ahead of the
+    /// stream. When the stream asks for bytes it is given one frame per write until a write
+    /// comes back empty.
+    pub(super) async fn send(&self, frame: &[u8]) -> Result<(), MacosBleError> {
         let mut framed = [0u8; L2CAP_SDU_LEN];
         let len = encode_stream_frame(frame, &mut framed).ok_or(MacosBleError::FrameTooLarge)?;
-        {
-            let Ok(mut out) = self.outbound.lock() else {
-                return Err(MacosBleError::Closed);
-            };
-            if out.closed {
-                return Err(MacosBleError::Closed);
-            }
-            if out.pending.len().saturating_add(len) > L2CAP_OUTBOUND_CAP {
-                return Err(MacosBleError::QueueFull);
-            }
-            out.pending.extend(framed[..len].iter().copied());
+        let queued_at = std::time::Instant::now();
+        self.outbound.enqueue(&framed[..len]).await?;
+        let queued = queued_at.elapsed();
+        if queued >= std::time::Duration::from_millis(50) {
+            super::data_plane::note_l2cap(
+                std::time::Duration::ZERO,
+                &format!("l2cap queued {}ms bytes={len}", queued.as_millis()),
+            );
         }
+        self.kick();
+        Ok(())
+    }
+
+    fn kick(&self) {
         let ptr = self.pump_ptr;
         self.queue.exec_async(move || {
             let ptr = ptr;
             // SAFETY: PumpHandle keeps this Box-backed pointer alive and all dereferences plus final
             // destruction are serialized on this same dispatch queue.
-            flush(unsafe { &*ptr.0 });
+            flush(unsafe { &*ptr.0 }, "retry");
         });
-        Ok(())
     }
 }
 

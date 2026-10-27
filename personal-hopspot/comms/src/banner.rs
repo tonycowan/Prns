@@ -1,4 +1,4 @@
-//! A banner for a note that arrives while Optio is not the front app.
+//! A banner for a note that arrives while N10A is not the front app.
 //!
 //! On iOS the banner is a local notification, and a background refresh keeps the
 //! journal awake long enough to take a note the sender is still offering.
@@ -145,7 +145,7 @@ fn ios_in_front() -> bool {
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn desktop_note(name: &str, words: &str) {
     if notify_rust::Notification::new()
-        .appname("Optio")
+        .appname("N10A")
         .summary(name)
         .body(words)
         .show()

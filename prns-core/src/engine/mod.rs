@@ -71,7 +71,8 @@ pub use command_execution::CommandTiming;
 pub use commands::*;
 pub use destination_retirement::RetireDestinationOutcome;
 pub use introspection::{
-    ActiveLinkSnapshot, AnnounceRateState, BoundedRouteSnapshots, RouteSnapshot,
+    ActiveLinkSnapshot, AnnounceRateState, BoundedRouteSnapshots, ResourceRoundKind,
+    ResourceRoundNote, ResourceSegmentProgress, RouteSnapshot,
 };
 pub use node_egress::ReemitAnnounce;
 #[cfg(test)]

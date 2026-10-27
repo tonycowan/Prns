@@ -64,6 +64,37 @@ impl InMemoryNodeIdentity {
         super::decrypt_token(&self.encryption_secret, &self.hash, ciphertext_token, out)
     }
 
+    /// Ratchet secrets newest-first, then the identity key. Plaintext is written at the start of `out`.
+    pub fn decrypt_with_ratchets(
+        &self,
+        ratchet_secrets: &[X25519SecretKey],
+        ciphertext_token: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, DecryptError> {
+        if out.len() < ciphertext_token.len() {
+            return Err(DecryptError::BufferTooShort);
+        }
+        out[..ciphertext_token.len()].copy_from_slice(ciphertext_token);
+        let out_start = out.as_ptr() as usize;
+        let opened = super::decrypt_token_in_place_with_ratchets(
+            ratchet_secrets,
+            &self.encryption_secret,
+            &self.hash,
+            super::IdentityKeyFallback::Permitted,
+            &mut out[..ciphertext_token.len()],
+        )?;
+        let opened_len = opened.plaintext.len();
+        let offset = (opened.plaintext.as_ptr() as usize)
+            .checked_sub(out_start)
+            .ok_or(DecryptError::InvalidToken)?;
+        drop(opened);
+        if offset.saturating_add(opened_len) > out.len() {
+            return Err(DecryptError::InvalidToken);
+        }
+        out.copy_within(offset..offset + opened_len, 0);
+        Ok(opened_len)
+    }
+
     pub fn into_parts(self) -> IdentityParts {
         let Self {
             encryption_secret,

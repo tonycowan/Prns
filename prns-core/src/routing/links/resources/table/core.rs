@@ -243,6 +243,10 @@ pub struct IncomingResourceState {
     pub data_bytes_per_second: u64,
     pub inherited_eifr: Option<u64>,
     pub fast_rate_rounds: u8,
+    /// Milliseconds from this round's request to its first part.
+    pub round_first_ms: u32,
+    /// How many parts this round asked for.
+    pub round_asked: u8,
     pub very_slow_rate_rounds: u8,
 }
 
@@ -294,6 +298,8 @@ impl Default for IncomingResourceState {
             data_bytes_per_second: 0,
             inherited_eifr: None,
             fast_rate_rounds: 0,
+            round_first_ms: 0,
+            round_asked: 0,
             very_slow_rate_rounds: 0,
         }
     }
@@ -1357,6 +1363,8 @@ impl<C: ResourceTable<IncomingResourceState>> IncomingResources<C> {
                     data_bytes_per_second: 0,
                     inherited_eifr: None,
                     fast_rate_rounds: 0,
+                    round_first_ms: 0,
+                    round_asked: 0,
                     very_slow_rate_rounds: 0,
                 },
                 shape,

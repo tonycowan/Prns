@@ -131,7 +131,8 @@ struct PortContext {
     events: UnboundedSender<PortEvent>,
 }
 
-/// Port reads backpressure when inbound is full; broadcast fan-out drops for a full outbound lane.
+/// Frames queued for one open port. Inbound reads wait when this is full. Outbound waits too:
+/// dropping the frame that did not fit made the receiver time out a whole part window.
 const PORT_LANE_DEPTH: usize = 8;
 
 pub struct UsbAutoHost<Scan, Open> {
@@ -383,14 +384,23 @@ where
                 }
                 Some(key) = port_notify_rx.recv() => Some(key),
                 out = seam.next_outbound() => {
+                    let frame = out.to_vec();
+                    // The copy owns the bytes, so the seam slot can go back before a full port lane waits.
+                    seam.accept_outbound_custody();
                     let now = Instant::now();
                     for port in &mut ports {
-                        if port.liveness.is_alive(now) {
-                            if let Some(slot) = port.outbound.try_grant() {
-                                slot.fill(out);
-                                port.outbound.commit();
-                            }
+                        if !port.liveness.is_alive(now) {
+                            continue;
                         }
+                        let slot = match port.outbound.try_grant() {
+                            Some(slot) => slot,
+                            None => tokio::select! {
+                                slot = port.outbound.grant() => slot,
+                                _ = &mut port.task => continue,
+                            },
+                        };
+                        slot.fill(&frame);
+                        port.outbound.commit();
                     }
                     None
                 }
@@ -750,6 +760,88 @@ mod tests {
             matches!(message, Message::Hello(_)).then_some(())
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_full_port_lane_holds_the_next_frame_until_a_slot_frees() {
+        let (host_wire, mut device) = tokio::io::duplex(4096);
+        let mut host_wire = Some(host_wire);
+        let open = move |_candidate: UsbAutoCandidate| {
+            let taken = host_wire.take();
+            async move { taken.ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected)) }
+        };
+        let scan = || std::vec![candidate("loopback")];
+
+        let host = UsbAutoHost::new(host_id(), scan, open, Arc::new(Notify::new()));
+        let status = host.status();
+
+        let (wake_tx, _wake_rx) = manifold_wake();
+        let (in_tx, _in_rx) = tokio_grant_lane(contract::MAX_FRAMED_BYTES, 8);
+        let (mut out_tx, out_rx) =
+            tokio_grant_lane(contract::MAX_FRAMED_BYTES, PORT_LANE_DEPTH + 1);
+        let seam = TokioInterfaceSeam::new(host_id(), in_tx, wake_tx, out_rx);
+        tokio::spawn(host.run(seam));
+
+        let mut decoder = contract::Decoder::new();
+        read_until(&mut device, &mut decoder, |message| {
+            matches!(message, Message::Hello(_)).then_some(())
+        })
+        .await;
+
+        let mut frame = [0u8; contract::MAX_FRAMED_BYTES];
+        let ack = Message::HelloAck {
+            tag: NodeTag([0xAB; 8]),
+            capabilities: Capabilities::none(),
+        };
+        let n = ack.write_framed(&mut frame).expect("frames the ack");
+        device.write_all(&frame[..n]).await.expect("the host reads");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while status.connection() != ConnectionState::Connected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the host confirms the link within the window");
+
+        let burst = PORT_LANE_DEPTH + 1;
+        for index in 0..burst {
+            out_tx
+                .grant()
+                .await
+                .fill(&[u8::try_from(index).expect("the burst fits in one byte")]);
+            out_tx.commit();
+        }
+        // One read can carry several frames. Keep every byte; returning at the first
+        // data frame would throw away the rest of that read.
+        let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut pending = std::collections::VecDeque::new();
+            let mut buf = [0u8; 256];
+            let mut delivered = Vec::with_capacity(burst);
+            while delivered.len() < burst {
+                if pending.is_empty() {
+                    let n = tokio::time::timeout(Duration::from_secs(2), device.read(&mut buf))
+                        .await
+                        .expect("a frame arrives within the window")
+                        .expect("the device wire stays open");
+                    pending.extend(buf[..n].iter().copied());
+                }
+                let Some(byte) = pending.pop_front() else {
+                    continue;
+                };
+                let Ok(Some(frame)) = decoder.feed(byte) else {
+                    continue;
+                };
+                if let Ok(Message::Data(packet)) = contract::decode_message(frame) {
+                    delivered.push(packet.to_vec());
+                }
+            }
+            delivered
+        })
+        .await
+        .expect("a full port lane still delivers every frame");
+        let expected: Vec<Vec<u8>> = (0..burst).map(|index| vec![index as u8]).collect();
+        assert_eq!(delivered, expected);
     }
 
     #[test]

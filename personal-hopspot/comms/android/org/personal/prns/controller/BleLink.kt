@@ -27,8 +27,11 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
+import java.io.File
 import java.nio.ByteBuffer
+import java.util.Calendar
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
@@ -676,17 +679,37 @@ class BleLink(private val context: Context) {
             val input = socket.inputStream
             val buf = ByteArray(L2CAP_CHUNK)
             val direct = ByteBuffer.allocateDirect(L2CAP_CHUNK)
+            var lastRead = 0L
+            var burst = 0
+            var reads = 0
+            noteL2cap("l2cap read-open[$connId]")
             while (running && radioActive && links.containsKey(connId)) {
                 val n = try {
                     input.read(buf)
                 } catch (e: Exception) {
+                    noteL2cap("l2cap read-end[$connId] $e")
                     break
                 }
-                if (n < 0) break
+                if (n < 0) {
+                    noteL2cap("l2cap read-end[$connId] n=$n burst=${burst}B reads=$reads")
+                    break
+                }
                 if (n > 0) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (lastRead != 0L && now - lastRead >= 200L) {
+                        noteL2cap(
+                            "l2cap read-gap[$connId] ${now - lastRead}ms burst=${burst}B reads=$reads then ${n}B",
+                        )
+                        burst = 0
+                        reads = 0
+                    }
+                    lastRead = now
+                    burst += n
+                    reads += 1
                     direct.clear()
                     direct.put(buf, 0, n)
                     if (!NativeBridge.nativeBleL2capIn(connId, direct, n)) {
+                        noteL2cap("l2cap read-dropped[$connId] ${n}B queue full or closed")
                         Log.w(TAG, "inbound L2CAP queue full or closed[$connId] ${n}B")
                         break
                     }
@@ -699,6 +722,9 @@ class BleLink(private val context: Context) {
             val direct = ByteBuffer.allocateDirect(L2CAP_CHUNK)
             val scratch = ByteArray(L2CAP_CHUNK)
             var generation = NativeBridge.nativeBleWorkGeneration()
+            var lastWrite = 0L
+            var burst = 0
+            noteL2cap("l2cap write-open[$connId]")
             while (running && radioActive && links.containsKey(connId)) {
                 direct.clear()
                 val n = NativeBridge.nativeBleL2capOut(connId, direct)
@@ -709,12 +735,40 @@ class BleLink(private val context: Context) {
                         output.write(scratch, 0, n)
                         output.flush()
                     } catch (e: Exception) {
+                        noteL2cap("l2cap write-end[$connId] $e burst=${burst}B")
                         break
                     }
+                    val now = SystemClock.elapsedRealtime()
+                    if (lastWrite != 0L && now - lastWrite >= 200L) {
+                        noteL2cap(
+                            "l2cap write-gap[$connId] ${now - lastWrite}ms burst=${burst}B then ${n}B",
+                        )
+                        burst = 0
+                    }
+                    lastWrite = now
+                    burst += n
                 } else {
                     generation = NativeBridge.nativeBleWaitForWork(generation, 0)
                 }
             }
+        }
+    }
+
+    @Synchronized
+    private fun noteL2cap(line: String) {
+        try {
+            val dir = File(context.filesDir, "journal")
+            if (!dir.isDirectory) dir.mkdirs()
+            val clock = Calendar.getInstance()
+            val stamp = String.format(
+                "%02d:%02d:%02d.%03d",
+                clock.get(Calendar.HOUR_OF_DAY),
+                clock.get(Calendar.MINUTE),
+                clock.get(Calendar.SECOND),
+                clock.get(Calendar.MILLISECOND),
+            )
+            File(dir, "l2cap.log").appendText("$stamp $line\n")
+        } catch (_: Exception) {
         }
     }
 

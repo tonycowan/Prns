@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use personal_rns::crypto::{sha256, Ed25519Signature};
 use personal_rns::identity::in_memory::InMemoryNodeIdentity;
@@ -43,6 +43,9 @@ static HANDLE: OnceLock<PrnsNodeHandle> = OnceLock::new();
 static OURS: OnceLock<IdentityHash> = OnceLock::new();
 static OUR_DELIVERY: OnceLock<DestinationHash> = OnceLock::new();
 static SIGNING: OnceLock<Zeroizing<[u8; IDENTITY_SECRET_KEY_LEN]>> = OnceLock::new();
+static RATCHET_ROTATED: OnceLock<tokio::sync::mpsc::UnboundedSender<DestinationHash>> =
+    OnceLock::new();
+static OUR_RATCHETS: Mutex<Vec<personal_rns::crypto::X25519SecretKey>> = Mutex::new(Vec::new());
 static MAIL: OnceLock<Mutex<Mail>> = OnceLock::new();
 
 struct Mail {
@@ -63,6 +66,32 @@ struct Mail {
     assemblies: HashMap<(String, u64), crate::lxmf::Assembly>,
     /// Pieces of one resource, joined when every piece has arrived.
     resources: HashMap<(LinkId, [u8; 32]), IncomingResource>,
+    /// A file name that arrived before its bytes, still owed on this link.
+    open_files: Vec<OpenFile>,
+    /// File names whose bytes will not arrive. The journal marks those notes failed.
+    incoming_failed: Vec<FailedAttachment>,
+    /// A name that arrived before we knew who sent it, on a link that then failed.
+    doomed_waits: Vec<DoomedWait>,
+}
+
+struct OpenFile {
+    link_id: LinkId,
+    identity: String,
+    written_at: f64,
+    file_name: String,
+}
+
+struct DoomedWait {
+    link_id: LinkId,
+    written_at: f64,
+    file_name: String,
+}
+
+/// A file the other person named, whose transfer then failed.
+pub struct FailedAttachment {
+    pub identity: String,
+    pub written_at: f64,
+    pub file_name: String,
 }
 
 struct IncomingResource {
@@ -80,6 +109,31 @@ pub struct ArrivedNote {
     pub from_mailbox: bool,
     /// sha256 of the packed note. Set when `from_mailbox` is true.
     pub digest: [u8; 32],
+    /// Set when the note carried a file. Empty when it did not.
+    pub file_name: String,
+    pub file_bytes: Vec<u8>,
+}
+
+fn arrived_note(
+    identity: String,
+    letter: crate::lxmf::NoteLetter,
+    from_mailbox: bool,
+    digest: [u8; 32],
+) -> ArrivedNote {
+    let (file_name, file_bytes) = match letter.file {
+        Some(file) => (file.name, file.bytes),
+        None => (String::new(), Vec::new()),
+    };
+    ArrivedNote {
+        identity,
+        words: letter.words,
+        written_at: letter.written_at,
+        place: letter.place,
+        from_mailbox,
+        digest,
+        file_name,
+        file_bytes,
+    }
 }
 
 /// A reaction that arrived on a link, still waiting for the contact list.
@@ -188,7 +242,7 @@ impl RunningJournal {
                 };
                 let _ = RUNTIME.set(runtime.handle().clone());
                 runtime.block_on(async move {
-                    let node =
+                    let mut node =
                         match stand_up_live(&remote_directory, &home, secret, on_journal_event) {
                             Ok(node) => node,
                             Err(error) => {
@@ -196,6 +250,18 @@ impl RunningJournal {
                                 return;
                             }
                         };
+                    let vault_dir = home.join("vault");
+                    let vault = personal_rns::identity::vault::FileVault::new(&vault_dir);
+                    let restored = node.seed_self_ratchets_from_vault(&vault);
+                    delivery_log(&format!(
+                        "ratchets restored {} refused {} dropped {}",
+                        restored.seeded_count, restored.refused_count, restored.dropped_count
+                    ));
+                    load_saved_ratchets(&vault, destination);
+                    let (rotated_tx, rotated_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let _ = RATCHET_ROTATED.set(rotated_tx);
+                    let flush_handle = node.handle();
+                    tokio::spawn(keep_ratchets(flush_handle, vault_dir, rotated_rx));
                     let _ = HANDLE.set(node.handle());
                     let announcer = node.handle();
                     let _ = ready_tx.send(Ok(()));
@@ -305,8 +371,9 @@ fn prepare_contacts() {
             book.writable = true;
         }
         Ok(text) => match crate::model::decode_contacts(&text) {
-            Some(people) => {
+            Some(mut people) => {
                 crate::model::note_ids_from(&people);
+                mark_files_already_kept(&mut people);
                 book.next_id = crate::model::next_person_id(&people);
                 book.people = people;
                 book.writable = true;
@@ -329,6 +396,21 @@ fn prepare_contacts() {
     queue_unsent(&saved);
 }
 
+/// A file kept beside the book was already copied into Downloads by an older build.
+fn mark_files_already_kept(people: &mut [crate::model::Person]) {
+    for person in people {
+        for note in &mut person.notes {
+            if note.mine || note.downloaded || note.file_name.is_none() {
+                continue;
+            }
+            if kept_file(note.id).is_some() {
+                note.downloaded = true;
+                note.failed = false;
+            }
+        }
+    }
+}
+
 fn remember_digests(people: &[crate::model::Person]) {
     let mut sent = sent_notes();
     for person in people {
@@ -349,12 +431,23 @@ fn queue_unsent(people: &[crate::model::Person]) {
                 && !note.posted
                 && note.kind == crate::model::NoteKind::Text
             {
+                let stored = note.file_name.as_ref().and_then(|_| kept_file(note.id));
+                let file = match (&note.file_name, &stored) {
+                    (Some(name), Some(bytes)) if !bytes.is_empty() => {
+                        Some((name.as_str(), bytes.as_slice()))
+                    }
+                    _ => None,
+                };
+                if note.words.trim().is_empty() && file.is_none() {
+                    continue;
+                }
                 send_note(
                     &person.identity,
                     &note.words,
                     note.id,
                     f64::from_bits(note.written_at),
                     note.place,
+                    file,
                 );
             }
         }
@@ -441,6 +534,161 @@ pub fn default_directory() -> PathBuf {
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         PathBuf::from(home).join(".local/share/journal")
+    }
+}
+
+/// Writes the bytes of a note's file beside the contact book, so a retry can send them again.
+pub fn keep_file(note_id: u64, bytes: &[u8]) {
+    if note_id == 0 || bytes.is_empty() {
+        return;
+    }
+    let dir = default_directory().join("files");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = write_private(&dir.join(note_id.to_string()), bytes);
+}
+
+/// Copies a saved file into the user's Downloads folder, keeping its name.
+/// A file already there with the same bytes is left in place. A different file
+/// of that name gets a numbered copy.
+pub fn publish_download(note_id: u64, name: &str) -> bool {
+    let name = crate::model::file_name_of(name);
+    #[cfg(target_os = "android")]
+    {
+        save_android_download(note_id, &name).is_some()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        download_copy(note_id, &name).is_some()
+    }
+}
+
+/// Opens the Downloads copy of a saved file, writing it there first if needed.
+pub fn show_kept_file(note_id: u64, name: &str) {
+    let name = crate::model::file_name_of(name);
+    #[cfg(target_os = "android")]
+    {
+        let Some(saved) = save_android_download(note_id, &name) else {
+            return;
+        };
+        let _ = with_android_context(|env, context| {
+            let class = env.get_object_class(context)?;
+            let text = env.new_string(&saved)?;
+            env.call_static_method(
+                &class,
+                "openDownload",
+                "(Ljava/lang/String;)V",
+                &[jni::objects::JValue::Object(&text)],
+            )?;
+            Ok(())
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let Some(path) = download_copy(note_id, &name) else {
+            return;
+        };
+        open_download(&path);
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn downloads_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            return std::path::PathBuf::from(profile).join("Downloads");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join("Downloads")
+}
+
+#[cfg(not(target_os = "android"))]
+fn download_copy(note_id: u64, name: &str) -> Option<std::path::PathBuf> {
+    let bytes = kept_file(note_id)?;
+    let dir = downloads_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    for n in 1..1000 {
+        let candidate = dir.join(crate::model::numbered_file_name(name, n));
+        if !candidate.exists() {
+            write_private(&candidate, &bytes).ok()?;
+            return Some(candidate);
+        }
+        let same_size = std::fs::metadata(&candidate)
+            .ok()
+            .is_some_and(|meta| meta.len() == bytes.len() as u64);
+        if same_size && std::fs::read(&candidate).ok().as_deref() == Some(bytes.as_slice()) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "android"))]
+fn open_download(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(path).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path.to_string_lossy()])
+            .spawn();
+    }
+    #[cfg(all(
+        not(any(target_os = "macos", target_os = "windows")),
+        not(target_arch = "wasm32")
+    ))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(target_os = "android")]
+fn save_android_download(note_id: u64, name: &str) -> Option<String> {
+    let source = default_directory().join("files").join(note_id.to_string());
+    with_android_context(|env, context| {
+        let class = env.get_object_class(context)?;
+        let source = env.new_string(source.to_string_lossy())?;
+        let name = env.new_string(name)?;
+        let value = env
+            .call_static_method(
+                &class,
+                "saveDownload",
+                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[
+                    jni::objects::JValue::Object(&source),
+                    jni::objects::JValue::Object(&name),
+                ],
+            )?
+            .l()?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let text: String = env.get_string(&jni::objects::JString::from(value))?.into();
+        Ok(Some(text).filter(|text| !text.is_empty()))
+    })
+    .ok()
+    .flatten()
+}
+
+/// The bytes saved for a note, when they are still on disk.
+pub fn kept_file(note_id: u64) -> Option<Vec<u8>> {
+    if note_id == 0 {
+        return None;
+    }
+    let bytes = std::fs::read(default_directory().join("files").join(note_id.to_string())).ok()?;
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes)
     }
 }
 
@@ -846,6 +1094,73 @@ fn capture_photo_blocking() -> PhotoCapture {
     .unwrap_or(PhotoCapture::Unavailable)
 }
 
+/// A file the person chose on Android. The desktop composer uses the page's own file control.
+#[cfg(target_os = "android")]
+pub enum ChosenFile {
+    Ready { name: String, bytes: Vec<u8> },
+    Over,
+    Missing,
+    Cancelled,
+}
+
+#[cfg(target_os = "android")]
+pub async fn choose_file(limit: Option<u64>) -> ChosenFile {
+    let Some(runtime) = RUNTIME.get() else {
+        return ChosenFile::Missing;
+    };
+    let max = limit.unwrap_or(0);
+    runtime
+        .spawn_blocking(move || choose_file_blocking(max))
+        .await
+        .unwrap_or(ChosenFile::Missing)
+}
+
+#[cfg(target_os = "android")]
+fn choose_file_blocking(max_bytes: u64) -> ChosenFile {
+    let max = i64::try_from(max_bytes).unwrap_or(0);
+    let text = with_android_context(|env, context| {
+        let class = env.get_object_class(context)?;
+        let value = env
+            .call_static_method(
+                &class,
+                "chooseFile",
+                "(J)Ljava/lang/String;",
+                &[jni::objects::JValue::Long(max)],
+            )?
+            .l()?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let string = jni::objects::JString::from(value);
+        let text: String = env.get_string(&string)?.into();
+        Ok(Some(text))
+    });
+    let Ok(Some(text)) = text else {
+        return ChosenFile::Cancelled;
+    };
+    if text == "over" {
+        return ChosenFile::Over;
+    }
+    if text == "missing" {
+        return ChosenFile::Missing;
+    }
+    let Some((name, path)) = text.split_once('\n') else {
+        return ChosenFile::Missing;
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return ChosenFile::Missing,
+    };
+    let _ = std::fs::remove_file(path);
+    if bytes.is_empty() {
+        return ChosenFile::Missing;
+    }
+    ChosenFile::Ready {
+        name: name.to_string(),
+        bytes,
+    }
+}
+
 #[cfg(target_os = "android")]
 pub fn device_location() -> Option<String> {
     with_android_context(|env, context| {
@@ -888,10 +1203,22 @@ pub fn send_note(
     note_id: u64,
     written_at: f64,
     place: Option<crate::model::Place>,
+    file: Option<(&str, &[u8])>,
 ) {
     let words = words.trim().to_string();
     let place = place.filter(|_| words.contains(crate::model::PLACEHOLDER));
-    if words.is_empty() {
+    let owned_name = file
+        .as_ref()
+        .map(|(name, _)| crate::model::file_name_of(name));
+    let file = match (&owned_name, file) {
+        (Some(name), Some((_, bytes)))
+            if !bytes.is_empty() && u32::try_from(bytes.len()).is_ok() =>
+        {
+            Some((name.as_str(), bytes))
+        }
+        _ => None,
+    };
+    if words.is_empty() && file.is_none() {
         return;
     }
     let Some(recipient) = contact_material(contact_identity) else {
@@ -900,10 +1227,7 @@ pub fn send_note(
     let Some(destination) = address_for(&recipient) else {
         return;
     };
-    let packed = match place {
-        Some(place) => crate::lxmf::pack_placed_note(&words, written_at, Some(place)),
-        None => crate::lxmf::pack_note(&words, written_at),
-    };
+    let packed = crate::lxmf::pack_file_note(&words, written_at, place, file);
     if note_id != 0 {
         sent_notes().insert(note_id, sha256(&packed));
     }
@@ -980,8 +1304,221 @@ const GIVE_UP_AFTER: u8 = 3;
 /// A note the person cannot take is posted to the mailbox by this time.
 const UNTIL_POSTED: Duration = Duration::from_secs(15);
 
-/// Direct delivery may use this much of [`UNTIL_POSTED`]. The rest is the mailbox.
+/// Direct delivery of a link packet may use this much of [`UNTIL_POSTED`]. The rest is the mailbox.
 const PERSON_SLICE: Duration = Duration::from_secs(8);
+
+/// How long a resource may move before it is given up. A link packet stays on
+/// [`PERSON_SLICE`]. A larger send gets the open-path floor (150 kbps) on top of
+/// that, so a photo is not abandoned while it is still crossing.
+fn resource_budget(bytes: u64) -> Duration {
+    let moving_ms = bytes.saturating_mul(8_000) / crate::model::OPEN_PATH_BPS.max(1);
+    PERSON_SLICE.saturating_add(Duration::from_millis(moving_ms))
+}
+
+/// How long a file send may sit with no new bytes. Before the first byte, that is the whole
+/// budget. After bytes are moving, a quiet stretch of [`PERSON_SLICE`] means the transfer stopped.
+fn person_quiet_limit(budget: Duration, moved: bool) -> Duration {
+    if moved {
+        PERSON_SLICE
+    } else {
+        budget
+    }
+}
+
+/// Polls the outgoing file until `attempt` finishes. A transfer that is still gaining bytes keeps
+/// its note. One that sits still for [`person_quiet_limit`] is the timeout.
+async fn wait_for_moving_send<F>(
+    label: &str,
+    budget: Duration,
+    mut attempt: std::pin::Pin<&mut F>,
+) -> Result<Result<(), String>, ()>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    let started = Instant::now();
+    let mut quiet_since = Instant::now();
+    let mut last = 0u64;
+    let mut noted = false;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut attempt => return Ok(result),
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                let done = transfer_view().await.done;
+                if done > last {
+                    last = done;
+                    quiet_since = Instant::now();
+                }
+                if !noted && last > 0 && started.elapsed() >= budget {
+                    noted = true;
+                    delivery_log(&format!(
+                        "{label} person still moving at {last} bytes"
+                    ));
+                }
+                let quiet = quiet_since.elapsed();
+                if quiet >= person_quiet_limit(budget, last > 0) {
+                    delivery_log(&format!(
+                        "{label} person stopped at {last} bytes after {}ms quiet",
+                        quiet.as_millis()
+                    ));
+                    return Err(());
+                }
+            }
+        }
+    }
+}
+
+/// The note whose file is on the wire right now. Zero when nothing large is leaving.
+static SENDING_NOTE: AtomicU64 = AtomicU64::new(0);
+
+struct SendingNote;
+
+impl SendingNote {
+    fn arm(note_id: u64) -> Option<Self> {
+        if note_id == 0 {
+            return None;
+        }
+        SENDING_NOTE.store(note_id, Ordering::Release);
+        Some(Self)
+    }
+}
+
+impl Drop for SendingNote {
+    fn drop(&mut self) {
+        SENDING_NOTE.store(0, Ordering::Release);
+    }
+}
+
+/// How far one transfer has moved. `done` and `total` are bytes of the whole file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TransferView {
+    pub note_id: u64,
+    pub done: u64,
+    pub total: u64,
+    pub incoming_identity: String,
+    pub incoming_done: u64,
+    pub incoming_total: u64,
+}
+
+struct SegmentSlice {
+    index: u64,
+    total_segments: u64,
+    parts_done: u64,
+    part_count: u64,
+    whole_bytes: u64,
+}
+
+/// A resource segment is numbered from 1. The slot in the assembly is one less.
+fn segment_slot(index: u64, total: u64) -> Option<usize> {
+    let slot = index.checked_sub(1)?;
+    if total == 0 || total > 4_096 || slot >= total {
+        return None;
+    }
+    usize::try_from(slot).ok()
+}
+
+/// Parts already across, counted in bytes of the whole file.
+///
+/// A segment is not a mebibyte. The last two segments of a file are split so neither is a short
+/// tail, so crediting every earlier segment as [`MAX_EFFICIENT_SIZE`] shows the file almost gone
+/// while half of it is still ahead. The span comes from the same plan the sender uses. A finished
+/// earlier segment stays in the total when only a later segment is still live.
+fn progress_of(segments: &[SegmentSlice]) -> Option<(u64, u64)> {
+    let whole = segments.first()?.whole_bytes;
+    if whole == 0 {
+        return None;
+    }
+    let full = personal_rns::routing::links::resources::MAX_EFFICIENT_SIZE as u64;
+    let stream = full.min(whole).max(1);
+    let plan =
+        personal_rns::routing::links::resources::ResourceSendPlan::new(whole, None, stream).ok()?;
+    let min_index = segments.iter().map(|segment| segment.index).min()?;
+    let earlier = plan
+        .segment(min_index)
+        .map(|span| span.data_start)
+        .unwrap_or(0)
+        .min(whole);
+    let mut partial = 0u64;
+    for segment in segments {
+        if segment.index == 0 || segment.index > segment.total_segments.max(1) {
+            continue;
+        }
+        let Some(span) = plan.segment(segment.index) else {
+            continue;
+        };
+        let this_len = span.data_end.saturating_sub(span.data_start);
+        let counted = segment.parts_done.min(segment.part_count);
+        let done = if segment.part_count == 0 {
+            0
+        } else {
+            this_len.saturating_mul(counted) / segment.part_count
+        };
+        partial = partial.saturating_add(done);
+    }
+    Some((earlier.saturating_add(partial).min(whole), whole))
+}
+
+/// The file leaving this journal, and the file arriving, if either is on the wire.
+pub async fn transfer_view() -> TransferView {
+    let note_id = SENDING_NOTE.load(Ordering::Acquire);
+    let Some(handle) = HANDLE.get() else {
+        return TransferView {
+            note_id,
+            ..TransferView::default()
+        };
+    };
+    let snap = handle.resource_segments().await;
+    note_wire(&snap.segments);
+    note_rounds(&snap.rounds, snap.rounds_dropped);
+    let mut outgoing: HashMap<[u8; 32], Vec<SegmentSlice>> = HashMap::new();
+    let mut incoming: HashMap<(LinkId, [u8; 32]), Vec<SegmentSlice>> = HashMap::new();
+    for row in snap.segments {
+        let slice = SegmentSlice {
+            index: row.segment_index,
+            total_segments: row.total_segments,
+            parts_done: row.parts_done,
+            part_count: row.part_count,
+            whole_bytes: row.whole_bytes,
+        };
+        let mark = *row.mark.as_bytes();
+        if row.incoming {
+            incoming.entry((row.link_id, mark)).or_default().push(slice);
+        } else {
+            outgoing.entry(mark).or_default().push(slice);
+        }
+    }
+    let (done, total) = outgoing
+        .into_values()
+        .filter_map(|segments| progress_of(&segments))
+        .max_by_key(|(_, total)| *total)
+        .unwrap_or((0, 0));
+    let incoming_pick = incoming
+        .into_iter()
+        .filter_map(|((link, _), segments)| {
+            let (done, total) = progress_of(&segments)?;
+            Some((link, done, total))
+        })
+        .max_by_key(|(_, _, total)| *total);
+    let (incoming_identity, incoming_done, incoming_total) = match incoming_pick {
+        Some((link, done, total)) => {
+            let identity = mail()
+                .peers
+                .get(&link)
+                .map(|identity| hex_encode(identity.as_bytes()))
+                .unwrap_or_default();
+            (identity, done, total)
+        }
+        None => (String::new(), 0, 0),
+    };
+    TransferView {
+        note_id,
+        done,
+        total,
+        incoming_identity,
+        incoming_done,
+        incoming_total,
+    }
+}
 
 enum OutboundKind {
     Note,
@@ -1093,8 +1630,11 @@ fn nudge_delivery() {
 
 async fn deliver_note(note: &mut QueuedNote) -> DeliveryOutcome {
     let can_post = !matches!(note.kind, OutboundKind::Reaction) && mailbox_address().is_some();
+    let fits = crate::lxmf::fits_one_link_packet(&note.packed);
+    let _meter = (!fits).then(|| SendingNote::arm(note.note_id)).flatten();
     if !can_post {
-        return if deliver_to_person(note, None).await {
+        let budget = (!fits).then(|| resource_budget(note.packed.len() as u64));
+        return if deliver_to_person(note, budget).await {
             DeliveryOutcome::Settled
         } else {
             DeliveryOutcome::Again
@@ -1107,17 +1647,30 @@ async fn deliver_note(note: &mut QueuedNote) -> DeliveryOutcome {
             "{label} contact is isolated, posting to the mailbox"
         ));
     } else {
-        let person = PERSON_SLICE.min(UNTIL_POSTED.saturating_sub(started.elapsed()));
+        let person = if fits {
+            PERSON_SLICE.min(UNTIL_POSTED.saturating_sub(started.elapsed()))
+        } else {
+            resource_budget(note.packed.len() as u64)
+        };
         delivery_log(&format!(
-            "{label} trying the person for {}ms",
-            person.as_millis()
+            "{label} trying the person for {}ms{}",
+            person.as_millis(),
+            if fits {
+                String::new()
+            } else {
+                format!(" ({} bytes)", note.packed.len())
+            }
         ));
         if deliver_to_person(note, Some(person)).await {
             return DeliveryOutcome::Settled;
         }
     }
     note.stage = OutboundStage::Mailbox;
-    let left = UNTIL_POSTED.saturating_sub(started.elapsed());
+    let left = if fits {
+        UNTIL_POSTED.saturating_sub(started.elapsed())
+    } else {
+        resource_budget(note.packed.len() as u64)
+    };
     if deliver_to_mailbox(note, left).await {
         DeliveryOutcome::Posted
     } else {
@@ -1166,6 +1719,11 @@ fn hash_hex(hash: &personal_rns::wire::DestinationHash) -> String {
         .collect()
 }
 
+/// A line in the delivery log. Used while a file is crossing so the wire can be read afterwards.
+pub fn trace(message: &str) {
+    delivery_log(message);
+}
+
 fn delivery_log(message: &str) {
     let when = chrono::Local::now().format("%H:%M:%S%.3f");
     let line = format!("{when} {message}\n");
@@ -1178,6 +1736,165 @@ fn delivery_log(message: &str) {
             use std::io::Write;
             file.write_all(line.as_bytes())
         });
+}
+
+static WIRE_AT: AtomicU64 = AtomicU64::new(0);
+static WIRE_QUIET: AtomicBool = AtomicBool::new(true);
+
+/// One line every two seconds while a file is on a link, and one line when it leaves.
+fn note_wire(rows: &[personal_rns::engine::ResourceSegmentProgress]) {
+    if rows.is_empty() {
+        if !WIRE_QUIET.swap(true, Ordering::Relaxed) {
+            delivery_log("wire quiet");
+        }
+        return;
+    }
+    WIRE_QUIET.store(false, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let last = WIRE_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 2_000 {
+        return;
+    }
+    WIRE_AT.store(now, Ordering::Relaxed);
+    for row in rows {
+        let way = if row.incoming { "in" } else { "out" };
+        let wire = if row.interface == personal_rns::interfaces::InterfaceId::new([0; 8]) {
+            "no link".to_string()
+        } else {
+            interface_name(row.interface)
+        };
+        delivery_log(&format!(
+            "wire {way} {wire} rtt={}ms mtu={} window={} ceiling={} sdu={} seg={}/{} parts={}/{} bytes={}",
+            row.rtt_millis,
+            row.mtu,
+            row.window,
+            row.ceiling,
+            row.sdu,
+            row.segment_index,
+            row.total_segments,
+            row.parts_done,
+            row.part_count,
+            row.whole_bytes
+        ));
+    }
+}
+
+/// Every request since the last poll, written in one open so the log does not slow the transfer.
+fn note_rounds(rounds: &[personal_rns::engine::ResourceRoundNote], dropped: u32) {
+    if rounds.is_empty() && dropped == 0 {
+        return;
+    }
+    use personal_rns::engine::ResourceRoundKind;
+    let when = chrono::Local::now().format("%H:%M:%S%.3f");
+    let mut body = String::new();
+    for row in rounds {
+        let line = match row.kind {
+            ResourceRoundKind::Pull => format!(
+                "pull seg={}/{} at={} asked={} win={} max={} fast={} map={} hmu={}",
+                row.segment_index,
+                row.total_segments,
+                row.part_at,
+                row.asked,
+                row.window,
+                row.ceiling,
+                row.fast_rounds,
+                row.hashmap_height,
+                row.flag
+            ),
+            ResourceRoundKind::Round => format!(
+                "round seg={}/{} at={} got={} win={} max={} first={}ms span={}ms",
+                row.segment_index,
+                row.total_segments,
+                row.part_at,
+                row.moved,
+                row.window,
+                row.ceiling,
+                row.first_ms,
+                row.span_ms
+            ),
+            ResourceRoundKind::Watchdog => format!(
+                "watch seg={}/{} at={} win={} max={} span={}ms",
+                row.segment_index,
+                row.total_segments,
+                row.part_at,
+                row.window,
+                row.ceiling,
+                row.span_ms
+            ),
+            ResourceRoundKind::Serve => format!(
+                "serve seg={}/{} at={} asked={} sent={} hmu={}",
+                row.segment_index, row.total_segments, row.part_at, row.asked, row.moved, row.flag
+            ),
+            ResourceRoundKind::Admit => format!(
+                "admit seg={}/{} win={} max={} carried={}",
+                row.segment_index, row.total_segments, row.window, row.ceiling, row.flag
+            ),
+            ResourceRoundKind::Proof => {
+                let verdict = match row.flag {
+                    personal_rns::engine::ResourceRoundNote::PROOF_OUT => "out",
+                    personal_rns::engine::ResourceRoundNote::PROOF_IN_ACCEPTED => "in accepted",
+                    personal_rns::engine::ResourceRoundNote::PROOF_IN_INVALID => "in invalid",
+                    personal_rns::engine::ResourceRoundNote::PROOF_IN_MALFORMED => "in malformed",
+                    personal_rns::engine::ResourceRoundNote::PROOF_IN_MISSING => "in missing",
+                    personal_rns::engine::ResourceRoundNote::PROOF_IN_OFF_WIRE => "in off-wire",
+                    _ => "in",
+                };
+                if matches!(
+                    row.flag,
+                    personal_rns::engine::ResourceRoundNote::PROOF_IN_MALFORMED
+                        | personal_rns::engine::ResourceRoundNote::PROOF_IN_MISSING
+                ) {
+                    format!("proof {verdict}")
+                } else {
+                    format!(
+                        "proof {verdict} seg={}/{}",
+                        row.segment_index, row.total_segments
+                    )
+                }
+            }
+        };
+        body.push_str(&format!("{when} {line}\n"));
+    }
+    if dropped > 0 {
+        body.push_str(&format!("{when} rounds dropped {dropped}\n"));
+    }
+    let path = default_directory().join("delivery.log");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(body.as_bytes())
+        });
+}
+
+fn log_up_wires(handle: &PrnsNodeHandle, label: &str) {
+    let snaps = handle.interfaces();
+    let mut any = false;
+    for snap in &snaps {
+        if !matches!(
+            snap.connection,
+            personal_rns::interfaces::ConnectionState::Connected
+                | personal_rns::interfaces::ConnectionState::Degraded
+        ) {
+            continue;
+        }
+        any = true;
+        delivery_log(&format!(
+            "{label} {} is up, {} links, rx {} tx {}",
+            interface_name(snap.id),
+            snap.links,
+            snap.rx_bytes,
+            snap.tx_bytes
+        ));
+    }
+    if !any {
+        delivery_log(&format!("{label} no wire is up"));
+    }
 }
 
 async fn deliver_to_person(note: &QueuedNote, budget: Option<Duration>) -> bool {
@@ -1193,10 +1910,10 @@ async fn deliver_to_person(note: &QueuedNote, budget: Option<Duration>) -> bool 
     let one_packet = crate::lxmf::fits_one_link_packet(&note.packed);
     if !one_packet {
         let carry = carry_for_identity(&note.identity);
-        if !carry.allows(note.packed.len() as u64) {
+        let weight = crate::lxmf::carried_bytes(&note.packed);
+        if !carry.allows(weight) {
             delivery_log(&format!(
-                "{label} person skipped: {} bytes is more than this path will carry ({})",
-                note.packed.len(),
+                "{label} person skipped: {weight} bytes is more than this path will carry ({})",
                 carry_label(carry)
             ));
             return false;
@@ -1205,24 +1922,88 @@ async fn deliver_to_person(note: &QueuedNote, budget: Option<Duration>) -> bool 
     let ours = OURS.get().copied();
     let destination = note.destination;
     let attempt = async {
-        let _ = seek_path(&handle, destination).await;
+        log_up_wires(&handle, &format!("{label} person"));
+        match handle.request_path(destination).await {
+            Ok(found) => delivery_log(&format!("{label} person path {} hops", found.hops.0)),
+            Err(err) => delivery_log(&format!("{label} person path {err:?}")),
+        }
+        match handle.route(destination).await {
+            Some(route) => delivery_log(&format!(
+                "{label} person route {} {} hops",
+                interface_name(route.interface),
+                route.hops
+            )),
+            None => delivery_log(&format!("{label} person route none")),
+        }
         let link = handle
-            .establish_link(destination)
+            .establish_link_with_rtt(destination)
             .await
             .map_err(|err| format!("link {err:?}"))?;
+        delivery_log(&format!(
+            "{label} person link {:?} rtt={}ms",
+            link.link_id, link.rtt_millis
+        ));
+        let link = link.link_id;
         if let Some(ours) = ours {
             if let Err(err) = handle.identify(link, ours).await {
                 delivery_log(&format!("{label} person identify {err:?}"));
             }
         }
-        if one_packet {
+        let ratchet = handle.announced_ratchet(destination).await;
+        let Some(material) = signing_material() else {
+            return Err("no signing key".into());
+        };
+        let ratchet_public = ratchet.map(personal_rns::crypto::X25519PublicKey);
+        let Some(sealed) = crate::mailbox::seal_for_delivery(
+            &material,
+            &note.recipient,
+            &note.packed,
+            ratchet_public.as_ref(),
+        ) else {
+            return Err("could not seal".into());
+        };
+        delivery_log(&format!(
+            "{label} person sealed to {}",
+            if ratchet_public.is_some() {
+                "their ratchet"
+            } else {
+                "their identity key"
+            }
+        ));
+        if !one_packet {
+            if let Some(prelude) = crate::lxmf::file_announcement(&note.packed) {
+                let Some(sealed_prelude) = crate::mailbox::seal_for_delivery(
+                    &material,
+                    &note.recipient,
+                    &prelude,
+                    ratchet_public.as_ref(),
+                ) else {
+                    return Err("could not seal the file announcement".into());
+                };
+                delivery_log(&format!("{label} person sent the words ahead of the file"));
+                if crate::lxmf::fits_one_link_packet(&sealed_prelude) {
+                    handle
+                        .send_link_packet(link, &sealed_prelude)
+                        .await
+                        .map_err(|err| format!("announcement {err:?}"))?;
+                } else {
+                    let total = sealed_prelude.len() as u64;
+                    let cursor = std::io::Cursor::new(sealed_prelude);
+                    handle
+                        .send_resource(link, total, cursor)
+                        .await
+                        .map_err(|err| format!("announcement {err:?}"))?;
+                }
+            }
+        }
+        if crate::lxmf::fits_one_link_packet(&sealed) {
             handle
-                .send_link_packet(link, &note.packed)
+                .send_link_packet(link, &sealed)
                 .await
                 .map_err(|err| format!("packet {err:?}"))?;
         } else {
-            let total = note.packed.len() as u64;
-            let cursor = std::io::Cursor::new(note.packed.clone());
+            let total = sealed.len() as u64;
+            let cursor = std::io::Cursor::new(sealed);
             handle
                 .send_resource(link, total, cursor)
                 .await
@@ -1232,7 +2013,13 @@ async fn deliver_to_person(note: &QueuedNote, budget: Option<Duration>) -> bool 
     };
     let budget = budget.unwrap_or(Duration::from_secs(20));
     let started = Instant::now();
-    match tokio::time::timeout(budget, attempt).await {
+    tokio::pin!(attempt);
+    let waited = if one_packet {
+        tokio::time::timeout(budget, attempt).await.map_err(|_| ())
+    } else {
+        wait_for_moving_send(&label, budget, attempt).await
+    };
+    match waited {
         Ok(Ok(())) => {
             delivery_log(&format!(
                 "{label} person accepted in {}ms",
@@ -1308,7 +2095,11 @@ async fn deliver_to_mailbox(note: &mut QueuedNote, budget: Duration) -> bool {
     let ours = OURS.get().copied();
     let mailbox_hex = hash_hex(&mailbox);
     let attempt = async {
-        let _ = seek_path(&handle, mailbox).await;
+        log_up_wires(&handle, &format!("{label} mailbox"));
+        match handle.request_path(mailbox).await {
+            Ok(found) => delivery_log(&format!("{label} mailbox path {} hops", found.hops.0)),
+            Err(err) => delivery_log(&format!("{label} mailbox path {err:?}")),
+        }
         let route = handle.route(mailbox).await;
         match &route {
             Some(route) => delivery_log(&format!(
@@ -1396,6 +2187,95 @@ fn signing_material() -> Option<PrivateIdentityMaterial> {
     PrivateIdentityMaterial::from_slice(&secret[..]).ok()
 }
 
+fn load_saved_ratchets(
+    vault: &personal_rns::identity::vault::FileVault,
+    destination: DestinationHash,
+) {
+    use personal_rns::identity::vault::IdentityVault;
+
+    let label = personal_rns::runtime::self_ratchet_identity_label(&destination);
+    let Ok(Some(len)) = vault.stored_blob_len(&label) else {
+        return;
+    };
+    let mut buf = personal_rns::Zeroizing::new(vec![0u8; len]);
+    match vault.load_blob(&label, &mut buf) {
+        Ok(Some(bytes)) if remember_ratchet_secrets(bytes) => {
+            let count = our_ratchet_secrets().len();
+            delivery_log(&format!("ratchets loaded {count}"));
+        }
+        Ok(_) => delivery_log("ratchet record unreadable"),
+        Err(error) => delivery_log(&format!("ratchet load failed: {error}")),
+    }
+}
+
+fn remember_ratchet_secrets(sealed: &[u8]) -> bool {
+    let Ok(record) = personal_rns::persistence::read_self_ratchets_snapshot(sealed) else {
+        return false;
+    };
+    let secrets: Vec<_> = record.secrets_newest_first().collect();
+    *OUR_RATCHETS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = secrets;
+    true
+}
+
+fn our_ratchet_secrets() -> Vec<personal_rns::crypto::X25519SecretKey> {
+    OUR_RATCHETS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .map(|secret| {
+            secret.with_scalar_bytes(|bytes| personal_rns::crypto::X25519SecretKey::new(*bytes))
+        })
+        .collect()
+}
+
+async fn refresh_our_ratchets(handle: &PrnsNodeHandle) {
+    let Some(destination) = OUR_DELIVERY.get().copied() else {
+        return;
+    };
+    if let Ok(Some(snapshot)) = handle.snapshot_self_ratchet(destination).await {
+        let _ = remember_ratchet_secrets(&snapshot.sealed);
+    }
+}
+
+async fn keep_ratchets(
+    handle: PrnsNodeHandle,
+    vault_dir: PathBuf,
+    mut rotated: tokio::sync::mpsc::UnboundedReceiver<DestinationHash>,
+) {
+    use personal_rns::identity::vault::IdentityVault;
+
+    let mut vault = personal_rns::identity::vault::FileVault::new(vault_dir);
+    while let Some(destination) = rotated.recv().await {
+        match handle.snapshot_self_ratchet(destination).await {
+            Ok(Some(snapshot)) => {
+                if !remember_ratchet_secrets(&snapshot.sealed) {
+                    delivery_log("ratchet record unreadable");
+                    continue;
+                }
+                let label = personal_rns::runtime::self_ratchet_identity_label(&destination);
+                match vault.store_blob(&label, &snapshot.sealed) {
+                    Ok(()) => delivery_log("ratchet kept"),
+                    Err(error) => delivery_log(&format!("ratchet keep failed: {error}")),
+                }
+            }
+            Ok(None) => delivery_log("ratchet keep skipped: no record"),
+            Err(error) => delivery_log(&format!("ratchet keep failed: {error:?}")),
+        }
+    }
+}
+
+fn unseal_for_us(bytes: &[u8]) -> Option<Vec<u8>> {
+    let ours = signing_material()?;
+    let delivery = OUR_DELIVERY.get()?;
+    if bytes.len() < 16 || &bytes[..16] != delivery.as_bytes() {
+        return None;
+    }
+    let secrets = our_ratchet_secrets();
+    crate::mailbox::open_lxmf(&ours, delivery, bytes, &secrets).map(|opened| opened.payload)
+}
+
 async fn collect_mailbox() {
     if DELIVERING.load(Ordering::Acquire) {
         return;
@@ -1451,10 +2331,12 @@ async fn collect_mailbox() {
             handle.close_link(link);
             return;
         };
+        refresh_our_ratchets(&handle).await;
+        let secrets = our_ratchet_secrets();
         let mut haves = Vec::new();
         for message in &messages {
             haves.push(sha256(message));
-            if let Some(opened) = crate::mailbox::open_lxmf(&ours, &delivery, message) {
+            if let Some(opened) = crate::mailbox::open_lxmf(&ours, &delivery, message, &secrets) {
                 stage_mailbox(&opened);
             }
         }
@@ -1487,14 +2369,11 @@ fn stage_mailbox(opened: &crate::mailbox::OpenedMail) {
         return;
     }
     if let Some(letter) = crate::lxmf::open_note(&opened.payload) {
-        mail().inbox.push(ArrivedNote {
-            identity,
-            words: letter.words,
-            written_at: letter.written_at,
-            place: letter.place,
-            from_mailbox: true,
-            digest: sha256(&opened.payload),
-        });
+        let digest = sha256(&opened.payload);
+        let mut mail = mail();
+        watch_arrived_file(&mut mail, None, &identity, &letter);
+        mail.inbox
+            .push(arrived_note(identity, letter, true, digest));
     }
 }
 
@@ -1615,12 +2494,14 @@ pub fn reach_for(identity: &str) -> Reach {
             ways: state.ways,
             winner: state.path.clone(),
             hops: state.hops,
+            file_limit: file_limit_of(state.path.as_deref().unwrap_or(""), state.round_trip_ms),
         },
         None => Reach {
             pending: false,
             ways: crate::model::OfferedWays::none(),
             winner: None,
             hops: None,
+            file_limit: Some(crate::model::SMALLEST_ATTACHMENT),
         },
     }
 }
@@ -1955,6 +2836,13 @@ fn interface_name(interface: personal_rns::interfaces::InterfaceId) -> String {
     .to_string()
 }
 
+fn file_limit_of(path: &str, round_trip_ms: Option<u64>) -> Option<u64> {
+    match carry_for_path(path, round_trip_ms) {
+        crate::model::ResourceCarry::Open => None,
+        crate::model::ResourceCarry::Limited(bytes) => Some(bytes),
+    }
+}
+
 fn carry_for_identity(identity: &str) -> crate::model::ResourceCarry {
     let map = reach_map();
     let Some(state) = map.get(identity) else {
@@ -2125,6 +3013,11 @@ pub fn drain_failures() -> Vec<u64> {
     std::mem::take(&mut mail().failed)
 }
 
+/// Files whose transfer failed after the name had already arrived.
+pub fn drain_incoming_failures() -> Vec<FailedAttachment> {
+    std::mem::take(&mut mail().incoming_failed)
+}
+
 pub fn same_contact(stored_identity: &str, identity_hash_hex: &str) -> bool {
     let stored = stored_identity.trim();
     if stored.eq_ignore_ascii_case(identity_hash_hex) {
@@ -2161,19 +3054,84 @@ pub async fn rest(millis: u64) {
 fn on_journal_event(event: PrnsEvent<'_>, _: &NoRemoteControlHostControls) {
     match event {
         PrnsEvent::Diagnostic(Diagnostic::LinkEstablished(link)) => {
+            delivery_log(&format!(
+                "link up {:?} rtt={}ms",
+                link.link_id, link.rtt_millis
+            ));
             admit_link(
                 link.link_id,
                 crate::model::ResourceCarry::Limited(crate::model::SMALLEST_ATTACHMENT),
             );
         }
-        PrnsEvent::Diagnostic(Diagnostic::LinkClosed { link_id, .. }) => {
+        PrnsEvent::Diagnostic(Diagnostic::LinkClosed { link_id, reason }) => {
+            let held = {
+                let mail = mail();
+                let parts = mail
+                    .resources
+                    .iter()
+                    .filter(|((id, _), _)| *id == link_id)
+                    .map(|(_, incoming)| {
+                        let got = incoming.parts.iter().filter(|part| part.is_some()).count();
+                        format!("{got}/{}", incoming.parts.len())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let waiting = mail
+                    .waiting
+                    .get(&link_id)
+                    .map(|notes| notes.len())
+                    .unwrap_or(0);
+                (parts, waiting)
+            };
+            delivery_log(&format!(
+                "link down {link_id:?} {reason:?} parts={} waiting_notes={}",
+                if held.0.is_empty() {
+                    "-".to_string()
+                } else {
+                    held.0
+                },
+                held.1
+            ));
             if let Some(handle) = HANDLE.get() {
                 handle.deny_resource_offers(link_id);
             }
-            mail().resources.retain(|(id, _), _| *id != link_id);
+            {
+                let mut mail = mail();
+                fail_open_files(&mut mail, link_id);
+                mail.resources.retain(|(id, _), _| *id != link_id);
+            }
+        }
+        PrnsEvent::Diagnostic(Diagnostic::LinkInterfaceMismatch {
+            link_id,
+            attached_interface,
+            arrived_on,
+        }) => {
+            delivery_log(&format!(
+                "link {link_id:?} packet arrived on {} but the link is on {}",
+                interface_name(arrived_on),
+                interface_name(attached_interface)
+            ));
+        }
+        PrnsEvent::Diagnostic(Diagnostic::ResourceFailed { link_id, cause, .. }) => {
+            delivery_log(&format!("resource failed on {link_id:?} {cause:?}"));
+            fail_open_files(&mut mail(), link_id);
+        }
+        PrnsEvent::Diagnostic(Diagnostic::ResourceAssembled {
+            link_id,
+            total_size_bytes,
+            ..
+        }) => {
+            delivery_log(&format!(
+                "resource assembled on {link_id:?} {total_size_bytes} bytes"
+            ));
         }
         PrnsEvent::Diagnostic(Diagnostic::PeerIdentified { link_id, identity }) => {
             remember_peer(link_id, identity);
+        }
+        PrnsEvent::Diagnostic(Diagnostic::SelfRatchetRotated { destination }) => {
+            if let Some(sender) = RATCHET_ROTATED.get() {
+                let _ = sender.send(destination);
+            }
         }
         PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, .. })
         | PrnsEvent::Diagnostic(Diagnostic::RouteRemoved { destination, .. }) => {
@@ -2199,6 +3157,26 @@ fn on_journal_event(event: PrnsEvent<'_>, _: &NoRemoteControlHostControls) {
     }
 }
 
+#[cfg(test)]
+fn empty_mail() -> Mail {
+    Mail {
+        peers: HashMap::new(),
+        waiting: HashMap::new(),
+        waiting_marks: HashMap::new(),
+        inbox: Vec::new(),
+        marks: Vec::new(),
+        acked: Vec::new(),
+        failed: Vec::new(),
+        posted: Vec::new(),
+        waiting_parts: HashMap::new(),
+        assemblies: HashMap::new(),
+        resources: HashMap::new(),
+        open_files: Vec::new(),
+        incoming_failed: Vec::new(),
+        doomed_waits: Vec::new(),
+    }
+}
+
 fn mail() -> std::sync::MutexGuard<'static, Mail> {
     MAIL.get_or_init(|| {
         Mutex::new(Mail {
@@ -2213,6 +3191,9 @@ fn mail() -> std::sync::MutexGuard<'static, Mail> {
             waiting_parts: HashMap::new(),
             assemblies: HashMap::new(),
             resources: HashMap::new(),
+            open_files: Vec::new(),
+            incoming_failed: Vec::new(),
+            doomed_waits: Vec::new(),
         })
     })
     .lock()
@@ -2226,14 +3207,19 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
         mail.peers.insert(link_id, identity);
         if let Some(waiting) = mail.waiting.remove(&link_id) {
             for letter in waiting {
-                mail.inbox.push(ArrivedNote {
-                    identity: identity_hex.clone(),
-                    words: letter.words,
-                    written_at: letter.written_at,
-                    place: letter.place,
-                    from_mailbox: false,
-                    digest: [0; 32],
-                });
+                if take_doomed_wait(&mut mail, link_id, &letter) {
+                    if let Some(file) = letter.file.as_ref().filter(|file| file.bytes.is_empty()) {
+                        mail.incoming_failed.push(FailedAttachment {
+                            identity: identity_hex.clone(),
+                            written_at: letter.written_at,
+                            file_name: file.name.clone(),
+                        });
+                    }
+                } else {
+                    watch_arrived_file(&mut mail, Some(link_id), &identity_hex, &letter);
+                }
+                mail.inbox
+                    .push(arrived_note(identity_hex.clone(), letter, false, [0; 32]));
             }
         }
         if let Some(waiting) = mail.waiting_marks.remove(&link_id) {
@@ -2254,7 +3240,7 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
                 }
             }
             for whole in wholes {
-                stage_message(&mut mail, &identity_hex, &whole);
+                stage_message(&mut mail, &identity_hex, &whole, link_id);
             }
         }
     }
@@ -2263,6 +3249,10 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
 }
 
 fn accept_words(link_id: LinkId, bytes: &[u8]) {
+    if let Some(plain) = unseal_for_us(bytes) {
+        accept_message(link_id, &plain);
+        return;
+    }
     if bytes.first() == Some(&b'V') {
         accept_voice(link_id, bytes);
         return;
@@ -2286,9 +3276,9 @@ fn accept_resource_piece(
     total: u64,
     data: &[u8],
 ) {
-    if total == 0 || total > 4_096 || index >= total {
+    let Some(slot_index) = segment_slot(index, total) else {
         return;
-    }
+    };
     let key = (link_id, *hash.as_bytes());
     let mut mail = mail();
     let incoming = mail
@@ -2301,7 +3291,7 @@ fn accept_resource_piece(
     if incoming.total != total {
         return;
     }
-    if let Some(slot) = incoming.parts.get_mut(index as usize) {
+    if let Some(slot) = incoming.parts.get_mut(slot_index) {
         if slot.is_none() {
             *slot = Some(data.to_vec());
         }
@@ -2317,6 +3307,10 @@ fn accept_resource_piece(
     for part in done.parts.into_iter().flatten() {
         whole.extend(part);
     }
+    delivery_log(&format!(
+        "joined {} bytes on {link_id:?} from {total} segments",
+        whole.len()
+    ));
     accept_words(link_id, &whole);
 }
 
@@ -2333,7 +3327,7 @@ fn accept_fragment(link_id: LinkId, fragment: crate::lxmf::Fragment) {
     let Some(whole) = offer_piece(&mut mail, &identity_hex, fragment) else {
         return;
     };
-    stage_message(&mut mail, &identity_hex, &whole);
+    stage_message(&mut mail, &identity_hex, &whole, link_id);
 }
 
 fn offer_piece(
@@ -2351,7 +3345,15 @@ fn offer_piece(
     Some(whole)
 }
 
-fn stage_message(mail: &mut Mail, identity_hex: &str, bytes: &[u8]) {
+fn stage_message(mail: &mut Mail, identity_hex: &str, bytes: &[u8], link_id: LinkId) {
+    if let Some(plain) = unseal_for_us(bytes) {
+        stage_plain(mail, identity_hex, &plain, link_id);
+        return;
+    }
+    stage_plain(mail, identity_hex, bytes, link_id);
+}
+
+fn stage_plain(mail: &mut Mail, identity_hex: &str, bytes: &[u8], link_id: LinkId) {
     if let Some(digest) = crate::lxmf::open_ack(bytes) {
         note_receipt_into(mail, digest);
         return;
@@ -2366,14 +3368,13 @@ fn stage_message(mail: &mut Mail, identity_hex: &str, bytes: &[u8]) {
         return;
     }
     if let Some(letter) = crate::lxmf::open_note(bytes) {
-        mail.inbox.push(ArrivedNote {
-            identity: identity_hex.to_string(),
-            words: letter.words,
-            written_at: letter.written_at,
-            place: letter.place,
-            from_mailbox: false,
-            digest: [0; 32],
-        });
+        watch_arrived_file(mail, Some(link_id), identity_hex, &letter);
+        mail.inbox.push(arrived_note(
+            identity_hex.to_string(),
+            letter,
+            false,
+            [0; 32],
+        ));
     }
 }
 
@@ -2397,21 +3398,124 @@ fn accept_message(link_id: LinkId, bytes: &[u8]) {
         return;
     }
     let Some(letter) = crate::lxmf::open_note(bytes) else {
+        if bytes.len() > 500 {
+            delivery_log(&format!(
+                "arrived {} bytes on {link_id:?} and it was not a note",
+                bytes.len()
+            ));
+        }
         return;
     };
+    let file = letter
+        .file
+        .as_ref()
+        .map(|file| (file.name.clone(), file.bytes.len()));
     let mut mail = mail();
     if let Some(identity) = mail.peers.get(&link_id).copied() {
-        mail.inbox.push(ArrivedNote {
-            identity: hex_encode(identity.as_bytes()),
-            words: letter.words,
-            written_at: letter.written_at,
-            place: letter.place,
-            from_mailbox: false,
-            digest: [0; 32],
-        });
+        if let Some((name, len)) = &file {
+            delivery_log(&format!(
+                "arrived note file {name} {len} bytes on {link_id:?}"
+            ));
+        }
+        let identity_hex = hex_encode(identity.as_bytes());
+        watch_arrived_file(&mut mail, Some(link_id), &identity_hex, &letter);
+        mail.inbox
+            .push(arrived_note(identity_hex, letter, false, [0; 32]));
     } else {
+        delivery_log(&format!(
+            "arrived note on {link_id:?} waiting for who they are{}",
+            file.map(|(name, len)| format!(", file {name} {len} bytes"))
+                .unwrap_or_default()
+        ));
         mail.waiting.entry(link_id).or_default().push(letter);
     }
+}
+
+fn watch_arrived_file(
+    mail: &mut Mail,
+    link_id: Option<LinkId>,
+    identity: &str,
+    letter: &crate::lxmf::NoteLetter,
+) {
+    let Some(file) = &letter.file else {
+        return;
+    };
+    let same = |open: &OpenFile| {
+        open.identity == identity
+            && open.written_at.to_bits() == letter.written_at.to_bits()
+            && open.file_name == file.name
+    };
+    if !file.bytes.is_empty() {
+        mail.open_files.retain(|open| !same(open));
+        mail.incoming_failed.retain(|failed| {
+            !(failed.identity == identity
+                && failed.written_at.to_bits() == letter.written_at.to_bits()
+                && failed.file_name == file.name)
+        });
+        return;
+    }
+    let Some(link_id) = link_id else {
+        return;
+    };
+    mail.incoming_failed.retain(|failed| {
+        !(failed.identity == identity
+            && failed.written_at.to_bits() == letter.written_at.to_bits()
+            && failed.file_name == file.name)
+    });
+    if let Some(open) = mail.open_files.iter_mut().find(|open| same(open)) {
+        open.link_id = link_id;
+        return;
+    }
+    mail.open_files.push(OpenFile {
+        link_id,
+        identity: identity.to_string(),
+        written_at: letter.written_at,
+        file_name: file.name.clone(),
+    });
+}
+
+fn fail_open_files(mail: &mut Mail, link_id: LinkId) {
+    let doomed: Vec<DoomedWait> = mail
+        .waiting
+        .get(&link_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|letter| {
+            let file = letter.file.as_ref().filter(|file| file.bytes.is_empty())?;
+            Some(DoomedWait {
+                link_id,
+                written_at: letter.written_at,
+                file_name: file.name.clone(),
+            })
+        })
+        .collect();
+    mail.doomed_waits.extend(doomed);
+    let mut kept = Vec::new();
+    for open in mail.open_files.drain(..) {
+        if open.link_id == link_id {
+            mail.incoming_failed.push(FailedAttachment {
+                identity: open.identity,
+                written_at: open.written_at,
+                file_name: open.file_name,
+            });
+        } else {
+            kept.push(open);
+        }
+    }
+    mail.open_files = kept;
+}
+
+fn take_doomed_wait(mail: &mut Mail, link_id: LinkId, letter: &crate::lxmf::NoteLetter) -> bool {
+    let Some(file) = letter.file.as_ref() else {
+        return false;
+    };
+    let before = mail.doomed_waits.len();
+    mail.doomed_waits.retain(|wait| {
+        !(wait.link_id == link_id
+            && wait.written_at.to_bits() == letter.written_at.to_bits()
+            && wait.file_name == file.name)
+    });
+    mail.doomed_waits.len() != before
 }
 
 fn contact_material(stored_identity: &str) -> Option<PublicIdentityMaterial> {
@@ -3750,9 +4854,10 @@ mod tests {
     use super::{
         apply_watched_route, call_can_continue, contact_is_isolated, delivery_destination,
         finish_sample, forget, gateway_client_id, interface_name, machine_label, marks_from,
-        opens_at_the_mailbox, parse_tcp_target, reach_for, reach_map, stand_up, JournalIdentity,
-        ReachState, RouteLook, SampleNext, WireMarks, BUILT_IN_TCP, MAC_USB, PERSON_SLICE,
-        PHONE_USB, ROUTE_LOOK, STEP_WAIT, UNTIL_POSTED,
+        opens_at_the_mailbox, parse_tcp_target, person_quiet_limit, progress_of, reach_for,
+        reach_map, resource_budget, stand_up, JournalIdentity, ReachState, RouteLook, SampleNext,
+        SegmentSlice, WireMarks, BUILT_IN_TCP, MAC_USB, PERSON_SLICE, PHONE_USB, ROUTE_LOOK,
+        STEP_WAIT, UNTIL_POSTED,
     };
 
     #[test]
@@ -3762,9 +4867,103 @@ mod tests {
     }
 
     #[test]
+    fn a_resource_segment_is_numbered_from_one() {
+        assert_eq!(super::segment_slot(1, 2), Some(0));
+        assert_eq!(super::segment_slot(2, 2), Some(1));
+        assert_eq!(super::segment_slot(1, 1), Some(0));
+        assert_eq!(super::segment_slot(0, 1), None);
+    }
+
+    #[test]
+    fn a_named_file_is_failed_when_its_transfer_dies() {
+        use personal_rns::routing::links::LinkId;
+        use personal_rns::wire::TRUNCATED_HASH_BYTE_LEN;
+
+        let link = LinkId::new([0x44; TRUNCATED_HASH_BYTE_LEN]);
+        let other = LinkId::new([0x45; TRUNCATED_HASH_BYTE_LEN]);
+        let packed = crate::lxmf::pack_file_note(
+            "this photo",
+            1_700_000_000.0,
+            None,
+            Some(("Pears.jpg", b"jpeg-bytes")),
+        );
+        let named = crate::lxmf::open_note(&crate::lxmf::file_announcement(&packed).expect("name"))
+            .expect("announcement");
+        let whole = crate::lxmf::open_note(&packed).expect("file");
+        let mut mail = super::empty_mail();
+        super::watch_arrived_file(&mut mail, Some(link), "ab", &named);
+        super::watch_arrived_file(&mut mail, Some(other), "cd", &named);
+        super::fail_open_files(&mut mail, link);
+        assert!(mail.open_files.iter().all(|open| open.identity == "cd"));
+        assert_eq!(mail.incoming_failed.len(), 1);
+        assert_eq!(mail.incoming_failed[0].identity, "ab");
+        assert_eq!(mail.incoming_failed[0].file_name, "Pears.jpg");
+        super::watch_arrived_file(&mut mail, Some(link), "ab", &whole);
+        assert!(mail.incoming_failed.is_empty());
+        super::watch_arrived_file(&mut mail, Some(link), "ab", &named);
+        super::fail_open_files(&mut mail, link);
+        assert_eq!(mail.incoming_failed.len(), 1);
+        super::watch_arrived_file(&mut mail, Some(link), "ab", &named);
+        assert!(
+            mail.incoming_failed.is_empty(),
+            "a fresh announcement is another try"
+        );
+    }
+
+    #[test]
     fn an_isolated_contact_is_posted_without_waiting_on_them() {
         assert_eq!(UNTIL_POSTED, Duration::from_secs(15));
         assert!(PERSON_SLICE < UNTIL_POSTED);
+        assert_eq!(resource_budget(0), PERSON_SLICE);
+        let photo = resource_budget(1_231_490);
+        assert_eq!(person_quiet_limit(photo, false), photo);
+        assert_eq!(person_quiet_limit(photo, true), PERSON_SLICE);
+        assert!(photo > Duration::from_secs(60));
+        assert!(photo < Duration::from_secs(90));
+        let whole = 1_000u64;
+        let (done, total) = progress_of(&[SegmentSlice {
+            index: 1,
+            total_segments: 1,
+            parts_done: 40,
+            part_count: 80,
+            whole_bytes: whole,
+        }])
+        .expect("a live segment");
+        assert_eq!((done, total), (500, whole));
+        let span = personal_rns::routing::links::resources::MAX_EFFICIENT_SIZE as u64;
+        let photo_bytes = span + 200;
+        let plan =
+            personal_rns::routing::links::resources::ResourceSendPlan::new(photo_bytes, None, span)
+                .expect("plan");
+        let first = plan.segment(1).expect("first").data_end;
+        let (done, total) = progress_of(&[SegmentSlice {
+            index: 2,
+            total_segments: 2,
+            parts_done: 0,
+            part_count: 10,
+            whole_bytes: photo_bytes,
+        }])
+        .expect("the second segment");
+        assert_eq!((done, total), (first, photo_bytes));
+        assert!(first < span, "the short tail is folded into both segments");
+        let (done, _) = progress_of(&[
+            SegmentSlice {
+                index: 1,
+                total_segments: 2,
+                parts_done: 1,
+                part_count: 2,
+                whole_bytes: photo_bytes,
+            },
+            SegmentSlice {
+                index: 2,
+                total_segments: 2,
+                parts_done: 0,
+                part_count: 4,
+                whole_bytes: photo_bytes,
+            },
+        ])
+        .expect("both segments");
+        assert_eq!(done, first / 2);
         assert!(!opens_at_the_mailbox(false, true));
         assert!(opens_at_the_mailbox(true, true));
         assert!(!opens_at_the_mailbox(true, false));

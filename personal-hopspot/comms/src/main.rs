@@ -43,13 +43,14 @@ use model::remember_call;
 #[cfg(target_arch = "wasm32")]
 use model::sample_people;
 use model::{
-    add_person, can_call, code_mark, contact_code, group_by_day, has_unread, map_window, mark_read,
-    offered_ways, path_label, react_to_note, remove_person, rename_person, retry_note, shown_words,
-    write_note, write_placed_note, NoteKind, OfferedWays, Page, Person, Place, Reach, Reaction,
-    PLACEHOLDER, YOUR_PUBLIC_KEY,
+    add_person, can_call, code_mark, contact_code, file_choice, file_name_of, file_too_big,
+    group_by_day, has_unread, map_window, mark_read, offered_ways, path_label, react_to_note,
+    remove_person, rename_person, retry_note, shown_words, write_file_note, write_note,
+    write_placed_note, NoteKind, OfferedWays, Page, Person, Place, Reach, Reaction, PLACEHOLDER,
+    YOUR_PUBLIC_KEY,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use model::{fail_note, post_note, settle_note};
+use model::{fail_note, fail_their_file, land_their_file, post_note, settle_note};
 
 const KEEP_KEYBOARD: &str = r#"
 if (!window.__touchbaseKeepKeyboard) {
@@ -532,6 +533,31 @@ input.who.rename {
   justify-content: flex-end;
   margin-top: 0;
 }
+.theirs .failed { justify-content: flex-start; }
+.file-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  max-width: 100%;
+}
+.file-line .attached {
+  display: inline;
+  width: auto;
+  max-width: 100%;
+}
+.toast {
+  margin: 0;
+  pointer-events: none;
+  font-family: var(--book);
+  font-size: 14px;
+  line-height: 1;
+  color: var(--paper);
+  background: var(--pencil);
+  border-radius: 8px;
+  padding: 6px 8px;
+  white-space: nowrap;
+}
 .failed button,
 .posted span {
   font-family: var(--book);
@@ -547,6 +573,22 @@ input.who.rename {
   justify-content: flex-end;
   margin-top: 0;
 }
+.meter {
+  width: 148px;
+  max-width: 100%;
+  height: 4px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pencil) 16%, var(--paper));
+  overflow: hidden;
+}
+.meter span {
+  display: block;
+  height: 100%;
+  background: var(--pencil);
+  border-radius: inherit;
+}
+.mine .meter { margin-left: auto; }
 .reacts {
   display: flex;
   flex-wrap: wrap;
@@ -608,12 +650,18 @@ input.who.rename {
   margin: 0 0 4px;
   text-align: right;
 }
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
 .offers {
   display: flex;
-  justify-content: flex-end;
-  gap: 22px;
+  justify-content: flex-start;
+  flex: 0 0 auto;
+  gap: 16px;
 }
-.offers button {
+.offers button, .send {
   color: var(--pencil);
   font-size: 16px;
   line-height: 1;
@@ -622,6 +670,7 @@ input.who.rename {
   min-height: 44px;
   padding: 12px 0;
 }
+.send { margin-left: auto; }
 .film {
   display: block;
   width: auto;
@@ -737,7 +786,15 @@ input.who.rename {
 .composer textarea::placeholder { color: var(--pencil); font-family: var(--hand); }
 .write-row {
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
+.write-row .composer {
+  width: 100%;
+  min-width: 0;
+  margin-top: 0;
+}
+.note-line { position: relative; }
 .embed {
   position: absolute;
   left: calc(-1 * var(--edge-left));
@@ -770,6 +827,7 @@ input.who.rename {
   z-index: 5;
 }
 .embed-list .choice {
+  position: relative;
   display: block;
   width: 100%;
   text-align: left;
@@ -786,6 +844,32 @@ input.who.rename {
   color: inherit;
   -webkit-user-select: none;
   user-select: none;
+}
+.embed-list .choice input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.attached {
+  margin: 4px 0 0;
+  font-family: var(--book);
+  font-size: 15px;
+  line-height: 1.3;
+  color: var(--pencil);
+  word-break: break-all;
+}
+button.attached {
+  display: block;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 .note-body {
   flex: 1 1 auto;
@@ -1265,7 +1349,7 @@ fn adopt_scene_lifecycle() {
     // for those selectors.
     unsafe {
         let superclass = objc_getClass(c"UIResponder".as_ptr());
-        let class = objc_allocateClassPair(superclass, c"OptioSceneDelegate".as_ptr(), 0);
+        let class = objc_allocateClassPair(superclass, c"N10ASceneDelegate".as_ptr(), 0);
         assert!(
             !class.is_null(),
             "the scene delegate class could not be created"
@@ -1380,7 +1464,7 @@ fn main() {
             .with_cfg(
                 Config::new().with_window(
                     WindowBuilder::new()
-                        .with_title("Optio")
+                        .with_title("N10A")
                         .with_inner_size(dioxus::desktop::LogicalSize::new(440.0, 760.0)),
                 ),
             )
@@ -1571,6 +1655,8 @@ fn App() -> Element {
     let mut film_at = use_signal(|| 0u32);
     let mut reach = use_signal(Reach::unknown);
     let mut tail = use_signal(|| 0_u64);
+    let mut transfer = use_signal(TransferFace::default);
+    let download_toast = use_signal(|| (0_u64, 0_u64));
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -1590,14 +1676,49 @@ fn App() -> Element {
                             if arrived.from_mailbox {
                                 session::send_ack(&person.identity, &arrived.digest);
                             }
+                            let named = if !arrived.file_name.is_empty() {
+                                Some(arrived.file_name.as_str())
+                            } else if !arrived.file_bytes.is_empty() {
+                                Some("file")
+                            } else {
+                                None
+                            };
                             if note_from_them(
                                 person,
                                 &arrived.words,
                                 arrived.written_at,
                                 arrived.place,
+                                named,
                             ) {
+                                if !arrived.file_bytes.is_empty() {
+                                    if let Some(id) = person.notes.last().map(|note| note.id) {
+                                        session::keep_file(id, &arrived.file_bytes);
+                                        let saved_name = if arrived.file_name.is_empty() {
+                                            "file"
+                                        } else {
+                                            arrived.file_name.as_str()
+                                        };
+                                        if session::publish_download(id, saved_name)
+                                            && land_their_file(person, id)
+                                        {
+                                            show_download_toast(download_toast, id);
+                                        }
+                                        session::trace(&format!(
+                                            "kept {} bytes as {saved_name}",
+                                            arrived.file_bytes.len()
+                                        ));
+                                    }
+                                }
                                 let name = person.name.clone();
-                                let words = shown_words(&arrived.words, arrived.place);
+                                let words = if arrived.words.trim().is_empty() {
+                                    if arrived.file_name.is_empty() {
+                                        "file".to_string()
+                                    } else {
+                                        arrived.file_name.clone()
+                                    }
+                                } else {
+                                    shown_words(&arrived.words, arrived.place)
+                                };
                                 read_if_open(person, page());
                                 commit_people(people, listed);
                                 if banner::in_front() {
@@ -1605,7 +1726,53 @@ fn App() -> Element {
                                 } else {
                                     banner::note(&name, &words);
                                 }
+                            } else if !arrived.file_bytes.is_empty() {
+                                let saved_name = if arrived.file_name.is_empty() {
+                                    "file"
+                                } else {
+                                    arrived.file_name.as_str()
+                                };
+                                if let Some(note) = person.notes.iter_mut().rev().find(|note| {
+                                    !note.mine && note.file_name.as_deref() == Some(saved_name)
+                                }) {
+                                    let id = note.id;
+                                    let fresh = !note.downloaded;
+                                    note.failed = false;
+                                    session::keep_file(id, &arrived.file_bytes);
+                                    if session::publish_download(id, saved_name) {
+                                        note.downloaded = true;
+                                        if fresh {
+                                            show_download_toast(download_toast, id);
+                                        }
+                                    }
+                                    session::trace(&format!(
+                                        "kept {} bytes as {saved_name}",
+                                        arrived.file_bytes.len()
+                                    ));
+                                    commit_people(people, listed);
+                                } else {
+                                    session::trace(&format!(
+                                        "did not keep {} bytes ({saved_name})",
+                                        arrived.file_bytes.len()
+                                    ));
+                                }
+                            } else if !arrived.file_name.is_empty() {
+                                let saved_name = arrived.file_name.as_str();
+                                if let Some(note) = person.notes.iter_mut().rev().find(|note| {
+                                    !note.mine
+                                        && note.written_at == arrived.written_at.to_bits()
+                                        && note.file_name.as_deref() == Some(saved_name)
+                                        && note.failed
+                                }) {
+                                    note.failed = false;
+                                    commit_people(people, listed);
+                                }
                             }
+                        } else if !arrived.file_bytes.is_empty() {
+                            session::trace(&format!(
+                                "arrived file {} bytes with no matching contact",
+                                arrived.file_bytes.len()
+                            ));
                         }
                     }
                     for arrived in session::drain_reactions() {
@@ -1667,6 +1834,33 @@ fn App() -> Element {
                             commit_people(people, listed);
                         }
                     }
+                    let missed = session::drain_incoming_failures();
+                    if !missed.is_empty() {
+                        let mut listed = people();
+                        let mut changed = false;
+                        for missed in missed {
+                            let Some(person) = listed.iter_mut().find(|person| {
+                                session::same_contact(&person.identity, &missed.identity)
+                            }) else {
+                                continue;
+                            };
+                            if let Some(id) = person.notes.iter().rev().find_map(|note| {
+                                (!note.mine
+                                    && note.written_at == missed.written_at.to_bits()
+                                    && note.file_name.as_deref() == Some(missed.file_name.as_str()))
+                                .then_some(note.id)
+                            }) {
+                                if session::kept_file(id).is_some() {
+                                    continue;
+                                }
+                            }
+                            changed |=
+                                fail_their_file(person, missed.written_at, &missed.file_name);
+                        }
+                        if changed {
+                            commit_people(people, listed);
+                        }
+                    }
                     if let Some(done) = session::take_finished() {
                         let mut listed = people();
                         if let Some(person) = listed
@@ -1705,6 +1899,10 @@ fn App() -> Element {
                                 reach.set(next);
                             }
                         }
+                    }
+                    let next = TransferFace::from_session(session::transfer_view().await);
+                    if transfer() != next {
+                        transfer.set(next);
                     }
                     session::pause().await;
                 }
@@ -1850,6 +2048,8 @@ fn App() -> Element {
                                     reach: reach(),
                                     place_epoch: place_epoch,
                                     tail: tail(),
+                                    transfer: transfer(),
+                                    landed: download_toast().0,
                                     on_draft: move |value| draft_note.set(value),
                                     on_place: move |place| {
                                         draft_place.set(Some(place));
@@ -1873,7 +2073,20 @@ fn App() -> Element {
                                         else {
                                             return;
                                         };
-                                        let Some((words, written_at, place)) =
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        let stored = session::kept_file(note_id);
+                                        #[cfg(target_arch = "wasm32")]
+                                        let stored: Option<Vec<u8>> = None;
+                                        let file_only_gone = stored.is_none()
+                                            && person.notes.iter().any(|note| {
+                                                note.id == note_id
+                                                    && note.words.trim().is_empty()
+                                                    && note.file_name.is_some()
+                                            });
+                                        if file_only_gone {
+                                            return;
+                                        }
+                                        let Some((words, written_at, place, file_name)) =
                                             retry_note(person, note_id)
                                         else {
                                             return;
@@ -1881,16 +2094,28 @@ fn App() -> Element {
                                         let identity = person.identity.clone();
                                         commit_people(people, listed);
                                         #[cfg(not(target_arch = "wasm32"))]
-                                        session::send_note(
-                                            &identity,
-                                            &words,
-                                            note_id,
-                                            written_at,
-                                            place,
-                                        );
+                                        {
+                                            let file = match (&file_name, &stored) {
+                                                (Some(name), Some(bytes)) if !bytes.is_empty() => {
+                                                    Some((name.as_str(), bytes.as_slice()))
+                                                }
+                                                _ => None,
+                                            };
+                                            session::send_note(
+                                                &identity,
+                                                &words,
+                                                note_id,
+                                                written_at,
+                                                place,
+                                                file,
+                                            );
+                                        }
                                         #[cfg(target_arch = "wasm32")]
                                         {
-                                            let _ = (identity, words, written_at, place, note_id);
+                                            let _ = (
+                                                identity, words, written_at, place, note_id,
+                                                file_name, stored,
+                                            );
                                         }
                                     },
                                     on_react: move |(note_id, choice): (u64, Reaction)| {
@@ -1922,7 +2147,7 @@ fn App() -> Element {
                                             let _ = (bits, identity, words, reaction);
                                         }
                                     },
-                                    on_write: move |_| {
+                                    on_write: move |file: Option<(String, Vec<u8>)>| {
                                         let words = draft_note();
                                         let place = if words.contains(PLACEHOLDER) {
                                             draft_place()
@@ -1931,30 +2156,41 @@ fn App() -> Element {
                                         };
                                         let mut listed = people();
                                         if let Some(person) = listed.iter_mut().find(|person| person.id == id) {
-                                            let note_id = match place {
-                                                Some(place) => {
-                                                    write_placed_note(person, &words, Some(place))
+                                            let note_id = if let Some((name, _)) = &file {
+                                                write_file_note(person, &words, place, name)
+                                            } else {
+                                                match place {
+                                                    Some(place) => {
+                                                        write_placed_note(person, &words, Some(place))
+                                                    }
+                                                    None => write_note(person, &words),
                                                 }
-                                                None => write_note(person, &words),
                                             };
                                             #[cfg(not(target_arch = "wasm32"))]
                                             if let Some(note_id) = note_id {
+                                                if let Some((_, bytes)) = &file {
+                                                    session::keep_file(note_id, bytes);
+                                                }
                                                 let written_at = person
                                                     .notes
                                                     .iter()
                                                     .find(|note| note.id == note_id)
                                                     .map(|note| f64::from_bits(note.written_at))
                                                     .unwrap_or(0.0);
+                                                let sending = file.as_ref().map(|(name, bytes)| {
+                                                    (name.as_str(), bytes.as_slice())
+                                                });
                                                 session::send_note(
                                                     &person.identity,
                                                     &words,
                                                     note_id,
                                                     written_at,
                                                     place,
+                                                    sending,
                                                 );
                                             }
                                             #[cfg(target_arch = "wasm32")]
-                                            let _ = note_id;
+                                            let _ = (note_id, &file);
                                             tail.set(tail() + 1);
                                         }
                                         commit_people(people, listed);
@@ -2748,7 +2984,7 @@ fn PhotoControl(on_scanned: EventHandler<(String, String)>, mut notice: Signal<S
                                         frame.set(String::new());
                                         #[cfg(target_os = "windows")]
                                         use_file.set(true);
-                                        notice.set("Optio needs the camera to photograph a code.".into());
+                                        notice.set("N10A needs the camera to photograph a code.".into());
                                         break;
                                     }
                                     viewfinder::View::Unavailable => {
@@ -2793,7 +3029,7 @@ fn PhotoControl(on_scanned: EventHandler<(String, String)>, mut notice: Signal<S
                                 }
                             }
                             session::PhotoCapture::Denied => {
-                                notice.set("Optio needs the camera to photograph a code.".into());
+                                notice.set("N10A needs the camera to photograph a code.".into());
                             }
                             session::PhotoCapture::Unavailable => {
                                 notice.set("The camera didn't open.".into());
@@ -3045,15 +3281,26 @@ fn JournalPage(
     reach: Reach,
     place_epoch: Signal<u64>,
     tail: u64,
+    transfer: TransferFace,
+    landed: u64,
     on_draft: EventHandler<String>,
     on_place: EventHandler<Place>,
     on_back: EventHandler<()>,
     on_react: EventHandler<(u64, Reaction)>,
     on_retry: EventHandler<u64>,
-    on_write: EventHandler<()>,
+    on_write: EventHandler<Option<(String, Vec<u8>)>>,
 ) -> Element {
     let name = person.name.clone();
     let groups = group_by_day(&person.notes);
+    let hearing = hearing_file(&person.identity, &transfer);
+    let incoming_on = if hearing {
+        person.notes.iter().rev().find_map(|note| {
+            (!note.mine && note.file_name.as_ref().is_some_and(|name| !name.is_empty()))
+                .then_some(note.id)
+        })
+    } else {
+        None
+    };
     let real = person.identity.trim().len() == 128;
     let ways = if real {
         if reach.pending {
@@ -3084,8 +3331,9 @@ fn JournalPage(
     } else {
         String::new()
     };
-    let mut writing = use_signal(|| false);
-    let mut embeds = use_signal(|| false);
+    let embeds = use_signal(|| false);
+    let picked_name = use_signal(String::new);
+    let picked_bytes = use_signal(Vec::<u8>::new);
     let plus_at = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u128)));
     let place_at = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u128)));
     let embed_notice = use_signal(String::new);
@@ -3106,6 +3354,10 @@ fn JournalPage(
         }
     }
     let under_name = path_label(real, reach.pending, reach.winner.as_deref(), reach.hops);
+    let show_voice = (ending || can_voice) && !video_up && !(on_this && kind == 4);
+    let show_video = (video_up || ways.video) && !ending && !(on_this && kind == 4);
+    let write_from_key = on_write.clone();
+    let write_from_button = on_write;
     rsx! {
         div { class: "page journal",
             div { class: "title-row",
@@ -3151,158 +3403,440 @@ fn JournalPage(
                             settled: note.settled,
                             failed: note.failed,
                             posted: note.posted,
+                            downloaded: note.downloaded,
                             place: note.place,
+                            file_name: note.file_name.clone(),
                             reaction: note.reaction,
                             can_react: !note.mine && note.kind == NoteKind::Text,
                             on_react: move |choice| on_react.call((note.id, choice)),
                             on_retry: move |_| on_retry.call(note.id),
+                            landed: landed == note.id,
+                            meter: if note.mine
+                                && note.id == transfer.note_id
+                                && !note.settled
+                                && !note.failed
+                                && !note.posted
+                            {
+                                Some((transfer.done, transfer.total))
+                            } else if incoming_on == Some(note.id) {
+                                Some((transfer.incoming_done, transfer.incoming_total))
+                            } else {
+                                None
+                            },
+                        }
+                    }
+                }
+                if hearing && incoming_on.is_none() {
+                    li { class: "note theirs waiting",
+                        div { class: "note-body",
+                            div { class: "pack",
+                                Meter {
+                                    done: transfer.incoming_done,
+                                    total: transfer.incoming_total,
+                                    label: "Receiving",
+                                }
+                            }
                         }
                     }
                 }
             }
             div { class: "dock",
-            if writing() && !on_call {
-                div { class: "write-row",
-                    div { class: "embed",
-                        div {
-                            class: "plus",
-                            role: "button",
-                            aria_label: "Add something to this note",
-                            aria_expanded: embeds(),
-                            onpointerdown: move |event| event.prevent_default(),
-                            ontouchstart: move |event| event.prevent_default(),
-                            onpointerup: {
-                                let plus_at = plus_at.clone();
-                                move |event| {
-                                    event.prevent_default();
-                                    toggle_embeds(embeds, &plus_at);
-                                }
-                            },
-                            ontouchend: {
-                                let plus_at = plus_at.clone();
-                                move |event| {
-                                    event.prevent_default();
-                                    toggle_embeds(embeds, &plus_at);
-                                }
-                            },
-                            "+"
+                if film.is_some() || !hint.is_empty() {
+                    div { class: "call-line",
+                        if let Some(film) = film {
+                            img { class: "film", src: "{film}", alt: "video" }
                         }
-                        if embeds() {
-                            div { class: "embed-list",
-                                div {
-                                    class: "choice",
-                                    role: "button",
-                                    onpointerdown: move |event| event.prevent_default(),
-                                    ontouchstart: move |event| event.prevent_default(),
-                                    onpointerup: {
-                                        let place_at = place_at.clone();
-                                        move |event| {
-                                            event.prevent_default();
-                                            begin_place(place_at.as_ref(), embeds, place_epoch, embed_notice, on_place);
+                        if !hint.is_empty() {
+                            p { class: "hint", "{hint}" }
+                        }
+                    }
+                }
+                div { class: "write-row",
+                    if can_note {
+                        div { class: "note-line",
+                        div { class: "embed",
+                            div {
+                                class: "plus",
+                                role: "button",
+                                aria_label: "Add something to this note",
+                                aria_expanded: embeds(),
+                                onpointerdown: move |event| event.prevent_default(),
+                                ontouchstart: move |event| event.prevent_default(),
+                                onpointerup: {
+                                    let plus_at = plus_at.clone();
+                                    move |event| {
+                                        event.prevent_default();
+                                        toggle_embeds(embeds, &plus_at);
+                                    }
+                                },
+                                ontouchend: {
+                                    let plus_at = plus_at.clone();
+                                    move |event| {
+                                        event.prevent_default();
+                                        toggle_embeds(embeds, &plus_at);
+                                    }
+                                },
+                                "+"
+                            }
+                            if embeds() {
+                                div { class: "embed-list",
+                                    div {
+                                        class: "choice",
+                                        role: "button",
+                                        onpointerdown: move |event| event.prevent_default(),
+                                        ontouchstart: move |event| event.prevent_default(),
+                                        onpointerup: {
+                                            let place_at = place_at.clone();
+                                            move |event| {
+                                                event.prevent_default();
+                                                begin_place(place_at.as_ref(), embeds, place_epoch, embed_notice, on_place);
+                                            }
+                                        },
+                                        ontouchend: {
+                                            let place_at = place_at.clone();
+                                            move |event| {
+                                                event.prevent_default();
+                                                begin_place(place_at.as_ref(), embeds, place_epoch, embed_notice, on_place);
+                                            }
+                                        },
+                                        "location"
+                                    }
+                                    {file_choice_row(file_choice(reach.file_limit), reach.file_limit, picked_name, picked_bytes, embeds, embed_notice)}
+                                }
+                            }
+                        }
+                        div { class: "composer", "data-value": "{draft}",
+                            textarea {
+                                class: "hand",
+                                aria_label: "Write a note",
+                                placeholder: "Write a note",
+                                rows: "1",
+                                value: "{draft}",
+                                onmounted: move |event| {
+                                    spawn(async move {
+                                        let _ = event.set_focus(true).await;
+                                    });
+                                },
+                                oninput: move |event| on_draft.call(event.value()),
+                                onkeydown: move |event| {
+                                    if event.key() == Key::Enter && !event.modifiers().shift() {
+                                        event.prevent_default();
+                                        post_draft(picked_name, picked_bytes, embeds, embed_notice, &write_from_key);
+                                    }
+                                },
+                            }
+                        }
+                        }
+                    }
+                    if show_voice || show_video || can_note {
+                        div { class: "actions",
+                            if show_voice || show_video {
+                                div { class: "offers",
+                                    if show_voice {
+                                        button {
+                                            onclick: move |_| {
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                {
+                                                    if ending {
+                                                        session::hang_up();
+                                                    } else {
+                                                        session::place_call(&identity);
+                                                    }
+                                                }
+                                                #[cfg(target_arch = "wasm32")]
+                                                {
+                                                    let _ = (&identity, ending);
+                                                }
+                                            },
+                                            "{label}"
                                         }
-                                    },
-                                    ontouchend: {
-                                        let place_at = place_at.clone();
-                                        move |event| {
-                                            event.prevent_default();
-                                            begin_place(place_at.as_ref(), embeds, place_epoch, embed_notice, on_place);
+                                    }
+                                    if show_video {
+                                        button {
+                                            onclick: move |_| {
+                                                #[cfg(any(target_os = "macos", target_os = "android"))]
+                                                {
+                                                    if video_up {
+                                                        session::hang_up();
+                                                    } else if !ending {
+                                                        session::place_video(&video_identity);
+                                                    }
+                                                }
+                                                #[cfg(not(any(target_os = "macos", target_os = "android")))]
+                                                {
+                                                    let _ = (&video_identity, video_up, ending);
+                                                }
+                                            },
+                                            "{video_label}"
                                         }
+                                    }
+                                }
+                            }
+                            if can_note {
+                                button {
+                                    class: "send",
+                                    aria_label: "Send this note",
+                                    onclick: move |_| {
+                                        post_draft(picked_name, picked_bytes, embeds, embed_notice, &write_from_button);
                                     },
-                                    "location"
+                                    "send"
                                 }
                             }
                         }
                     }
-                    div { class: "composer", "data-value": "{draft}",
-                        textarea {
-                            class: "hand",
-                            aria_label: "Write a note",
-                            placeholder: "Write a note",
-                            rows: "1",
-                            value: "{draft}",
-                            onmounted: move |event| {
-                                spawn(async move {
-                                    let _ = event.set_focus(true).await;
-                                });
-                            },
-                            oninput: move |event| on_draft.call(event.value()),
-                            onkeydown: move |event| {
-                                if event.key() == Key::Enter && !event.modifiers().shift() {
-                                    event.prevent_default();
-                                    on_write.call(());
-                                    writing.set(false);
-                                    embeds.set(false);
-                                }
-                            },
-                        }
-                    }
                 }
-                if !embed_notice().is_empty() {
+                if can_note && !picked_name().is_empty() {
+                    p { class: "attached", "{picked_name}" }
+                }
+                if can_note && !embed_notice().is_empty() {
                     p { class: "hint", "{embed_notice}" }
                 }
-            } else {
-                div { class: "call-line",
-                    if let Some(film) = film {
-                        img { class: "film", src: "{film}", alt: "video" }
-                    }
-                    if !hint.is_empty() {
-                        p { class: "hint", "{hint}" }
-                    }
-                    div { class: "offers",
-                        if can_note && !on_call {
-                            button {
-                                onclick: move |_| writing.set(true),
-                                "note"
-                            }
-                        }
-                        if (ending || can_voice) && !video_up && !(on_this && kind == 4) {
-                            button {
-                                onclick: move |_| {
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    {
-                                        if ending {
-                                            session::hang_up();
-                                        } else {
-                                            session::place_call(&identity);
-                                        }
-                                    }
-                                    #[cfg(target_arch = "wasm32")]
-                                    {
-                                        let _ = (&identity, ending);
-                                    }
-                                },
-                                "{label}"
-                            }
-                        }
-                        if (video_up || ways.video) && !ending && !(on_this && kind == 4) {
-                            button {
-                                onclick: move |_| {
-                                    #[cfg(any(target_os = "macos", target_os = "android"))]
-                                    {
-                                        if video_up {
-                                            session::hang_up();
-                                        } else if !ending {
-                                            session::place_video(&video_identity);
-                                        }
-                                    }
-                                    #[cfg(not(any(target_os = "macos", target_os = "android")))]
-                                    {
-                                        let _ = (&video_identity, video_up, ending);
-                                    }
-                                },
-                                "{video_label}"
-                            }
-                        }
-                    }
-                }
-            }
             }
             }
         }
     }
 }
 
+fn post_draft(
+    mut picked_name: Signal<String>,
+    mut picked_bytes: Signal<Vec<u8>>,
+    mut embeds: Signal<bool>,
+    mut embed_notice: Signal<String>,
+    on_write: &EventHandler<Option<(String, Vec<u8>)>>,
+) {
+    let name = picked_name();
+    let bytes = picked_bytes();
+    picked_name.set(String::new());
+    picked_bytes.set(Vec::new());
+    let file = if name.is_empty() || bytes.is_empty() {
+        None
+    } else {
+        Some((name, bytes))
+    };
+    on_write.call(file);
+    embeds.set(false);
+    embed_notice.set(String::new());
+}
+
+enum HeldFile {
+    Ready(String, Vec<u8>),
+    Over,
+    Unreadable,
+}
+
+fn judge_file(name: &str, bytes: &[u8], limit: Option<u64>) -> HeldFile {
+    if bytes.is_empty() || u32::try_from(bytes.len()).is_err() {
+        return HeldFile::Unreadable;
+    }
+    if limit.is_some_and(|limit| bytes.len() as u64 > limit) {
+        return HeldFile::Over;
+    }
+    HeldFile::Ready(file_name_of(name), bytes.to_vec())
+}
+
+fn store_pick(
+    pick: HeldFile,
+    limit: Option<u64>,
+    mut picked_name: Signal<String>,
+    mut picked_bytes: Signal<Vec<u8>>,
+    mut embeds: Signal<bool>,
+    mut notice: Signal<String>,
+) {
+    match pick {
+        HeldFile::Ready(name, bytes) => {
+            picked_name.set(name);
+            picked_bytes.set(bytes);
+            notice.set(String::new());
+            embeds.set(false);
+        }
+        HeldFile::Over => {
+            notice.set(file_too_big(limit));
+            embeds.set(false);
+        }
+        HeldFile::Unreadable => {
+            notice.set("That file could not be read.".into());
+            embeds.set(false);
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn file_choice_row(
+    label: String,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    embeds: Signal<bool>,
+    notice: Signal<String>,
+) -> Element {
+    rsx! {
+        div {
+            class: "choice",
+            role: "button",
+            onclick: move |_| {
+                let picked_name = picked_name;
+                let picked_bytes = picked_bytes;
+                let embeds = embeds;
+                let notice = notice;
+                spawn(async move {
+                    match session::choose_file(limit).await {
+                        session::ChosenFile::Ready { name, bytes } => {
+                            store_pick(judge_file(&name, &bytes, limit), limit, picked_name, picked_bytes, embeds, notice);
+                        }
+                        session::ChosenFile::Over => {
+                            store_pick(HeldFile::Over, limit, picked_name, picked_bytes, embeds, notice);
+                        }
+                        session::ChosenFile::Missing => {
+                            store_pick(HeldFile::Unreadable, limit, picked_name, picked_bytes, embeds, notice);
+                        }
+                        session::ChosenFile::Cancelled => {}
+                    }
+                });
+            },
+            "{label}"
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn file_choice_row(
+    label: String,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    embeds: Signal<bool>,
+    notice: Signal<String>,
+) -> Element {
+    rsx! {
+        div {
+            class: "choice",
+            role: "button",
+            onclick: move |_| {
+                let Some(path) = mac_file() else {
+                    return;
+                };
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".into());
+                let announced = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                if limit.is_some_and(|limit| announced > limit && announced != 0) {
+                    store_pick(HeldFile::Over, limit, picked_name, picked_bytes, embeds, notice);
+                    return;
+                }
+                match std::fs::read(&path) {
+                    Ok(bytes) => store_pick(
+                        judge_file(&name, &bytes, limit),
+                        limit,
+                        picked_name,
+                        picked_bytes,
+                        embeds,
+                        notice,
+                    ),
+                    Err(_) => store_pick(
+                        HeldFile::Unreadable,
+                        limit,
+                        picked_name,
+                        picked_bytes,
+                        embeds,
+                        notice,
+                    ),
+                }
+            },
+            "{label}"
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_file() -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("POSIX path of (choose file with prompt \"Choose a file\")")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(path))
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "macos")))]
+fn file_choice_row(
+    label: String,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    embeds: Signal<bool>,
+    notice: Signal<String>,
+) -> Element {
+    rsx! {
+        label {
+            class: "choice",
+            "{label}"
+            input {
+                r#type: "file",
+                onchange: move |event| {
+                    let files = event.files();
+                    let Some(file) = files.into_iter().next() else {
+                        return;
+                    };
+                    let announced = file.size();
+                    if limit.is_some_and(|limit| announced > limit && announced != 0) {
+                        store_pick(HeldFile::Over, limit, picked_name, picked_bytes, embeds, notice);
+                        return;
+                    }
+                    let name = file.name();
+                    let picked_name = picked_name;
+                    let picked_bytes = picked_bytes;
+                    let embeds = embeds;
+                    let notice = notice;
+                    spawn(async move {
+                        match file.read_bytes().await {
+                            Ok(bytes) => store_pick(
+                                judge_file(&name, &bytes, limit),
+                                limit,
+                                picked_name,
+                                picked_bytes,
+                                embeds,
+                                notice,
+                            ),
+                            Err(_) => store_pick(
+                                HeldFile::Unreadable,
+                                limit,
+                                picked_name,
+                                picked_bytes,
+                                embeds,
+                                notice,
+                            ),
+                        }
+                    });
+                },
+            }
+        }
+    }
+}
+
 const REVEAL: f64 = 72.0;
+
+/// "In downloads" stays beside that file's name for three seconds after it lands.
+#[cfg(not(target_arch = "wasm32"))]
+fn show_download_toast(mut toast: Signal<(u64, u64)>, note_id: u64) {
+    let stamp = toast().1.wrapping_add(1).max(1);
+    toast.set((note_id, stamp));
+    spawn(async move {
+        session::rest(3_000).await;
+        if toast().1 == stamp {
+            toast.set((0, stamp));
+        }
+    });
+}
 
 fn jump_to_latest(data: std::rc::Rc<MountedData>) {
     spawn(async move {
@@ -3337,11 +3871,15 @@ fn NoteRow(
     settled: bool,
     failed: bool,
     posted: bool,
+    downloaded: bool,
     place: Option<Place>,
+    file_name: Option<String>,
     reaction: Option<Reaction>,
     can_react: bool,
     on_react: EventHandler<Reaction>,
     on_retry: EventHandler<()>,
+    landed: bool,
+    meter: Option<(u64, u64)>,
 ) -> Element {
     let mut reveal = use_signal(|| 0.0);
     let mut drag = use_signal(|| None::<(f64, f64, f64)>);
@@ -3357,6 +3895,8 @@ fn NoteRow(
     let tone = if settled { "" } else { "waiting" };
     let shown = shown_words(&words, place);
     let can_copy = kind == NoteKind::Text && !shown.is_empty();
+    let meter_label = if mine { "Sending" } else { "Receiving" };
+    let show_failed = failed && !downloaded && meter.is_none();
     rsx! {
         li { class: "note {note_class(kind)} {side} {tone}",
             div {
@@ -3426,21 +3966,60 @@ fn NoteRow(
                                 "{shown}"
                             }
                         }
+                        if let Some(name) = file_name.clone().filter(|name| !name.is_empty()) {
+                            div { class: "file-line",
+                                if failed && !mine {
+                                    span { class: "attached", "{name}" }
+                                } else {
+                                    button {
+                                        class: "attached",
+                                        aria_label: "Open {name}",
+                                        onpointerdown: move |event| event.stop_propagation(),
+                                        onpointerup: move |event| event.stop_propagation(),
+                                        onclick: {
+                                            let name = name.clone();
+                                            move |event| {
+                                                event.stop_propagation();
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                session::show_kept_file(note_id, &name);
+                                                #[cfg(target_arch = "wasm32")]
+                                                let _ = (note_id, &name);
+                                            }
+                                        },
+                                        "{name}"
+                                    }
+                                }
+                                if landed {
+                                    span { class: "toast", "In downloads" }
+                                }
+                            }
+                        }
+                        if let Some((done, total)) = meter {
+                            Meter {
+                                done,
+                                total,
+                                label: meter_label,
+                            }
+                        }
                         if posted && !settled {
                             div { class: "posted",
                                 span { "Posted" }
                             }
-                        } else if failed {
+                        } else if show_failed {
                             div { class: "failed",
-                                button {
-                                    aria_label: "Failed. Tap to try again.",
-                                    onpointerdown: move |event| event.stop_propagation(),
-                                    onpointerup: move |event| event.stop_propagation(),
-                                    onclick: move |event| {
-                                        event.stop_propagation();
-                                        on_retry.call(());
-                                    },
-                                    "Failed"
+                                if mine {
+                                    button {
+                                        aria_label: "Failed. Tap to try again.",
+                                        onpointerdown: move |event| event.stop_propagation(),
+                                        onpointerup: move |event| event.stop_propagation(),
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            on_retry.call(());
+                                        },
+                                        "Failed"
+                                    }
+                                } else {
+                                    span { aria_label: "Failed", "Failed" }
                                 }
                             }
                         } else if let Some(reaction) = reaction.filter(|_| !(choosing() && can_react)) {
@@ -3478,6 +4057,62 @@ fn NoteRow(
                     span { "{time}" }
                 }
             }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TransferFace {
+    note_id: u64,
+    done: u64,
+    total: u64,
+    incoming_identity: String,
+    incoming_done: u64,
+    incoming_total: u64,
+}
+
+impl TransferFace {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn from_session(view: session::TransferView) -> Self {
+        Self {
+            note_id: view.note_id,
+            done: view.done,
+            total: view.total,
+            incoming_identity: view.incoming_identity,
+            incoming_done: view.incoming_done,
+            incoming_total: view.incoming_total,
+        }
+    }
+}
+
+fn hearing_file(identity: &str, transfer: &TransferFace) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        transfer.incoming_total > 0 && session::same_contact(identity, &transfer.incoming_identity)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (identity, transfer);
+        false
+    }
+}
+
+#[component]
+fn Meter(done: u64, total: u64, label: &'static str) -> Element {
+    let width = if total == 0 {
+        0
+    } else {
+        (done.saturating_mul(100) / total).min(100)
+    };
+    rsx! {
+        div {
+            class: "meter",
+            role: "progressbar",
+            aria_label: "{label}",
+            aria_valuemin: "0",
+            aria_valuemax: "100",
+            aria_valuenow: "{width}",
+            span { style: "width: {width}%;" }
         }
     }
 }

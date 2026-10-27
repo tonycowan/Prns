@@ -1,6 +1,7 @@
 //! An LXMF note: the time it was written, an empty title, the words, and fields.
 //!
-//! A place, when the note still has one, is a `loc` field. Direct delivery is
+//! A place, when the note still has one, is a `loc` field. A file is an `fn`
+//! field for its name and an `fb` field for its bytes. Direct delivery is
 //! the packed message on a link. The link's own receipt settles that note.
 //! A note left on the mailbox is not settled until an `ack` field comes back
 //! carrying the hash of these packed bytes. That acknowledgement is not a note.
@@ -14,32 +15,87 @@ pub struct NoteLetter {
     /// Unix seconds carried in the message.
     pub written_at: f64,
     pub place: Option<Place>,
+    pub file: Option<AttachedFile>,
+}
+
+/// A file carried in the fields of a note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachedFile {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Packs the words the way LXMF packs a message.
+#[cfg(test)]
 pub fn pack_note(words: &str, written_at: f64) -> Vec<u8> {
-    pack_placed_note(words, written_at, None)
+    pack_file_note(words, written_at, None, None)
 }
 
 /// Packs a note that may also carry a place in its fields.
+#[cfg(test)]
 pub fn pack_placed_note(words: &str, written_at: f64, place: Option<Place>) -> Vec<u8> {
+    pack_file_note(words, written_at, place, None)
+}
+
+/// Packs a note that may carry a place and a file. The file is its name and its bytes.
+pub fn pack_file_note(
+    words: &str,
+    written_at: f64,
+    place: Option<Place>,
+    file: Option<(&str, &[u8])>,
+) -> Vec<u8> {
     let words = words.trim().as_bytes();
-    let mut out = Vec::with_capacity(16 + words.len());
+    let file = file.filter(|(name, _)| !name.is_empty());
+    let place_text = place.map(|place| place.text());
+    let mut out =
+        Vec::with_capacity(16 + words.len() + file.map(|(_, bytes)| bytes.len()).unwrap_or(0));
     out.push(0x94);
     out.push(0xcb);
     out.extend_from_slice(&written_at.to_be_bytes());
     push_bin(&mut out, b"");
     push_bin(&mut out, words);
-    match place {
-        Some(place) => {
-            let text = place.text();
-            out.push(0x81);
-            push_bin(&mut out, b"loc");
-            push_bin(&mut out, text.as_bytes());
+    let file_pairs = match file {
+        Some((_, bytes)) if !bytes.is_empty() => 2,
+        Some(_) => 1,
+        None => 0,
+    };
+    let pairs = usize::from(place_text.is_some()) + file_pairs;
+    out.push(0x80 | pairs as u8);
+    if let Some(text) = &place_text {
+        push_bin(&mut out, b"loc");
+        push_bin(&mut out, text.as_bytes());
+    }
+    if let Some((name, bytes)) = file {
+        push_bin(&mut out, b"fn");
+        push_bin(&mut out, name.as_bytes());
+        if !bytes.is_empty() {
+            push_bin(&mut out, b"fb");
+            push_bin(&mut out, bytes);
         }
-        None => out.push(0x80),
     }
     out
+}
+
+/// The same note with the file's name and none of its bytes, so the words can arrive before the file.
+pub fn file_announcement(packed: &[u8]) -> Option<Vec<u8>> {
+    let letter = open_note(packed)?;
+    let file = letter.file?;
+    if file.bytes.is_empty() {
+        return None;
+    }
+    Some(pack_file_note(
+        &letter.words,
+        letter.written_at,
+        letter.place,
+        Some((&file.name, &[])),
+    ))
+}
+
+/// The bytes a path's ceiling is measured against. A file counts as itself. Anything else counts as the packed note.
+pub fn carried_bytes(packed: &[u8]) -> u64 {
+    open_note(packed)
+        .and_then(|note| note.file.map(|file| file.bytes.len() as u64))
+        .unwrap_or(packed.len() as u64)
 }
 
 /// A reaction to a note, matched by the time it was written, or by its words.
@@ -197,6 +253,7 @@ struct MessageFields {
     place: Option<Place>,
     reaction: Option<(f64, String, Option<crate::model::Reaction>)>,
     ack: Option<[u8; 32]>,
+    file: Option<(String, Vec<u8>)>,
 }
 
 fn read_message(bytes: &[u8]) -> Option<ReadMessage> {
@@ -241,7 +298,11 @@ pub fn pack_ack(digest: &[u8; 32]) -> Vec<u8> {
 /// The hash an acknowledgement names. A note, and a reaction, are left closed.
 pub fn open_ack(bytes: &[u8]) -> Option<[u8; 32]> {
     let read = read_message(bytes)?;
-    if !read.words.is_empty() || read.fields.reaction.is_some() || read.fields.place.is_some() {
+    if !read.words.is_empty()
+        || read.fields.reaction.is_some()
+        || read.fields.place.is_some()
+        || read.fields.file.is_some()
+    {
         return None;
     }
     read.fields.ack
@@ -250,9 +311,13 @@ pub fn open_ack(bytes: &[u8]) -> Option<[u8; 32]> {
 /// Opens a packed LXMF message. Anything that is not one is left closed.
 pub fn open_note(bytes: &[u8]) -> Option<NoteLetter> {
     let read = read_message(bytes)?;
+    let file = read.fields.file.map(|(name, bytes)| AttachedFile {
+        name: crate::model::file_name_of(&name),
+        bytes,
+    });
     if read.fields.ack.is_some()
         || read.fields.reaction.is_some()
-        || (read.words.is_empty() && read.fields.place.is_none())
+        || (read.words.is_empty() && read.fields.place.is_none() && file.is_none())
     {
         return None;
     }
@@ -260,6 +325,7 @@ pub fn open_note(bytes: &[u8]) -> Option<NoteLetter> {
         words: read.words,
         written_at: read.written_at,
         place: read.fields.place,
+        file,
     })
 }
 
@@ -287,9 +353,17 @@ fn push_bin(out: &mut Vec<u8>, bytes: &[u8]) {
     if len <= u8::MAX as usize {
         out.push(0xc4);
         out.push(len as u8);
-    } else {
+    } else if len <= u16::MAX as usize {
         out.push(0xc5);
         out.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        let Ok(len) = u32::try_from(len) else {
+            out.push(0xc4);
+            out.push(0);
+            return;
+        };
+        out.push(0xc6);
+        out.extend_from_slice(&len.to_be_bytes());
     }
     out.extend_from_slice(bytes);
 }
@@ -363,6 +437,7 @@ impl<'a> Reader<'a> {
                 place: None,
                 reaction: None,
                 ack: None,
+                file: None,
             });
         };
         let mut place = None;
@@ -370,6 +445,8 @@ impl<'a> Reader<'a> {
         let mut on = None;
         let mut of = String::new();
         let mut ack = None;
+        let mut file_name = None;
+        let mut file_bytes = None;
         for _ in 0..pairs {
             match self.text_or_skip()? {
                 Some(key) if key == b"loc" => {
@@ -405,6 +482,18 @@ impl<'a> Reader<'a> {
                         }
                     }
                 }
+                Some(key) if key == b"fn" => {
+                    if let Some(value) = self.text_or_skip()? {
+                        file_name = String::from_utf8(value).ok();
+                    }
+                }
+                Some(key) if key == b"fb" => {
+                    if let Some(value) = self.text_or_skip()? {
+                        if !value.is_empty() {
+                            file_bytes = Some(value);
+                        }
+                    }
+                }
                 _ => self.skip()?,
             }
         }
@@ -420,10 +509,17 @@ impl<'a> Reader<'a> {
             }
             None => None,
         };
+        let file = match (file_name, file_bytes) {
+            (Some(name), Some(bytes)) => Some((name, bytes)),
+            (Some(name), None) => Some((name, Vec::new())),
+            (None, Some(bytes)) => Some(("file".to_string(), bytes)),
+            (None, None) => None,
+        };
         Some(MessageFields {
             place,
             reaction,
             ack,
+            file,
         })
     }
 
@@ -550,12 +646,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_file_name_can_arrive_before_its_bytes() {
+        let words = "this photo, though";
+        let packed = pack_file_note(
+            words,
+            1_700_000_000.0,
+            None,
+            Some(("IMG_4711.jpeg", b"jpeg")),
+        );
+        let ahead = file_announcement(&packed).expect("announcement");
+        let note = open_note(&ahead).expect("note");
+        assert_eq!(note.words, words);
+        let file = note.file.expect("name");
+        assert_eq!(file.name, "IMG_4711.jpeg");
+        assert!(file.bytes.is_empty());
+        assert!(ahead.len() < 431);
+    }
+
+    #[test]
     fn a_note_round_trips_as_an_lxmf_message() {
         let packed = pack_note("  The pears are ready.  ", 1_700_000_000.0);
         let note = open_note(&packed).expect("note");
         assert_eq!(note.words, "The pears are ready.");
         assert_eq!(note.written_at, 1_700_000_000.0);
         assert!(note.place.is_none());
+        assert!(note.file.is_none());
         assert_eq!(packed[0], 0x94);
         assert_eq!(packed[1], 0xcb);
         assert_eq!(*packed.last().unwrap(), 0x80);
@@ -644,5 +759,36 @@ mod tests {
         assert_eq!(note.place, Some(place));
         let without = pack_placed_note("Meet me", 1_700_000_000.0, None);
         assert!(open_note(&without).expect("note").place.is_none());
+    }
+
+    #[test]
+    fn a_file_round_trips_and_counts_as_its_own_bytes() {
+        let bytes = vec![7u8; 2_048];
+        let packed = pack_file_note("", 1_700_000_000.0, None, Some(("Pears.jpg", &bytes)));
+        let note = open_note(&packed).expect("a file");
+        assert!(note.words.is_empty());
+        let file = note.file.expect("file");
+        assert_eq!(file.name, "Pears.jpg");
+        assert_eq!(file.bytes, bytes);
+        assert_eq!(carried_bytes(&packed), 2_048);
+        assert!(open_ack(&packed).is_none());
+        let wide = vec![1u8; 70_000];
+        let packed = pack_file_note("hi", 1.0, None, Some(("wide.bin", &wide)));
+        assert!(packed.contains(&0xc6));
+        let note = open_note(&packed).expect("a wide file");
+        assert_eq!(note.words, "hi");
+        assert_eq!(note.file.expect("file").bytes.len(), 70_000);
+        let plain = pack_note("hi", 1.0);
+        assert_eq!(carried_bytes(&plain), plain.len() as u64);
+        let place = Place::from_degrees(40.7484, -73.9857).expect("place");
+        let both = pack_file_note(
+            "Meet me 📍 Location",
+            1_700_000_000.0,
+            Some(place),
+            Some(("a.txt", b"hi")),
+        );
+        let note = open_note(&both).expect("place and file");
+        assert_eq!(note.place, Some(place));
+        assert_eq!(note.file.expect("file").name, "a.txt");
     }
 }
