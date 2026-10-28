@@ -1,5 +1,5 @@
 use crate::crypto::ratchets::RatchetRotation;
-use crate::engine::node_egress::{fan_announce, fan_frame};
+use crate::engine::node_egress::{fan_announce, fan_frame, fan_frame_heaviest_first};
 use crate::engine::settlement::settle;
 #[cfg(feature = "runtime-metrics")]
 use crate::engine::AnnounceCommandOutcome;
@@ -835,7 +835,7 @@ impl<S: StorageLayout> EngineState<S> {
                             Some(interface) => FanTarget::Only(interface),
                             None => FanTarget::All,
                         };
-                        fan_frame(interfaces, fan, &buf[..wire_bytes], sink);
+                        fan_frame_heaviest_first(interfaces, fan, &buf[..wire_bytes], sink);
                         if let Some(culled) = culled {
                             settle(
                                 sink,

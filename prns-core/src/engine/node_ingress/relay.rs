@@ -1,3 +1,4 @@
+use crate::engine::node_egress::{walk_interfaces, InterfaceWalk};
 #[cfg(feature = "runtime-metrics")]
 use crate::engine::{AnnounceOrigin, PathRequestRelayOutcome};
 use crate::engine::{
@@ -42,7 +43,7 @@ impl<S: StorageLayout> EngineState<S> {
         else {
             return;
         };
-        for descriptor in interfaces {
+        walk_interfaces(interfaces, InterfaceWalk::HeaviestFirst, |descriptor| {
             let path_audience = match audience {
                 RelayAudience::AllNetworkInterfaces | RelayAudience::OnlineNetworkInterfaces => {
                     PathRequestAudience::Network
@@ -61,7 +62,7 @@ impl<S: StorageLayout> EngineState<S> {
                     #[cfg(feature = "runtime-metrics")]
                     self.path_request_relay_counts
                         .record(PathRequestRelayOutcome::RateLimited);
-                    continue;
+                    return;
                 }
                 match audience {
                     RelayAudience::OnlineNetworkInterfaces | RelayAudience::BoundaryAndGateway => {
@@ -100,7 +101,7 @@ impl<S: StorageLayout> EngineState<S> {
                     }
                 }
             }
-        }
+        });
     }
 
     pub(super) fn relay_announce_to_local_clients<Work>(

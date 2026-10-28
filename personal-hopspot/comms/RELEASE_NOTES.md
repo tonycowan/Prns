@@ -2,8 +2,6 @@
 
 Since the last release.
 
-The journal is now called N10A. It has its own picture on the home screen, in the dock, and in the app switcher.
+A file is accepted when it arrives. The choice still tells you how large a file this path will take, and a larger file is held back on the sending side.
 
-The note box stays on the page. Voice, video, and send sit under it.
-
-You can attach a file. The choice tells you how large a file this path will take.
+When more than one path is open, the faster one is asked first.

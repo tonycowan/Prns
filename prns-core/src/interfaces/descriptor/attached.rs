@@ -63,6 +63,10 @@ impl<'a> AttachedInterfaces<'a> {
     pub fn iter(self) -> core::slice::Iter<'a, InterfaceDescriptor> {
         self.descriptors.iter()
     }
+
+    pub fn as_slice(self) -> &'a [InterfaceDescriptor] {
+        self.descriptors
+    }
 }
 
 impl<'a> IntoIterator for AttachedInterfaces<'a> {

@@ -9,7 +9,32 @@ pub(in crate::engine) fn fan_frame(
     bytes: &[u8],
     sink: &mut impl FnMut(EngineReaction<'_>),
 ) {
-    fan(interfaces, fanout, bytes, EmissionKind::Frame, sink);
+    fan(
+        interfaces,
+        fanout,
+        bytes,
+        EmissionKind::Frame,
+        InterfaceWalk::Attachment,
+        sink,
+    );
+}
+
+/// A path request answers on the first interface that delivers it, so the heavier
+/// interfaces are handed the packet first. Equal weights keep attachment order.
+pub(in crate::engine) fn fan_frame_heaviest_first(
+    interfaces: AttachedInterfaces<'_>,
+    fanout: FanTarget,
+    bytes: &[u8],
+    sink: &mut impl FnMut(EngineReaction<'_>),
+) {
+    fan(
+        interfaces,
+        fanout,
+        bytes,
+        EmissionKind::Frame,
+        InterfaceWalk::HeaviestFirst,
+        sink,
+    );
 }
 
 pub(in crate::engine) fn fan_announce(
@@ -18,7 +43,67 @@ pub(in crate::engine) fn fan_announce(
     bytes: &[u8],
     sink: &mut impl FnMut(EngineReaction<'_>),
 ) {
-    fan(interfaces, fanout, bytes, EmissionKind::Announce, sink);
+    fan(
+        interfaces,
+        fanout,
+        bytes,
+        EmissionKind::Announce,
+        InterfaceWalk::Attachment,
+        sink,
+    );
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::engine) enum InterfaceWalk {
+    Attachment,
+    HeaviestFirst,
+}
+
+/// Visits every attached interface. `HeaviestFirst` is a stable sort on gravity:
+/// a larger weight goes out first, and equal weights stay in attachment order.
+pub(in crate::engine) fn walk_interfaces<'a>(
+    interfaces: AttachedInterfaces<'a>,
+    order: InterfaceWalk,
+    mut visit: impl FnMut(&'a crate::interfaces::InterfaceDescriptor),
+) {
+    let descriptors = interfaces.as_slice();
+    match order {
+        InterfaceWalk::Attachment => {
+            for descriptor in descriptors {
+                visit(descriptor);
+            }
+        }
+        InterfaceWalk::HeaviestFirst => {
+            let mut started = false;
+            let mut last_gravity = crate::interfaces::InterfaceGravity::ZERO;
+            let mut last_index = 0usize;
+            loop {
+                let mut best: Option<(usize, crate::interfaces::InterfaceGravity)> = None;
+                for (index, descriptor) in descriptors.iter().enumerate() {
+                    if started
+                        && (descriptor.gravity > last_gravity
+                            || (descriptor.gravity == last_gravity && index <= last_index))
+                    {
+                        continue;
+                    }
+                    let better = best.is_none_or(|(best_index, best_gravity)| {
+                        descriptor.gravity > best_gravity
+                            || (descriptor.gravity == best_gravity && index < best_index)
+                    });
+                    if better {
+                        best = Some((index, descriptor.gravity));
+                    }
+                }
+                let Some((index, gravity)) = best else {
+                    break;
+                };
+                started = true;
+                last_gravity = gravity;
+                last_index = index;
+                visit(&descriptors[index]);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -32,12 +117,13 @@ fn fan(
     fanout: FanTarget,
     bytes: &[u8],
     emission: EmissionKind,
+    order: InterfaceWalk,
     sink: &mut impl FnMut(EngineReaction<'_>),
 ) {
     let mut fleets_emitted: u128 = 0;
-    for descriptor in interfaces {
+    walk_interfaces(interfaces, order, |descriptor| {
         if !descriptor.capabilities.allows_transmit() {
-            continue;
+            return;
         }
         let targeted = match fanout {
             FanTarget::All => true,
@@ -45,7 +131,7 @@ fn fan(
             FanTarget::AllExcept(id) => descriptor.id != id,
         };
         if !targeted {
-            continue;
+            return;
         }
         match descriptor.id.kind().and_then(InterfaceKind::fanout_kind) {
             Some(supervisor) => {
@@ -81,7 +167,7 @@ fn fan(
                 if matches!(emission, EmissionKind::Announce)
                     && descriptor.mode == InterfaceMode::AccessPoint
                 {
-                    continue;
+                    return;
                 }
                 match emission {
                     EmissionKind::Frame => sink(EngineReaction::Directive(Directive::Send {
@@ -100,7 +186,7 @@ fn fan(
                 }
             }
         }
-    }
+    });
 }
 
 #[cfg(test)]
@@ -251,5 +337,57 @@ mod tests {
         );
 
         assert_eq!(fleets, std::vec![InterfaceKind::BluetoothAuto]);
+    }
+
+    #[test]
+    fn a_path_request_leaves_on_the_heaviest_interface_first() {
+        use crate::interfaces::InterfaceGravity;
+
+        let ble = InterfaceId::new([InterfaceKind::BluetoothPeer as u8, 0x01, 0, 0, 0, 0, 0, 0]);
+        let tcp_first = InterfaceId::new([InterfaceKind::TcpClient as u8, 0x02, 0, 0, 0, 0, 0, 0]);
+        let tcp_second = InterfaceId::new([InterfaceKind::TcpClient as u8, 0x03, 0, 0, 0, 0, 0, 0]);
+        let wifi = InterfaceId::new([InterfaceKind::WifiPeer as u8, 0x04, 0, 0, 0, 0, 0, 0]);
+        let interfaces = [
+            InterfaceDescriptor {
+                gravity: InterfaceGravity::new(700_000),
+                ..routable_descriptor(ble)
+            },
+            InterfaceDescriptor {
+                gravity: InterfaceGravity::new(500_000_000),
+                ..routable_descriptor(tcp_first)
+            },
+            InterfaceDescriptor {
+                gravity: InterfaceGravity::new(500_000_000),
+                ..routable_descriptor(tcp_second)
+            },
+            InterfaceDescriptor {
+                gravity: InterfaceGravity::new(1_000_000_000),
+                ..routable_descriptor(wifi)
+            },
+        ];
+        let mut sent = std::vec::Vec::new();
+        fan_frame_heaviest_first(
+            AttachedInterfaces::new(&interfaces),
+            FanTarget::All,
+            &[0xAB],
+            &mut |reaction| match reaction {
+                EngineReaction::Directive(Directive::SendToFleet { supervisor, .. }) => {
+                    sent.push(format!("fleet {supervisor:?}"));
+                }
+                EngineReaction::Directive(Directive::Send { target, .. }) => {
+                    sent.push(format!("send {target:?}"));
+                }
+                _ => {}
+            },
+        );
+        assert_eq!(
+            sent,
+            std::vec![
+                format!("fleet {:?}", InterfaceKind::AutoWifi),
+                format!("send {tcp_first:?}"),
+                format!("send {tcp_second:?}"),
+                format!("fleet {:?}", InterfaceKind::BluetoothAuto),
+            ]
+        );
     }
 }

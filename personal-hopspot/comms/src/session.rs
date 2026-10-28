@@ -2852,19 +2852,7 @@ fn carry_for_identity(identity: &str) -> crate::model::ResourceCarry {
     carry_for_path(&path, state.round_trip_ms)
 }
 
-fn carry_for_hash(identity: &IdentityHash) -> crate::model::ResourceCarry {
-    let hex = hex_encode(identity.as_bytes());
-    let found = reach_map().iter().find_map(|(stored, state)| {
-        same_contact(stored, &hex)
-            .then(|| (state.path.clone().unwrap_or_default(), state.round_trip_ms))
-    });
-    match found {
-        Some((path, sample)) => carry_for_path(&path, sample),
-        None => crate::model::resource_carry(None, false),
-    }
-}
-
-/// A measured sample wins. Without one, a fast wire is treated as open until the sample returns, Bluetooth takes a middle step, and anything else stays small. LoRa never leaves the smallest attachment.
+/// A measured sample wins. Without one, a fast wire is treated as open until the sample returns, Bluetooth takes a middle step, and anything else stays small. LoRa never leaves the smallest attachment. The sender uses this ceiling to choose what to offer.
 fn carry_for_path(path: &str, round_trip_ms: Option<u64>) -> crate::model::ResourceCarry {
     if path == "LoRa" {
         return crate::model::resource_carry(None, true);
@@ -2886,19 +2874,16 @@ fn carry_label(carry: crate::model::ResourceCarry) -> String {
     }
 }
 
-fn admit_link(link_id: LinkId, carry: crate::model::ResourceCarry) {
+/// Accepts a transfer of any size on this link. The probe sizes what the sender offers, not what a receiver will take.
+fn admit_link(link_id: LinkId) {
     let Some(handle) = HANDLE.get() else {
         return;
-    };
-    let max_uncompressed_bytes = match carry {
-        crate::model::ResourceCarry::Open => u64::MAX,
-        crate::model::ResourceCarry::Limited(bytes) => bytes,
     };
     let _ = handle.admit_resource_offers(
         link_id,
         personal_rns::runtime::ResourceOfferAdmission {
             peer: personal_rns::runtime::ResourceAdmissionPeer::Any,
-            max_uncompressed_bytes,
+            max_uncompressed_bytes: u64::MAX,
             accept_compressed: true,
         },
     );
@@ -3058,10 +3043,7 @@ fn on_journal_event(event: PrnsEvent<'_>, _: &NoRemoteControlHostControls) {
                 "link up {:?} rtt={}ms",
                 link.link_id, link.rtt_millis
             ));
-            admit_link(
-                link.link_id,
-                crate::model::ResourceCarry::Limited(crate::model::SMALLEST_ATTACHMENT),
-            );
+            admit_link(link.link_id);
         }
         PrnsEvent::Diagnostic(Diagnostic::LinkClosed { link_id, reason }) => {
             let held = {
@@ -3245,7 +3227,6 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
         }
     }
     note_peer_on_call(link_id, &identity_hex);
-    admit_link(link_id, carry_for_hash(&identity));
 }
 
 fn accept_words(link_id: LinkId, bytes: &[u8]) {
