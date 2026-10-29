@@ -6,9 +6,6 @@
 use qrcode::types::Color;
 use qrcode::QrCode;
 
-/// Browser stand-in for the identity public key. The desktop session replaces it with a real key.
-pub const YOUR_PUBLIC_KEY: &str = "7f3a9c1e5b28d046a1c7e94f0b6d3a82c5e17890ab34df12657890abcdef01239c4e7a1b0d5f3826e4a9c0b7d1f6a3852e0c9b4d7f1a6e3085c2b9d4f7a1e063";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoteKind {
     Text,
@@ -1629,14 +1626,6 @@ mod tests {
         assert!(jo.note && !jo.voice && !jo.video);
         let someone_new = offered_ways(4);
         assert!(someone_new.note && !someone_new.voice && !someone_new.video);
-    }
-
-    #[test]
-    fn your_public_key_is_the_full_identity_key() {
-        assert_eq!(super::YOUR_PUBLIC_KEY.len(), 128);
-        assert!(super::YOUR_PUBLIC_KEY
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]
