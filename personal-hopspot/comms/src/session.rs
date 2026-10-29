@@ -1,8 +1,11 @@
 //! The journal's own identity and `lxmf.delivery` destination.
 //!
 //! This is the person's address, not a hopspot's private delivery destination.
-//! The public key is what a contact scans. The destination hash is derived from
-//! that key and the fixed name `lxmf.delivery`, and it is what a path request names.
+//! A contact code carries that address. The public key arrives with the announce
+//! a path response replays, and is kept once so a later note can be sealed.
+//! A note that arrives before that key is held, and a path is requested at once
+//! so the same note can be checked when the announce comes back.
+//! The destination hash is what a path request names.
 
 use std::collections::HashMap;
 use std::io;
@@ -35,6 +38,7 @@ use personal_rns::{load_or_create_identity_secret, IdentitySecretFileError};
 const DELIVERY_APP: &str = "lxmf";
 const DELIVERY_ASPECTS: &[&str] = &["delivery"];
 const IDENTITY_FILE: &str = "identity";
+const LEARNED_KEYS_FILE: &str = "learned-keys";
 
 pub static PUBLIC_KEY: OnceLock<String> = OnceLock::new();
 static RUNNING: OnceLock<RunningJournal> = OnceLock::new();
@@ -392,6 +396,7 @@ fn prepare_contacts() {
     }
     let saved = book.people.clone();
     drop(book);
+    load_learned_keys(&default_directory());
     remember_digests(&saved);
     queue_unsent(&saved);
 }
@@ -460,6 +465,13 @@ pub fn opening_contacts() -> Vec<crate::model::Person> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .people
         .clone()
+}
+
+/// This journal's `lxmf.delivery` address, once the session has started.
+pub fn lxmf_address() -> Option<String> {
+    OUR_DELIVERY
+        .get()
+        .map(|destination| hex_encode(destination.as_bytes()))
 }
 
 pub fn opening_next_id() -> u64 {
@@ -1194,9 +1206,9 @@ pub fn open_map(query: &str) {
     });
 }
 
-/// A note for a contact whose code is their identity public key.
-/// The words travel as an LXMF message on a link to that contact's `lxmf.delivery` address.
-/// If no path exists yet, the note stays queued and is tried again until it is delivered.
+/// A note for a contact, addressed by their public key or their `lxmf.delivery` address.
+/// The words travel as an LXMF message on a link to that address.
+/// A note sent before the public key is known waits, and leaves once an announce supplies it.
 pub fn send_note(
     contact_identity: &str,
     words: &str,
@@ -1221,10 +1233,24 @@ pub fn send_note(
     if words.is_empty() && file.is_none() {
         return;
     }
-    let Some(recipient) = contact_material(contact_identity) else {
+    if note_id != 0 && already_queued(note_id) {
+        return;
+    }
+    let Some(destination) = destination_for_contact(contact_identity) else {
         return;
     };
-    let Some(destination) = address_for(&recipient) else {
+    let Some(recipient) = contact_material(contact_identity) else {
+        hold_for_key(HeldNote {
+            identity: contact_identity.trim().to_string(),
+            words,
+            note_id,
+            written_at,
+            place,
+            file_name: owned_name.clone(),
+            file_bytes: file.map(|(_, bytes)| bytes.to_vec()),
+        });
+        delivery_log(&format!("note {note_id} is waiting for their public key"));
+        learn_key_from_announce(destination);
         return;
     };
     let packed = crate::lxmf::pack_file_note(&words, written_at, place, file);
@@ -1907,7 +1933,16 @@ async fn deliver_to_person(note: &QueuedNote, budget: Option<Duration>) -> bool 
         delivery_log(&format!("{label} person skipped: nothing to send"));
         return false;
     }
-    let one_packet = crate::lxmf::fits_one_link_packet(&note.packed);
+    let Some(material) = signing_material() else {
+        delivery_log(&format!("{label} person skipped: no signing key"));
+        return false;
+    };
+    let Some(signed) = crate::mailbox::sign_for_link(&material, &note.recipient, &note.packed)
+    else {
+        delivery_log(&format!("{label} person could not sign the note"));
+        return false;
+    };
+    let one_packet = crate::lxmf::fits_one_link_packet(&signed);
     if !one_packet {
         let carry = carry_for_identity(&note.identity);
         let weight = crate::lxmf::carried_bytes(&note.packed);
@@ -1919,6 +1954,21 @@ async fn deliver_to_person(note: &QueuedNote, budget: Option<Duration>) -> bool 
             return false;
         }
     }
+    let prelude = if one_packet {
+        None
+    } else if let Some(announcement) = crate::lxmf::file_announcement(&note.packed) {
+        let Some(signed_prelude) =
+            crate::mailbox::sign_for_link(&material, &note.recipient, &announcement)
+        else {
+            delivery_log(&format!(
+                "{label} person could not sign the file announcement"
+            ));
+            return false;
+        };
+        Some(signed_prelude)
+    } else {
+        None
+    };
     let ours = OURS.get().copied();
     let destination = note.destination;
     let attempt = async {
@@ -1949,61 +1999,31 @@ async fn deliver_to_person(note: &QueuedNote, budget: Option<Duration>) -> bool 
                 delivery_log(&format!("{label} person identify {err:?}"));
             }
         }
-        let ratchet = handle.announced_ratchet(destination).await;
-        let Some(material) = signing_material() else {
-            return Err("no signing key".into());
-        };
-        let ratchet_public = ratchet.map(personal_rns::crypto::X25519PublicKey);
-        let Some(sealed) = crate::mailbox::seal_for_delivery(
-            &material,
-            &note.recipient,
-            &note.packed,
-            ratchet_public.as_ref(),
-        ) else {
-            return Err("could not seal".into());
-        };
-        delivery_log(&format!(
-            "{label} person sealed to {}",
-            if ratchet_public.is_some() {
-                "their ratchet"
+        delivery_log(&format!("{label} person signed the note"));
+        if let Some(prelude) = &prelude {
+            delivery_log(&format!("{label} person sent the words ahead of the file"));
+            if crate::lxmf::fits_one_link_packet(prelude) {
+                handle
+                    .send_link_packet(link, prelude)
+                    .await
+                    .map_err(|err| format!("announcement {err:?}"))?;
             } else {
-                "their identity key"
-            }
-        ));
-        if !one_packet {
-            if let Some(prelude) = crate::lxmf::file_announcement(&note.packed) {
-                let Some(sealed_prelude) = crate::mailbox::seal_for_delivery(
-                    &material,
-                    &note.recipient,
-                    &prelude,
-                    ratchet_public.as_ref(),
-                ) else {
-                    return Err("could not seal the file announcement".into());
-                };
-                delivery_log(&format!("{label} person sent the words ahead of the file"));
-                if crate::lxmf::fits_one_link_packet(&sealed_prelude) {
-                    handle
-                        .send_link_packet(link, &sealed_prelude)
-                        .await
-                        .map_err(|err| format!("announcement {err:?}"))?;
-                } else {
-                    let total = sealed_prelude.len() as u64;
-                    let cursor = std::io::Cursor::new(sealed_prelude);
-                    handle
-                        .send_resource(link, total, cursor)
-                        .await
-                        .map_err(|err| format!("announcement {err:?}"))?;
-                }
+                let total = prelude.len() as u64;
+                let cursor = std::io::Cursor::new(prelude.clone());
+                handle
+                    .send_resource(link, total, cursor)
+                    .await
+                    .map_err(|err| format!("announcement {err:?}"))?;
             }
         }
-        if crate::lxmf::fits_one_link_packet(&sealed) {
+        if one_packet {
             handle
-                .send_link_packet(link, &sealed)
+                .send_link_packet(link, &signed)
                 .await
                 .map_err(|err| format!("packet {err:?}"))?;
         } else {
-            let total = sealed.len() as u64;
-            let cursor = std::io::Cursor::new(sealed);
+            let total = signed.len() as u64;
+            let cursor = std::io::Cursor::new(signed.clone());
             handle
                 .send_resource(link, total, cursor)
                 .await
@@ -2350,11 +2370,48 @@ async fn collect_mailbox() {
     let _ = tokio::time::timeout(Duration::from_secs(60), attempt).await;
 }
 
-fn stage_mailbox(opened: &crate::mailbox::OpenedMail) {
-    if !signature_matches(opened) {
-        return;
+fn accept_signed(link_id: Option<LinkId>, opened: &crate::mailbox::OpenedMail) -> bool {
+    let Some(identity) = verified_sender(opened) else {
+        return defer_until_key(arrival_of(link_id), opened);
+    };
+    if let Some(link_id) = link_id {
+        remember_peer(link_id, identity);
+        accept_message(link_id, &opened.payload);
+        return true;
     }
-    let identity = hex_encode(&opened.source);
+    let identity_hex = hex_encode(identity.as_bytes());
+    if let Some(digest) = crate::lxmf::open_ack(&opened.payload) {
+        note_receipt_into(&mut mail(), digest);
+        return true;
+    }
+    if let Some(letter) = crate::lxmf::open_reaction(&opened.payload) {
+        mail().marks.push(ArrivedReaction {
+            identity: identity_hex,
+            written_at: letter.written_at,
+            words: letter.words,
+            reaction: letter.reaction,
+        });
+        return true;
+    }
+    let Some(letter) = crate::lxmf::open_note(&opened.payload) else {
+        return false;
+    };
+    delivery_log("arrived note by packet");
+    let mut mail = mail();
+    watch_arrived_file(&mut mail, None, &identity_hex, &letter);
+    mail.inbox
+        .push(arrived_note(identity_hex, letter, false, [0; 32]));
+    true
+}
+
+fn stage_mailbox(opened: &crate::mailbox::OpenedMail) {
+    let Some(identity) = verified_sender(opened) else {
+        if !defer_until_key(Arrival::Mailbox, opened) {
+            delivery_log("arrived mailbox note and the signature did not match a contact");
+        }
+        return;
+    };
+    let identity = hex_encode(identity.as_bytes());
     if let Some(digest) = crate::lxmf::open_ack(&opened.payload) {
         note_receipt_into(&mut mail(), digest);
         return;
@@ -2377,19 +2434,23 @@ fn stage_mailbox(opened: &crate::mailbox::OpenedMail) {
     }
 }
 
-fn signature_matches(opened: &crate::mailbox::OpenedMail) -> bool {
+fn verified_sender(opened: &crate::mailbox::OpenedMail) -> Option<IdentityHash> {
     for person in opening_contacts() {
         let Some(material) = contact_material(&person.identity) else {
             continue;
         };
-        if material.identity_hash().as_bytes() != &opened.source {
+        let by_identity = material.identity_hash().as_bytes() == &opened.source;
+        let by_address =
+            address_for(&material).is_some_and(|delivery| delivery.as_bytes() == &opened.source);
+        if !by_identity && !by_address {
             continue;
         }
-        return material
+        material
             .verify(&opened.signed, &Ed25519Signature(opened.signature))
-            .is_ok();
+            .ok()?;
+        return Some(material.identity_hash());
     }
-    false
+    None
 }
 
 fn note_receipt_into(mail: &mut Mail, digest: [u8; 32]) {
@@ -2584,6 +2645,7 @@ pub fn measure(identity: &str) {
                 );
             }
         }
+        learn_key_from_announce(destination);
         let sample = send_probe(&handle, destination, ours).await;
         finish_search(
             &identity,
@@ -3008,10 +3070,7 @@ pub fn same_contact(stored_identity: &str, identity_hash_hex: &str) -> bool {
     if stored.eq_ignore_ascii_case(identity_hash_hex) {
         return true;
     }
-    let Some(bytes) = decode_hex(stored) else {
-        return false;
-    };
-    let Ok(material) = PublicIdentityMaterial::from_slice(&bytes) else {
+    let Some(material) = contact_material(stored) else {
         return false;
     };
     hex_encode(material.identity_hash().as_bytes()).eq_ignore_ascii_case(identity_hash_hex)
@@ -3115,12 +3174,18 @@ fn on_journal_event(event: PrnsEvent<'_>, _: &NoRemoteControlHostControls) {
                 let _ = sender.send(destination);
             }
         }
-        PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, .. })
-        | PrnsEvent::Diagnostic(Diagnostic::RouteRemoved { destination, .. }) => {
+        PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, .. }) => {
+            learn_key_from_announce(destination);
+            note_route_churn(destination);
+        }
+        PrnsEvent::Diagnostic(Diagnostic::RouteRemoved { destination, .. }) => {
             note_route_churn(destination);
         }
         PrnsEvent::Message(Message::Delivered(Delivery::Link(delivery))) => {
             accept_words(delivery.link_id, delivery.plaintext);
+        }
+        PrnsEvent::Message(Message::Delivered(Delivery::Single(delivery))) => {
+            accept_packet(delivery.destination, delivery.context, delivery.plaintext);
         }
         PrnsEvent::Message(Message::Resource { link_id, data, .. }) => {
             accept_words(link_id, data);
@@ -3229,7 +3294,44 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
     note_peer_on_call(link_id, &identity_hex);
 }
 
+fn accept_packet(
+    destination: personal_rns::wire::DestinationHash,
+    context: personal_rns::wire::WireContext,
+    bytes: &[u8],
+) {
+    if context != personal_rns::wire::WireContext::None {
+        return;
+    }
+    let Some(ours) = OUR_DELIVERY.get() else {
+        return;
+    };
+    if destination != *ours {
+        return;
+    }
+    let Some(opened) = crate::mailbox::open_packet(ours, bytes) else {
+        delivery_log(&format!(
+            "arrived packet of {} bytes and it was not a note",
+            bytes.len()
+        ));
+        return;
+    };
+    if !accept_signed(None, &opened) {
+        delivery_log("arrived packet and the signature did not match a contact");
+    }
+}
+
 fn accept_words(link_id: LinkId, bytes: &[u8]) {
+    if let Some(ours) = OUR_DELIVERY.get() {
+        if let Some(opened) = crate::mailbox::open_signed(ours, bytes) {
+            if accept_signed(Some(link_id), &opened) {
+                return;
+            }
+            delivery_log(&format!(
+                "arrived signed note on {link_id:?} and it did not match a contact"
+            ));
+            return;
+        }
+    }
     if let Some(plain) = unseal_for_us(bytes) {
         accept_message(link_id, &plain);
         return;
@@ -3500,6 +3602,15 @@ fn take_doomed_wait(mail: &mut Mail, link_id: LinkId, letter: &crate::lxmf::Note
 }
 
 fn contact_material(stored_identity: &str) -> Option<PublicIdentityMaterial> {
+    if let Some(material) = material_of(stored_identity) {
+        return Some(material);
+    }
+    let address = hex_encode(hash_of_hex(stored_identity)?.as_bytes());
+    let key = learned_map().get(&address)?.clone();
+    material_of(&key)
+}
+
+fn material_of(stored_identity: &str) -> Option<PublicIdentityMaterial> {
     let bytes = decode_hex(stored_identity.trim())?;
     PublicIdentityMaterial::from_slice(&bytes).ok()
 }
@@ -3509,7 +3620,311 @@ fn address_for(material: &PublicIdentityMaterial) -> Option<DestinationHash> {
 }
 
 fn destination_for_contact(stored_identity: &str) -> Option<DestinationHash> {
-    address_for(&contact_material(stored_identity)?)
+    if let Some(material) = material_of(stored_identity) {
+        return address_for(&material);
+    }
+    hash_of_hex(stored_identity)
+}
+
+/// The `lxmf.delivery` address to put in a contact's QR code.
+pub fn shared_address(stored_identity: &str) -> Option<String> {
+    destination_for_contact(stored_identity).map(|destination| hex_encode(destination.as_bytes()))
+}
+
+fn hash_of_hex(text: &str) -> Option<DestinationHash> {
+    let bytes = decode_hex(text.trim())?;
+    let raw: [u8; 16] = bytes.try_into().ok()?;
+    Some(DestinationHash::new(raw))
+}
+
+fn key_binds_destination(destination: &DestinationHash, material: &PublicIdentityMaterial) -> bool {
+    address_for(material) == Some(*destination)
+}
+
+fn contact_is_missing_key(destination: &DestinationHash) -> bool {
+    opening_contacts().iter().any(|person| {
+        destination_for_contact(&person.identity) == Some(*destination)
+            && contact_material(&person.identity).is_none()
+    })
+}
+
+/// A path response is an announce, and so is a live one. Either installs the
+/// identity. Copy that public key onto a contact we still know only by address.
+fn learn_key_from_announce(destination: DestinationHash) {
+    if !contact_is_missing_key(&destination) {
+        flush_arrivals_for(&hex_encode(destination.as_bytes()));
+        return;
+    }
+    let Some(runtime) = RUNTIME.get().cloned() else {
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        return;
+    };
+    runtime.spawn(async move {
+        let Some(snapshot) = handle
+            .destination_identity(
+                personal_rns::node_introspection::DestinationIdentityQuery::Destination(
+                    destination,
+                ),
+            )
+            .await
+        else {
+            return;
+        };
+        if !key_binds_destination(&destination, &snapshot.public) {
+            return;
+        }
+        let address = hex_encode(destination.as_bytes());
+        let key = hex_encode(snapshot.public.as_bytes());
+        remember_key(&address, &key);
+    });
+}
+
+fn learned_map() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
+    static MAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn load_learned_keys(directory: &Path) {
+    let text = std::fs::read_to_string(directory.join(LEARNED_KEYS_FILE)).unwrap_or_default();
+    let mut map = learned_map();
+    map.clear();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(address) = parts.next() else {
+            continue;
+        };
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        if parts.next().is_some() {
+            continue;
+        }
+        let Some(address) = hash_of_hex(address) else {
+            continue;
+        };
+        if material_of(key).is_none() {
+            continue;
+        }
+        map.insert(
+            hex_encode(address.as_bytes()),
+            key.trim().to_ascii_lowercase(),
+        );
+    }
+}
+
+fn remember_key(address: &str, key: &str) {
+    let fresh = {
+        let mut map = learned_map();
+        if map.get(address).map(String::as_str) == Some(key) {
+            false
+        } else {
+            map.insert(address.to_string(), key.to_string());
+            true
+        }
+    };
+    if !fresh {
+        flush_arrivals_for(address);
+        return;
+    }
+    persist_learned_keys(&default_directory());
+    delivery_log(&format!("learned the public key for {address}"));
+    flush_held_for(address);
+    flush_arrivals_for(address);
+}
+
+fn persist_learned_keys(directory: &Path) {
+    if std::fs::create_dir_all(directory).is_err() {
+        return;
+    }
+    let map = learned_map();
+    let mut lines: Vec<_> = map
+        .iter()
+        .map(|(address, key)| format!("{address} {key}"))
+        .collect();
+    drop(map);
+    lines.sort();
+    let mut text = lines.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    let temporary = directory.join("learned-keys.tmp");
+    if write_private(&temporary, text.as_bytes()).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(temporary, directory.join(LEARNED_KEYS_FILE));
+}
+
+struct HeldNote {
+    identity: String,
+    words: String,
+    note_id: u64,
+    written_at: f64,
+    place: Option<crate::model::Place>,
+    file_name: Option<String>,
+    file_bytes: Option<Vec<u8>>,
+}
+
+fn held_notes() -> std::sync::MutexGuard<'static, Vec<HeldNote>> {
+    static HELD: OnceLock<Mutex<Vec<HeldNote>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn hold_for_key(note: HeldNote) {
+    let mut held = held_notes();
+    if note.note_id != 0 {
+        held.retain(|waiting| waiting.note_id != note.note_id);
+    }
+    held.push(note);
+}
+
+fn flush_held_for(address: &str) {
+    let ready = {
+        let mut held = held_notes();
+        let mut ready = Vec::new();
+        let mut keep = Vec::new();
+        for note in held.drain(..) {
+            let same = hash_of_hex(&note.identity)
+                .map(|destination| hex_encode(destination.as_bytes()))
+                .as_deref()
+                == Some(address);
+            if same {
+                ready.push(note);
+            } else {
+                keep.push(note);
+            }
+        }
+        *held = keep;
+        ready
+    };
+    for note in ready {
+        let file = note
+            .file_name
+            .as_deref()
+            .zip(note.file_bytes.as_deref())
+            .map(|(name, bytes)| (name, bytes));
+        send_note(
+            &note.identity,
+            &note.words,
+            note.note_id,
+            note.written_at,
+            note.place,
+            file,
+        );
+    }
+}
+
+enum Arrival {
+    Link(LinkId),
+    Packet,
+    Mailbox,
+}
+
+fn arrival_of(link_id: Option<LinkId>) -> Arrival {
+    match link_id {
+        Some(link_id) => Arrival::Link(link_id),
+        None => Arrival::Packet,
+    }
+}
+
+struct HeldArrival {
+    kind: Arrival,
+    opened: crate::mailbox::OpenedMail,
+}
+
+fn held_arrivals() -> std::sync::MutexGuard<'static, Vec<HeldArrival>> {
+    static HELD: OnceLock<Mutex<Vec<HeldArrival>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The signature cannot be checked until the public key is on file. Keep the
+/// note and ask for a path; the path response announce carries that key.
+fn defer_until_key(kind: Arrival, opened: &crate::mailbox::OpenedMail) -> bool {
+    let destination = DestinationHash::new(opened.source);
+    if !contact_is_missing_key(&destination) {
+        return false;
+    }
+    held_arrivals().push(HeldArrival {
+        kind,
+        opened: crate::mailbox::OpenedMail {
+            source: opened.source,
+            payload: opened.payload.clone(),
+            signature: opened.signature,
+            signed: opened.signed.clone(),
+        },
+    });
+    delivery_log("arrived note is waiting for their public key");
+    ask_for_key(destination);
+    true
+}
+
+fn ask_for_key(destination: DestinationHash) {
+    let Some(runtime) = RUNTIME.get().cloned() else {
+        return;
+    };
+    let Some(handle) = HANDLE.get().cloned() else {
+        return;
+    };
+    runtime.spawn(async move {
+        match handle.request_path(destination).await {
+            Ok(found) => delivery_log(&format!(
+                "path for their public key came back, {} hops",
+                found.hops.0
+            )),
+            Err(err) => delivery_log(&format!("path for their public key failed: {err:?}")),
+        }
+        learn_key_from_announce(destination);
+    });
+}
+
+fn flush_arrivals_for(address: &str) {
+    let Some(destination) = hash_of_hex(address) else {
+        return;
+    };
+    let ready = {
+        let mut held = held_arrivals();
+        let mut ready = Vec::new();
+        let mut keep = Vec::new();
+        for note in held.drain(..) {
+            if note.opened.source == *destination.as_bytes() {
+                ready.push(note);
+            } else {
+                keep.push(note);
+            }
+        }
+        *held = keep;
+        ready
+    };
+    for note in ready {
+        release_arrival(note);
+    }
+}
+
+fn release_arrival(arrival: HeldArrival) {
+    match arrival.kind {
+        Arrival::Link(link_id) => {
+            if !accept_signed(Some(link_id), &arrival.opened) {
+                delivery_log("arrived note still did not match a contact");
+            }
+        }
+        Arrival::Packet => {
+            if !accept_signed(None, &arrival.opened) {
+                delivery_log("arrived note still did not match a contact");
+            }
+        }
+        Arrival::Mailbox => stage_mailbox(&arrival.opened),
+    }
+}
+
+fn already_queued(note_id: u64) -> bool {
+    note_queue().iter().any(|note| note.note_id == note_id)
 }
 
 /// What the open journal shows for the voice button.
@@ -4827,6 +5242,7 @@ mod tests {
     use personal_rns::prelude::*;
     use tokio::sync::mpsc;
 
+    use personal_rns::identity::PublicIdentityMaterial;
     use personal_rns::interfaces::{
         ConnectionState, InterfaceGravity, InterfaceId, InterfaceMode, InterfaceSnapshot,
         Membership, PeerDetails, RadioIndication,
@@ -4836,9 +5252,9 @@ mod tests {
         apply_watched_route, call_can_continue, contact_is_isolated, delivery_destination,
         finish_sample, forget, gateway_client_id, interface_name, machine_label, marks_from,
         opens_at_the_mailbox, parse_tcp_target, person_quiet_limit, progress_of, reach_for,
-        reach_map, resource_budget, stand_up, JournalIdentity, ReachState, RouteLook, SampleNext,
-        SegmentSlice, WireMarks, BUILT_IN_TCP, MAC_USB, PERSON_SLICE, PHONE_USB, ROUTE_LOOK,
-        STEP_WAIT, UNTIL_POSTED,
+        reach_map, resource_budget, same_contact, stand_up, JournalIdentity, ReachState, RouteLook,
+        SampleNext, SegmentSlice, WireMarks, BUILT_IN_TCP, MAC_USB, PERSON_SLICE, PHONE_USB,
+        ROUTE_LOOK, STEP_WAIT, UNTIL_POSTED,
     };
 
     #[test]
@@ -5214,6 +5630,142 @@ mod tests {
             first.destination()
         );
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_delivery_address_learns_the_public_key_that_its_announce_carries() {
+        let directory = temp_journal();
+        let identity = JournalIdentity::load_or_create(&directory).expect("identity");
+        let other = temp_journal();
+        let someone_else = JournalIdentity::load_or_create(&other).expect("other identity");
+        let address = super::hex_encode(identity.destination().as_bytes());
+        assert_eq!(
+            super::destination_for_contact(&address),
+            Some(identity.destination())
+        );
+        assert_eq!(
+            super::shared_address(&address).as_deref(),
+            Some(address.as_str())
+        );
+        assert_eq!(
+            super::shared_address(identity.public_key_hex()).as_deref(),
+            Some(address.as_str())
+        );
+        assert!(super::contact_material(&address).is_none());
+        let material = PublicIdentityMaterial::from_slice(
+            &super::decode_hex(identity.public_key_hex()).expect("key bytes"),
+        )
+        .expect("public key");
+        assert!(super::key_binds_destination(
+            &identity.destination(),
+            &material
+        ));
+        let foreign = PublicIdentityMaterial::from_slice(
+            &super::decode_hex(someone_else.public_key_hex()).expect("other key"),
+        )
+        .expect("other public key");
+        assert!(!super::key_binds_destination(
+            &identity.destination(),
+            &foreign
+        ));
+        super::learned_map().insert(address.clone(), identity.public_key_hex().to_string());
+        let learned = super::contact_material(&address).expect("the key from the announce");
+        assert_eq!(learned.as_bytes(), material.as_bytes());
+        assert!(same_contact(
+            &address,
+            &super::hex_encode(learned.identity_hash().as_bytes())
+        ));
+        super::learned_map().remove(&address);
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn an_arrived_note_waits_until_the_path_brings_the_public_key() {
+        use personal_rns::identity::PrivateIdentityMaterial;
+        use personal_rns::routing::links::LinkId;
+        use personal_rns::wire::TRUNCATED_HASH_BYTE_LEN;
+
+        let sender_dir = temp_journal();
+        let recipient_dir = temp_journal();
+        let log_home = temp_journal();
+        let previous_home = std::env::var("JOURNAL_HOME").ok();
+        std::env::set_var("JOURNAL_HOME", &log_home);
+        let sender = JournalIdentity::load_or_create(&sender_dir).expect("sender");
+        let recipient = JournalIdentity::load_or_create(&recipient_dir).expect("recipient");
+        let address = super::hex_encode(sender.destination().as_bytes());
+        let link = LinkId::new([0x21; TRUNCATED_HASH_BYTE_LEN]);
+        let words = "held until the key arrives";
+        let previous = {
+            let mut book = super::book_slot()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = book.people.clone();
+            book.people = vec![crate::model::Person {
+                id: 1,
+                name: "Mac".into(),
+                identity: address.clone(),
+                notes: Vec::new(),
+                seen: 0,
+            }];
+            previous
+        };
+        struct PutBack {
+            people: Vec<crate::model::Person>,
+            address: String,
+            link: LinkId,
+            previous_home: Option<String>,
+            log_home: std::path::PathBuf,
+        }
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                match self.previous_home.take() {
+                    Some(home) => std::env::set_var("JOURNAL_HOME", home),
+                    None => std::env::remove_var("JOURNAL_HOME"),
+                }
+                let _ = std::fs::remove_dir_all(&self.log_home);
+                super::book_slot()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .people = std::mem::take(&mut self.people);
+                super::learned_map().remove(&self.address);
+                if let Some(source) = super::hash_of_hex(&self.address) {
+                    super::held_arrivals().retain(|held| held.opened.source != *source.as_bytes());
+                }
+                let mut mail = super::mail();
+                mail.inbox
+                    .retain(|note| note.words != "held until the key arrives");
+                mail.peers.remove(&self.link);
+            }
+        }
+        let _put_back = PutBack {
+            people: previous,
+            address: address.clone(),
+            link,
+            previous_home,
+            log_home,
+        };
+
+        let payload = crate::lxmf::pack_note(words, 1_700_000_000.0);
+        let sender_key = PrivateIdentityMaterial::from_bytes(*sender.secret);
+        let recipient_key = PrivateIdentityMaterial::from_bytes(*recipient.secret);
+        let wire = crate::mailbox::sign_for_link(&sender_key, &recipient_key.public(), &payload)
+            .expect("signed note");
+        let opened =
+            crate::mailbox::open_signed(&recipient.destination(), &wire).expect("opened note");
+        assert!(super::accept_signed(Some(link), &opened));
+        assert!(super::held_arrivals()
+            .iter()
+            .any(|held| held.opened.source == opened.source));
+        assert!(super::mail().inbox.iter().all(|note| note.words != words));
+        super::learned_map().insert(address.clone(), sender.public_key_hex().to_string());
+        super::flush_arrivals_for(&address);
+        assert!(super::mail().inbox.iter().any(|note| note.words == words));
+        assert!(super::held_arrivals()
+            .iter()
+            .all(|held| held.opened.source != opened.source));
+        let _ = std::fs::remove_dir_all(&sender_dir);
+        let _ = std::fs::remove_dir_all(&recipient_dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]

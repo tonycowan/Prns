@@ -32,7 +32,7 @@ mod voice;
 use dioxus::prelude::*;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use scan::contact_from_rgba;
-use scan::{contact_from_code, contact_from_image};
+use scan::{contact_from_code, contact_from_image, pasted_public_key};
 
 #[cfg(not(target_arch = "wasm32"))]
 use model::apply_reaction;
@@ -47,7 +47,6 @@ use model::{
     group_by_day, has_unread, map_window, mark_read, offered_ways, path_label, react_to_note,
     remove_person, rename_person, retry_note, shown_words, write_file_note, write_note,
     write_placed_note, NoteKind, OfferedWays, Page, Person, Place, Reach, Reaction, PLACEHOLDER,
-    YOUR_PUBLIC_KEY,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use model::{fail_note, fail_their_file, land_their_file, post_note, settle_note};
@@ -64,6 +63,20 @@ if (!window.__touchbaseKeepKeyboard) {
     };
     document.addEventListener("touchstart", keep, {capture: true, passive: false});
     document.addEventListener("mousedown", keep, true);
+    // The keyboard pans the page instead of shortening it, which carries the name
+    // and the W I B U marks off the top. Follow the visible area.
+    var root = document.documentElement;
+    var fitKeyboard = function () {
+      var view = window.visualViewport;
+      if (!view) return;
+      root.style.setProperty("--keyboard-top", view.offsetTop + "px");
+      root.style.setProperty("--keyboard-height", view.height + "px");
+    };
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", fitKeyboard);
+      window.visualViewport.addEventListener("scroll", fitKeyboard);
+      fitKeyboard();
+    }
   }
 }
 "#;
@@ -216,7 +229,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .wires {
   position: fixed;
   z-index: 3;
-  top: max(14px, env(safe-area-inset-top));
+  top: calc(var(--keyboard-top, 0px) + max(14px, env(safe-area-inset-top)));
   left: 0;
   right: 0;
   display: flex;
@@ -236,7 +249,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .incoming {
   position: fixed;
   z-index: 4;
-  top: calc(max(14px, env(safe-area-inset-top)) + 22px);
+  top: calc(var(--keyboard-top, 0px) + max(14px, env(safe-area-inset-top)) + 22px);
   left: 0;
   right: 0;
   display: flex;
@@ -370,7 +383,10 @@ input.who.rename {
 }
 .sheet {
   position: fixed;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: var(--keyboard-top, 0px);
+  height: var(--keyboard-height, 100%);
   overflow: hidden;
   background: var(--paper);
   transform: translateX(100%);
@@ -931,6 +947,7 @@ button.attached {
 .mark rect { fill: var(--ink); }
 .name-line {
   width: 100%;
+  margin: 0;
   font-size: 34px;
   border-bottom: 1px solid transparent;
 }
@@ -2000,16 +2017,43 @@ fn App() -> Element {
                         }
                     }
                 },
+                on_share: move |id| {
+                    let next = Page::Share(id);
+                    cover.set(next);
+                    page.set(next);
+                },
             }
             div { class: if open { "sheet open" } else { "sheet" },
                 match cover() {
                     Page::People => rsx! {},
                     Page::Code => rsx! {
                         CodePage {
+                            heading: "Your QR code",
                             name: your_name(),
-                            public_key: your_public_key(),
+                            address: your_lxmf_address(),
+                            renameable: true,
                             on_name: move |name| your_name.set(name),
                             on_back: move |_| page.set(Page::People),
+                        }
+                    },
+                    Page::Share(id) => {
+                        let shared = people().into_iter().find(|person| person.id == id);
+                        match shared {
+                            Some(person) => {
+                                let name = person.name.clone();
+                                let address = contact_address(&person.identity);
+                                rsx! {
+                                    CodePage {
+                                        heading: "Share",
+                                        name,
+                                        address,
+                                        renameable: false,
+                                        on_name: move |_| {},
+                                        on_back: move |_| page.set(Page::People),
+                                    }
+                                }
+                            }
+                            None => rsx! {},
                         }
                     },
                     Page::Add => rsx! {
@@ -2319,6 +2363,7 @@ fn PeoplePage(
     on_add: EventHandler<()>,
     on_rename: EventHandler<(u64, String)>,
     on_remove: EventHandler<u64>,
+    on_share: EventHandler<u64>,
 ) -> Element {
     let mut confirming = use_signal(|| None::<u64>);
     let mut renaming = use_signal(|| None::<u64>);
@@ -2503,6 +2548,7 @@ fn PeoplePage(
                             on_rename.call((id, name));
                         },
                         on_cancel: move |_| renaming.set(None),
+                        on_share: move |id| on_share.call(id),
                     }
                 }
             }
@@ -2512,7 +2558,9 @@ fn PeoplePage(
     }
 }
 
-const ACTION: f64 = 84.0;
+const REMOVE_WIDTH: f64 = 84.0;
+/// Rename and share, side by side.
+const CONFIG_WIDTH: f64 = 168.0;
 
 #[component]
 fn PersonRow(
@@ -2530,6 +2578,7 @@ fn PersonRow(
     on_draft: EventHandler<String>,
     on_named: EventHandler<(u64, String)>,
     on_cancel: EventHandler<()>,
+    on_share: EventHandler<u64>,
 ) -> Element {
     let mut reveal = use_signal(|| 0.0);
     let mut drag = use_signal(|| None::<(f64, f64, f64)>);
@@ -2607,8 +2656,8 @@ fn PersonRow(
                     if travel.abs() < 8.0 && dy.abs() > travel.abs() {
                         return;
                     }
-                    // A pull to the right opens the actions on the left. A pull to the left opens removal.
-                    reveal.set((start_reveal - travel).clamp(-ACTION, ACTION));
+                    // A pull to the right opens rename and share. A pull to the left opens removal.
+                    reveal.set((start_reveal - travel).clamp(-CONFIG_WIDTH, REMOVE_WIDTH));
                 },
                 onpointerup: move |event| {
                     let tap = drag().is_some_and(|(start_x, start_y, _)| {
@@ -2623,6 +2672,17 @@ fn PersonRow(
                 onpointercancel: move |_| release_row(drag, reveal),
                 onpointerleave: move |_| release_row(drag, reveal),
                 div { class: "name-config",
+                    button {
+                        aria_label: "Share",
+                        onpointerdown: move |event| event.stop_propagation(),
+                        onpointerup: move |event| event.stop_propagation(),
+                        onclick: move |event| {
+                            event.stop_propagation();
+                            reveal.set(0.0);
+                            on_share.call(id);
+                        },
+                        "share"
+                    }
                     button {
                         aria_label: "Rename",
                         onpointerdown: move |event| event.stop_propagation(),
@@ -2673,10 +2733,10 @@ fn release_row(mut drag: Signal<Option<(f64, f64, f64)>>, mut reveal: Signal<f64
     }
     drag.set(None);
     let value = reveal();
-    let next = if value > ACTION / 2.0 {
-        ACTION
-    } else if value < -ACTION / 2.0 {
-        -ACTION
+    let next = if value > REMOVE_WIDTH / 2.0 {
+        REMOVE_WIDTH
+    } else if value < -REMOVE_WIDTH / 2.0 {
+        -CONFIG_WIDTH
     } else {
         0.0
     };
@@ -2730,49 +2790,68 @@ fn machine_name() -> String {
     }
 }
 
-#[component]
-fn your_public_key() -> String {
+fn your_lxmf_address() -> String {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(key) = session::PUBLIC_KEY.get() {
-        return key.clone();
+    if let Some(address) = session::lxmf_address() {
+        return address;
     }
-    YOUR_PUBLIC_KEY.to_string()
+    "19ab44c0e8d15f2076c3aa91b0d4e6f2".to_string()
+}
+
+fn contact_address(identity: &str) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(address) = session::shared_address(identity) {
+        return address;
+    }
+    identity.trim().to_string()
 }
 
 #[component]
 fn CodePage(
+    heading: &'static str,
     name: String,
-    public_key: String,
+    address: String,
+    renameable: bool,
     on_name: EventHandler<String>,
     on_back: EventHandler<()>,
 ) -> Element {
-    let payload = contact_code(&name, &public_key);
+    let payload = contact_code(&name, &address);
     let mark = code_mark(&payload);
     let copied = use_signal(|| false);
     let share = payload.clone();
-    let key = public_key.clone();
+    let shown = address.clone();
+    let copy_label = if renameable {
+        "Copy your QR code"
+    } else {
+        "Copy their QR code"
+    };
     rsx! {
         div { class: "page",
             div { class: "title-row",
                 button { class: "back", onclick: move |_| on_back.call(()), "←" }
-                h1 { "Your QR code" }
+                h1 { "{heading}" }
             }
-            input {
-                class: "name-line hand",
-                aria_label: "Your name",
-                value: "{name}",
-                oninput: move |event| on_name.call(event.value()),
+            if renameable {
+                input {
+                    class: "name-line hand",
+                    aria_label: "Your name",
+                    value: "{name}",
+                    oninput: move |event| on_name.call(event.value()),
+                }
+            } else {
+                p { class: "name-line", "{name}" }
             }
             Mark {
                 mark,
+                copy_label,
                 on_copy: move |_| copy_text(share.clone(), copied),
             }
             div { class: "field",
-                span { "Public key" }
+                span { "LXMF address" }
                 button {
                     class: "public-key",
-                    onclick: move |_| copy_text(key.clone(), copied),
-                    "{public_key}"
+                    onclick: move |_| copy_text(shown.clone(), copied),
+                    "{address}"
                 }
             }
             if copied() {
@@ -2783,14 +2862,18 @@ fn CodePage(
 }
 
 #[component]
-fn Mark(mark: Option<(usize, Vec<(usize, usize)>)>, on_copy: EventHandler<()>) -> Element {
+fn Mark(
+    mark: Option<(usize, Vec<(usize, usize)>)>,
+    copy_label: &'static str,
+    on_copy: EventHandler<()>,
+) -> Element {
     let Some((width, cells)) = mark else {
         return rsx! {};
     };
     rsx! {
         button {
             class: "mark",
-            aria_label: "Copy your QR code",
+            aria_label: "{copy_label}",
             onclick: move |_| on_copy.call(()),
             svg {
                 view_box: "0 0 {width} {width}",
@@ -3078,13 +3161,13 @@ fn AddPage(
                     let _ = event.set_focus(true).await;
                 });
             },
-            onpaste: move |event| accept_paste(event, on_scanned, notice),
+            onpaste: move |event| accept_paste(event, on_scanned, on_code, notice),
             div { class: "title-row",
                 button { class: "back", aria_label: "Back to contacts", onclick: move |_| on_back.call(()), "←" }
                 h1 { "Add a contact" }
             }
             PhotoControl { on_scanned, notice }
-            p { class: "hint", "Or paste a photo of their QR code." }
+            p { class: "hint", "Or paste a photo of their QR code, or their LXMF address." }
             if !message.is_empty() {
                 p { class: "notice", "{message}" }
             }
@@ -3097,7 +3180,7 @@ fn AddPage(
                 }
             }
             label { class: "field",
-                span { "Public key" }
+                span { "LXMF address" }
                 input {
                     value: "{code}",
                     oninput: move |event| on_code.call(event.value()),
@@ -3125,12 +3208,19 @@ fn accept_image(
 fn accept_paste(
     event: Event<ClipboardData>,
     on_scanned: EventHandler<(String, String)>,
+    on_code: EventHandler<String>,
     mut notice: Signal<String>,
 ) {
     event.prevent_default();
-    if let Some(text) = pasted_text(&event) {
+    if let Some(text) = pasted_text(&event).or_else(clipboard_text) {
         if let Some((name, identity)) = contact_from_code(&text) {
+            notice.set(String::new());
             on_scanned.call((name, identity));
+            return;
+        }
+        if let Some(key) = pasted_public_key(&text) {
+            notice.set(String::new());
+            on_code.call(key);
             return;
         }
     }
@@ -3160,6 +3250,21 @@ fn accept_paste(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn pasted_text(_event: &Event<ClipboardData>) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "android")]
+fn clipboard_text() -> Option<String> {
+    session::read_clipboard()?.text
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+fn clipboard_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clipboard_text() -> Option<String> {
     None
 }
 

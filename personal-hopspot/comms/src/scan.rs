@@ -1,7 +1,7 @@
 //! Read a contact out of a photo of their code.
 //!
 //! The photo is the same mark shown on Your QR code: the contact's name,
-//! then their identity public key, one field per line.
+//! then their `lxmf.delivery` address, one field per line.
 
 #[cfg(test)]
 use image::Luma;
@@ -19,6 +19,17 @@ pub fn contact_from_code(payload: &str) -> Option<(String, String)> {
         return None;
     }
     Some((name.to_string(), identity.to_string()))
+}
+
+/// A copied `lxmf.delivery` address, or an identity public key, with any surrounding space removed.
+/// A QR code is two lines and is not this.
+pub fn pasted_public_key(text: &str) -> Option<String> {
+    let hex: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if (hex.len() == 32 || hex.len() == 128) && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(hex.to_ascii_lowercase())
+    } else {
+        None
+    }
 }
 
 pub fn contact_from_image(bytes: &[u8]) -> Option<(String, String)> {
@@ -142,7 +153,9 @@ pub fn code_png(payload: &str) -> Option<Vec<u8>> {
 mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::contact_from_bgra;
-    use super::{code_png, contact_from_code, contact_from_image, contact_from_luma};
+    use super::{
+        code_png, contact_from_code, contact_from_image, contact_from_luma, pasted_public_key,
+    };
     use crate::model::contact_code;
 
     #[test]
@@ -195,5 +208,16 @@ mod tests {
             contact_from_code(" Mara \n 19ab \n"),
             Some(("Mara".into(), "19ab".into()))
         );
+    }
+
+    #[test]
+    fn a_pasted_key_is_one_line_of_hex() {
+        let key = "ab".repeat(64);
+        let address = "ab".repeat(16);
+        assert_eq!(pasted_public_key(&key), Some(key.clone()));
+        assert_eq!(pasted_public_key(&format!("  {key}\n")), Some(key.clone()));
+        assert_eq!(pasted_public_key(&address), Some(address));
+        assert!(pasted_public_key("abcd").is_none());
+        assert!(pasted_public_key(&format!("Mara\n{key}")).is_none());
     }
 }

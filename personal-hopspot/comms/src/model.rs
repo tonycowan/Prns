@@ -1,6 +1,6 @@
 //! The notebook: contacts the user has added, and the notes they have shared.
 //!
-//! A contact code is the person's name and their identity public key, one
+//! A contact code is the person's name and their `lxmf.delivery` address, one
 //! field per line. Nothing here names the network underneath.
 
 use qrcode::types::Color;
@@ -248,6 +248,7 @@ pub enum Page {
     Code,
     Add,
     Journal(u64),
+    Share(u64),
 }
 
 pub fn contact_code(name: &str, identity: &str) -> String {
@@ -1640,7 +1641,7 @@ mod tests {
 
     #[test]
     fn your_qr_code_draws_a_square_mark() {
-        let (width, cells) = code_mark(&contact_code("Alex", super::YOUR_PUBLIC_KEY))
+        let (width, cells) = code_mark(&contact_code("Alex", "19ab44c0e8d15f2076c3aa91b0d4e6f2"))
             .expect("a contact code fits in a mark");
         assert!(width >= 21);
         assert!(!cells.is_empty());

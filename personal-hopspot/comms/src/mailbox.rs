@@ -169,6 +169,96 @@ pub fn read_ids(bytes: &[u8]) -> Option<Vec<[u8; STAMP_LEN]>> {
     Some(ids)
 }
 
+/// The signed message a direct link carries: destination, source, signature, then the note.
+pub(crate) fn sign_for_link(
+    ours: &PrivateIdentityMaterial,
+    recipient: &PublicIdentityMaterial,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
+    let signed = sign_note(ours, recipient, payload)?;
+    let mut wire = Vec::with_capacity(HASH_LEN + HASH_LEN + SIGNATURE_LEN + signed.payload.len());
+    wire.extend(signed.destination.as_bytes());
+    wire.extend(signed.source);
+    wire.extend(signed.signature);
+    wire.extend(signed.payload);
+    Some(wire)
+}
+
+/// Opens a signed message addressed to `our_delivery`. The bytes start with that address.
+pub(crate) fn open_signed(our_delivery: &DestinationHash, wire: &[u8]) -> Option<OpenedMail> {
+    if wire.len() < HASH_LEN + HASH_LEN + SIGNATURE_LEN
+        || &wire[..HASH_LEN] != our_delivery.as_bytes()
+    {
+        return None;
+    }
+    open_body(our_delivery, &wire[HASH_LEN..])
+}
+
+/// Opens one packet addressed to `our_delivery`. The address is the packet's destination, so the bytes start with the source.
+pub(crate) fn open_packet(our_delivery: &DestinationHash, plaintext: &[u8]) -> Option<OpenedMail> {
+    open_body(our_delivery, plaintext)
+}
+
+fn open_body(our_delivery: &DestinationHash, body: &[u8]) -> Option<OpenedMail> {
+    if body.len() < HASH_LEN + SIGNATURE_LEN {
+        return None;
+    }
+    let mut source = [0u8; HASH_LEN];
+    source.copy_from_slice(&body[..HASH_LEN]);
+    let mut signature = [0u8; SIGNATURE_LEN];
+    signature.copy_from_slice(&body[HASH_LEN..HASH_LEN + SIGNATURE_LEN]);
+    let payload = crate::lxmf::payload_for_signature(&body[HASH_LEN + SIGNATURE_LEN..])?;
+    let message_hash = sha256_chunks(&[our_delivery.as_bytes(), &source, &payload]);
+    let mut signed = Vec::with_capacity(HASH_LEN + HASH_LEN + payload.len() + SHA256_OUTPUT_LEN);
+    signed.extend(our_delivery.as_bytes());
+    signed.extend(source);
+    signed.extend(&payload);
+    signed.extend(message_hash);
+    Some(OpenedMail {
+        source,
+        payload,
+        signature,
+        signed,
+    })
+}
+
+struct SignedNote {
+    destination: DestinationHash,
+    source: [u8; HASH_LEN],
+    signature: [u8; SIGNATURE_LEN],
+    payload: Vec<u8>,
+}
+
+fn sign_note(
+    ours: &PrivateIdentityMaterial,
+    recipient: &PublicIdentityMaterial,
+    payload: &[u8],
+) -> Option<SignedNote> {
+    let destination = derive_single_destination_hash(
+        &recipient.identity_hash(),
+        PROPAGATION_APP,
+        PROPAGATION_ASPECTS,
+    )
+    .ok()?;
+    let source_destination =
+        derive_single_destination_hash(&ours.identity_hash(), PROPAGATION_APP, PROPAGATION_ASPECTS)
+            .ok()?;
+    let source = *source_destination.as_bytes();
+    let message_hash = sha256_chunks(&[destination.as_bytes(), &source, payload]);
+    let mut signed = Vec::with_capacity(HASH_LEN + HASH_LEN + payload.len() + SHA256_OUTPUT_LEN);
+    signed.extend(destination.as_bytes());
+    signed.extend(source);
+    signed.extend(payload);
+    signed.extend(message_hash);
+    let signature = ours.sign(&signed).0;
+    Some(SignedNote {
+        destination,
+        source,
+        signature,
+        payload: payload.to_vec(),
+    })
+}
+
 /// Seals a note to `ratchet` when the path announced one, otherwise to the identity encryption key.
 pub(crate) fn seal_for_delivery(
     ours: &PrivateIdentityMaterial,
@@ -189,24 +279,12 @@ fn seal_lxmf_with(
     iv: &[u8; ENCRYPTION_IV_LEN],
     ratchet: Option<&X25519PublicKey>,
 ) -> Option<Vec<u8>> {
-    let destination = derive_single_destination_hash(
-        &recipient.identity_hash(),
-        PROPAGATION_APP,
-        PROPAGATION_ASPECTS,
-    )
-    .ok()?;
-    let source = ours.identity_hash();
-    let message_hash = sha256_chunks(&[destination.as_bytes(), source.as_bytes(), payload]);
-    let mut signed = Vec::with_capacity(HASH_LEN + HASH_LEN + payload.len() + SHA256_OUTPUT_LEN);
-    signed.extend(destination.as_bytes());
-    signed.extend(source.as_bytes());
-    signed.extend(payload);
-    signed.extend(message_hash);
-    let signature = ours.sign(&signed);
-    let mut plaintext = Vec::with_capacity(HASH_LEN + SIGNATURE_LEN + payload.len());
-    plaintext.extend(source.as_bytes());
-    plaintext.extend(signature.0);
-    plaintext.extend(payload);
+    let signed = sign_note(ours, recipient, payload)?;
+    let destination = signed.destination;
+    let mut plaintext = Vec::with_capacity(HASH_LEN + SIGNATURE_LEN + signed.payload.len());
+    plaintext.extend(signed.source);
+    plaintext.extend(signed.signature);
+    plaintext.extend(&signed.payload);
     let mut ciphertext = vec![0u8; plaintext.len() + 256];
     let len = match ratchet {
         Some(ratchet) => recipient
@@ -453,12 +531,53 @@ mod tests {
         .expect("delivery address");
         let opened = open_lxmf(&recipient, &delivery, &lxmf, &[]).expect("opened");
         assert_eq!(opened.payload, payload);
-        assert_eq!(opened.source, *sender.identity_hash().as_bytes());
+        let sender_delivery = derive_single_destination_hash(
+            &sender.identity_hash(),
+            PROPAGATION_APP,
+            PROPAGATION_ASPECTS,
+        )
+        .expect("sender address");
+        assert_eq!(opened.source, *sender_delivery.as_bytes());
         sender
             .public()
             .verify(&opened.signed, &Ed25519Signature(opened.signature))
             .expect("signature");
         assert!(open_lxmf(&sender, &delivery, &lxmf, &[]).is_none());
+    }
+
+    #[test]
+    fn a_signed_note_opens_on_a_link_and_as_a_packet() {
+        let sender = secret(0x44, 0x33);
+        let recipient = secret(0x22, 0x11);
+        let payload = crate::lxmf::pack_note("The pears are ready.", 1_700_000_000.0);
+        let wire = sign_for_link(&sender, &recipient.public(), &payload).expect("signed");
+        let delivery = derive_single_destination_hash(
+            &recipient.identity_hash(),
+            PROPAGATION_APP,
+            PROPAGATION_ASPECTS,
+        )
+        .expect("delivery address");
+        let opened = open_signed(&delivery, &wire).expect("link note");
+        assert_eq!(opened.payload, payload);
+        sender
+            .public()
+            .verify(&opened.signed, &Ed25519Signature(opened.signature))
+            .expect("signature");
+        let packet = open_packet(&delivery, &wire[HASH_LEN..]).expect("packet");
+        assert_eq!(packet.payload, payload);
+        assert_eq!(packet.signature, opened.signature);
+        assert!(open_signed(&delivery, &wire[HASH_LEN..]).is_none());
+        let mut stamped = wire.clone();
+        let payload_at = HASH_LEN + HASH_LEN + SIGNATURE_LEN;
+        assert_eq!(stamped[payload_at], 0x94);
+        stamped[payload_at] = 0x95;
+        stamped.extend_from_slice(&[0xc4, 0x01, 0xab]);
+        let opened = open_signed(&delivery, &stamped).expect("stamp left out");
+        assert_eq!(opened.payload, payload);
+        sender
+            .public()
+            .verify(&opened.signed, &Ed25519Signature(opened.signature))
+            .expect("signature over the unstamped note");
     }
 
     #[test]

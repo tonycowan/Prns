@@ -280,6 +280,34 @@ fn read_message(bytes: &[u8]) -> Option<ReadMessage> {
     })
 }
 
+/// The bytes a signature covers. A stamp after the four fields is left out, and the array header becomes four.
+pub(crate) fn payload_for_signature(bytes: &[u8]) -> Option<Vec<u8>> {
+    let marker = *bytes.first()?;
+    let mut reader = Reader { bytes };
+    let len = reader.array_len()?;
+    if len < 4 {
+        return None;
+    }
+    reader.number()?;
+    reader.bytes_or_text()?;
+    reader.bytes_or_text()?;
+    reader.fields()?;
+    let end = bytes.len() - reader.bytes.len();
+    if len == 4 {
+        if reader.bytes.is_empty() {
+            return Some(bytes.to_vec());
+        }
+        return None;
+    }
+    if !(0x90..=0x9f).contains(&marker) {
+        return None;
+    }
+    let mut signed = Vec::with_capacity(end);
+    signed.push(0x94);
+    signed.extend_from_slice(&bytes[1..end]);
+    Some(signed)
+}
+
 /// An acknowledgement of a mailbox note. The field is the hash of the packed note.
 /// Empty words keep an older app from showing it as a note.
 pub fn pack_ack(digest: &[u8; 32]) -> Vec<u8> {

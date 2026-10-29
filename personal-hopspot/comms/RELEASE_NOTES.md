@@ -2,6 +2,8 @@
 
 Since the last release.
 
-A file is accepted when it arrives. The choice still tells you how large a file this path will take, and a larger file is held back on the sending side.
+A contact is added by their address. The first path that comes back keeps their key, and a note that arrived before the key is held and then accepted.
 
-When more than one path is open, the faster one is asked first.
+Swipe a name to the right and choose share to show that contact's code.
+
+A note sent straight to someone is signed, so the receiver can check who sent it.
