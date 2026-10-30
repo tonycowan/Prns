@@ -14,6 +14,34 @@ short_description = "A private journal shared with people you have added"
 
 [permissions]
 location = { precision = "fine", description = "N10A uses your location when you add it to a note." }
+bluetooth = { description = "N10A uses Bluetooth to reach people you have added." }
+
+# CoreBluetooth refuses a restoration identifier unless these modes are declared,
+# and that refusal is an Objective-C exception that aborts the process.
+[ios]
+background_modes = ["bluetooth-central", "bluetooth-peripheral"]
+
+# iOS 27 traps at launch unless this names the scene delegate registered in main.rs.
+[ios.raw]
+info_plist = """
+<key>UIApplicationSceneManifest</key>
+<dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+        <key>UIWindowSceneSessionRoleApplication</key>
+        <array>
+            <dict>
+                <key>UISceneConfigurationName</key>
+                <string>Default Configuration</string>
+                <key>UISceneDelegateClassName</key>
+                <string>N10ASceneDelegate</string>
+            </dict>
+        </array>
+    </dict>
+</dict>
+"""
 
 [android]
 min_sdk = 30

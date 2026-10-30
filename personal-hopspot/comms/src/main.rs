@@ -182,8 +182,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: var(--paper);
 }
 .page {
-  --edge-left: max(44px, env(safe-area-inset-left));
-  --edge-right: max(20px, env(safe-area-inset-right));
+  --margin: 20px;
+  --edge-left: max(var(--margin), env(safe-area-inset-left));
+  --edge-right: max(var(--margin), env(safe-area-inset-right));
   height: 100%;
   overflow: auto;
   padding:
@@ -394,7 +395,6 @@ input.who.rename {
   pointer-events: none;
 }
 .journal {
-  --edge-right: var(--edge-left);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -776,6 +776,7 @@ input.who.rename {
   min-width: 0;
   max-height: calc(1.35em * 5);
   overflow: hidden;
+  padding-left: 40px;
   font-family: var(--hand);
   font-size: 19.5px;
   line-height: 1.35;
@@ -793,6 +794,7 @@ input.who.rename {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+  padding-left: 40px;
   font-family: var(--hand);
   font-size: 19.5px;
   line-height: 1.35;
@@ -813,53 +815,51 @@ input.who.rename {
 .note-line { position: relative; }
 .embed {
   position: absolute;
-  left: calc(-1 * var(--edge-left));
-  bottom: 0;
-  width: var(--edge-left);
+  left: 0;
+  bottom: calc(1px + (19.5px * 1.35 - 32px) / 2);
+  z-index: 2;
   display: flex;
-  justify-content: center;
+  align-items: center;
 }
-.plus {
-  min-width: 36px;
-  min-height: 44px;
-  font-size: 28px;
+.plus,
+.embed-list .choice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: content-box;
+  height: 26px;
+  min-height: 26px;
+  min-width: 0;
+  padding: 3px 8px;
+  font-family: var(--book);
+  font-size: 14px;
   line-height: 1;
-  color: var(--pencil);
   text-decoration: none;
   cursor: pointer;
-  background: transparent;
+  color: var(--paper);
+  background: var(--pencil);
   border: 0;
-  padding: 0;
+  border-radius: 8px;
   -webkit-user-select: none;
   user-select: none;
 }
 .embed-list {
   position: absolute;
   left: 0;
-  bottom: calc(100% + 4px);
-  min-width: 148px;
-  background: var(--paper);
-  border: 1px solid var(--rule);
+  bottom: calc(100% + var(--margin));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--margin);
+  width: max-content;
+  background: transparent;
+  border: 0;
   z-index: 5;
 }
 .embed-list .choice {
   position: relative;
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 12px 14px;
-  font-family: var(--book);
-  font-size: 16px;
-  line-height: 1;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  min-height: 44px;
-  cursor: pointer;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  -webkit-user-select: none;
-  user-select: none;
+  justify-content: flex-start;
+  width: max-content;
 }
 .embed-list .choice input {
   position: absolute;

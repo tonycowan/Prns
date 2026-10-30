@@ -2,8 +2,8 @@
 
 Since the last release.
 
-A contact is added by their address. The first path that comes back keeps their key, and a note that arrived before the key is held and then accepted.
+The margins on both sides of the page match.
 
-Swipe a name to the right and choose share to show that contact's code.
+The control that adds something to a note sits on the last line of the writing, and it and its choices look like Copy.
 
-A note sent straight to someone is signed, so the receiver can check who sent it.
+The iPhone app opens.
