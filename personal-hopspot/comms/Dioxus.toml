@@ -14,16 +14,22 @@ short_description = "A private journal shared with people you have added"
 
 [permissions]
 location = { precision = "fine", description = "N10A uses your location when you add it to a note." }
-bluetooth = { description = "N10A uses Bluetooth to reach people you have added." }
 
 # CoreBluetooth refuses a restoration identifier unless these modes are declared,
 # and that refusal is an Objective-C exception that aborts the process.
+# The usage strings live in the raw plist. Declaring bluetooth under [permissions]
+# also injects Android scan and connect permissions, which the raw manifest already
+# lists, and the scan entry there carries neverForLocation.
 [ios]
 background_modes = ["bluetooth-central", "bluetooth-peripheral"]
 
 # iOS 27 traps at launch unless this names the scene delegate registered in main.rs.
 [ios.raw]
 info_plist = """
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>N10A uses Bluetooth to reach people you have added.</string>
+<key>NSBluetoothPeripheralUsageDescription</key>
+<string>N10A uses Bluetooth to reach people you have added.</string>
 <key>UIApplicationSceneManifest</key>
 <dict>
     <key>UIApplicationSupportsMultipleScenes</key>
