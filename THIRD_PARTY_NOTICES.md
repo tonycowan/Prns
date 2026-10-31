@@ -2,7 +2,7 @@
 
 This checked bundle covers the shipped and qualification Rust, JavaScript, and Android product graphs.
 It was generated with `cargo-about 0.9.1` by `./tools/prns repo notices generate`.
-Notice input fingerprint: `sha256:137f1bf149a113a1ba2b9be540785587ca92b3cbb7d32ba327d1131753a923f8`.
+Notice input fingerprint: `sha256:6c2a4814f40edb9b40b834de872f6b22721d1ebb89b5dce07a598d776da1d3bc`.
 Each locked Rust manifest closure is fetched into a fresh isolated Cargo home before cargo-about reads its target-filtered packaged license material offline.
 Entries are deduplicated by SPDX identifier and canonical notice text; line endings, trailing space, and repeated blank lines are normalized without changing legal words.
 
@@ -3382,41 +3382,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### MIT (04dc52136d82)
-
-License: MIT License
-
-Used by: `zip 9.1.1`
-
-Release graphs: controller Linux, controller Windows, controller macOS
-
-```text
-The MIT License (MIT)
-
-Copyright (c) 2014 Mathijs van de Nes
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Some files in the "tests/data" subdirectory of this repository are under other
-licences; see files named LICENSE.*.txt for details.
-```
-
 ### MIT (05f344491a7d)
 
 License: MIT License
@@ -4871,7 +4836,7 @@ SOFTWARE.
 
 License: MIT License
 
-Used by: `adler2 2.0.1`, `allocator-api2 0.3.1`, `anyhow 1.0.102`, `anyhow 1.0.104`, `async-recursion 1.1.1`, `async-trait 0.1.89`, `async-trait 0.1.91`, `async-trait 0.1.92`, `concurrent-queue 2.5.0`, `ctrlc 3.5.2`, `curve25519-dalek-derive 0.1.1`, `deku 0.18.1`, `displaydoc 0.2.6`, `displaydoc 0.2.7`, `docsplay 0.1.3`, `endi 1.1.1`, `event-listener 5.4.1`, `event-listener-strategy 0.5.4`, `fastrand 2.4.1`, `fastrand 2.5.0`, `flume 0.12.0`, `futures-lite 2.6.1`, `home 0.5.12`, `indoc 2.0.7`, `inventory 0.3.24`, `iter-read 1.1.0`, `itoa 1.0.18`, `linux-raw-sys 0.12.1`, `macro-string 0.1.4`, `num_enum 0.7.6`, `num_enum_derive 0.7.6`, `nusb 0.2.4`, `nusb 0.2.7`, `once_cell 1.21.4`, `ordered-stream 0.2.0`, `parking 2.2.1`, `paste 1.0.15`, `pastey 0.1.1`, `pastey 0.2.3`, `pin-project 1.1.13`, `pin-project-internal 1.1.13`, `pin-project-lite 0.2.17`, `portable-atomic 1.13.1`, `portable-atomic 1.14.0`, `portable-atomic 1.15.0`, `proc-macro-crate 1.3.1`, `proc-macro-crate 2.0.2`, `proc-macro-crate 3.5.0`, `proc-macro2 1.0.106`, `proc-macro2 1.0.107`, `quote 1.0.45`, `quote 1.0.46`, `quote 1.0.47`, `rtrb 0.3.5`, `rustc-hash 1.1.0`, `rustc-hash 2.1.2`, `rustc-hash 2.1.3`, `rustix 1.1.4`, `rustversion 1.0.22`, `rustversion 1.0.23`, `semver 1.0.28`, `send_wrapper 0.6.0`, `serde 1.0.228`, `serde 1.0.229`, `serde_core 1.0.228`, `serde_core 1.0.229`, `serde_derive 1.0.228`, `serde_derive 1.0.229`, `serde_json 1.0.150`, `serde_json 1.0.151`, `serde_path_to_error 0.1.20`, `serde_repr 0.1.21`, `serde_yaml 0.9.34+deprecated`, `smol_str 0.2.2`, `syn 1.0.109`, `syn 2.0.117`, `syn 2.0.118`, `syn 2.0.119`, `syn 3.0.3`, `syn 3.0.4`, `syn 3.0.5`, `syn 3.0.6`, `system-deps 6.2.2`, `thiserror 1.0.69`, `thiserror 2.0.18`, `thiserror 2.0.19`, `thiserror 2.0.20`, `thiserror-impl 1.0.69`, `thiserror-impl 2.0.18`, `thiserror-impl 2.0.19`, `thiserror-impl 2.0.20`, `unic-langid 0.9.6`, `unic-langid-impl 0.9.6`, `unic-langid-macros 0.9.6`, `unic-langid-macros-impl 0.9.6`, `unicode-ident 1.0.24`, `unicode-ident 1.0.26`, `unsafe-libyaml 0.2.11`, `utf-8 0.7.6`, `utf8-zero 0.8.1`, `wasm-streams 0.4.2`, `x11 2.21.0`, `x11-dl 2.21.0`, `zmij 1.0.21`, `zmij 1.0.23`, `zvariant_utils 3.5.0`
+Used by: `adler2 2.0.1`, `allocator-api2 0.3.1`, `anyhow 1.0.102`, `anyhow 1.0.104`, `async-recursion 1.1.1`, `async-trait 0.1.89`, `async-trait 0.1.91`, `async-trait 0.1.92`, `concurrent-queue 2.5.0`, `ctrlc 3.5.2`, `curve25519-dalek-derive 0.1.1`, `deku 0.18.1`, `displaydoc 0.2.6`, `displaydoc 0.2.7`, `docsplay 0.1.3`, `endi 1.1.1`, `event-listener 5.4.1`, `event-listener-strategy 0.5.4`, `fastrand 2.4.1`, `fastrand 2.5.0`, `flume 0.12.0`, `futures-lite 2.6.1`, `home 0.5.12`, `indoc 2.0.7`, `inventory 0.3.24`, `iter-read 1.1.0`, `itoa 1.0.18`, `linux-raw-sys 0.12.1`, `macro-string 0.1.4`, `num_enum 0.7.6`, `num_enum_derive 0.7.6`, `nusb 0.2.4`, `nusb 0.2.7`, `once_cell 1.21.4`, `ordered-stream 0.2.0`, `parking 2.2.1`, `paste 1.0.15`, `pastey 0.1.1`, `pastey 0.2.3`, `pin-project 1.1.13`, `pin-project-internal 1.1.13`, `pin-project-lite 0.2.17`, `portable-atomic 1.13.1`, `portable-atomic 1.14.0`, `portable-atomic 1.15.0`, `proc-macro-crate 1.3.1`, `proc-macro-crate 2.0.2`, `proc-macro-crate 3.5.0`, `proc-macro2 1.0.106`, `proc-macro2 1.0.107`, `quote 1.0.45`, `quote 1.0.46`, `quote 1.0.47`, `rtrb 0.3.5`, `rustc-hash 1.1.0`, `rustc-hash 2.1.2`, `rustc-hash 2.1.3`, `rustix 1.1.4`, `rustversion 1.0.22`, `rustversion 1.0.23`, `semver 1.0.28`, `send_wrapper 0.6.0`, `serde 1.0.228`, `serde 1.0.229`, `serde_core 1.0.228`, `serde_core 1.0.229`, `serde_derive 1.0.228`, `serde_derive 1.0.229`, `serde_json 1.0.150`, `serde_json 1.0.151`, `serde_path_to_error 0.1.20`, `serde_repr 0.1.21`, `serde_yaml 0.9.34+deprecated`, `smol_str 0.2.2`, `syn 1.0.109`, `syn 2.0.117`, `syn 2.0.118`, `syn 2.0.119`, `syn 3.0.3`, `syn 3.0.4`, `syn 3.0.5`, `syn 3.0.6`, `system-deps 6.2.2`, `thiserror 1.0.69`, `thiserror 2.0.18`, `thiserror 2.0.19`, `thiserror 2.0.20`, `thiserror-impl 1.0.69`, `thiserror-impl 2.0.18`, `thiserror-impl 2.0.19`, `thiserror-impl 2.0.20`, `typed-path 0.13.0`, `unic-langid 0.9.6`, `unic-langid-impl 0.9.6`, `unic-langid-macros 0.9.6`, `unic-langid-macros-impl 0.9.6`, `unicode-ident 1.0.24`, `unicode-ident 1.0.26`, `unsafe-libyaml 0.2.11`, `utf-8 0.7.6`, `utf8-zero 0.8.1`, `wasm-streams 0.4.2`, `x11 2.21.0`, `x11-dl 2.21.0`, `zmij 1.0.21`, `zmij 1.0.23`, `zvariant_utils 3.5.0`
 
 Release graphs: Android, ESP32-C6, ESP32-S3 Heltec, ESP32-S3 Heltec E290, ESP32-S3 Heltec R8, ESP32-S3 Heltec V3, ESP32-S3 Heltec Wireless Stick Lite V3, ESP32-S3 T-Beam, ESP32-S3 XIAO Wio-SX1262, HaLoW appliance manager, HaLoW headless, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, Nordic DFU browser core, WASM, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, desktop Windows, desktop macOS, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64, iOS, nRF52840, website Rust/WASM
 
@@ -6107,7 +6072,7 @@ License: MIT License
 
 Used by: `cfg_aliases 0.2.1`, `cfg_aliases 0.2.2`
 
-Release graphs: HaLoW headless, Host SDK native, Node addon Linux, controller Linux, daemon Linux, daemon Windows, daemon macOS, desktop Linux, engine, flasher Linux arm64, flasher Linux x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: HaLoW headless, Host SDK native, Node addon Linux, controller Linux, controller macOS, daemon Linux, daemon Windows, daemon macOS, desktop Linux, engine, flasher Linux arm64, flasher Linux x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 MIT License
@@ -7211,9 +7176,9 @@ THE SOFTWARE.
 
 License: MIT License
 
-Used by: `spin 0.9.9`
+Used by: `spin 0.9.9`, `zip 9.1.1`
 
-Release graphs: Node addon Linux, Node addon Windows, Node addon macOS, daemon Linux, daemon Windows, daemon macOS, website Rust/WASM
+Release graphs: Node addon Linux, Node addon Windows, Node addon macOS, controller Linux, controller Windows, controller macOS, daemon Linux, daemon Windows, daemon macOS, website Rust/WASM
 
 ```text
 The MIT License (MIT)
@@ -8967,7 +8932,7 @@ License: MIT License
 
 Used by: `getrandom 0.4.2`, `getrandom 0.4.3`
 
-Release graphs: HaLoW appliance manager, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, controller Linux, daemon Linux, desktop Linux, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
+Release graphs: HaLoW appliance manager, Host SDK native, Node addon Linux, Node addon Windows, Node addon macOS, controller Linux, controller Windows, controller macOS, daemon Linux, desktop Linux, engine, flasher Linux arm64, flasher Linux x86_64, flasher Windows x86_64, flasher macOS arm64, flasher macOS x86_64
 
 ```text
 Copyright (c) 2018-2026 The rust-random Project Developers
@@ -13502,6 +13467,36 @@ freely, subject to the following restrictions:
    appreciated but is not required.
 2. Altered source versions must be plainly marked as such, and must not be
    misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+```
+
+### Zlib (6ddf0fba55d4)
+
+License: zlib License
+
+Used by: `zlib-rs 0.6.7`
+
+Release graphs: controller Linux, controller Windows, controller macOS
+
+```text
+(C) 2024 Trifecta Tech Foundation
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+
 3. This notice may not be removed or altered from any source distribution.
 ```
 
