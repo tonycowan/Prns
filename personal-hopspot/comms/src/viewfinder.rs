@@ -45,6 +45,8 @@ static BUSY: AtomicBool = AtomicBool::new(false);
 static HOLD: Mutex<()> = Mutex::new(());
 static PREVIEW: Mutex<Option<String>> = Mutex::new(None);
 static DONE: Mutex<Option<Done>> = Mutex::new(None);
+static FOR_PHOTO: AtomicBool = AtomicBool::new(false);
+static STILL: Mutex<Option<(u32, u32, Vec<u8>)>> = Mutex::new(None);
 
 enum Done {
     Code(String),
@@ -101,11 +103,22 @@ impl CodeFinder {
 
 /// Opens the camera. The returned token stops matching once the camera closes.
 pub fn start() -> u64 {
+    start_camera(false)
+}
+
+/// Opens the camera for one picture. A code in the frame does not close it.
+pub fn start_for_photo() -> u64 {
+    start_camera(true)
+}
+
+fn start_camera(photo: bool) -> u64 {
+    FOR_PHOTO.store(photo, Ordering::Release);
     STOP.store(false, Ordering::Release);
     let run = RUN.fetch_add(1, Ordering::AcqRel) + 1;
     CURRENT.store(run, Ordering::Release);
     *lock(&PREVIEW) = None;
     *lock(&DONE) = None;
+    *lock(&STILL) = None;
     std::thread::Builder::new()
         .name("journal-camera".into())
         .spawn(move || run_camera(run))
@@ -122,6 +135,14 @@ pub fn stop() {
 
 pub fn token() -> u64 {
     RUN.load(Ordering::Acquire)
+}
+
+/// The latest color frame, flipped to match the preview on a Mac.
+pub fn take_image() -> Option<image::DynamicImage> {
+    let (width, height, mut rgb) = lock(&STILL).clone()?;
+    #[cfg(not(target_os = "ios"))]
+    flip_horizontal(&mut rgb, width, height);
+    image::RgbImage::from_raw(width, height, rgb).map(image::DynamicImage::ImageRgb8)
 }
 
 pub fn look() -> View {
@@ -298,9 +319,14 @@ fn on_frame(sample: &CMSampleBuffer) {
                 *lock(&PREVIEW) = Some(picture);
             }
         }
-        if let Some((name, identity)) = contact_from_luma(&seen.luma) {
-            *lock(&DONE) = Some(Done::Code(format!("{name}\n{identity}")));
-            STOP.store(true, Ordering::Release);
+        if let Some(still) = seen.still {
+            *lock(&STILL) = Some(still);
+        }
+        if !FOR_PHOTO.load(Ordering::Acquire) {
+            if let Some((name, identity)) = contact_from_luma(&seen.luma) {
+                *lock(&DONE) = Some(Done::Code(format!("{name}\n{identity}")));
+                STOP.store(true, Ordering::Release);
+            }
         }
     }
     BUSY.store(false, Ordering::Release);
@@ -311,6 +337,7 @@ struct Seen {
     preview: Vec<u8>,
     preview_width: u32,
     preview_height: u32,
+    still: Option<(u32, u32, Vec<u8>)>,
 }
 
 fn grab_frame(sample: &CMSampleBuffer) -> Option<Seen> {
@@ -342,11 +369,17 @@ fn grab_frame(sample: &CMSampleBuffer) -> Option<Seen> {
             let (scan_w, scan_h, scan) = shrink_bgra(&bytes, width, height, stride, SCAN_EDGE)?;
             let (preview_width, preview_height, preview) =
                 shrink_bgra(&bytes, width, height, stride, PREVIEW_EDGE)?;
+            let still = if FOR_PHOTO.load(Ordering::Acquire) {
+                rgb_from_bgra(&scan, scan_w, scan_h).map(|rgb| (scan_w, scan_h, rgb))
+            } else {
+                None
+            };
             Some(Seen {
                 luma: gray_from_bgra(&scan, scan_w, scan_h)?,
                 preview,
                 preview_width,
                 preview_height,
+                still,
             })
         }
         Copied::Luma {
@@ -358,11 +391,17 @@ fn grab_frame(sample: &CMSampleBuffer) -> Option<Seen> {
             let (scan_w, scan_h, scan) = shrink_plane(&bytes, width, height, stride, SCAN_EDGE)?;
             let (preview_width, preview_height, plane) =
                 shrink_plane(&bytes, width, height, stride, PREVIEW_EDGE)?;
+            let still = if FOR_PHOTO.load(Ordering::Acquire) {
+                Some((scan_w, scan_h, gray_to_rgb(&scan)))
+            } else {
+                None
+            };
             Some(Seen {
                 luma: GrayImage::from_raw(scan_w, scan_h, scan)?,
                 preview: gray_as_bgra(&plane),
                 preview_width,
                 preview_height,
+                still,
             })
         }
     }
@@ -556,6 +595,48 @@ fn shrink_bgra(
         }
     }
     Some((out_w, out_h, out))
+}
+
+fn rgb_from_bgra(bgra: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let count = (width as usize).checked_mul(height as usize)?;
+    if bgra.len() < count.saturating_mul(4) {
+        return None;
+    }
+    let mut rgb = Vec::with_capacity(count * 3);
+    for pixel in bgra.chunks_exact(4).take(count) {
+        rgb.push(pixel[2]);
+        rgb.push(pixel[1]);
+        rgb.push(pixel[0]);
+    }
+    Some(rgb)
+}
+
+fn gray_to_rgb(gray: &[u8]) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(gray.len() * 3);
+    for pixel in gray {
+        rgb.push(*pixel);
+        rgb.push(*pixel);
+        rgb.push(*pixel);
+    }
+    rgb
+}
+
+#[cfg(not(target_os = "ios"))]
+fn flip_horizontal(rgb: &mut [u8], width: u32, height: u32) {
+    let width = width as usize;
+    let height = height as usize;
+    if width < 2 || rgb.len() < width.saturating_mul(height).saturating_mul(3) {
+        return;
+    }
+    for y in 0..height {
+        for x in 0..width / 2 {
+            let left = (y * width + x) * 3;
+            let right = (y * width + (width - 1 - x)) * 3;
+            for channel in 0..3 {
+                rgb.swap(left + channel, right + channel);
+            }
+        }
+    }
 }
 
 fn jpeg_url(bgra: &[u8], width: u32, height: u32) -> Option<String> {

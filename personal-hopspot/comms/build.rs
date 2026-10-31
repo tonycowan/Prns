@@ -148,20 +148,42 @@ fn pkg_output(pkg: &str, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("pkg-config output")
 }
 
-/// Release builds show `v` plus the crate version. Everything else adds the commit.
+/// Release builds show `v` plus the crate version. Every other build adds a build id,
+/// so a test install can be told from the release. `TOUCHBASE_BUILD` is that id when
+/// a deploy sets it. Otherwise the id is the commit and the time of the build.
 fn stamp_version() {
     println!("cargo:rerun-if-env-changed=TOUCHBASE_RELEASE");
+    println!("cargo:rerun-if-env-changed=TOUCHBASE_BUILD");
     watch_git_head();
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     let shown = if release_build() {
         format!("v{version}")
     } else {
-        match commit_id() {
-            Some(commit) => format!("v{version}+{commit}"),
-            None => format!("v{version}"),
-        }
+        format!("v{version}+{}", build_id())
     };
     println!("cargo:rustc-env=TOUCHBASE_VERSION={shown}");
+}
+
+fn build_id() -> String {
+    if let Ok(id) = std::env::var("TOUCHBASE_BUILD") {
+        let id = id.trim();
+        if !id.is_empty() && !id.contains([' ', '\n', '\r', '"']) {
+            return id.to_string();
+        }
+    }
+    let stamp = chrono_stamp();
+    match commit_id() {
+        Some(commit) => format!("{commit}.{stamp}"),
+        None => stamp,
+    }
+}
+
+fn chrono_stamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    format!("{now:x}")
 }
 
 fn release_build() -> bool {

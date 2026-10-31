@@ -1069,6 +1069,56 @@ pub enum PhotoCapture {
 }
 
 #[cfg(target_os = "android")]
+pub enum Shot {
+    Ready(Vec<u8>),
+    Cancelled,
+    Denied,
+    Unavailable,
+}
+
+#[cfg(target_os = "android")]
+pub async fn take_photo() -> Shot {
+    let Some(runtime) = RUNTIME.get() else {
+        return Shot::Unavailable;
+    };
+    runtime
+        .spawn_blocking(take_photo_blocking)
+        .await
+        .unwrap_or(Shot::Unavailable)
+}
+
+#[cfg(target_os = "android")]
+fn take_photo_blocking() -> Shot {
+    let text = with_android_context(|env, context| {
+        let class = env.get_object_class(context)?;
+        let value = env
+            .call_static_method(&class, "takePhoto", "()Ljava/lang/String;", &[])?
+            .l()?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let string = jni::objects::JString::from(value);
+        let text: String = env.get_string(&string)?.into();
+        Ok(Some(text))
+    });
+    match text {
+        Ok(Some(path)) if path == "denied" => Shot::Denied,
+        Ok(Some(path)) if path == "cancelled" => Shot::Cancelled,
+        Ok(Some(path)) if path == "missing" || path.is_empty() => Shot::Unavailable,
+        Ok(Some(path)) => {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            let _ = std::fs::remove_file(&path);
+            if bytes.is_empty() {
+                Shot::Unavailable
+            } else {
+                Shot::Ready(bytes)
+            }
+        }
+        _ => Shot::Cancelled,
+    }
+}
+
+#[cfg(target_os = "android")]
 pub async fn capture_photo() -> PhotoCapture {
     let Some(runtime) = RUNTIME.get() else {
         return PhotoCapture::Unavailable;

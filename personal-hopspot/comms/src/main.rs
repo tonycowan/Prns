@@ -36,17 +36,23 @@ use scan::{contact_from_code, contact_from_image, pasted_public_key};
 
 #[cfg(not(target_arch = "wasm32"))]
 use model::apply_reaction;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+use model::fit_photo;
 #[cfg(not(target_arch = "wasm32"))]
 use model::note_from_them;
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+use model::prepare_photo;
 #[cfg(not(target_arch = "wasm32"))]
 use model::remember_call;
 #[cfg(target_arch = "wasm32")]
 use model::sample_people;
 use model::{
-    add_person, can_call, code_mark, contact_code, file_choice, file_name_of, file_too_big,
-    group_by_day, has_unread, map_window, mark_read, offered_ways, path_label, react_to_note,
+    add_person, can_call, code_mark, contact_code, delivered_mark, file_choice, file_name_of,
+    file_too_big, group_by_day, has_unread, keeps_file, map_window, mark_read, note_runs,
+    note_with_file, note_with_photo, offered_ways, path_label, photo_choice, react_to_note,
     remove_person, rename_person, retry_note, shown_words, write_file_note, write_note,
-    write_placed_note, NoteKind, OfferedWays, Page, Person, Place, Reach, Reaction, PLACEHOLDER,
+    write_placed_note, FittedPhoto, NoteKind, Page, Person, Place, Reach, Reaction, PHOTO_FILE,
+    PLACEHOLDER,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use model::{fail_note, fail_their_file, land_their_file, post_note, settle_note};
@@ -55,7 +61,8 @@ const KEEP_KEYBOARD: &str = r#"
 if (!window.__touchbaseKeepKeyboard) {
   window.__touchbaseKeepKeyboard = true;
   var iphone = /iPhone|iPad|iPod/.test(navigator.userAgent);
-  if (iphone) {
+  var android = /Android/.test(navigator.userAgent);
+  if (iphone || android) {
     var keep = function (event) {
       var node = event.target;
       if (!node || !node.closest) return;
@@ -63,6 +70,13 @@ if (!window.__touchbaseKeepKeyboard) {
     };
     document.addEventListener("touchstart", keep, {capture: true, passive: false});
     document.addEventListener("mousedown", keep, true);
+  }
+  if (android) {
+    // The window already shortens for the keyboard. A second inset, or the
+    // home-indicator padding, leaves an empty row under send.
+    document.documentElement.style.setProperty("--dock-bottom", "8px");
+  }
+  if (iphone) {
     // The keyboard pans the page instead of shortening it, which carries the name
     // and the W I B U marks off the top. Follow the visible area.
     var root = document.documentElement;
@@ -71,6 +85,12 @@ if (!window.__touchbaseKeepKeyboard) {
       if (!view) return;
       root.style.setProperty("--keyboard-top", view.offsetTop + "px");
       root.style.setProperty("--keyboard-height", view.height + "px");
+      var covered = window.screen.height - (view.offsetTop + view.height);
+      if (covered > 160) {
+        root.style.setProperty("--dock-bottom", "8px");
+      } else {
+        root.style.removeProperty("--dock-bottom");
+      }
     };
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", fitKeyboard);
@@ -171,7 +191,7 @@ button, input, textarea {
   padding: 0;
 }
 button { cursor: pointer; }
-button:focus-visible, input:focus-visible, textarea:focus-visible {
+button:focus-visible, input:focus-visible, textarea:focus-visible, .draft:focus-visible {
   outline: 1px solid var(--pencil);
   outline-offset: 3px;
 }
@@ -279,6 +299,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   min-height: 44px;
 }
 .hand { font-family: var(--hand); }
+.narrator { font-family: var(--book); font-style: normal; }
 .actions {
   display: flex;
   justify-content: space-between;
@@ -429,12 +450,15 @@ input.who.rename {
   background-attachment: local;
 }
 .dock {
-  position: sticky;
-  bottom: 0;
+  flex: none;
+  position: relative;
   z-index: 2;
   margin-top: 8px;
-  padding-top: 6px;
-  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  padding:
+    6px
+    var(--edge-right)
+    var(--dock-bottom, max(8px, env(safe-area-inset-bottom)))
+    var(--edge-left);
   background: var(--paper);
 }
 .sheet.open {
@@ -496,6 +520,12 @@ input.who.rename {
 }
 .words.hand { font-size: 19.5px; color: var(--note); }
 .theirs .words.hand { font-family: var(--their-hand); font-size: 22px; }
+.words .spot {
+  display: inline;
+  font-size: 0.75em;
+  line-height: 1;
+  vertical-align: -0.05em;
+}
 .mine .note-body { margin-left: var(--edge-left); }
 .theirs .note-body { margin-right: var(--edge-left); }
 .mine .pack {
@@ -715,6 +745,24 @@ input.who.rename {
   opacity: 0;
   cursor: pointer;
 }
+.finder .shutters {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 48px;
+  row-gap: 16px;
+  align-items: center;
+  margin-top: 8px;
+}
+.note-photo {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(168px, 100%);
+  max-height: 168px;
+  margin: 0 0 8px;
+  cursor: pointer;
+}
+.mine .note-photo { margin-left: auto; }
 .finder { margin: 4px 0 8px; }
 .finder .well {
   position: relative;
@@ -739,6 +787,7 @@ input.who.rename {
 }
 .finder.rear .well { aspect-ratio: 3 / 4; }
 .finder.rear img { transform: none; }
+.finder.plain .well::after { display: none; }
 .finder .well::after {
   content: "";
   position: absolute;
@@ -762,33 +811,15 @@ input.who.rename {
   font-size: 15px;
 }
 .composer {
-  display: grid;
+  position: relative;
   margin-top: 8px;
   border-bottom: 1px solid var(--rule);
 }
-.composer::after {
-  content: attr(data-value) " ";
-  visibility: hidden;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  grid-area: 1 / 1;
-  min-width: 0;
-  max-height: calc(1.35em * 5);
-  overflow: hidden;
-  padding-left: 40px;
-  font-family: var(--hand);
-  font-size: 19.5px;
-  line-height: 1.35;
-}
-.composer textarea {
-  grid-area: 1 / 1;
+.composer .draft {
   min-width: 0;
   width: 100%;
-  height: 100%;
   min-height: 1.35em;
   max-height: calc(1.35em * 5);
-  resize: none;
   overflow-x: hidden;
   overflow-y: auto;
   white-space: pre-wrap;
@@ -800,8 +831,37 @@ input.who.rename {
   line-height: 1.35;
   text-align: left;
   color: var(--note);
+  caret-color: var(--note);
+  -webkit-user-select: text;
+  user-select: text;
 }
-.composer textarea::placeholder { color: var(--pencil); font-family: var(--hand); }
+.composer .pill {
+  display: inline-block;
+  vertical-align: baseline;
+  margin: 0 2px;
+  padding: 0 8px 1px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pencil) 18%, var(--paper));
+  color: var(--ink);
+  font-family: var(--book);
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+.composer .pill::before { content: attr(data-mark); }
+.composer .empty-hint {
+  position: absolute;
+  left: 40px;
+  top: 0;
+  color: var(--pencil);
+  font-family: var(--hand);
+  font-size: 19.5px;
+  line-height: 1.35;
+  pointer-events: none;
+}
 .write-row {
   position: relative;
   display: flex;
@@ -994,6 +1054,19 @@ fn font_face(family: &str, bytes: &[u8]) -> String {
         "@font-face {{ font-family: \"{family}\"; font-style: normal; font-weight: 400; font-display: swap; src: url(data:font/woff2;base64,{}) format(\"woff2\"); }}\n",
         base64(bytes)
     )
+}
+
+fn kept_photo(note_id: u64) -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = note_id;
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bytes = session::kept_file(note_id)?;
+        Some(format!("data:image/jpeg;base64,{}", base64(&bytes)))
+    }
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -1499,7 +1572,7 @@ fn main() {
             banner::install();
             adopt_scene_lifecycle();
         }
-        eprintln!("touchbase: starting the journal");
+        eprintln!("touchbase: starting the journal {}", app_version());
         session::start_default().expect("the journal session could not start");
         eprintln!("touchbase: opening the window");
         dioxus::LaunchBuilder::mobile().launch(App);
@@ -1670,6 +1743,7 @@ fn App() -> Element {
     let mut draft_note = use_signal(String::new);
     let mut draft_place = use_signal(|| None::<Place>);
     let mut place_epoch = use_signal(|| 0_u64);
+    let mut styled = use_signal(|| 0_u64);
     let mut visit = use_signal(|| 0_u64);
     let mut wires = use_signal(read_wires);
     let mut voice = use_signal(VoiceLine::quiet);
@@ -1731,14 +1805,20 @@ fn App() -> Element {
                                     }
                                 }
                                 let name = person.name.clone();
-                                let words = if arrived.words.trim().is_empty() {
-                                    if arrived.file_name.is_empty() {
-                                        "file".to_string()
-                                    } else {
-                                        arrived.file_name.clone()
-                                    }
+                                let words = shown_words(
+                                    &arrived.words,
+                                    arrived.place,
+                                    Some(arrived.file_name.as_str())
+                                        .filter(|name| !name.is_empty()),
+                                );
+                                let words = if !words.is_empty() {
+                                    words
+                                } else if !arrived.file_name.is_empty() {
+                                    arrived.file_name.clone()
+                                } else if arrived.words.trim().is_empty() {
+                                    "file".to_string()
                                 } else {
-                                    shown_words(&arrived.words, arrived.place)
+                                    words
                                 };
                                 read_if_open(person, page());
                                 commit_people(people, listed);
@@ -2095,6 +2175,7 @@ fn App() -> Element {
                                     film_at: film_at(),
                                     reach: reach(),
                                     place_epoch: place_epoch,
+                                    styled: styled,
                                     tail: tail(),
                                     transfer: transfer(),
                                     landed: download_toast().0,
@@ -2111,6 +2192,7 @@ fn App() -> Element {
                                             }
                                             text.push_str(PLACEHOLDER);
                                             draft_note.set(text);
+                                            styled.set(styled() + 1);
                                         }
                                     },
                                     on_back: move |_| page.set(Page::People),
@@ -2197,6 +2279,9 @@ fn App() -> Element {
                                     },
                                     on_write: move |file: Option<(String, Vec<u8>)>| {
                                         let words = draft_note();
+                                        let file = file.filter(|(name, bytes)| {
+                                            !bytes.is_empty() && keeps_file(&words, name)
+                                        });
                                         let place = if words.contains(PLACEHOLDER) {
                                             draft_place()
                                         } else {
@@ -3389,6 +3474,7 @@ fn JournalPage(
     film_at: u32,
     reach: Reach,
     place_epoch: Signal<u64>,
+    styled: Signal<u64>,
     tail: u64,
     transfer: TransferFace,
     landed: u64,
@@ -3410,13 +3496,9 @@ fn JournalPage(
     } else {
         None
     };
-    let real = person.identity.trim().len() == 128;
+    let real = crate::model::is_added_contact(&person.identity);
     let ways = if real {
-        if reach.pending {
-            OfferedWays::none()
-        } else {
-            reach.ways
-        }
+        crate::model::call_ways(&reach)
     } else {
         offered_ways(person.id)
     };
@@ -3443,8 +3525,58 @@ fn JournalPage(
     let embeds = use_signal(|| false);
     let picked_name = use_signal(String::new);
     let picked_bytes = use_signal(Vec::<u8>::new);
+    let mut file_mark = use_signal(|| None::<(String, String)>);
+    let mut as_photo = use_signal(|| false);
+    let shooting = use_signal(|| false);
+    let shot_frame = use_signal(String::new);
+    let mut paint_job = use_signal(|| None::<(String, String)>);
+    let seen_style = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(styled())));
+    {
+        let draft = draft.clone();
+        let on_draft = on_draft.clone();
+        use_effect(move || {
+            let Some((previous, name)) = file_mark() else {
+                return;
+            };
+            file_mark.set(None);
+            let photo = as_photo();
+            as_photo.set(false);
+            let next = if photo {
+                note_with_photo(&draft, &previous)
+            } else {
+                note_with_file(&draft, &previous, &name)
+            };
+            paint_job.set(Some((next.clone(), name)));
+            on_draft.call(next);
+        });
+    }
+    {
+        let draft = draft.clone();
+        let seen_style = seen_style.clone();
+        use_effect(move || {
+            let tick = styled();
+            if tick == seen_style.get() {
+                return;
+            }
+            seen_style.set(tick);
+            paint_job.set(Some((draft.clone(), picked_name())));
+        });
+    }
+    use_effect(move || {
+        let Some((words, name)) = paint_job() else {
+            return;
+        };
+        spawn(async move {
+            paint_sheet(&composer_html(&words, &name), &words).await;
+        });
+    });
+    let draft_epoch = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u64)));
     let plus_at = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u128)));
     let place_at = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u128)));
+    let file_at = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u128)));
+    let photo_at = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u128)));
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+    use_drop(|| viewfinder::stop());
     let embed_notice = use_signal(String::new);
     let mut mounted = use_signal(|| None::<std::rc::Rc<MountedData>>);
     let pinned = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(true)));
@@ -3549,7 +3681,9 @@ fn JournalPage(
                     }
                 }
             }
+            }
             div { class: "dock",
+                {photo_finder(shooting, shot_frame, reach.file_limit, picked_name, picked_bytes, embeds, embed_notice, file_mark, as_photo)}
                 if film.is_some() || !hint.is_empty() {
                     div { class: "call-line",
                         if let Some(film) = film {
@@ -3610,27 +3744,65 @@ fn JournalPage(
                                         },
                                         "location"
                                     }
-                                    {file_choice_row(file_choice(reach.file_limit), reach.file_limit, picked_name, picked_bytes, embeds, embed_notice)}
+                                    {photo_choice_row(photo_choice(reach.file_limit), reach.file_limit, picked_name, picked_bytes, embeds, embed_notice, file_mark, as_photo, shooting, shot_frame, photo_at.clone())}
+                                    {file_choice_row(file_choice(reach.file_limit), reach.file_limit, picked_name, picked_bytes, embeds, embed_notice, file_mark, file_at.clone())}
                                 }
                             }
                         }
-                        div { class: "composer", "data-value": "{draft}",
-                            textarea {
-                                class: "hand",
+                        div { class: "composer",
+                            if draft.is_empty() {
+                                span { class: "empty-hint", "Write a note" }
+                            }
+                            div {
+                                id: "draft-sheet",
+                                class: "draft hand",
+                                contenteditable: "true",
+                                role: "textbox",
+                                tabindex: "0",
                                 aria_label: "Write a note",
-                                placeholder: "Write a note",
-                                rows: "1",
-                                value: "{draft}",
-                                onmounted: move |event| {
-                                    spawn(async move {
-                                        let _ = event.set_focus(true).await;
-                                    });
+                                aria_multiline: "true",
+                                onmounted: {
+                                    let words = draft.clone();
+                                    let name = picked_name();
+                                    move |event| {
+                                        let words = words.clone();
+                                        let name = name.clone();
+                                        spawn(async move {
+                                            let _ = event.set_focus(true).await;
+                                            if !words.is_empty() {
+                                                paint_sheet(&composer_html(&words, &name), &words).await;
+                                            }
+                                        });
+                                    }
                                 },
-                                oninput: move |event| on_draft.call(event.value()),
-                                onkeydown: move |event| {
-                                    if event.key() == Key::Enter && !event.modifiers().shift() {
-                                        event.prevent_default();
-                                        post_draft(picked_name, picked_bytes, embeds, embed_notice, &write_from_key);
+                                oninput: {
+                                    let on_draft = on_draft.clone();
+                                    let draft_epoch = draft_epoch.clone();
+                                    move |_| {
+                                        let draft_epoch = draft_epoch.clone();
+                                        let seen = draft_epoch.get();
+                                        spawn(async move {
+                                            if draft_epoch.get() != seen {
+                                                return;
+                                            }
+                                            if let Some(text) = composer_text().await {
+                                                if draft_epoch.get() == seen {
+                                                    on_draft.call(text);
+                                                }
+                                            }
+                                        });
+                                    }
+                                },
+                                onkeydown: {
+                                    let on_draft = on_draft.clone();
+                                    let write_from_key = write_from_key.clone();
+                                    let draft_epoch = draft_epoch.clone();
+                                    move |event| {
+                                        if event.key() == Key::Enter && !event.modifiers().shift() {
+                                            event.prevent_default();
+                                            let draft_epoch = draft_epoch.clone();
+                                            send_note_from_sheet(on_draft, picked_name, picked_bytes, embeds, embed_notice, write_from_key, draft_epoch);
+                                        }
                                     }
                                 },
                             }
@@ -3685,8 +3857,13 @@ fn JournalPage(
                                 button {
                                     class: "send",
                                     aria_label: "Send this note",
-                                    onclick: move |_| {
-                                        post_draft(picked_name, picked_bytes, embeds, embed_notice, &write_from_button);
+                                    onclick: {
+                                        let on_draft = on_draft.clone();
+                                        let draft_epoch = draft_epoch.clone();
+                                        move |_| {
+                                            let draft_epoch = draft_epoch.clone();
+                                            send_note_from_sheet(on_draft, picked_name, picked_bytes, embeds, embed_notice, write_from_button, draft_epoch);
+                                        }
                                     },
                                     "send"
                                 }
@@ -3694,16 +3871,290 @@ fn JournalPage(
                         }
                     }
                 }
-                if can_note && !picked_name().is_empty() {
-                    p { class: "attached", "{picked_name}" }
-                }
                 if can_note && !embed_notice().is_empty() {
                     p { class: "hint", "{embed_notice}" }
                 }
             }
-            }
         }
     }
+}
+
+fn js_string(text: &str) -> String {
+    let mut out = String::from('"');
+    for ch in text.chars() {
+        match ch {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            '<' => out.push_str("\\u003c"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn html_text(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' => out.push_str("<br>"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn html_attr(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' | '\r' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The note, with location and file marks wrapped so they use the page face.
+///
+/// A mark's words live in `data-mark` and are drawn with CSS. They are not a
+/// text node: Android's keyboard reads those, and would autocomplete the pill
+/// into the rest of the note.
+fn composer_html(words: &str, file_name: &str) -> String {
+    let mut html = String::new();
+    for run in note_runs(words, file_name) {
+        if run.mark {
+            html.push_str("<span class=\"narrator pill\" contenteditable=\"false\" data-mark=\"");
+            html.push_str(&html_attr(&run.text));
+            html.push_str("\"></span>");
+        } else {
+            html.push_str(&html_text(&run.text));
+        }
+    }
+    html
+}
+
+async fn paint_sheet(html: &str, words: &str) {
+    let script = format!(
+        r#"(function () {{
+  var node = document.getElementById("draft-sheet");
+  if (!node) return;
+  if (!node.dataset.bound) {{
+    node.dataset.bound = "1";
+    node.addEventListener("paste", function (event) {{
+      event.preventDefault();
+      var text = event.clipboardData && event.clipboardData.getData("text/plain");
+      if (text) document.execCommand("insertText", false, text);
+    }});
+    node.addEventListener("beforeinput", function (event) {{
+      if (node.dataset.painting === "1") {{
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }}
+    }}, true);
+    node.addEventListener("keydown", function (event) {{
+      var back = event.key === "Backspace" || event.keyCode === 8;
+      var del = event.key === "Delete" || event.keyCode === 46;
+      if (!back && !del) return;
+      if (event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
+      var sel = window.getSelection();
+      if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return;
+      var range = sel.getRangeAt(0);
+      var pill = pillHolding(range.startContainer, node) || pillBeside(node, range, back);
+      if (!pill) return;
+      event.preventDefault();
+      var next = pill.nextSibling;
+      pill.remove();
+      var caret = document.createRange();
+      if (next && next.parentNode) {{
+        caret.setStartBefore(next);
+        caret.collapse(true);
+      }} else {{
+        caret.selectNodeContents(node);
+        caret.collapse(false);
+      }}
+      seat(node);
+      sel.removeAllRanges();
+      sel.addRange(caret);
+      node.dispatchEvent(new Event("input", {{ bubbles: true }}));
+    }}, true);
+    node.addEventListener("input", function () {{
+      if (node.dataset.painting === "1") return;
+      seat(node);
+    }});
+    node.addEventListener("mouseup", function () {{ followPill(node); }});
+    node.addEventListener("keyup", function () {{ followPill(node); }});
+  }}
+  function pillHolding(start, sheet) {{
+    var box = start;
+    while (box && box !== sheet) {{
+      if (box.nodeType === 1 && box.classList && box.classList.contains("pill")) return box;
+      box = box.parentNode;
+    }}
+    return null;
+  }}
+  function neighborPill(from, dir) {{
+    var sibling = dir < 0 ? from.previousSibling : from.nextSibling;
+    while (sibling && sibling.nodeType === 3 && sibling.textContent.replace(/\u200b/g, "").length === 0) {{
+      sibling = dir < 0 ? sibling.previousSibling : sibling.nextSibling;
+    }}
+    if (sibling && sibling.nodeType === 1 && sibling.classList && sibling.classList.contains("pill")) return sibling;
+    return null;
+  }}
+  function pillBeside(sheet, range, back) {{
+    var box = range.startContainer;
+    var offset = range.startOffset;
+    if (box.nodeType === 3) {{
+      if (back) {{
+        var visible = box.textContent.replace(/\u200b/g, "");
+        if (offset > 0 && visible.length > 0) return null;
+        return neighborPill(box, -1);
+      }}
+      if (offset < box.textContent.length) return null;
+      return neighborPill(box, 1);
+    }}
+    if (box !== sheet && !(box.classList && box.classList.contains("draft"))) return null;
+    var child = box.childNodes[back ? offset - 1 : offset];
+    if (!child) return null;
+    if (child.nodeType === 1 && child.classList && child.classList.contains("pill")) return child;
+    if (child.nodeType === 3) return neighborPill(child, back ? -1 : 1);
+    return null;
+  }}
+  function sheetText(root) {{
+    var out = "";
+    var kids = root.childNodes;
+    for (var i = 0; i < kids.length; i++) {{
+      var child = kids[i];
+      if (child.nodeType === 3) out += child.textContent;
+      else if (child.nodeType === 1) {{
+        if (child.classList && child.classList.contains("pill")) out += child.getAttribute("data-mark") || "";
+        else if (child.tagName === "BR") out += "\n";
+        else out += sheetText(child);
+      }}
+    }}
+    return out;
+  }}
+  function seat(sheet) {{
+    var last = sheet.lastChild;
+    if (!last || last.nodeType !== 1 || !last.classList || !last.classList.contains("pill")) return;
+    sheet.appendChild(document.createTextNode("\u200b"));
+  }}
+  function followPill(sheet) {{
+    if (sheet.dataset.painting === "1") return;
+    var sel = window.getSelection();
+    if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return;
+    if (sel.anchorNode !== sheet && !sheet.contains(sel.anchorNode)) return;
+    seat(sheet);
+    var last = sheet.lastChild;
+    if (!last || last.nodeType !== 3) return;
+    var range = sel.getRangeAt(0);
+    if (range.startContainer === last) return;
+    if (range.startContainer !== sheet) return;
+    var pill = last.previousSibling;
+    if (!pill || !pill.classList || !pill.classList.contains("pill")) return;
+    var index = Array.prototype.indexOf.call(sheet.childNodes, pill);
+    if (range.startOffset <= index) return;
+    var next = document.createRange();
+    next.setStart(last, last.textContent.length);
+    next.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(next);
+  }}
+  function flat(text) {{
+    text = text.replace(/\u00a0/g, " ").replace(/\u200b/g, "");
+    if (text.endsWith("\n")) text = text.slice(0, -1);
+    return text;
+  }}
+  var want = {want};
+  if (flat(sheetText(node)) === want) return;
+  node.dataset.painting = "1";
+  node.innerHTML = {html};
+  seat(node);
+  setTimeout(function () {{ delete node.dataset.painting; }}, 150);
+  var range = document.createRange();
+  var tail = node.lastChild;
+  if (tail && tail.nodeType === 3) {{
+    range.setStart(tail, tail.textContent.length);
+    range.collapse(true);
+  }} else {{
+    range.selectNodeContents(node);
+    range.collapse(false);
+  }}
+  var sel = window.getSelection();
+  if (sel) {{
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }}
+}})();"#,
+        want = js_string(words),
+        html = js_string(html),
+    );
+    document::eval(&script);
+}
+
+async fn composer_text() -> Option<String> {
+    let mut eval = document::eval(
+        r#"(function () {
+  var node = document.getElementById("draft-sheet");
+  if (!node) { dioxus.send("0"); return; }
+  function sheetText(root) {
+    var out = "";
+    var kids = root.childNodes;
+    for (var i = 0; i < kids.length; i++) {
+      var child = kids[i];
+      if (child.nodeType === 3) out += child.textContent;
+      else if (child.nodeType === 1) {
+        if (child.classList && child.classList.contains("pill")) out += child.getAttribute("data-mark") || "";
+        else if (child.tagName === "BR") out += "\n";
+        else out += sheetText(child);
+      }
+    }
+    return out;
+  }
+  var text = sheetText(node).replace(/\u00a0/g, " ").replace(/\u200b/g, "");
+  if (text.endsWith("\n")) text = text.slice(0, -1);
+  dioxus.send("1" + text);
+})();"#,
+    );
+    match eval.recv::<String>().await {
+        Ok(text) if text.starts_with('1') => Some(text[1..].to_string()),
+        _ => None,
+    }
+}
+
+fn send_note_from_sheet(
+    on_draft: EventHandler<String>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    embeds: Signal<bool>,
+    embed_notice: Signal<String>,
+    on_write: EventHandler<Option<(String, Vec<u8>)>>,
+    draft_epoch: std::rc::Rc<std::cell::Cell<u64>>,
+) {
+    spawn(async move {
+        // A keystroke still in flight must not write the sent words back after this.
+        draft_epoch.set(draft_epoch.get().wrapping_add(1));
+        if let Some(text) = composer_text().await {
+            on_draft.call(text);
+        }
+        post_draft(picked_name, picked_bytes, embeds, embed_notice, &on_write);
+        paint_sheet(&composer_html("", ""), "").await;
+    });
 }
 
 fn post_draft(
@@ -3750,13 +4201,16 @@ fn store_pick(
     mut picked_bytes: Signal<Vec<u8>>,
     mut embeds: Signal<bool>,
     mut notice: Signal<String>,
+    mut file_mark: Signal<Option<(String, String)>>,
 ) {
     match pick {
         HeldFile::Ready(name, bytes) => {
-            picked_name.set(name);
+            let previous = picked_name();
+            picked_name.set(name.clone());
             picked_bytes.set(bytes);
             notice.set(String::new());
             embeds.set(false);
+            file_mark.set(Some((previous, name)));
         }
         HeldFile::Over => {
             notice.set(file_too_big(limit));
@@ -3769,6 +4223,321 @@ fn store_pick(
     }
 }
 
+fn keep_shot(
+    fitted: FittedPhoto,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    embeds: Signal<bool>,
+    mut notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    mut as_photo: Signal<bool>,
+) {
+    match fitted {
+        FittedPhoto::Ready(jpeg) => {
+            as_photo.set(true);
+            store_pick(
+                HeldFile::Ready(PHOTO_FILE.to_string(), jpeg),
+                limit,
+                picked_name,
+                picked_bytes,
+                embeds,
+                notice,
+                file_mark,
+            );
+        }
+        FittedPhoto::Over => {
+            as_photo.set(false);
+            store_pick(
+                HeldFile::Over,
+                limit,
+                picked_name,
+                picked_bytes,
+                embeds,
+                notice,
+                file_mark,
+            );
+        }
+        FittedPhoto::Unreadable => {
+            as_photo.set(false);
+            store_pick(
+                HeldFile::Unreadable,
+                limit,
+                picked_name,
+                picked_bytes,
+                embeds,
+                notice,
+                file_mark,
+            );
+            notice.set("That photo could not be read.".into());
+        }
+    }
+}
+
+fn photo_finder(
+    shooting: Signal<bool>,
+    shot_frame: Signal<String>,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    embeds: Signal<bool>,
+    notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    as_photo: Signal<bool>,
+) -> Element {
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+    {
+        let _ = (
+            shooting,
+            shot_frame,
+            limit,
+            picked_name,
+            picked_bytes,
+            embeds,
+            notice,
+            file_mark,
+            as_photo,
+        );
+        return rsx! {};
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+    {
+        let mut shooting = shooting;
+        let mut shot_frame = shot_frame;
+        let picture = shot_frame();
+        let finder = if cfg!(target_os = "ios") {
+            "finder rear plain"
+        } else {
+            "finder plain"
+        };
+        rsx! {
+            if shooting() {
+                div { class: "{finder}",
+                    div { class: "well",
+                        if picture.is_empty() {
+                            p { class: "opening", "Opening the camera…" }
+                        } else {
+                            img { src: "{picture}", alt: "Camera" }
+                        }
+                    }
+                    div { class: "shutters",
+                        button {
+                            class: "photo",
+                            onclick: move |_| {
+                                let fitted = viewfinder::take_image()
+                                    .map(|image| fit_photo(image, limit))
+                                    .unwrap_or(FittedPhoto::Unreadable);
+                                viewfinder::stop();
+                                shooting.set(false);
+                                shot_frame.set(String::new());
+                                keep_shot(fitted, limit, picked_name, picked_bytes, embeds, notice, file_mark, as_photo);
+                            },
+                            "Take the photo"
+                        }
+                        button {
+                            class: "photo",
+                            onclick: move |_| {
+                                viewfinder::stop();
+                                shooting.set(false);
+                                shot_frame.set(String::new());
+                            },
+                            "Close the camera"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn photo_choice_row(
+    label: String,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    embeds: Signal<bool>,
+    notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    as_photo: Signal<bool>,
+    shooting: Signal<bool>,
+    shot_frame: Signal<String>,
+    photo_at: std::rc::Rc<std::cell::Cell<u128>>,
+) -> Element {
+    let _ = (shooting, shot_frame);
+    rsx! {
+        div {
+            class: "choice",
+            role: "button",
+            onpointerdown: move |event| event.prevent_default(),
+            ontouchstart: move |event| event.prevent_default(),
+            onpointerup: {
+                let photo_at = photo_at.clone();
+                move |event| {
+                    event.prevent_default();
+                    begin_photo(photo_at.as_ref(), limit, picked_name, picked_bytes, embeds, notice, file_mark, as_photo);
+                }
+            },
+            ontouchend: {
+                let photo_at = photo_at.clone();
+                move |event| {
+                    event.prevent_default();
+                    begin_photo(photo_at.as_ref(), limit, picked_name, picked_bytes, embeds, notice, file_mark, as_photo);
+                }
+            },
+            "{label}"
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn begin_photo(
+    last: &std::cell::Cell<u128>,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    mut embeds: Signal<bool>,
+    mut notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    as_photo: Signal<bool>,
+) {
+    if !once_per_tap(last) {
+        return;
+    }
+    embeds.set(false);
+    notice.set(String::new());
+    spawn(async move {
+        match session::take_photo().await {
+            session::Shot::Ready(bytes) => keep_shot(
+                prepare_photo(&bytes, limit),
+                limit,
+                picked_name,
+                picked_bytes,
+                embeds,
+                notice,
+                file_mark,
+                as_photo,
+            ),
+            session::Shot::Denied => {
+                notice.set("N10A needs the camera to take a photo.".into());
+            }
+            session::Shot::Unavailable => {
+                notice.set("The camera didn't open.".into());
+            }
+            session::Shot::Cancelled => {}
+        }
+    });
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+fn photo_choice_row(
+    label: String,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    mut embeds: Signal<bool>,
+    mut notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    as_photo: Signal<bool>,
+    mut shooting: Signal<bool>,
+    mut shot_frame: Signal<String>,
+    photo_at: std::rc::Rc<std::cell::Cell<u128>>,
+) -> Element {
+    let _ = (limit, picked_name, picked_bytes, file_mark, as_photo);
+    rsx! {
+        div {
+            class: "choice",
+            role: "button",
+            onclick: move |_| {
+                if !once_per_tap(photo_at.as_ref()) {
+                    return;
+                }
+                embeds.set(false);
+                shot_frame.set(String::new());
+                shooting.set(true);
+                let token = viewfinder::start_for_photo();
+                spawn(async move {
+                    loop {
+                        if viewfinder::token() != token || !shooting() {
+                            break;
+                        }
+                        match viewfinder::look() {
+                            viewfinder::View::Picture(url) => {
+                                if shot_frame() != url {
+                                    shot_frame.set(url);
+                                }
+                            }
+                            viewfinder::View::Denied => {
+                                viewfinder::stop();
+                                shooting.set(false);
+                                shot_frame.set(String::new());
+                                notice.set("N10A needs the camera to take a photo.".into());
+                                break;
+                            }
+                            viewfinder::View::Unavailable => {
+                                viewfinder::stop();
+                                shooting.set(false);
+                                shot_frame.set(String::new());
+                                notice.set("The camera didn't open.".into());
+                                break;
+                            }
+                            _ => {}
+                        }
+                        session::rest(80).await;
+                    }
+                });
+            },
+            "{label}"
+        }
+    }
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows"
+)))]
+fn photo_choice_row(
+    label: String,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    embeds: Signal<bool>,
+    notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    as_photo: Signal<bool>,
+    shooting: Signal<bool>,
+    shot_frame: Signal<String>,
+    photo_at: std::rc::Rc<std::cell::Cell<u128>>,
+) -> Element {
+    let _ = (shooting, shot_frame, photo_at);
+    rsx! {
+        label {
+            class: "choice",
+            "{label}"
+            input {
+                r#type: "file",
+                accept: "image/*",
+                capture: "environment",
+                onchange: move |event| {
+                    let Some(file) = event.files().into_iter().next() else {
+                        return;
+                    };
+                    embeds.set(false);
+                    spawn(async move {
+                        let fitted = match file.read_bytes().await {
+                            Ok(bytes) => prepare_photo(&bytes, limit),
+                            Err(_) => FittedPhoto::Unreadable,
+                        };
+                        keep_shot(fitted, limit, picked_name, picked_bytes, embeds, notice, file_mark, as_photo);
+                    });
+                },
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "android")]
 fn file_choice_row(
     label: String,
@@ -3777,34 +4546,86 @@ fn file_choice_row(
     picked_bytes: Signal<Vec<u8>>,
     embeds: Signal<bool>,
     notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    file_at: std::rc::Rc<std::cell::Cell<u128>>,
 ) -> Element {
     rsx! {
         div {
             class: "choice",
             role: "button",
-            onclick: move |_| {
-                let picked_name = picked_name;
-                let picked_bytes = picked_bytes;
-                let embeds = embeds;
-                let notice = notice;
-                spawn(async move {
-                    match session::choose_file(limit).await {
-                        session::ChosenFile::Ready { name, bytes } => {
-                            store_pick(judge_file(&name, &bytes, limit), limit, picked_name, picked_bytes, embeds, notice);
-                        }
-                        session::ChosenFile::Over => {
-                            store_pick(HeldFile::Over, limit, picked_name, picked_bytes, embeds, notice);
-                        }
-                        session::ChosenFile::Missing => {
-                            store_pick(HeldFile::Unreadable, limit, picked_name, picked_bytes, embeds, notice);
-                        }
-                        session::ChosenFile::Cancelled => {}
-                    }
-                });
+            onpointerdown: move |event| event.prevent_default(),
+            ontouchstart: move |event| event.prevent_default(),
+            onpointerup: {
+                let file_at = file_at.clone();
+                move |event| {
+                    event.prevent_default();
+                    begin_file(file_at.as_ref(), limit, picked_name, picked_bytes, embeds, notice, file_mark);
+                }
+            },
+            ontouchend: {
+                let file_at = file_at.clone();
+                move |event| {
+                    event.prevent_default();
+                    begin_file(file_at.as_ref(), limit, picked_name, picked_bytes, embeds, notice, file_mark);
+                }
             },
             "{label}"
         }
     }
+}
+
+#[cfg(target_os = "android")]
+fn begin_file(
+    last: &std::cell::Cell<u128>,
+    limit: Option<u64>,
+    picked_name: Signal<String>,
+    picked_bytes: Signal<Vec<u8>>,
+    mut embeds: Signal<bool>,
+    notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+) {
+    if !once_per_tap(last) {
+        return;
+    }
+    embeds.set(false);
+    spawn(async move {
+        match session::choose_file(limit).await {
+            session::ChosenFile::Ready { name, bytes } => {
+                store_pick(
+                    judge_file(&name, &bytes, limit),
+                    limit,
+                    picked_name,
+                    picked_bytes,
+                    embeds,
+                    notice,
+                    file_mark,
+                );
+            }
+            session::ChosenFile::Over => {
+                store_pick(
+                    HeldFile::Over,
+                    limit,
+                    picked_name,
+                    picked_bytes,
+                    embeds,
+                    notice,
+                    file_mark,
+                );
+            }
+            session::ChosenFile::Missing => {
+                store_pick(
+                    HeldFile::Unreadable,
+                    limit,
+                    picked_name,
+                    picked_bytes,
+                    embeds,
+                    notice,
+                    file_mark,
+                );
+            }
+            session::ChosenFile::Cancelled => {}
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -3815,7 +4636,10 @@ fn file_choice_row(
     picked_bytes: Signal<Vec<u8>>,
     embeds: Signal<bool>,
     notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    file_at: std::rc::Rc<std::cell::Cell<u128>>,
 ) -> Element {
+    let _ = file_at;
     rsx! {
         div {
             class: "choice",
@@ -3830,7 +4654,7 @@ fn file_choice_row(
                     .unwrap_or_else(|| "file".into());
                 let announced = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
                 if limit.is_some_and(|limit| announced > limit && announced != 0) {
-                    store_pick(HeldFile::Over, limit, picked_name, picked_bytes, embeds, notice);
+                    store_pick(HeldFile::Over, limit, picked_name, picked_bytes, embeds, notice, file_mark);
                     return;
                 }
                 match std::fs::read(&path) {
@@ -3841,6 +4665,7 @@ fn file_choice_row(
                         picked_bytes,
                         embeds,
                         notice,
+                        file_mark,
                     ),
                     Err(_) => store_pick(
                         HeldFile::Unreadable,
@@ -3849,6 +4674,7 @@ fn file_choice_row(
                         picked_bytes,
                         embeds,
                         notice,
+                        file_mark,
                     ),
                 }
             },
@@ -3884,7 +4710,10 @@ fn file_choice_row(
     picked_bytes: Signal<Vec<u8>>,
     embeds: Signal<bool>,
     notice: Signal<String>,
+    file_mark: Signal<Option<(String, String)>>,
+    file_at: std::rc::Rc<std::cell::Cell<u128>>,
 ) -> Element {
+    let _ = file_at;
     rsx! {
         label {
             class: "choice",
@@ -3898,7 +4727,7 @@ fn file_choice_row(
                     };
                     let announced = file.size();
                     if limit.is_some_and(|limit| announced > limit && announced != 0) {
-                        store_pick(HeldFile::Over, limit, picked_name, picked_bytes, embeds, notice);
+                        store_pick(HeldFile::Over, limit, picked_name, picked_bytes, embeds, notice, file_mark);
                         return;
                     }
                     let name = file.name();
@@ -3906,6 +4735,7 @@ fn file_choice_row(
                     let picked_bytes = picked_bytes;
                     let embeds = embeds;
                     let notice = notice;
+                    let file_mark = file_mark;
                     spawn(async move {
                         match file.read_bytes().await {
                             Ok(bytes) => store_pick(
@@ -3915,6 +4745,7 @@ fn file_choice_row(
                                 picked_bytes,
                                 embeds,
                                 notice,
+                                file_mark,
                             ),
                             Err(_) => store_pick(
                                 HeldFile::Unreadable,
@@ -3923,6 +4754,7 @@ fn file_choice_row(
                                 picked_bytes,
                                 embeds,
                                 notice,
+                                file_mark,
                             ),
                         }
                     });
@@ -4002,8 +4834,14 @@ fn NoteRow(
     };
     let side = if mine { "mine" } else { "theirs" };
     let tone = if settled { "" } else { "waiting" };
-    let shown = shown_words(&words, place);
-    let can_copy = kind == NoteKind::Text && !shown.is_empty();
+    let runs = note_runs(&words, file_name.as_deref().unwrap_or(""));
+    let marked = runs.iter().any(|run| run.mark);
+    let photo = file_name
+        .as_deref()
+        .is_some_and(|name| file_name_of(name) == PHOTO_FILE);
+    let shot = if photo { kept_photo(note_id) } else { None };
+    let copy_words = words.clone();
+    let can_copy = kind == NoteKind::Text && !words.trim().is_empty();
     let meter_label = if mine { "Sending" } else { "Receiving" };
     let show_failed = failed && !downloaded && meter.is_none();
     rsx! {
@@ -4043,7 +4881,7 @@ fn NoteRow(
                         PlaceMap { place }
                     }
                     div { class: "pack",
-                        if !shown.is_empty() {
+                        if !words.trim().is_empty() {
                             p {
                                 id: "note-{note_id}",
                                 class: "{words_class}",
@@ -4072,10 +4910,44 @@ fn NoteRow(
                                     });
                                 },
                                 onpointercancel: move |_| text_down.set(None),
-                                "{shown}"
+                                if marked {
+                                    for (i, run) in runs.into_iter().enumerate() {
+                                        if run.mark {
+                                            span { key: "{i}", class: "spot", "{delivered_mark(&run.text)}" }
+                                        } else {
+                                            span { key: "{i}", "{run.text}" }
+                                        }
+                                    }
+                                } else {
+                                    "{words}"
+                                }
                             }
                         }
-                        if let Some(name) = file_name.clone().filter(|name| !name.is_empty()) {
+                        if photo {
+                            if let Some(src) = shot {
+                                img {
+                                    class: "note-photo",
+                                    src: "{src}",
+                                    alt: "Photo",
+                                    role: "button",
+                                    aria_label: "Open this photo",
+                                    onpointerdown: move |event| event.stop_propagation(),
+                                    onpointerup: move |event| event.stop_propagation(),
+                                    onclick: move |event| {
+                                        event.stop_propagation();
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        session::show_kept_file(note_id, PHOTO_FILE);
+                                        #[cfg(target_arch = "wasm32")]
+                                        let _ = note_id;
+                                    },
+                                }
+                            }
+                            if landed {
+                                div { class: "file-line",
+                                    span { class: "toast", "In downloads" }
+                                }
+                            }
+                        } else if let Some(name) = file_name.clone().filter(|name| !name.is_empty()) {
                             div { class: "file-line",
                                 if failed && !mine {
                                     span { class: "attached", "{name}" }
@@ -4146,7 +5018,7 @@ fn NoteRow(
                                     on_react.call(choice);
                                 },
                                 on_copy: move |_| {
-                                    let full = shown.clone();
+                                    let full = copy_words.clone();
                                     spawn(async move {
                                         let selected = selection_inside(note_id).await;
                                         let text = copied_text(&full, &selected);
@@ -4446,6 +5318,17 @@ mod font_tests {
         assert!(css.contains("font-family: \"Kalam\""));
         assert!(css.contains("font-family: \"Patrick Hand\""));
         assert!(css.contains("font-family: \"Libre Baskerville\""));
+        assert!(css.contains(".narrator { font-family: var(--book);"));
+        let html = super::composer_html("See you 📍 Location there", "");
+        assert_eq!(
+            html,
+            "See you <span class=\"narrator pill\" contenteditable=\"false\" data-mark=\"📍 Location\"></span> there"
+        );
+        let html = super::composer_html("Bring 📎 notes & plans.txt", "notes & plans.txt");
+        assert_eq!(
+            html,
+            "Bring <span class=\"narrator pill\" contenteditable=\"false\" data-mark=\"📎 notes &amp; plans.txt\"></span>"
+        );
         assert!(css.contains("data:font/woff2;base64,"));
         assert!(!css.contains("fonts.googleapis.com"));
     }

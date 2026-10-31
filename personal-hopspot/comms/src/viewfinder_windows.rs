@@ -28,9 +28,13 @@ const PREVIEW_EDGE: u32 = 640;
 static RUN: AtomicU64 = AtomicU64::new(0);
 static CURRENT: AtomicU64 = AtomicU64::new(0);
 static STOP: AtomicBool = AtomicBool::new(false);
+static FOR_PHOTO: AtomicBool = AtomicBool::new(false);
 static HOLD: Mutex<()> = Mutex::new(());
 static PREVIEW: Mutex<Option<String>> = Mutex::new(None);
 static DONE: Mutex<Option<Done>> = Mutex::new(None);
+static STILL: Mutex<Option<(u32, u32, Vec<u8>)>> = Mutex::new(None);
+
+const STILL_EDGE: u32 = 1280;
 
 enum Done {
     Code(String),
@@ -49,16 +53,34 @@ pub enum View {
 
 /// Opens the camera. The returned token stops matching once the camera closes.
 pub fn start() -> u64 {
+    start_camera(false)
+}
+
+/// Opens the camera for one picture. A code in the frame does not close it.
+pub fn start_for_photo() -> u64 {
+    start_camera(true)
+}
+
+fn start_camera(photo: bool) -> u64 {
+    FOR_PHOTO.store(photo, Ordering::Release);
     STOP.store(false, Ordering::Release);
     let run = RUN.fetch_add(1, Ordering::AcqRel) + 1;
     CURRENT.store(run, Ordering::Release);
     *lock(&PREVIEW) = None;
     *lock(&DONE) = None;
+    *lock(&STILL) = None;
     std::thread::Builder::new()
         .name("journal-camera".into())
         .spawn(move || run_camera(run))
         .ok();
     run
+}
+
+/// The latest color frame, flipped to match the mirrored preview.
+pub fn take_image() -> Option<image::DynamicImage> {
+    let (width, height, mut rgb) = lock(&STILL).clone()?;
+    flip_horizontal(&mut rgb, width, height);
+    image::RgbImage::from_raw(width, height, rgb).map(image::DynamicImage::ImageRgb8)
 }
 
 /// Closes the camera, including when the page goes away.
@@ -157,7 +179,13 @@ fn run_camera(run: u64) {
                     *lock(&PREVIEW) = Some(picture);
                 }
             }
-            if let Some((name, identity)) = contact_from_bgra(&bgra, width, height, width * 4) {
+            if FOR_PHOTO.load(Ordering::Acquire) {
+                if let Some(still) = rgb_edge(&bgra, width, height, STILL_EDGE) {
+                    *lock(&STILL) = Some(still);
+                }
+            } else if let Some((name, identity)) =
+                contact_from_bgra(&bgra, width, height, width * 4)
+            {
                 *lock(&DONE) = Some(Done::Code(format!("{name}\n{identity}")));
                 STOP.store(true, Ordering::Release);
             }
@@ -307,6 +335,34 @@ fn preview_due() -> bool {
     }
     *last = Some(now);
     true
+}
+
+fn rgb_edge(bgra: &[u8], width: u32, height: u32, edge: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let (out_w, out_h, shrunk) = shrink_bgra(bgra, width, height, edge)?;
+    let mut rgb = Vec::with_capacity((out_w as usize) * (out_h as usize) * 3);
+    for pixel in shrunk.chunks_exact(4) {
+        rgb.push(pixel[2]);
+        rgb.push(pixel[1]);
+        rgb.push(pixel[0]);
+    }
+    Some((out_w, out_h, rgb))
+}
+
+fn flip_horizontal(rgb: &mut [u8], width: u32, height: u32) {
+    let width = width as usize;
+    let height = height as usize;
+    if width < 2 || rgb.len() < width.saturating_mul(height).saturating_mul(3) {
+        return;
+    }
+    for y in 0..height {
+        for x in 0..width / 2 {
+            let left = (y * width + x) * 3;
+            let right = (y * width + (width - 1 - x)) * 3;
+            for channel in 0..3 {
+                rgb.swap(left + channel, right + channel);
+            }
+        }
+    }
 }
 
 fn preview_url(bgra: &[u8], width: u32, height: u32) -> Option<String> {

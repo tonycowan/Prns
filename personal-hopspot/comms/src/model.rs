@@ -24,6 +24,13 @@ pub struct Place {
 /// when the note is sent, the place is sent with them.
 pub const PLACEHOLDER: &str = "📍 Location";
 
+/// Shown in the note while a photo is attached. The picture travels with the note
+/// when these words are still there.
+pub const PHOTO_MARK: &str = "📷 Photo";
+
+/// The file name a captured photo is stored under.
+pub const PHOTO_FILE: &str = "photo.jpg";
+
 impl Place {
     pub fn from_degrees(latitude: f64, longitude: f64) -> Option<Self> {
         if !latitude.is_finite()
@@ -60,12 +67,129 @@ impl Place {
     }
 }
 
-/// The words of a note, with the place marker taken out once the map is shown.
-pub fn shown_words(words: &str, place: Option<Place>) -> String {
-    if place.is_none() {
+/// The mark dropped into a note while a file is attached. The name is the file's name.
+pub fn file_placeholder(name: &str) -> String {
+    format!("📎 {}", file_name_of(name))
+}
+
+/// The pin or clip left in a delivered note, where the attachment sat in the words.
+/// The map and the file line are what the reader opens.
+pub fn delivered_mark(text: &str) -> &str {
+    match text.chars().next() {
+        Some(icon @ ('📍' | '📎' | '📷')) => &text[..icon.len_utf8()],
+        _ => text,
+    }
+}
+
+/// One stretch of a note. A mark is a location or a file name, set apart from the handwriting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoteRun {
+    pub mark: bool,
+    pub text: String,
+}
+
+/// Splits a note into handwriting and attachment marks.
+pub fn note_runs(words: &str, file_name: &str) -> Vec<NoteRun> {
+    let file_mark = if file_name.trim().is_empty() {
+        None
+    } else {
+        Some(file_placeholder(file_name))
+    };
+    let mut runs = Vec::new();
+    let mut rest = words;
+    while !rest.is_empty() {
+        let Some((at, len)) = earliest_mark(rest, file_mark.as_deref()) else {
+            runs.push(NoteRun {
+                mark: false,
+                text: rest.to_string(),
+            });
+            break;
+        };
+        if at > 0 {
+            runs.push(NoteRun {
+                mark: false,
+                text: rest[..at].to_string(),
+            });
+        }
+        let end = at + len;
+        runs.push(NoteRun {
+            mark: true,
+            text: rest[at..end].to_string(),
+        });
+        rest = &rest[end..];
+    }
+    runs
+}
+
+fn earliest_mark(words: &str, file_mark: Option<&str>) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    for marker in [Some(PLACEHOLDER), Some(PHOTO_MARK), file_mark]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(at) = words.find(marker) {
+            if best.is_none_or(|(earlier, _)| at < earlier) {
+                best = Some((at, marker.len()));
+            }
+        }
+    }
+    best
+}
+
+fn append_mark(words: &str, marker: &str) -> String {
+    let mut text = words.to_string();
+    if text.contains(marker) {
+        return text;
+    }
+    if !text.is_empty() && !text.ends_with(' ') && !text.ends_with('\n') {
+        text.push(' ');
+    }
+    text.push_str(marker);
+    text
+}
+
+/// Puts the file mark into the note. A previous file or photo mark is replaced.
+pub fn note_with_file(words: &str, previous: &str, name: &str) -> String {
+    let marker = file_placeholder(name);
+    let old = file_placeholder(previous);
+    if !previous.trim().is_empty() && words.contains(&old) {
+        return words.replacen(&old, &marker, 1);
+    }
+    if words.contains(PHOTO_MARK) {
+        return words.replacen(PHOTO_MARK, &marker, 1);
+    }
+    append_mark(words, &marker)
+}
+
+/// Puts the photo mark into the note. A previous file mark is replaced.
+pub fn note_with_photo(words: &str, previous: &str) -> String {
+    let old = file_placeholder(previous);
+    if !previous.trim().is_empty() && words.contains(&old) {
+        return words.replacen(&old, PHOTO_MARK, 1);
+    }
+    append_mark(words, PHOTO_MARK)
+}
+
+/// The attached file stays with the note when its mark is still in the words.
+pub fn keeps_file(words: &str, name: &str) -> bool {
+    words.contains(&file_placeholder(name))
+        || (file_name_of(name) == PHOTO_FILE && words.contains(PHOTO_MARK))
+}
+
+/// The words of a note, with a place or file marker taken out once that attachment is shown.
+pub fn shown_words(words: &str, place: Option<Place>, file_name: Option<&str>) -> String {
+    let file_name = file_name.map(str::trim).filter(|name| !name.is_empty());
+    if place.is_none() && file_name.is_none() {
         return words.to_string();
     }
-    let mut out = words.replace(PLACEHOLDER, "");
+    let mut out = words.to_string();
+    if place.is_some() {
+        out = out.replace(PLACEHOLDER, "");
+    }
+    if let Some(name) = file_name {
+        out = out.replace(&file_placeholder(name), "");
+        out = out.replace(PHOTO_MARK, "");
+    }
     while out.contains("  ") {
         out = out.replace("  ", " ");
     }
@@ -443,10 +567,17 @@ pub fn retry_note(
     ))
 }
 
-/// The voice button is shown for a real contact, and for the sample conversations
+/// A contact added from a code. The code carries a 32-character delivery address.
+/// A pasted identity key is 128 characters. Either one is a person who can be called.
+pub fn is_added_contact(identity: &str) -> bool {
+    let hex = identity.trim();
+    (hex.len() == 32 || hex.len() == 128) && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The voice button is shown for an added contact, and for the sample conversations
 /// that already offer a call.
 pub fn can_call(person: &Person) -> bool {
-    offered_ways(person.id).voice || person.identity.trim().len() == 128
+    offered_ways(person.id).voice || is_added_contact(&person.identity)
 }
 
 /// A voice call that just ended, written into the thread as a voice note.
@@ -734,6 +865,118 @@ impl Reach {
     }
 }
 
+/// The label in the note menu. An open path says "photo". A capped path names the ceiling.
+pub fn photo_choice(limit: Option<u64>) -> String {
+    match limit {
+        None => "photo".to_string(),
+        Some(bytes) => format!("photo <{}", size_word(bytes)),
+    }
+}
+
+/// A captured picture, small enough for the path that will carry it.
+pub enum FittedPhoto {
+    Ready(Vec<u8>),
+    Over,
+    Unreadable,
+}
+
+/// Shrinks and compresses a picture until it fits `limit`. An open path keeps a clear photo.
+pub fn fit_photo(image: image::DynamicImage, limit: Option<u64>) -> FittedPhoto {
+    let image = image.into_rgb8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return FittedPhoto::Unreadable;
+    }
+    let longest = width.max(height);
+    let mut edge = match limit {
+        None => longest.min(1600),
+        Some(bytes) if bytes >= 1_000_000 => longest.min(1280),
+        Some(bytes) if bytes >= 256 * 1024 => longest.min(960),
+        Some(bytes) if bytes >= 64 * 1024 => longest.min(640),
+        Some(bytes) if bytes >= 16 * 1024 => longest.min(360),
+        Some(_) => longest.min(160),
+    };
+    let mut quality = 75u8;
+    for _ in 0..24 {
+        let Some(jpeg) = encode_photo(&image, edge, quality) else {
+            return FittedPhoto::Unreadable;
+        };
+        if limit.is_none_or(|limit| jpeg.len() as u64 <= limit) {
+            return FittedPhoto::Ready(jpeg);
+        }
+        if quality > 35 {
+            quality = quality.saturating_sub(15);
+            continue;
+        }
+        if edge > 48 {
+            edge = (edge * 2 / 3).max(48);
+            quality = 55;
+            continue;
+        }
+        return FittedPhoto::Over;
+    }
+    FittedPhoto::Over
+}
+
+/// Reads a camera photo and fits it to the path. Exif orientation is applied.
+#[cfg_attr(
+    any(target_os = "macos", target_os = "ios", target_os = "windows"),
+    allow(dead_code)
+)]
+pub fn prepare_photo(bytes: &[u8], limit: Option<u64>) -> FittedPhoto {
+    let Some(image) = open_photo(bytes) else {
+        return FittedPhoto::Unreadable;
+    };
+    fit_photo(image, limit)
+}
+
+#[cfg_attr(
+    any(target_os = "macos", target_os = "ios", target_os = "windows"),
+    allow(dead_code)
+)]
+fn open_photo(bytes: &[u8]) -> Option<image::DynamicImage> {
+    use image::ImageDecoder;
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut image = image::DynamicImage::from_decoder(decoder).ok()?;
+    image.apply_orientation(orientation);
+    Some(image)
+}
+
+fn encode_photo(image: &image::RgbImage, edge: u32, quality: u8) -> Option<Vec<u8>> {
+    let (width, height) = image.dimensions();
+    let longest = width.max(height).max(1);
+    let (out_w, out_h) = if longest <= edge {
+        (width, height)
+    } else {
+        (
+            (u64::from(width) * u64::from(edge) / u64::from(longest)).max(1) as u32,
+            (u64::from(height) * u64::from(edge) / u64::from(longest)).max(1) as u32,
+        )
+    };
+    let scaled = if out_w == width && out_h == height {
+        image.clone()
+    } else {
+        image::imageops::resize(image, out_w, out_h, image::imageops::FilterType::Triangle)
+    };
+    let mut jpeg = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality);
+    image::ImageEncoder::write_image(
+        encoder,
+        scaled.as_raw(),
+        out_w,
+        out_h,
+        image::ExtendedColorType::Rgb8,
+    )
+    .ok()?;
+    Some(jpeg)
+}
+
 /// The label in the note menu. An open path says "file". A capped path names the ceiling.
 pub fn file_choice(limit: Option<u64>) -> String {
     match limit {
@@ -789,6 +1032,27 @@ pub fn file_name_of(raw: &str) -> String {
         "file".to_string()
     } else {
         name.to_string()
+    }
+}
+
+/// An open file on Wi-Fi, Internet, or USB is the fast path, so the call buttons
+/// are offered with it. A sample that came back too slow puts a size on the file,
+/// and that size is what hides the calls. Bluetooth's stand-in carries voice only.
+pub fn call_ways(reach: &Reach) -> OfferedWays {
+    match reach.winner.as_deref() {
+        Some("Wi-Fi" | "Internet" | "USB") if reach.file_limit.is_none() => OfferedWays {
+            note: true,
+            voice: true,
+            video: true,
+        },
+        Some("Bluetooth") if reach.ways == OfferedWays::none() && reach.file_limit.is_some() => {
+            OfferedWays {
+                note: true,
+                voice: true,
+                video: false,
+            }
+        }
+        _ => reach.ways,
     }
 }
 
@@ -1295,13 +1559,13 @@ pub fn code_mark(payload: &str) -> Option<(usize, Vec<(usize, usize)>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_person, apply_reaction, bits_per_second, can_call, code_mark, contact_code,
+        add_person, apply_reaction, bits_per_second, call_ways, can_call, code_mark, contact_code,
         decode_contacts, encode_contacts, fail_note, fail_their_file, file_choice, file_name_of,
         group_by_day, has_unread, land_their_file, mark_read, next_person_id, note_from_them,
         note_ids_from, numbered_file_name, offered_ways, path_label, react_to_note, remember_call,
         remove_person, rename_person, resource_carry, retry_note, sample_people, settle_note,
         ways_for_ack, write_file_note, write_note, Note, NoteKind, OfferedWays, Person, Place,
-        Reaction, ResourceCarry, OPEN_PATH_BPS, PLACEHOLDER, SMALLEST_ATTACHMENT,
+        Reach, Reaction, ResourceCarry, OPEN_PATH_BPS, PLACEHOLDER, SMALLEST_ATTACHMENT,
         VIDEO_ROUND_TRIP_MS,
     };
 
@@ -1320,6 +1584,73 @@ mod tests {
             "Bluetooth : 2 hops"
         );
         assert_eq!(path_label(false, false, None, None), "");
+    }
+
+    #[test]
+    fn an_open_fast_wire_offers_the_calls_before_a_sample() {
+        let open = Reach {
+            pending: false,
+            ways: OfferedWays::none(),
+            winner: Some("USB".to_string()),
+            hops: Some(1),
+            file_limit: None,
+        };
+        assert_eq!(
+            call_ways(&open),
+            OfferedWays {
+                note: true,
+                voice: true,
+                video: true,
+            }
+        );
+        let slow = Reach {
+            pending: false,
+            ways: OfferedWays {
+                note: true,
+                voice: false,
+                video: false,
+            },
+            winner: Some("USB".to_string()),
+            hops: Some(1),
+            file_limit: Some(2_048),
+        };
+        assert_eq!(call_ways(&slow), slow.ways);
+        let waiting = Reach::unknown();
+        assert_eq!(call_ways(&waiting), OfferedWays::none());
+        let stale = Reach {
+            pending: false,
+            ways: OfferedWays {
+                note: true,
+                voice: false,
+                video: false,
+            },
+            winner: Some("USB".to_string()),
+            hops: Some(1),
+            file_limit: None,
+        };
+        assert_eq!(
+            call_ways(&stale),
+            OfferedWays {
+                note: true,
+                voice: true,
+                video: true,
+            }
+        );
+        let radio = Reach {
+            pending: false,
+            ways: OfferedWays::none(),
+            winner: Some("Bluetooth".to_string()),
+            hops: Some(1),
+            file_limit: Some(256 * 1024),
+        };
+        assert_eq!(
+            call_ways(&radio),
+            OfferedWays {
+                note: true,
+                voice: true,
+                video: false,
+            }
+        );
     }
 
     #[test]
@@ -1399,7 +1730,7 @@ mod tests {
         let samples = sample_people();
         assert!(can_call(&samples[0]));
         assert!(can_call(&samples[1]));
-        assert!(!can_call(&samples[2]));
+        assert!(can_call(&samples[2]));
         let real = Person {
             id: 9,
             name: "Ned".into(),
@@ -1408,6 +1739,14 @@ mod tests {
             seen: 0,
         };
         assert!(can_call(&real));
+        let named = Person {
+            id: 10,
+            name: "No address".into(),
+            identity: "not-an-address".into(),
+            notes: Vec::new(),
+            seen: 0,
+        };
+        assert!(!can_call(&named));
     }
 
     #[test]
@@ -1990,8 +2329,96 @@ Hello
                 && center_y < tile.top + tile.edge
         }));
         assert_eq!(
-            super::shown_words(&format!("See you {PLACEHOLDER} there"), Some(place)),
+            super::shown_words(&format!("See you {PLACEHOLDER} there"), Some(place), None),
             "See you there"
         );
+        assert_eq!(
+            super::note_with_file("Bring this", "", "window.xml"),
+            "Bring this 📎 window.xml"
+        );
+        assert_eq!(
+            super::note_with_file("Bring this 📎 window.xml", "window.xml", "notes.txt"),
+            "Bring this 📎 notes.txt"
+        );
+        assert_eq!(
+            super::shown_words("Bring this 📎 window.xml", None, Some("window.xml")),
+            "Bring this"
+        );
+        assert_eq!(
+            super::note_runs(&format!("See you {PLACEHOLDER} there"), ""),
+            vec![
+                super::NoteRun {
+                    mark: false,
+                    text: "See you ".into(),
+                },
+                super::NoteRun {
+                    mark: true,
+                    text: PLACEHOLDER.into(),
+                },
+                super::NoteRun {
+                    mark: false,
+                    text: " there".into(),
+                },
+            ]
+        );
+        assert_eq!(super::delivered_mark(PLACEHOLDER), "📍");
+        assert_eq!(super::delivered_mark("📎 window.xml"), "📎");
+        assert_eq!(super::delivered_mark(super::PHOTO_MARK), "📷");
+        assert_eq!(
+            super::note_runs("Bring this 📎 window.xml", "window.xml"),
+            vec![
+                super::NoteRun {
+                    mark: false,
+                    text: "Bring this ".into(),
+                },
+                super::NoteRun {
+                    mark: true,
+                    text: "📎 window.xml".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_photo_uses_the_path_allowance() {
+        assert_eq!(super::photo_choice(None), "photo");
+        assert_eq!(super::photo_choice(Some(2_048)), "photo <2k");
+        assert_eq!(
+            super::note_with_photo("Look", ""),
+            format!("Look {}", super::PHOTO_MARK)
+        );
+        assert_eq!(
+            super::note_with_photo("Look 📎 window.xml", "window.xml"),
+            format!("Look {}", super::PHOTO_MARK)
+        );
+        assert_eq!(
+            super::note_with_file(
+                &format!("Look {}", super::PHOTO_MARK),
+                super::PHOTO_FILE,
+                "notes.txt"
+            ),
+            "Look 📎 notes.txt"
+        );
+        assert!(super::keeps_file(
+            &format!("Look {}", super::PHOTO_MARK),
+            super::PHOTO_FILE
+        ));
+        assert!(!super::keeps_file("Look", super::PHOTO_FILE));
+        let mut noisy = image::RgbImage::new(640, 480);
+        for (x, y, pixel) in noisy.enumerate_pixels_mut() {
+            pixel[0] = (x.wrapping_mul(13).wrapping_add(y.wrapping_mul(7))) as u8;
+            pixel[1] = (x.wrapping_mul(3).wrapping_add(y)) as u8;
+            pixel[2] = y.wrapping_mul(11) as u8;
+        }
+        let open = super::fit_photo(image::DynamicImage::ImageRgb8(noisy.clone()), None);
+        let tight = super::fit_photo(image::DynamicImage::ImageRgb8(noisy), Some(2_048));
+        let super::FittedPhoto::Ready(open) = open else {
+            panic!("open path");
+        };
+        let super::FittedPhoto::Ready(tight) = tight else {
+            panic!("tight path");
+        };
+        assert!(tight.len() <= 2_048, "{}", tight.len());
+        assert!(open.len() > tight.len());
     }
 }

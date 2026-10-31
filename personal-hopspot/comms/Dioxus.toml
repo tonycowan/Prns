@@ -30,6 +30,8 @@ info_plist = """
 <string>N10A uses Bluetooth to reach people you have added.</string>
 <key>NSBluetoothPeripheralUsageDescription</key>
 <string>N10A uses Bluetooth to reach people you have added.</string>
+<key>NSCameraUsageDescription</key>
+<string>N10A uses the camera to take a photo and to photograph a code.</string>
 <key>UIApplicationSceneManifest</key>
 <dict>
     <key>UIApplicationSupportsMultipleScenes</key>

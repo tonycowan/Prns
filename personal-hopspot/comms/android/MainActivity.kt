@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import android.content.Context
@@ -30,9 +31,11 @@ import android.provider.Settings
 import android.webkit.MimeTypeMap
 import android.util.Log
 import android.view.View
+import android.view.WindowManager
 import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -53,6 +56,9 @@ class MainActivity : WryActivity() {
     private var fileLatch: CountDownLatch? = null
     private var fileResult: AtomicReference<String?>? = null
     private var fileLimit: Long = 0
+    private var photoLatch: CountDownLatch? = null
+    private var photoResult: AtomicReference<String?>? = null
+    private var photoFile: File? = null
     private var wifi: WifiLan? = null
     private var scanner: CodeScan? = null
     private var film: Film? = null
@@ -123,6 +129,57 @@ class MainActivity : WryActivity() {
             }
         }
 
+    private val photoPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                launchCamera()
+            } else {
+                photoFile?.delete()
+                photoFile = null
+                photoResult?.set("denied")
+                photoLatch?.countDown()
+                photoLatch = null
+                photoResult = null
+            }
+        }
+
+    private val takePicture =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val latch = photoLatch
+            val saved = photoResult
+            val file = photoFile
+            photoLatch = null
+            photoResult = null
+            photoFile = null
+            if (latch == null || saved == null) {
+                file?.delete()
+                return@registerForActivityResult
+            }
+            if (result.resultCode == Activity.RESULT_OK && file != null && file.length() > 0L) {
+                saved.set(file.absolutePath)
+            } else if (result.resultCode == Activity.RESULT_OK && file != null) {
+                val bitmap = result.data?.extras?.get("data") as? android.graphics.Bitmap
+                if (bitmap != null) {
+                    val wrote = runCatching {
+                        file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }
+                    }.isSuccess && file.length() > 0L
+                    if (wrote) {
+                        saved.set(file.absolutePath)
+                    } else {
+                        file.delete()
+                        saved.set("missing")
+                    }
+                } else {
+                    file.delete()
+                    saved.set("missing")
+                }
+            } else {
+                file?.delete()
+                saved.set(if (result.resultCode == Activity.RESULT_CANCELED) "cancelled" else "missing")
+            }
+            latch.countDown()
+        }
+
     private val radios =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             startRadios()
@@ -137,6 +194,7 @@ class MainActivity : WryActivity() {
         process = applicationContext
         bindToWifi()
         super.onCreate(savedInstanceState)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         instance = this
         val lan = WifiLan(this)
         lan.start()
@@ -407,6 +465,68 @@ class MainActivity : WryActivity() {
     }
 
     private fun format(location: Location) = "${location.latitude},${location.longitude}"
+
+    fun capturePhoto(): String? {
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<String?>(null)
+        runOnUiThread {
+            photoLatch = latch
+            photoResult = result
+            val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                launchCamera()
+            } else {
+                try {
+                    photoPermission.launch(Manifest.permission.CAMERA)
+                } catch (_: IllegalStateException) {
+                    result.set("missing")
+                    latch.countDown()
+                }
+            }
+        }
+        if (!latch.await(10, TimeUnit.MINUTES)) {
+            return "missing"
+        }
+        return result.get()
+    }
+
+    private fun launchCamera() {
+        try {
+            val dir = File(cacheDir, "photos").apply { mkdirs() }
+            val file = File(dir, "shot-${System.nanoTime()}.jpg")
+            if (!file.createNewFile()) {
+                photoResult?.set("missing")
+                photoLatch?.countDown()
+                return
+            }
+            val uri = FileProvider.getUriForFile(
+                this,
+                "org.personal.prns.comms.fileprovider",
+                file,
+            )
+            photoFile = file
+            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                clipData = ClipData.newRawUri("photo", uri)
+            }
+            val resolved = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            for (info in resolved) {
+                grantUriPermission(
+                    info.activityInfo.packageName,
+                    uri,
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            takePicture.launch(intent)
+        } catch (_: Exception) {
+            photoFile?.delete()
+            photoFile = null
+            photoResult?.set("missing")
+            photoLatch?.countDown()
+        }
+    }
 
     fun pickFile(maxBytes: Long): String? {
         val latch = CountDownLatch(1)
@@ -799,6 +919,12 @@ class MainActivity : WryActivity() {
         fun whereAmI(): String? {
             val activity = instance ?: return null
             return activity.readPlace()
+        }
+
+        @JvmStatic
+        fun takePhoto(): String? {
+            val activity = instance ?: return "missing"
+            return activity.capturePhoto()
         }
 
         @JvmStatic
