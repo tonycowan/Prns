@@ -4503,7 +4503,7 @@ fn photo_choice_row(
     limit: Option<u64>,
     picked_name: Signal<String>,
     picked_bytes: Signal<Vec<u8>>,
-    embeds: Signal<bool>,
+    mut embeds: Signal<bool>,
     notice: Signal<String>,
     file_mark: Signal<Option<(String, String)>>,
     as_photo: Signal<bool>,
