@@ -47,6 +47,11 @@ static PREVIEW: Mutex<Option<String>> = Mutex::new(None);
 static DONE: Mutex<Option<Done>> = Mutex::new(None);
 static FOR_PHOTO: AtomicBool = AtomicBool::new(false);
 static STILL: Mutex<Option<(u32, u32, Vec<u8>)>> = Mutex::new(None);
+/// The photo camera the phone is using. A code always uses the back camera.
+#[cfg(target_os = "ios")]
+static FRONT: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "ios")]
+static FLIP: AtomicBool = AtomicBool::new(false);
 
 enum Done {
     Code(String),
@@ -111,8 +116,35 @@ pub fn start_for_photo() -> u64 {
     start_camera(true)
 }
 
+/// Switches between the back camera and the front camera while a photo is open.
+#[cfg(target_os = "ios")]
+pub fn flip_camera() {
+    if FOR_PHOTO.load(Ordering::Acquire) {
+        FLIP.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn flip_camera() {}
+
+/// Whether the preview is the front camera. The saved photo is mirrored to match.
+#[cfg(target_os = "ios")]
+pub fn facing_front() -> bool {
+    FRONT.load(Ordering::Acquire)
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn facing_front() -> bool {
+    false
+}
+
 fn start_camera(photo: bool) -> u64 {
     FOR_PHOTO.store(photo, Ordering::Release);
+    #[cfg(target_os = "ios")]
+    {
+        FRONT.store(false, Ordering::Release);
+        FLIP.store(false, Ordering::Release);
+    }
     STOP.store(false, Ordering::Release);
     let run = RUN.fetch_add(1, Ordering::AcqRel) + 1;
     CURRENT.store(run, Ordering::Release);
@@ -140,8 +172,14 @@ pub fn token() -> u64 {
 /// The latest color frame, flipped to match the preview on a Mac.
 pub fn take_image() -> Option<image::DynamicImage> {
     let (width, height, mut rgb) = lock(&STILL).clone()?;
+    // The Mac preview is always mirrored. On a phone, only the front camera is.
+    #[cfg(target_os = "ios")]
+    let mirror = facing_front();
     #[cfg(not(target_os = "ios"))]
-    flip_horizontal(&mut rgb, width, height);
+    let mirror = true;
+    if mirror {
+        flip_horizontal(&mut rgb, width, height);
+    }
     image::RgbImage::from_raw(width, height, rgb).map(image::DynamicImage::ImageRgb8)
 }
 
@@ -180,11 +218,15 @@ fn run_camera(run: u64) {
     // configure them, start on this background thread, and stop before they are dropped.
     // The frame receiver and its queue stay alive until the callback is cleared.
     let opened = unsafe { open_session(run, media) };
-    let Some(opened) = opened else {
+    let Some(mut opened) = opened else {
         finish(run, Done::Unavailable);
         return;
     };
     while CURRENT.load(Ordering::Acquire) == run && !STOP.load(Ordering::Acquire) {
+        #[cfg(target_os = "ios")]
+        if FLIP.swap(false, Ordering::AcqRel) {
+            unsafe { swap_camera(&mut opened, media) };
+        }
         std::thread::sleep(Duration::from_millis(40));
     }
     unsafe {
@@ -222,6 +264,7 @@ fn allowed(media: &objc2_av_foundation::AVMediaType, run: u64) -> bool {
 
 struct Opened {
     session: Retained<AVCaptureSession>,
+    input: Retained<AVCaptureDeviceInput>,
     output: Retained<AVCaptureVideoDataOutput>,
     /// AVFoundation does not keep this alive on its own. Frames stop if it is dropped.
     _delegate: Retained<CodeFinder>,
@@ -270,42 +313,105 @@ unsafe fn open_session(run: u64, media: &objc2_av_foundation::AVMediaType) -> Op
         }
         session.addOutput(output_ref);
         #[cfg(target_os = "ios")]
-        if let Some(connection) = output.connectionWithMediaType(media) {
-            // The phone is held upright. Turn the frames to match, so the code is not on its side.
-            #[allow(deprecated)]
-            if connection.isVideoOrientationSupported() {
-                connection.setVideoOrientation(AVCaptureVideoOrientation::Portrait);
-            }
-        }
+        aim_connection(&output, media);
         session.commitConfiguration();
         session.startRunning();
     }
     Some(Opened {
         session,
+        input,
         output,
         _delegate: delegate,
         _queue: queue,
     })
 }
 
+#[cfg(target_os = "ios")]
+unsafe fn aim_connection(
+    output: &AVCaptureVideoDataOutput,
+    media: &objc2_av_foundation::AVMediaType,
+) {
+    // SAFETY: the output belongs to the session this thread is configuring.
+    let Some(connection) = (unsafe { output.connectionWithMediaType(media) }) else {
+        return;
+    };
+    unsafe {
+        // The phone is held upright. Turn the frames to match, so the code is not on its side.
+        #[allow(deprecated)]
+        if connection.isVideoOrientationSupported() {
+            connection.setVideoOrientation(AVCaptureVideoOrientation::Portrait);
+        }
+        // Leave the pixels unmirrored. The page mirrors the front camera itself.
+        if connection.isVideoMirroringSupported() {
+            connection.setAutomaticallyAdjustsVideoMirroring(false);
+            connection.setVideoMirrored(false);
+        }
+    }
+}
+
+#[cfg(target_os = "ios")]
+unsafe fn swap_camera(opened: &mut Opened, media: &objc2_av_foundation::AVMediaType) {
+    let want_front = !FRONT.load(Ordering::Acquire);
+    let position = if want_front {
+        AVCaptureDevicePosition::Front
+    } else {
+        AVCaptureDevicePosition::Back
+    };
+    let Some(device) = device_at(media, position) else {
+        return;
+    };
+    let Ok(input) = (unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }) else {
+        return;
+    };
+    unsafe { opened.session.beginConfiguration() };
+    let old: &AVCaptureInput = &opened.input;
+    unsafe { opened.session.removeInput(old) };
+    let new_input: &AVCaptureInput = &input;
+    if unsafe { opened.session.canAddInput(new_input) } {
+        unsafe {
+            opened.session.addInput(new_input);
+            aim_connection(&opened.output, media);
+        }
+        opened.input = input;
+        FRONT.store(want_front, Ordering::Release);
+        *lock(&PREVIEW) = None;
+        *lock(&STILL) = None;
+    } else if unsafe { opened.session.canAddInput(old) } {
+        unsafe { opened.session.addInput(old) };
+    }
+    unsafe { opened.session.commitConfiguration() };
+}
+
 fn video_device(media: &objc2_av_foundation::AVMediaType) -> Option<Retained<AVCaptureDevice>> {
     #[cfg(target_os = "ios")]
     {
-        // SAFETY: the wide-angle type is a process-wide constant. The back camera
-        // photographs a code held up to the phone.
-        let device_type = unsafe { AVCaptureDeviceTypeBuiltInWideAngleCamera };
-        if let Some(device) = unsafe {
-            AVCaptureDevice::defaultDeviceWithDeviceType_mediaType_position(
-                device_type,
-                Some(media),
-                AVCaptureDevicePosition::Back,
-            )
-        } {
+        let position = if FRONT.load(Ordering::Acquire) {
+            AVCaptureDevicePosition::Front
+        } else {
+            AVCaptureDevicePosition::Back
+        };
+        if let Some(device) = device_at(media, position) {
             return Some(device);
         }
     }
     // SAFETY: default video device for this process. Nil means there is no camera.
     unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }
+}
+
+#[cfg(target_os = "ios")]
+fn device_at(
+    media: &objc2_av_foundation::AVMediaType,
+    position: AVCaptureDevicePosition,
+) -> Option<Retained<AVCaptureDevice>> {
+    // SAFETY: the wide-angle type is a process-wide constant.
+    let device_type = unsafe { AVCaptureDeviceTypeBuiltInWideAngleCamera };
+    unsafe {
+        AVCaptureDevice::defaultDeviceWithDeviceType_mediaType_position(
+            device_type,
+            Some(media),
+            position,
+        )
+    }
 }
 
 fn on_frame(sample: &CMSampleBuffer) {
@@ -621,7 +727,6 @@ fn gray_to_rgb(gray: &[u8]) -> Vec<u8> {
     rgb
 }
 
-#[cfg(not(target_os = "ios"))]
 fn flip_horizontal(rgb: &mut [u8], width: u32, height: u32) {
     let width = width as usize;
     let height = height as usize;

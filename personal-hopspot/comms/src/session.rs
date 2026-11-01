@@ -1156,8 +1156,8 @@ fn capture_photo_blocking() -> PhotoCapture {
     .unwrap_or(PhotoCapture::Unavailable)
 }
 
-/// A file the person chose on Android. The desktop composer uses the page's own file control.
-#[cfg(target_os = "android")]
+/// A file the person chose on a phone. The desktop composer uses the page's own file control.
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub enum ChosenFile {
     Ready { name: String, bytes: Vec<u8> },
     Over,
@@ -1165,7 +1165,7 @@ pub enum ChosenFile {
     Cancelled,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub async fn choose_file(limit: Option<u64>) -> ChosenFile {
     let Some(runtime) = RUNTIME.get() else {
         return ChosenFile::Missing;
@@ -1175,6 +1175,16 @@ pub async fn choose_file(limit: Option<u64>) -> ChosenFile {
         .spawn_blocking(move || choose_file_blocking(max))
         .await
         .unwrap_or(ChosenFile::Missing)
+}
+
+#[cfg(target_os = "ios")]
+fn choose_file_blocking(max_bytes: u64) -> ChosenFile {
+    match crate::picker::choose(max_bytes) {
+        crate::picker::Picked::Ready { name, bytes } => ChosenFile::Ready { name, bytes },
+        crate::picker::Picked::Over => ChosenFile::Over,
+        crate::picker::Picked::Missing => ChosenFile::Missing,
+        crate::picker::Picked::Cancelled => ChosenFile::Cancelled,
+    }
 }
 
 #[cfg(target_os = "android")]

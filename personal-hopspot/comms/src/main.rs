@@ -13,6 +13,8 @@ mod lxmf;
 #[cfg(not(target_arch = "wasm32"))]
 mod mailbox;
 mod model;
+#[cfg(target_os = "ios")]
+mod picker;
 mod scan;
 #[cfg(not(target_arch = "wasm32"))]
 mod session;
@@ -66,6 +68,9 @@ if (!window.__touchbaseKeepKeyboard) {
     var keep = function (event) {
       var node = event.target;
       if (!node || !node.closest) return;
+      // The file row is a real file input. Cancelling its touch means iOS
+      // never opens the picker. The other rows keep the keyboard themselves.
+      if (node.closest("label.choice")) return;
       if (node.closest(".plus, .embed-list")) event.preventDefault();
     };
     document.addEventListener("touchstart", keep, {capture: true, passive: false});
@@ -825,7 +830,7 @@ input.who.rename {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
-  padding-left: 40px;
+  padding: 6px 12px;
   font-family: var(--hand);
   font-size: 19.5px;
   line-height: 1.35;
@@ -834,6 +839,10 @@ input.who.rename {
   caret-color: var(--note);
   -webkit-user-select: text;
   user-select: text;
+}
+.composer .draft:focus,
+.composer .draft:focus-visible {
+  outline: none;
 }
 .composer .pill {
   display: inline-block;
@@ -854,8 +863,8 @@ input.who.rename {
 .composer .pill::before { content: attr(data-mark); }
 .composer .empty-hint {
   position: absolute;
-  left: 40px;
-  top: 0;
+  left: 12px;
+  top: 6px;
   color: var(--pencil);
   font-family: var(--hand);
   font-size: 19.5px;
@@ -872,11 +881,20 @@ input.who.rename {
   min-width: 0;
   margin-top: 0;
 }
-.note-line { position: relative; }
+.note-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.note-line .composer {
+  flex: 1 1 auto;
+  width: auto;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
 .embed {
-  position: absolute;
-  left: 0;
-  bottom: calc(1px + (19.5px * 1.35 - 32px) / 2);
+  position: relative;
+  flex: none;
   z-index: 2;
   display: flex;
   align-items: center;
@@ -903,6 +921,15 @@ input.who.rename {
   -webkit-user-select: none;
   user-select: none;
 }
+.plus {
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  font-size: 24px;
+}
 .embed-list {
   position: absolute;
   left: 0;
@@ -926,8 +953,13 @@ input.who.rename {
   inset: 0;
   width: 100%;
   height: 100%;
+  margin: 0;
+  padding: 0;
+  font-size: 16px;
   opacity: 0;
   cursor: pointer;
+  -webkit-user-select: auto;
+  user-select: auto;
 }
 .attached {
   margin: 4px 0 0;
@@ -4304,8 +4336,14 @@ fn photo_finder(
     {
         let mut shooting = shooting;
         let mut shot_frame = shot_frame;
+        let mut facing = use_signal(|| false);
+        use_effect(move || {
+            if !shooting() {
+                facing.set(false);
+            }
+        });
         let picture = shot_frame();
-        let finder = if cfg!(target_os = "ios") {
+        let finder = if cfg!(target_os = "ios") && !facing() {
             "finder rear plain"
         } else {
             "finder plain"
@@ -4329,16 +4367,19 @@ fn photo_finder(
                                     .unwrap_or(FittedPhoto::Unreadable);
                                 viewfinder::stop();
                                 shooting.set(false);
+                                facing.set(false);
                                 shot_frame.set(String::new());
                                 keep_shot(fitted, limit, picked_name, picked_bytes, embeds, notice, file_mark, as_photo);
                             },
                             "Take the photo"
                         }
+                        {front_camera_button(facing, shot_frame)}
                         button {
                             class: "photo",
                             onclick: move |_| {
                                 viewfinder::stop();
                                 shooting.set(false);
+                                facing.set(false);
                                 shot_frame.set(String::new());
                             },
                             "Close the camera"
@@ -4348,6 +4389,27 @@ fn photo_finder(
             }
         }
     }
+}
+
+#[cfg(target_os = "ios")]
+fn front_camera_button(mut facing: Signal<bool>, mut shot_frame: Signal<String>) -> Element {
+    rsx! {
+        button {
+            class: "photo",
+            onclick: move |_| {
+                viewfinder::flip_camera();
+                facing.set(!facing());
+                shot_frame.set(String::new());
+            },
+            if facing() { "Back camera" } else { "Front camera" }
+        }
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+fn front_camera_button(facing: Signal<bool>, shot_frame: Signal<String>) -> Element {
+    let _ = (facing, shot_frame);
+    rsx! {}
 }
 
 #[cfg(target_os = "android")]
@@ -4430,17 +4492,64 @@ fn begin_photo(
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+fn begin_camera(
+    last: &std::cell::Cell<u128>,
+    mut embeds: Signal<bool>,
+    mut notice: Signal<String>,
+    mut shooting: Signal<bool>,
+    mut shot_frame: Signal<String>,
+) {
+    if !once_per_tap(last) {
+        return;
+    }
+    embeds.set(false);
+    shot_frame.set(String::new());
+    shooting.set(true);
+    let token = viewfinder::start_for_photo();
+    spawn(async move {
+        loop {
+            if viewfinder::token() != token || !shooting() {
+                break;
+            }
+            match viewfinder::look() {
+                viewfinder::View::Picture(url) => {
+                    if shot_frame() != url {
+                        shot_frame.set(url);
+                    }
+                }
+                viewfinder::View::Denied => {
+                    viewfinder::stop();
+                    shooting.set(false);
+                    shot_frame.set(String::new());
+                    notice.set("N10A needs the camera to take a photo.".into());
+                    break;
+                }
+                viewfinder::View::Unavailable => {
+                    viewfinder::stop();
+                    shooting.set(false);
+                    shot_frame.set(String::new());
+                    notice.set("The camera didn't open.".into());
+                    break;
+                }
+                _ => {}
+            }
+            session::rest(80).await;
+        }
+    });
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
 fn photo_choice_row(
     label: String,
     limit: Option<u64>,
     picked_name: Signal<String>,
     picked_bytes: Signal<Vec<u8>>,
-    mut embeds: Signal<bool>,
-    mut notice: Signal<String>,
+    embeds: Signal<bool>,
+    notice: Signal<String>,
     file_mark: Signal<Option<(String, String)>>,
     as_photo: Signal<bool>,
-    mut shooting: Signal<bool>,
-    mut shot_frame: Signal<String>,
+    shooting: Signal<bool>,
+    shot_frame: Signal<String>,
     photo_at: std::rc::Rc<std::cell::Cell<u128>>,
 ) -> Element {
     let _ = (limit, picked_name, picked_bytes, file_mark, as_photo);
@@ -4448,44 +4557,27 @@ fn photo_choice_row(
         div {
             class: "choice",
             role: "button",
-            onclick: move |_| {
-                if !once_per_tap(photo_at.as_ref()) {
-                    return;
+            onpointerdown: move |event| event.prevent_default(),
+            ontouchstart: move |event| event.prevent_default(),
+            onclick: {
+                let photo_at = photo_at.clone();
+                move |_| {
+                    begin_camera(photo_at.as_ref(), embeds, notice, shooting, shot_frame);
                 }
-                embeds.set(false);
-                shot_frame.set(String::new());
-                shooting.set(true);
-                let token = viewfinder::start_for_photo();
-                spawn(async move {
-                    loop {
-                        if viewfinder::token() != token || !shooting() {
-                            break;
-                        }
-                        match viewfinder::look() {
-                            viewfinder::View::Picture(url) => {
-                                if shot_frame() != url {
-                                    shot_frame.set(url);
-                                }
-                            }
-                            viewfinder::View::Denied => {
-                                viewfinder::stop();
-                                shooting.set(false);
-                                shot_frame.set(String::new());
-                                notice.set("N10A needs the camera to take a photo.".into());
-                                break;
-                            }
-                            viewfinder::View::Unavailable => {
-                                viewfinder::stop();
-                                shooting.set(false);
-                                shot_frame.set(String::new());
-                                notice.set("The camera didn't open.".into());
-                                break;
-                            }
-                            _ => {}
-                        }
-                        session::rest(80).await;
-                    }
-                });
+            },
+            onpointerup: {
+                let photo_at = photo_at.clone();
+                move |event| {
+                    event.prevent_default();
+                    begin_camera(photo_at.as_ref(), embeds, notice, shooting, shot_frame);
+                }
+            },
+            ontouchend: {
+                let photo_at = photo_at.clone();
+                move |event| {
+                    event.prevent_default();
+                    begin_camera(photo_at.as_ref(), embeds, notice, shooting, shot_frame);
+                }
             },
             "{label}"
         }
@@ -4538,7 +4630,7 @@ fn photo_choice_row(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn file_choice_row(
     label: String,
     limit: Option<u64>,
@@ -4574,7 +4666,7 @@ fn file_choice_row(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn begin_file(
     last: &std::cell::Cell<u128>,
     limit: Option<u64>,
@@ -4702,7 +4794,7 @@ fn mac_file() -> Option<std::path::PathBuf> {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "macos")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 fn file_choice_row(
     label: String,
     limit: Option<u64>,
