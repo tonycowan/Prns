@@ -124,18 +124,10 @@ pub fn flip_camera() {
     }
 }
 
-#[cfg(not(target_os = "ios"))]
-pub fn flip_camera() {}
-
 /// Whether the preview is the front camera. The saved photo is mirrored to match.
 #[cfg(target_os = "ios")]
 pub fn facing_front() -> bool {
     FRONT.load(Ordering::Acquire)
-}
-
-#[cfg(not(target_os = "ios"))]
-pub fn facing_front() -> bool {
-    false
 }
 
 fn start_camera(photo: bool) -> u64 {
@@ -218,10 +210,12 @@ fn run_camera(run: u64) {
     // configure them, start on this background thread, and stop before they are dropped.
     // The frame receiver and its queue stay alive until the callback is cleared.
     let opened = unsafe { open_session(run, media) };
-    let Some(mut opened) = opened else {
+    let Some(opened) = opened else {
         finish(run, Done::Unavailable);
         return;
     };
+    #[cfg(target_os = "ios")]
+    let mut opened = opened;
     while CURRENT.load(Ordering::Acquire) == run && !STOP.load(Ordering::Acquire) {
         #[cfg(target_os = "ios")]
         if FLIP.swap(false, Ordering::AcqRel) {
@@ -264,6 +258,8 @@ fn allowed(media: &objc2_av_foundation::AVMediaType, run: u64) -> bool {
 
 struct Opened {
     session: Retained<AVCaptureSession>,
+    /// Kept for the life of the session. On a Mac nothing reads it after open.
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     input: Retained<AVCaptureDeviceInput>,
     output: Retained<AVCaptureVideoDataOutput>,
     /// AVFoundation does not keep this alive on its own. Frames stop if it is dropped.
