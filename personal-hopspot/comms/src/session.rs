@@ -58,6 +58,10 @@ struct Mail {
     waiting_marks: HashMap<LinkId, Vec<crate::lxmf::ReactionLetter>>,
     inbox: Vec<ArrivedNote>,
     marks: Vec<ArrivedReaction>,
+    places: Vec<ArrivedShare>,
+    /// Contacts a place was just offered to, with the Unix second it was offered.
+    offered: Vec<(String, u64)>,
+    waiting_places: HashMap<LinkId, Vec<crate::lxmf::ShareLetter>>,
     /// Notes whose link receipt has come back.
     acked: Vec<u64>,
     /// Notes that were tried three times and will not send themselves again.
@@ -146,6 +150,13 @@ pub struct ArrivedReaction {
     pub written_at: f64,
     pub words: String,
     pub reaction: Option<crate::model::Reaction>,
+}
+
+/// A place offered on its own. It is not a note.
+pub struct ArrivedShare {
+    pub identity: String,
+    pub place: crate::model::Place,
+    pub written_at: f64,
 }
 
 pub struct JournalIdentity {
@@ -1384,6 +1395,120 @@ pub fn send_reaction(
     nudge_delivery();
 }
 
+/// Offers a place with no note. False when the contact's key is not known yet.
+pub fn send_share(contact_identity: &str, place: crate::model::Place, written_at: f64) -> bool {
+    let Some(recipient) = contact_material(contact_identity) else {
+        return false;
+    };
+    let Some(destination) = address_for(&recipient) else {
+        return false;
+    };
+    note_queue().push(QueuedNote {
+        destination,
+        recipient,
+        identity: contact_identity.trim().to_string(),
+        packed: crate::lxmf::pack_share(place, written_at),
+        note_id: 0,
+        tries: 0,
+        kind: OutboundKind::Share,
+        stage: OutboundStage::Person,
+        mailbox_bytes: None,
+    });
+    nudge_delivery();
+    true
+}
+
+static OFFERING: AtomicBool = AtomicBool::new(false);
+
+fn share_memory() -> std::sync::MutexGuard<'static, ShareMemory> {
+    static MEMORY: OnceLock<Mutex<ShareMemory>> = OnceLock::new();
+    MEMORY
+        .get_or_init(|| {
+            Mutex::new(ShareMemory {
+                queued: HashMap::new(),
+                retry_after: HashMap::new(),
+            })
+        })
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct ShareMemory {
+    /// Unix seconds a place was queued for this contact, before the book is saved.
+    queued: HashMap<String, u64>,
+    /// Do not ask the device again for this contact until this Unix second.
+    retry_after: HashMap<String, u64>,
+}
+
+fn share_due_people(now_seconds: u64) -> Vec<crate::model::Person> {
+    let memory = share_memory();
+    opening_contacts()
+        .into_iter()
+        .filter(|person| {
+            let identity = person.identity.trim();
+            if memory
+                .retry_after
+                .get(identity)
+                .is_some_and(|after| *after > now_seconds)
+            {
+                return false;
+            }
+            let offered = person
+                .offered_at
+                .max(memory.queued.get(identity).copied().unwrap_or(0));
+            let mut due = person.clone();
+            due.offered_at = offered;
+            crate::model::share_is_due(&due, now_seconds)
+        })
+        .collect()
+}
+
+/// Reads the finest place the device has and offers it to every contact who is due.
+/// The read happens off the journal loop. Nothing is written into a journal.
+pub fn offer_shares_if_due() {
+    let now = crate::lxmf::unix_now() as u64;
+    if share_due_people(now).is_empty() {
+        return;
+    }
+    if OFFERING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let Some(runtime) = RUNTIME.get().cloned() else {
+        OFFERING.store(false, Ordering::Release);
+        return;
+    };
+    runtime.spawn(async move {
+        let place = crate::location::current_place().await;
+        let now = crate::lxmf::unix_now();
+        let secs = now as u64;
+        if let Some(place) = place {
+            let mut offered = Vec::new();
+            for person in share_due_people(secs) {
+                let identity = person.identity.trim().to_string();
+                if send_share(&identity, place, now) {
+                    share_memory().queued.insert(identity.clone(), secs);
+                    share_memory().retry_after.remove(identity.as_str());
+                    offered.push((identity, secs));
+                } else {
+                    share_memory()
+                        .retry_after
+                        .insert(identity, secs.saturating_add(60));
+                }
+            }
+            if !offered.is_empty() {
+                mail().offered.extend(offered);
+            }
+        } else {
+            for person in share_due_people(secs) {
+                share_memory()
+                    .retry_after
+                    .insert(person.identity.trim().to_string(), secs.saturating_add(60));
+            }
+        }
+        OFFERING.store(false, Ordering::Release);
+    });
+}
+
 /// How many times a direct-only send is tried before it is marked failed.
 const GIVE_UP_AFTER: u8 = 3;
 
@@ -1610,6 +1735,7 @@ enum OutboundKind {
     Note,
     Ack,
     Reaction,
+    Share,
 }
 
 enum OutboundStage {
@@ -1795,6 +1921,7 @@ fn note_label(note: &QueuedNote) -> String {
         OutboundKind::Note => format!("note {}", note.note_id),
         OutboundKind::Ack => "ack".to_string(),
         OutboundKind::Reaction => "reaction".to_string(),
+        OutboundKind::Share => "place".to_string(),
     }
 }
 
@@ -2453,6 +2580,14 @@ fn accept_signed(link_id: Option<LinkId>, opened: &crate::mailbox::OpenedMail) -
         });
         return true;
     }
+    if let Some(letter) = crate::lxmf::open_share(&opened.payload) {
+        mail().places.push(ArrivedShare {
+            identity: identity_hex,
+            place: letter.place,
+            written_at: letter.written_at,
+        });
+        return true;
+    }
     let Some(letter) = crate::lxmf::open_note(&opened.payload) else {
         return false;
     };
@@ -2482,6 +2617,14 @@ fn stage_mailbox(opened: &crate::mailbox::OpenedMail) {
             written_at: letter.written_at,
             words: letter.words,
             reaction: letter.reaction,
+        });
+        return;
+    }
+    if let Some(letter) = crate::lxmf::open_share(&opened.payload) {
+        mail().places.push(ArrivedShare {
+            identity,
+            place: letter.place,
+            written_at: letter.written_at,
         });
         return;
     }
@@ -3105,6 +3248,16 @@ pub fn drain_reactions() -> Vec<ArrivedReaction> {
     std::mem::take(&mut mail().marks)
 }
 
+/// Places offered on their own, still waiting for the contact list.
+pub fn drain_shares() -> Vec<ArrivedShare> {
+    std::mem::take(&mut mail().places)
+}
+
+/// Contacts a place was just offered to.
+pub fn drain_offered() -> Vec<(String, u64)> {
+    std::mem::take(&mut mail().offered)
+}
+
 /// Notes the other side has acknowledged.
 pub fn drain_acks() -> Vec<u64> {
     std::mem::take(&mut mail().acked)
@@ -3272,6 +3425,9 @@ fn empty_mail() -> Mail {
         waiting_marks: HashMap::new(),
         inbox: Vec::new(),
         marks: Vec::new(),
+        places: Vec::new(),
+        offered: Vec::new(),
+        waiting_places: HashMap::new(),
         acked: Vec::new(),
         failed: Vec::new(),
         posted: Vec::new(),
@@ -3292,6 +3448,9 @@ fn mail() -> std::sync::MutexGuard<'static, Mail> {
             waiting_marks: HashMap::new(),
             inbox: Vec::new(),
             marks: Vec::new(),
+            places: Vec::new(),
+            offered: Vec::new(),
+            waiting_places: HashMap::new(),
             acked: Vec::new(),
             failed: Vec::new(),
             posted: Vec::new(),
@@ -3336,6 +3495,15 @@ fn remember_peer(link_id: LinkId, identity: IdentityHash) {
                     written_at: letter.written_at,
                     words: letter.words,
                     reaction: letter.reaction,
+                });
+            }
+        }
+        if let Some(waiting) = mail.waiting_places.remove(&link_id) {
+            for letter in waiting {
+                mail.places.push(ArrivedShare {
+                    identity: identity_hex.clone(),
+                    place: letter.place,
+                    written_at: letter.written_at,
                 });
             }
         }
@@ -3510,6 +3678,14 @@ fn stage_plain(mail: &mut Mail, identity_hex: &str, bytes: &[u8], link_id: LinkI
         });
         return;
     }
+    if let Some(letter) = crate::lxmf::open_share(bytes) {
+        mail.places.push(ArrivedShare {
+            identity: identity_hex.to_string(),
+            place: letter.place,
+            written_at: letter.written_at,
+        });
+        return;
+    }
     if let Some(letter) = crate::lxmf::open_note(bytes) {
         watch_arrived_file(mail, Some(link_id), identity_hex, &letter);
         mail.inbox.push(arrived_note(
@@ -3537,6 +3713,19 @@ fn accept_message(link_id: LinkId, bytes: &[u8]) {
             });
         } else {
             mail.waiting_marks.entry(link_id).or_default().push(letter);
+        }
+        return;
+    }
+    if let Some(letter) = crate::lxmf::open_share(bytes) {
+        let mut mail = mail();
+        if let Some(identity) = mail.peers.get(&link_id).copied() {
+            mail.places.push(ArrivedShare {
+                identity: hex_encode(identity.as_bytes()),
+                place: letter.place,
+                written_at: letter.written_at,
+            });
+        } else {
+            mail.waiting_places.entry(link_id).or_default().push(letter);
         }
         return;
     }
@@ -5767,6 +5956,10 @@ mod tests {
                 identity: address.clone(),
                 notes: Vec::new(),
                 seen: 0,
+                location: crate::model::LocationShare::Never,
+                located: None,
+                located_at: 0,
+                offered_at: 0,
             }];
             previous
         };

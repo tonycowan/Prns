@@ -267,6 +267,217 @@ pub fn map_window(place: Place) -> MapWindow {
     }
 }
 
+/// Tiles and pin positions for a rectangle of the map.
+/// With no focus, the view holds every place. A focus closes in on that place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapFit {
+    pub zoom: u32,
+    pub tiles: Vec<MapTile>,
+    pub pins: Vec<(f64, f64)>,
+}
+
+const CLOSE_SPAN_METERS: f64 = 800.0;
+
+pub fn map_fit(places: &[Place], width: f64, height: f64, focused: Option<Place>) -> MapFit {
+    if width < 1.0 || height < 1.0 || (places.is_empty() && focused.is_none()) {
+        return MapFit {
+            zoom: 1,
+            tiles: Vec::new(),
+            pins: Vec::new(),
+        };
+    }
+    let center = focused.or_else(|| places.first().copied());
+    let close = focused.is_some() || places.len() <= 1;
+    let zoom = if close {
+        close_zoom(center.map(Place::latitude).unwrap_or(0.0), width, height)
+    } else {
+        overview_zoom(places, width, height)
+    };
+    let (cx, cy) = if let Some(place) = focused {
+        world_pixel(place.latitude(), place.longitude(), zoom)
+    } else {
+        let points: Vec<_> = places
+            .iter()
+            .map(|place| world_pixel(place.latitude(), place.longitude(), zoom))
+            .collect();
+        let min_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::INFINITY, f64::min);
+        let max_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+    };
+    let left = cx - width / 2.0;
+    let top = cy - height / 2.0;
+    let pins = places
+        .iter()
+        .map(|place| {
+            let (x, y) = world_pixel(place.latitude(), place.longitude(), zoom);
+            (x - left, y - top)
+        })
+        .collect();
+    MapFit {
+        zoom,
+        tiles: tiles_covering(left, top, width, height, zoom),
+        pins,
+    }
+}
+
+/// The newest place shared with this contact.
+/// A place written into a note and a place offered on its own are both counted.
+/// The later of the two is the one the map uses.
+pub fn latest_place(person: &Person) -> Option<Place> {
+    newest_place(person).map(|(place, _)| place)
+}
+
+/// When the place on the map was written, as Unix seconds.
+pub fn place_as_of(person: &Person) -> Option<f64> {
+    let (_, bits) = newest_place(person)?;
+    if bits == 0 {
+        return None;
+    }
+    let unix = f64::from_bits(bits);
+    if !unix.is_finite() || unix <= 0.0 {
+        return None;
+    }
+    Some(unix)
+}
+
+/// `DD/MM/YY hh:mm` in the device's local time, on a 24-hour clock.
+pub fn place_clock(unix_secs: f64) -> Option<String> {
+    if !unix_secs.is_finite() || unix_secs <= 0.0 {
+        return None;
+    }
+    let utc = chrono::DateTime::from_timestamp(unix_secs.floor() as i64, 0)?;
+    Some(
+        utc.with_timezone(&chrono::Local)
+            .format("%d/%m/%y %H:%M")
+            .to_string(),
+    )
+}
+
+fn newest_place(person: &Person) -> Option<(Place, u64)> {
+    let noted = person
+        .notes
+        .iter()
+        .filter(|note| note.place.is_some())
+        .max_by_key(|note| (note.written_at, note.id));
+    match (noted, person.located) {
+        (Some(note), Some(place)) if person.located_at > note.written_at => {
+            Some((place, person.located_at))
+        }
+        (Some(note), _) => note.place.map(|place| (place, note.written_at)),
+        (None, Some(place)) => Some((place, person.located_at)),
+        (None, None) => None,
+    }
+}
+
+/// Keeps a place this contact offered on its own. An older one is left as it is.
+/// Nothing is added to the journal.
+pub fn remember_shared(person: &mut Person, place: Place, written_at_unix: f64) -> bool {
+    if !written_at_unix.is_finite() || written_at_unix <= 0.0 {
+        return false;
+    }
+    let stamp = written_at_unix.to_bits();
+    if person.located_at != 0 && stamp <= person.located_at {
+        return false;
+    }
+    person.located = Some(place);
+    person.located_at = stamp;
+    true
+}
+
+/// True when this contact is due another automatic place.
+pub fn share_is_due(person: &Person, now_seconds: u64) -> bool {
+    let Some(every) = person.location.every() else {
+        return false;
+    };
+    now_seconds.saturating_sub(person.offered_at) >= every
+}
+
+/// Records that a place was offered to this contact. An older time is left as it is.
+pub fn mark_offered(person: &mut Person, at_seconds: u64) -> bool {
+    if at_seconds <= person.offered_at {
+        return false;
+    }
+    person.offered_at = at_seconds;
+    true
+}
+
+fn close_zoom(latitude: f64, width: f64, height: f64) -> u32 {
+    let span = width.min(height).max(1.0);
+    (1..=17)
+        .rev()
+        .find(|&zoom| meters_per_pixel(latitude, zoom) * span >= CLOSE_SPAN_METERS)
+        .unwrap_or(1)
+}
+
+fn overview_zoom(places: &[Place], width: f64, height: f64) -> u32 {
+    let inner_w = width * 0.76;
+    let inner_h = height * 0.76;
+    for zoom in (1..=17).rev() {
+        let points: Vec<_> = places
+            .iter()
+            .map(|place| world_pixel(place.latitude(), place.longitude(), zoom))
+            .collect();
+        let min_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::INFINITY, f64::min);
+        let max_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if max_x - min_x <= inner_w.max(1.0) && max_y - min_y <= inner_h.max(1.0) {
+            return zoom;
+        }
+    }
+    1
+}
+
+fn tiles_covering(left: f64, top: f64, width: f64, height: f64, zoom: u32) -> Vec<MapTile> {
+    let n = 1_i64 << zoom;
+    let x0 = (left / 256.0).floor() as i64;
+    let x1 = ((left + width) / 256.0).floor() as i64;
+    let y0 = (top / 256.0).floor() as i64;
+    let y1 = ((top + height) / 256.0).floor() as i64;
+    let mut tiles = Vec::new();
+    for ty in y0..=y1 {
+        if ty < 0 || ty >= n {
+            continue;
+        }
+        for tx in x0..=x1 {
+            tiles.push(MapTile {
+                x: tx.rem_euclid(n) as u32,
+                y: ty as u32,
+                left: tx as f64 * 256.0 - left,
+                top: ty as f64 * 256.0 - top,
+                edge: 256.0,
+            });
+        }
+    }
+    tiles
+}
+
 fn pixels_for_view(latitude: f64, zoom: u32) -> f64 {
     VIEW_SIDE_METERS / meters_per_pixel(latitude, zoom)
 }
@@ -352,6 +563,46 @@ pub struct Note {
     pub downloaded: bool,
 }
 
+/// How often this contact is offered a place. Never until that is chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LocationShare {
+    #[default]
+    Never,
+    Daily,
+    Hourly,
+    TenMinutes,
+}
+
+impl LocationShare {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Daily => "day",
+            Self::Hourly => "hour",
+            Self::TenMinutes => "ten",
+        }
+    }
+
+    pub fn parse(token: &str) -> Self {
+        match token {
+            "day" => Self::Daily,
+            "hour" => Self::Hourly,
+            "ten" => Self::TenMinutes,
+            _ => Self::Never,
+        }
+    }
+
+    /// Seconds between automatic places. Never means none are offered.
+    pub fn every(self) -> Option<u64> {
+        match self {
+            Self::Never => None,
+            Self::Daily => Some(86_400),
+            Self::Hourly => Some(3_600),
+            Self::TenMinutes => Some(600),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Person {
     pub id: u64,
@@ -361,6 +612,13 @@ pub struct Person {
     /// The newest note id this journal has been opened through.
     /// A later note from them is still unread.
     pub seen: u64,
+    pub location: LocationShare,
+    /// The newest place this contact offered on its own, with no note.
+    pub located: Option<Place>,
+    /// When `located` was written, as the bits of a Unix-seconds float. Zero means none.
+    pub located_at: u64,
+    /// When a place was last offered to this contact, as Unix seconds. Zero means never.
+    pub offered_at: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -370,6 +628,8 @@ pub enum Page {
     Add,
     Journal(u64),
     Share(u64),
+    Info(u64),
+    Map,
 }
 
 pub fn contact_code(name: &str, identity: &str) -> String {
@@ -384,6 +644,10 @@ pub fn sample_people() -> Vec<Person> {
             name: "Mara".into(),
             identity: "19ab44c0e8d15f2076c3aa91b0d4e6f2".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: vec![
                 kept(
                     NoteKind::Text,
@@ -414,6 +678,10 @@ pub fn sample_people() -> Vec<Person> {
             name: "Sam".into(),
             identity: "77c0de12a9b4f6530188e2d4c6ab5190".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: vec![
                 kept(
                     NoteKind::Video,
@@ -436,6 +704,10 @@ pub fn sample_people() -> Vec<Person> {
             name: "Jo".into(),
             identity: "05f8a1d6c3b94720e4d1aa78c2b6e093".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: vec![
                 kept(
                     NoteKind::Text,
@@ -1230,6 +1502,10 @@ pub fn add_person(people: &mut Vec<Person>, next_id: &mut u64, name: &str, ident
         identity: identity.to_string(),
         notes: Vec::new(),
         seen: 0,
+        location: LocationShare::Never,
+        located: None,
+        located_at: 0,
+        offered_at: 0,
     });
     true
 }
@@ -1254,6 +1530,18 @@ pub fn rename_person(people: &mut [Person], id: u64, name: &str) -> bool {
         return false;
     }
     person.name = name.to_string();
+    true
+}
+
+/// How often a place is offered. The same choice again is left as it is.
+pub fn set_location_share(people: &mut [Person], id: u64, location: LocationShare) -> bool {
+    let Some(person) = people.iter_mut().find(|person| person.id == id) else {
+        return false;
+    };
+    if person.location == location {
+        return false;
+    }
+    person.location = location;
     true
 }
 
@@ -1283,9 +1571,12 @@ pub fn mark_read(person: &mut Person) -> bool {
 /// whether a note we sent has given up. Version 6 adds whether the mailbox has it,
 /// and the hash an acknowledgement will name. Version 7 adds the file's name.
 /// Version 8 adds whether a file they sent landed in Downloads.
+/// Version 9 adds how often a place is offered to that contact.
+/// Version 10 adds the newest place they offered on their own, when it was
+/// written, and when a place was last offered to them.
 /// The bytes stay in a file beside the book. An older book still opens.
 pub fn encode_contacts(people: &[Person]) -> String {
-    let mut out = String::from("journal-contacts 8\n");
+    let mut out = String::from("journal-contacts 10\n");
     out.push_str(&people.len().to_string());
     out.push('\n');
     for person in people {
@@ -1293,6 +1584,23 @@ pub fn encode_contacts(people: &[Person]) -> String {
         line(&mut out, &escape_field(&person.name));
         line(&mut out, &escape_field(&person.identity));
         line(&mut out, &person.seen.to_string());
+        line(&mut out, person.location.token());
+        line(
+            &mut out,
+            &match person.located {
+                Some(place) => escape_field(&place.text()),
+                None => "-".to_string(),
+            },
+        );
+        line(
+            &mut out,
+            &if person.located_at == 0 {
+                "-".to_string()
+            } else {
+                format!("{:016x}", person.located_at)
+            },
+        );
+        line(&mut out, &person.offered_at.to_string());
         line(&mut out, &person.notes.len().to_string());
         for note in &person.notes {
             line(&mut out, &note.id.to_string());
@@ -1346,6 +1654,8 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
         "journal-contacts 6" => 6,
         "journal-contacts 7" => 7,
         "journal-contacts 8" => 8,
+        "journal-contacts 9" => 9,
+        "journal-contacts 10" => 10,
         _ => return None,
     };
     let count: usize = lines.next()?.parse().ok()?;
@@ -1358,6 +1668,20 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
             Some(lines.next()?.parse().ok()?)
         } else {
             None
+        };
+        let location = if version >= 9 {
+            LocationShare::parse(lines.next()?)
+        } else {
+            LocationShare::Never
+        };
+        let (located, located_at, offered_at) = if version >= 10 {
+            (
+                read_place(lines.next()?)?,
+                read_stamp(lines.next()?)?,
+                lines.next()?.parse().ok()?,
+            )
+        } else {
+            (None, 0, 0)
         };
         let notes_len: usize = lines.next()?.parse().ok()?;
         let mut notes = Vec::with_capacity(notes_len);
@@ -1417,6 +1741,10 @@ pub fn decode_contacts(text: &str) -> Option<Vec<Person>> {
             identity,
             notes,
             seen,
+            location,
+            located,
+            located_at,
+            offered_at,
         });
     }
     if lines.next().is_some() {
@@ -1561,11 +1889,13 @@ mod tests {
     use super::{
         add_person, apply_reaction, bits_per_second, call_ways, can_call, code_mark, contact_code,
         decode_contacts, encode_contacts, fail_note, fail_their_file, file_choice, file_name_of,
-        group_by_day, has_unread, land_their_file, mark_read, next_person_id, note_from_them,
-        note_ids_from, numbered_file_name, offered_ways, path_label, react_to_note, remember_call,
-        remove_person, rename_person, resource_carry, retry_note, sample_people, settle_note,
-        ways_for_ack, write_file_note, write_note, Note, NoteKind, OfferedWays, Person, Place,
-        Reach, Reaction, ResourceCarry, OPEN_PATH_BPS, PLACEHOLDER, SMALLEST_ATTACHMENT,
+        group_by_day, has_unread, land_their_file, latest_place, map_fit, mark_offered, mark_read,
+        next_person_id, note_from_them, note_ids_from, numbered_file_name, offered_ways,
+        path_label, place_as_of, place_clock, react_to_note, remember_call, remember_shared,
+        remove_person, rename_person, resource_carry, retry_note, sample_people,
+        set_location_share, settle_note, share_is_due, ways_for_ack, write_file_note, write_note,
+        write_placed_note, LocationShare, Note, NoteKind, OfferedWays, Person, Place, Reach,
+        Reaction, ResourceCarry, OPEN_PATH_BPS, PLACEHOLDER, SMALLEST_ATTACHMENT,
         VIDEO_ROUND_TRIP_MS,
     };
 
@@ -1737,6 +2067,10 @@ mod tests {
             identity: "ab".repeat(64),
             notes: Vec::new(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
         };
         assert!(can_call(&real));
         let named = Person {
@@ -1745,6 +2079,10 @@ mod tests {
             identity: "not-an-address".into(),
             notes: Vec::new(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
         };
         assert!(!can_call(&named));
     }
@@ -1819,6 +2157,23 @@ mod tests {
         let read = decode_contacts(&encode_contacts(&people)).expect("the book");
         assert_eq!(read[0].name, "Ned");
         assert!(read[0].notes == notes);
+    }
+
+    #[test]
+    fn a_location_choice_stays_with_the_contact() {
+        let mut people = sample_people();
+        let id = people[0].id;
+        assert_eq!(people[0].location, LocationShare::Never);
+        assert!(!set_location_share(&mut people, 99, LocationShare::Daily));
+        assert!(set_location_share(&mut people, id, LocationShare::Hourly));
+        assert!(!set_location_share(&mut people, id, LocationShare::Hourly));
+        let read = decode_contacts(&encode_contacts(&people)).expect("the book");
+        assert_eq!(read[0].location, LocationShare::Hourly);
+        assert_eq!(read[1].location, LocationShare::Never);
+        let older = "journal-contacts 8\n1\n1\nMara\nab\n0\n0\n";
+        let read = decode_contacts(older).expect("an older book");
+        assert_eq!(read[0].name, "Mara");
+        assert_eq!(read[0].location, LocationShare::Never);
     }
 
     #[test]
@@ -1922,6 +2277,10 @@ mod tests {
             name: "Alex".into(),
             identity: "ab".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: Vec::new(),
         };
         assert!(write_note(&mut person, "   ").is_none());
@@ -1983,6 +2342,10 @@ mod tests {
             name: "Alex \\ the gate".into(),
             identity: "ab".repeat(64),
             seen: 40,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: vec![Note {
                 id: 40,
                 kind: NoteKind::Text,
@@ -2093,6 +2456,10 @@ Hello
             name: "Alex".into(),
             identity: "ab".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: Vec::new(),
         };
         write_note(&mut person, "I'm here.");
@@ -2142,6 +2509,10 @@ Hello
             name: "Alex".into(),
             identity: "ab".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: Vec::new(),
         };
         assert!(note_from_them(
@@ -2194,6 +2565,10 @@ Hello
             name: "Alex".into(),
             identity: "ab".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: Vec::new(),
         }];
         let id = write_note(&mut people[0], "The pears are ready.").expect("a note");
@@ -2220,6 +2595,10 @@ Hello
             name: "Alex".into(),
             identity: "ab".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: Vec::new(),
         };
         assert!(note_from_them(
@@ -2254,6 +2633,10 @@ Hello
             name: "Alex".into(),
             identity: "ab".into(),
             seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
             notes: vec![Note {
                 id: 4,
                 kind: NoteKind::Text,
@@ -2328,6 +2711,97 @@ Hello
                 && center_y >= tile.top
                 && center_y < tile.top + tile.edge
         }));
+    }
+
+    #[test]
+    fn a_map_holds_every_latest_place_and_closes_in_on_one() {
+        let here = Place::from_degrees(41.88, -87.63).expect("here");
+        let there = Place::from_degrees(40.71, -74.00).expect("there");
+        let wide = map_fit(&[here, there], 400.0, 300.0, None);
+        assert!(wide.zoom < map_fit(&[here], 400.0, 300.0, None).zoom);
+        assert!(wide
+            .pins
+            .iter()
+            .all(|(x, y)| { *x > 20.0 && *x < 380.0 && *y > 15.0 && *y < 285.0 }));
+        let close = map_fit(&[here, there], 400.0, 300.0, Some(here));
+        assert!(close.zoom > wide.zoom);
+        assert!((close.pins[0].0 - 200.0).abs() < 1.0);
+        assert!((close.pins[0].1 - 150.0).abs() < 1.0);
+        assert!(map_fit(&[], 400.0, 300.0, None).tiles.is_empty());
+    }
+
+    #[test]
+    fn the_newest_shared_place_is_the_one_on_the_map() {
+        let mut person = Person {
+            id: 1,
+            name: "Ada".into(),
+            identity: "ab".into(),
+            notes: Vec::new(),
+            seen: 0,
+            location: LocationShare::Never,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
+        };
+        assert!(latest_place(&person).is_none());
+        write_note(&mut person, "hello");
+        let first = Place::from_degrees(1.0, 2.0).expect("first");
+        let later = Place::from_degrees(3.0, 4.0).expect("later");
+        write_placed_note(&mut person, "there 📍 Location", Some(first));
+        write_placed_note(&mut person, "later 📍 Location", Some(later));
+        assert_eq!(latest_place(&person), Some(later));
+    }
+
+    #[test]
+    fn an_automatic_place_stays_off_the_journal() {
+        let manual = Place::from_degrees(1.0, 2.0).expect("manual");
+        let automatic = Place::from_degrees(3.0, 4.0).expect("automatic");
+        let mut person = Person {
+            id: 1,
+            name: "Ada".into(),
+            identity: "ab".into(),
+            notes: Vec::new(),
+            seen: 0,
+            location: LocationShare::Hourly,
+            located: None,
+            located_at: 0,
+            offered_at: 0,
+        };
+        assert!(share_is_due(&person, 10_000));
+        write_placed_note(&mut person, "there 📍 Location", Some(manual));
+        person.notes[0].written_at = 2_000.0f64.to_bits();
+        assert_eq!(latest_place(&person), Some(manual));
+        assert!(remember_shared(&mut person, automatic, 1_000.0));
+        assert_eq!(person.notes.len(), 1);
+        assert_eq!(latest_place(&person), Some(manual));
+        assert!(remember_shared(&mut person, automatic, 3_000.0));
+        assert!(!remember_shared(&mut person, manual, 2_500.0));
+        assert_eq!(person.notes.len(), 1);
+        assert_eq!(latest_place(&person), Some(automatic));
+        assert!(mark_offered(&mut person, 10_000));
+        assert!(!share_is_due(&person, 10_100));
+        assert!(share_is_due(&person, 10_000 + 3_600));
+        let read = decode_contacts(&encode_contacts(&[person.clone()])).expect("the book");
+        assert_eq!(read[0].located, Some(automatic));
+        assert_eq!(read[0].offered_at, 10_000);
+        assert_eq!(latest_place(&read[0]), Some(automatic));
+        let older = "journal-contacts 9\n1\n1\nAda\nab\n0\nhour\n0\n";
+        let read = decode_contacts(older).expect("an older book");
+        assert!(read[0].located.is_none());
+        assert_eq!(read[0].offered_at, 0);
+        assert_eq!(read[0].location, LocationShare::Hourly);
+        let when =
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2026, 11, 1, 17, 26, 0).unwrap();
+        assert_eq!(
+            place_clock(when.timestamp() as f64).as_deref(),
+            Some("01/11/26 17:26")
+        );
+        assert_eq!(place_as_of(&person), Some(3_000.0));
+    }
+
+    #[test]
+    fn a_place_stays_readable_in_the_note() {
+        let place = Place::from_degrees(40.7484, -73.9857).expect("place");
         assert_eq!(
             super::shown_words(&format!("See you {PLACEHOLDER} there"), Some(place), None),
             "See you there"

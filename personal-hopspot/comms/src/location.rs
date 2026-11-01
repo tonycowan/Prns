@@ -1,5 +1,7 @@
-//! A fine-grained fix for a place embedded in a note.
+//! The most detailed place the device can produce.
 //!
+//! A reading keeps the smallest uncertainty it sees, and stops once that is
+//! within twenty metres or twelve seconds have passed.
 //! macOS and iOS need `NSLocationWhenInUseUsageDescription` in the app's Info.plist
 //! ("N10A uses your location when you add it to a note.") or the system
 //! will not ask, and this returns nothing.
@@ -39,9 +41,14 @@ pub async fn current_place() -> Option<Place> {
             let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &wasm_bindgen::JsValue::NULL);
         });
         use wasm_bindgen::JsCast;
-        let _ = geo.get_current_position_with_error_callback(
+        let mut options = web_sys::PositionOptions::new();
+        options.enable_high_accuracy(true);
+        options.maximum_age(0);
+        options.timeout(20_000);
+        let _ = geo.get_current_position_with_error_callback_and_options(
             ok.as_ref().unchecked_ref(),
             err.as_ref().unchecked_ref(),
+            &options,
         );
         ok.forget();
         err.forget();
@@ -158,8 +165,12 @@ fn blocking_place() -> Option<Place> {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[link(name = "CoreLocation", kind = "framework")]
 extern "C" {
-    static kCLLocationAccuracyBest: f64;
+    static kCLLocationAccuracyBestForNavigation: f64;
 }
+
+/// A fix this sharp is detailed enough to stop waiting for a finer one.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const DETAILED_METERS: f64 = 20.0;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[repr(C)]
@@ -186,6 +197,9 @@ unsafe impl RefEncode for Coordinate {
 struct LocationIvars {
     tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<Option<Place>>>>,
     started: std::sync::atomic::AtomicBool,
+    best_accuracy: std::sync::Mutex<f64>,
+    best: std::sync::Mutex<Option<Place>>,
+    generation: u64,
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -203,7 +217,8 @@ define_class!(
         fn did_update(&self, manager: &AnyObject, locations: &AnyObject) {
             // SAFETY: CoreLocation passes the locations array for this callback.
             // `count` is the array length. `lastObject` is a CLLocation or null.
-            // `coordinate` is two f64 fields. Stopping updates ends this request.
+            // `coordinate` is two f64 fields. `horizontalAccuracy` is the
+            // uncertainty in metres, negative when the fix is not usable.
             let count: usize = unsafe { msg_send![locations, count] };
             if count == 0 {
                 return;
@@ -213,8 +228,31 @@ define_class!(
                 return;
             }
             let coord: Coordinate = unsafe { msg_send![loc, coordinate] };
+            let accuracy: f64 = unsafe { msg_send![loc, horizontalAccuracy] };
+            if !accuracy.is_finite() || accuracy < 0.0 {
+                return;
+            }
+            let place = Place::from_degrees(coord.latitude, coord.longitude);
+            let sharp = {
+                let Ok(mut best_accuracy) = self.ivars().best_accuracy.lock() else {
+                    return;
+                };
+                let Ok(mut best) = self.ivars().best.lock() else {
+                    return;
+                };
+                if accuracy < *best_accuracy {
+                    *best_accuracy = accuracy;
+                    *best = place;
+                }
+                *best_accuracy <= DETAILED_METERS
+            };
+            if !sharp {
+                return;
+            }
+            // SAFETY: A fix this sharp is the most detailed one worth waiting for.
+            // Stopping updates ends this request.
             let _: () = unsafe { msg_send![manager, stopUpdatingLocation] };
-            self.finish(Place::from_degrees(coord.latitude, coord.longitude));
+            self.finish_best();
         }
 
         #[unsafe(method(locationManager:didFailWithError:))]
@@ -228,8 +266,9 @@ define_class!(
             }
             // SAFETY: The manager argument is the CLLocationManager that failed
             // after a fix was requested. Stopping updates ends this request.
+            // The finest fix already received, if any, is the one that is kept.
             let _: () = unsafe { msg_send![manager, stopUpdatingLocation] };
-            self.finish(None);
+            self.finish_best();
         }
 
         #[unsafe(method(locationManagerDidChangeAuthorization:))]
@@ -248,10 +287,13 @@ define_class!(
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 impl LocationDelegate {
-    fn new(tx: std::sync::mpsc::Sender<Option<Place>>) -> Retained<Self> {
+    fn new(tx: std::sync::mpsc::Sender<Option<Place>>, generation: u64) -> Retained<Self> {
         let this = Self::alloc().set_ivars(LocationIvars {
             tx: std::sync::Mutex::new(Some(tx)),
             started: std::sync::atomic::AtomicBool::new(false),
+            best_accuracy: std::sync::Mutex::new(f64::MAX),
+            best: std::sync::Mutex::new(None),
+            generation,
         });
         // SAFETY: `init` is NSObject's initializer, called on the object just allocated.
         unsafe { objc2::msg_send![super(this), init] }
@@ -262,6 +304,16 @@ impl LocationDelegate {
             return;
         };
         let _ = tx.send(place);
+    }
+
+    fn finish_best(&self) {
+        let place = self
+            .ivars()
+            .best
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        self.finish(place);
     }
 
     fn on_status(&self, manager: &AnyObject, status: isize) {
@@ -281,42 +333,70 @@ impl LocationDelegate {
         {
             return;
         }
-        // SAFETY: Location is allowed. `requestLocation` asks CoreLocation for one fix.
-        let _: () = unsafe { msg_send![manager, requestLocation] };
+        // SAFETY: Location is allowed. Updates continue until a fix is within
+        // twenty metres, or twelve seconds pass, and the finest one is kept.
+        let _: () = unsafe { msg_send![manager, startUpdatingLocation] };
+        let generation = self.ivars().generation;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(12));
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                HOLD.with(|hold| {
+                    let hold = hold.borrow();
+                    let Some(current) = hold.as_ref() else {
+                        return;
+                    };
+                    if current.delegate.ivars().generation != generation {
+                        return;
+                    }
+                    // SAFETY: `current.manager` is the CLLocationManager for this
+                    // request. Twelve seconds is long enough for the finest fix
+                    // the device is going to produce. Stopping updates ends it.
+                    let _: () = unsafe { msg_send![&*current.manager, stopUpdatingLocation] };
+                    current.delegate.finish_best();
+                });
+            });
+        });
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn request_on_main(tx: std::sync::mpsc::Sender<Option<Place>>) {
-    use std::cell::RefCell;
+struct HeldFix {
+    manager: Retained<AnyObject>,
+    /// Retained so CoreLocation can message it after the request function returns.
+    #[allow(dead_code)]
+    delegate: Retained<LocationDelegate>,
+}
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+thread_local! {
+    static HOLD: std::cell::RefCell<Option<HeldFix>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn request_on_main(tx: std::sync::mpsc::Sender<Option<Place>>) {
     use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject};
 
-    struct Hold {
-        manager: Retained<AnyObject>,
-        /// Retained so CoreLocation can message it after this function returns.
-        #[allow(dead_code)]
-        delegate: Retained<LocationDelegate>,
-    }
-
-    thread_local! {
-        static HOLD: RefCell<Option<Hold>> = const { RefCell::new(None) };
-    }
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
     let Some(cls) = AnyClass::get(c"CLLocationManager") else {
         let _ = tx.send(None);
         return;
     };
     // SAFETY: `cls` is CLLocationManager. `new` returns a retained instance.
-    // `kCLLocationAccuracyBest` is the framework's finest accuracy constant.
-    // `authorizationStatus` is the current CLAuthorizationStatus.
-    // The delegate is a retained NSObject. The two requests start a one-shot fix.
+    // `kCLLocationAccuracyBestForNavigation` asks for the finest fix the
+    // device can produce. `kCLDistanceFilterNone` (`-1`) delivers every one,
+    // so the sharpest can be kept. `authorizationStatus` is the current
+    // CLAuthorizationStatus. The delegate is a retained NSObject.
     let manager: Retained<AnyObject> = unsafe { msg_send![cls, new] };
-    let accuracy = unsafe { kCLLocationAccuracyBest };
+    let accuracy = unsafe { kCLLocationAccuracyBestForNavigation };
     let _: () = unsafe { msg_send![&*manager, setDesiredAccuracy: accuracy] };
-    let delegate = LocationDelegate::new(tx);
+    let _: () = unsafe { msg_send![&*manager, setDistanceFilter: -1.0_f64] };
+    let delegate = LocationDelegate::new(tx, generation);
     // SAFETY: The delegate receives the authorization dialog's result.
     // A fix is requested only after that result is allowed, so the dialog
     // is not cancelled by an early failure.
@@ -333,6 +413,6 @@ fn request_on_main(tx: std::sync::mpsc::Sender<Option<Place>>) {
             // SAFETY: `old.manager` is the CLLocationManager kept from the previous request.
             let _: () = unsafe { msg_send![&*old.manager, stopUpdatingLocation] };
         }
-        *hold = Some(Hold { manager, delegate });
+        *hold = Some(HeldFix { manager, delegate });
     });
 }

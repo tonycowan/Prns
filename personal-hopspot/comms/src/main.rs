@@ -50,14 +50,17 @@ use model::remember_call;
 use model::sample_people;
 use model::{
     add_person, can_call, code_mark, contact_code, delivered_mark, file_choice, file_name_of,
-    file_too_big, group_by_day, has_unread, keeps_file, map_window, mark_read, note_runs,
-    note_with_file, note_with_photo, offered_ways, path_label, photo_choice, react_to_note,
-    remove_person, rename_person, retry_note, shown_words, write_file_note, write_note,
-    write_placed_note, FittedPhoto, NoteKind, Page, Person, Place, Reach, Reaction, PHOTO_FILE,
-    PLACEHOLDER,
+    file_too_big, group_by_day, has_unread, keeps_file, latest_place, map_fit, map_window,
+    mark_read, note_runs, note_with_file, note_with_photo, offered_ways, path_label, photo_choice,
+    place_as_of, place_clock, react_to_note, remove_person, rename_person, retry_note,
+    set_location_share, shown_words, write_file_note, write_note, write_placed_note, FittedPhoto,
+    LocationShare, NoteKind, Page, Person, Place, Reach, Reaction, PHOTO_FILE, PLACEHOLDER,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use model::{fail_note, fail_their_file, land_their_file, post_note, settle_note};
+use model::{
+    fail_note, fail_their_file, land_their_file, mark_offered, post_note, remember_shared,
+    settle_note,
+};
 
 const KEEP_KEYBOARD: &str = r#"
 if (!window.__touchbaseKeepKeyboard) {
@@ -108,7 +111,7 @@ if (!window.__touchbaseKeepKeyboard) {
 
 // Android takes a downward drag at the top of the list as scrolling. This follows
 // that drag and opens the seam without calling preventDefault, so a sideways
-// slide can still reveal rename and remove. 56 matches `SEAM`.
+// slide can still reveal info and remove. 56 matches `SEAM`.
 #[cfg(target_os = "android")]
 const SEAM_TOUCH: &str = r#"
 if (!window.__touchbaseSeam) {
@@ -188,7 +191,7 @@ html, body, #main {
   background: var(--paper);
   color: var(--ink);
 }
-button, input, textarea {
+button, input, textarea, select {
   font: inherit;
   color: inherit;
   background: transparent;
@@ -260,6 +263,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, .draft:focus-
   right: 0;
   display: flex;
   justify-content: center;
+  align-items: center;
   gap: 0.7em;
   margin: 0;
   pointer-events: none;
@@ -269,6 +273,25 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, .draft:focus-
   letter-spacing: 0.08em;
   transform: translateY(var(--seam, 0px));
   transition: transform var(--seam-move, 180ms ease);
+}
+.wires button.back {
+  position: absolute;
+  left: max(20px, env(safe-area-inset-left));
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  justify-content: flex-start;
+  pointer-events: auto;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--ink);
+  text-decoration: none;
 }
 .wires .live { color: var(--ink); }
 .wires .quiet { color: var(--pencil); opacity: 0.35; }
@@ -339,47 +362,30 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, .draft:focus-
   line-height: 1.45;
   padding: 10px 0 8px;
 }
-.name-swipe {
-  display: flex;
-  align-items: stretch;
-  overflow: hidden;
-  touch-action: pan-y;
-}
-.names .name-swipe > .who {
-  flex: 1 1 auto;
-  width: auto;
-  min-width: 0;
-  user-select: none;
-}
 .names .fresh { margin-right: 0.35em; }
-.name-config, .name-remove {
-  overflow: hidden;
-  display: flex;
-  flex: 0 0 0px;
-  transition: flex-basis 180ms ease;
-}
-.name-config { flex-basis: var(--config, 0px); justify-content: flex-end; }
-.name-remove { flex-basis: var(--remove, 0px); justify-content: flex-end; }
-.name-config button, .name-remove button {
+.journal .who { width: 100%; }
+.journal .name-line {
   display: flex;
   align-items: center;
-  flex: 0 0 84px;
-  width: 84px;
-  height: 100%;
-  box-sizing: border-box;
+  justify-content: space-between;
+  gap: 14px;
+}
+.journal .name-line h1 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.journal .info {
+  flex: none;
+  width: auto;
+  height: 30px;
   color: var(--pencil);
   font-family: var(--book);
   font-size: 16px;
   line-height: 1;
   text-decoration: underline;
   text-underline-offset: 4px;
-}
-.name-config button { justify-content: flex-end; padding: 0 12px 0 0; }
-.name-remove button { justify-content: flex-end; padding: 0 0 0 12px; }
-.name-swipe.live .name-config,
-.name-swipe.live .name-remove { transition: none; }
-input.who.rename {
-  border-bottom: 1px solid var(--pencil);
 }
 .confirm-remove { padding: 12px 0 8px; }
 .confirm-remove p {
@@ -430,7 +436,7 @@ input.who.rename {
   flex: none;
   margin: 0;
   padding:
-    calc(max(14px, env(safe-area-inset-top)) + 18px)
+    calc(max(14px, env(safe-area-inset-top)) + 34px)
     var(--edge-right)
     6px
     var(--edge-left);
@@ -470,6 +476,85 @@ input.who.rename {
   transform: translateX(0);
   pointer-events: auto;
 }
+.relation-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.relation-bar button {
+  width: auto;
+  min-height: 44px;
+  padding: 12px 0;
+  color: var(--pencil);
+  font-family: var(--book);
+  font-size: 16px;
+  line-height: 1;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+.relation-fields {
+  display: grid;
+  gap: 18px;
+  margin-top: 28px;
+}
+label.outlined {
+  position: relative;
+  display: block;
+  width: 100%;
+  margin: 10px 0 0;
+  padding: 10px 12px 8px;
+  border: 1px solid #8a8175;
+  border-radius: 8px;
+  background: transparent;
+}
+label.outlined > span {
+  position: absolute;
+  top: 0;
+  left: 10px;
+  max-width: calc(100% - 24px);
+  transform: translateY(-50%);
+  padding: 0 6px;
+  background: var(--paper);
+  font-family: var(--book);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--pencil);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+label.outlined input,
+label.outlined select {
+  width: 100%;
+  margin: 0;
+  padding: 2px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-family: var(--book);
+  font-size: 18px;
+  line-height: 1.3;
+  color: var(--ink);
+}
+label.outlined select {
+  padding-right: 22px;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%236e685f' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right center;
+  background-size: 12px 12px;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+label.outlined input:focus,
+label.outlined input:focus-visible,
+label.outlined select:focus,
+label.outlined select:focus-visible { outline: none; }
+label.outlined:focus-within { border-color: var(--ink); }
+label.outlined:focus-within > span { color: var(--ink); }
+.relation .confirm-remove { margin-top: 18px; }
 .title-row {
   display: flex;
   align-items: flex-start;
@@ -1012,6 +1097,71 @@ button.attached {
   color: var(--pencil);
   font-family: var(--book);
   font-size: 11px;
+  line-height: 1.2;
+}
+.atlas {
+  --margin: 20px;
+  --edge-left: max(var(--margin), env(safe-area-inset-left));
+  --edge-right: max(var(--margin), env(safe-area-inset-right));
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  padding:
+    calc(max(14px, env(safe-area-inset-top)) + 34px)
+    0
+    0
+    0;
+}
+.atlas-map {
+  position: relative;
+  flex: 1 1 50%;
+  min-height: 0;
+  margin: 0 var(--edge-right) 0 var(--edge-left);
+  overflow: hidden;
+  background: rgba(92, 78, 58, 0.08);
+}
+.atlas-map .tile {
+  position: absolute;
+  max-width: none;
+}
+.atlas-map .pin {
+  margin: 0;
+  transform: translate(-50%, -50%);
+}
+.atlas-map .pin.chosen {
+  width: 16px;
+  height: 16px;
+}
+.atlas-map .map-credit {
+  position: absolute;
+  z-index: 2;
+  left: 8px;
+  bottom: 6px;
+  padding: 0 4px;
+  background: var(--paper);
+}
+.atlas-list {
+  flex: 1 1 50%;
+  min-height: 0;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding:
+    0
+    var(--edge-right)
+    max(16px, env(safe-area-inset-bottom))
+    var(--edge-left);
+}
+.atlas-list .who.unplaced {
+  color: var(--pencil);
+  opacity: 0.4;
+}
+.atlas-list .who.chosen { color: var(--ink); }
+.atlas-list .as-of {
+  display: block;
+  margin-top: 2px;
+  color: var(--pencil);
+  font-size: 15px;
   line-height: 1.2;
 }
 .field { margin: 18px 0; }
@@ -1708,6 +1858,52 @@ fn this_call(person: &str, voice: &VoiceLine) -> bool {
     }
 }
 
+fn forget_removed(identity: &str, line: &VoiceLine) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        session::forget(identity);
+        if this_call(identity, line) {
+            if line.kind == 4 {
+                session::decline(line.ticket);
+            } else {
+                session::hang_up();
+            }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (identity, line);
+    }
+}
+
+fn drop_person(
+    id: u64,
+    people: Signal<Vec<Person>>,
+    mut page: Signal<Page>,
+    mut cover: Signal<Page>,
+    voice: Signal<VoiceLine>,
+) {
+    let mut listed = people();
+    let identity = listed
+        .iter()
+        .find(|person| person.id == id)
+        .map(|person| person.identity.clone());
+    if !remove_person(&mut listed, id) {
+        return;
+    }
+    let identity = identity.expect("the removed contact");
+    commit_people(people, listed);
+    forget_removed(&identity, &voice());
+    let showing = match page() {
+        Page::Journal(open) | Page::Info(open) | Page::Share(open) => open == id,
+        _ => false,
+    };
+    if showing {
+        cover.set(Page::People);
+        page.set(Page::People);
+    }
+}
+
 #[component]
 fn IncomingBar(voice: VoiceLine, people: Vec<Person>) -> Element {
     if voice.kind != 4 {
@@ -1908,6 +2104,31 @@ fn App() -> Element {
                             ));
                         }
                     }
+                    for arrived in session::drain_shares() {
+                        let mut listed = people();
+                        if let Some(person) = listed.iter_mut().find(|person| {
+                            session::same_contact(&person.identity, &arrived.identity)
+                        }) {
+                            if remember_shared(person, arrived.place, arrived.written_at) {
+                                commit_people(people, listed);
+                            }
+                        }
+                    }
+                    let offered = session::drain_offered();
+                    if !offered.is_empty() {
+                        let mut listed = people();
+                        let mut changed = false;
+                        for (identity, at) in offered {
+                            if let Some(person) = listed.iter_mut().find(|person| {
+                                person.identity.trim().eq_ignore_ascii_case(&identity)
+                            }) {
+                                changed |= mark_offered(person, at);
+                            }
+                        }
+                        if changed {
+                            commit_people(people, listed);
+                        }
+                    }
                     for arrived in session::drain_reactions() {
                         let mut listed = people();
                         if let Some(person) = listed.iter_mut().find(|person| {
@@ -2037,6 +2258,7 @@ fn App() -> Element {
                     if transfer() != next {
                         transfer.set(next);
                     }
+                    session::offer_shares_if_due();
                     session::pause().await;
                 }
             });
@@ -2053,7 +2275,19 @@ fn App() -> Element {
                 #[cfg(target_os = "macos")]
                 banner::became_active();
             },
-            WireLetters { wires: wires() }
+            WireLetters {
+                wires: wires(),
+                back: open,
+                on_back: move |_| {
+                    if let Page::Info(id) = page() {
+                        let next = Page::Journal(id);
+                        cover.set(next);
+                        page.set(next);
+                    } else {
+                        page.set(Page::People);
+                    }
+                },
+            }
             IncomingBar { voice: voice(), people: people() }
             PeoplePage {
                 people: people(),
@@ -2089,50 +2323,9 @@ fn App() -> Element {
                     cover.set(Page::Add);
                     page.set(Page::Add);
                 },
-                on_rename: move |(id, name): (u64, String)| {
-                    let mut listed = people();
-                    if rename_person(&mut listed, id, &name) {
-                        commit_people(people, listed);
-                    }
-                },
-                on_remove: move |id| {
-                    let mut listed = people();
-                    let identity = listed
-                        .iter()
-                        .find(|person| person.id == id)
-                        .map(|person| person.identity.clone());
-                    if !remove_person(&mut listed, id) {
-                        return;
-                    }
-                    let identity = identity.expect("the removed contact");
-                    commit_people(people, listed);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        session::forget(&identity);
-                        let line = voice();
-                        if this_call(&identity, &line) {
-                            if line.kind == 4 {
-                                session::decline(line.ticket);
-                            } else {
-                                session::hang_up();
-                            }
-                        }
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        let _ = identity;
-                    }
-                    if let Page::Journal(open) = page() {
-                        if open == id {
-                            cover.set(Page::People);
-                            page.set(Page::People);
-                        }
-                    }
-                },
-                on_share: move |id| {
-                    let next = Page::Share(id);
-                    cover.set(next);
-                    page.set(next);
+                on_map: move |_| {
+                    cover.set(Page::Map);
+                    page.set(Page::Map);
                 },
             }
             div { class: if open { "sheet open" } else { "sheet" },
@@ -2145,7 +2338,6 @@ fn App() -> Element {
                             address: your_lxmf_address(),
                             renameable: true,
                             on_name: move |name| your_name.set(name),
-                            on_back: move |_| page.set(Page::People),
                         }
                     },
                     Page::Share(id) => {
@@ -2161,7 +2353,6 @@ fn App() -> Element {
                                         address,
                                         renameable: false,
                                         on_name: move |_| {},
-                                        on_back: move |_| page.set(Page::People),
                                     }
                                 }
                             }
@@ -2174,7 +2365,6 @@ fn App() -> Element {
                             code: draft_code(),
                             on_name: move |value| draft_name.set(value),
                             on_code: move |value| draft_code.set(value),
-                            on_back: move |_| page.set(Page::People),
                             on_scanned: move |(name, identity): (String, String)| {
                                 let mut listed = people();
                                 let mut id = next_id();
@@ -2227,7 +2417,6 @@ fn App() -> Element {
                                             styled.set(styled() + 1);
                                         }
                                     },
-                                    on_back: move |_| page.set(Page::People),
                                     on_retry: move |note_id: u64| {
                                         let mut listed = people();
                                         let Some(person) =
@@ -2363,8 +2552,51 @@ fn App() -> Element {
                                         draft_place.set(None);
                                         place_epoch.set(place_epoch() + 1);
                                     },
+                                    on_info: move |_| {
+                                        let next = Page::Info(id);
+                                        cover.set(next);
+                                        page.set(next);
+                                    },
                                 }
                             },
+                            None => rsx! {},
+                        }
+                    }
+                    Page::Map => rsx! {
+                        ContactMap { people: people() }
+                    },
+                    Page::Info(id) => {
+                        let chosen = people().into_iter().find(|person| person.id == id);
+                        match chosen {
+                            Some(person) => {
+                                let name = person.name.clone();
+                                let location = person.location;
+                                rsx! {
+                                    RelationPage {
+                                        id,
+                                        name,
+                                        location,
+                                        on_name: move |name: String| {
+                                            let mut listed = people();
+                                            if rename_person(&mut listed, id, &name) {
+                                                commit_people(people, listed);
+                                            }
+                                        },
+                                        on_location: move |location: LocationShare| {
+                                            let mut listed = people();
+                                            if set_location_share(&mut listed, id, location) {
+                                                commit_people(people, listed);
+                                            }
+                                        },
+                                        on_share: move |_| {
+                                            let next = Page::Share(id);
+                                            cover.set(next);
+                                            page.set(next);
+                                        },
+                                        on_remove: move |_| drop_person(id, people, page, cover, voice),
+                                    }
+                                }
+                            }
                             None => rsx! {},
                         }
                     }
@@ -2403,9 +2635,17 @@ fn read_wires() -> Wires {
 }
 
 #[component]
-fn WireLetters(wires: Wires) -> Element {
+fn WireLetters(wires: Wires, back: bool, on_back: EventHandler<()>) -> Element {
     rsx! {
         div { class: "wires",
+            if back {
+                button {
+                    class: "back",
+                    aria_label: "Back",
+                    onclick: move |_| on_back.call(()),
+                    "←"
+                }
+            }
             span { class: if wires.wifi { "live" } else { "quiet" }, title: "Wifi auto", "W" }
             span { class: if wires.internet { "live" } else { "quiet" }, title: "Internet", "I" }
             span { class: if wires.ble { "live" } else { "quiet" }, title: "BLE", "B" }
@@ -2478,13 +2718,8 @@ fn PeoplePage(
     on_open: EventHandler<u64>,
     on_code: EventHandler<()>,
     on_add: EventHandler<()>,
-    on_rename: EventHandler<(u64, String)>,
-    on_remove: EventHandler<u64>,
-    on_share: EventHandler<u64>,
+    on_map: EventHandler<()>,
 ) -> Element {
-    let mut confirming = use_signal(|| None::<u64>);
-    let mut renaming = use_signal(|| None::<u64>);
-    let mut draft = use_signal(String::new);
     let mut at_top = use_signal(|| true);
     let mut seam = use_signal(|| 0.0);
     let mut pulling = use_signal(|| false);
@@ -2619,6 +2854,17 @@ fn PeoplePage(
                             pulled.set(false);
                             return;
                         }
+                        on_map.call(());
+                    },
+                    "map"
+                }
+                button {
+                    class: "action",
+                    onclick: move |_| {
+                        if pulled() {
+                            pulled.set(false);
+                            return;
+                        }
                         on_code.call(());
                     },
                     "Your QR code"
@@ -2629,43 +2875,15 @@ fn PeoplePage(
             } else {
             ul { class: "names",
                 for person in people {
-                    PersonRow {
-                        key: "{person.id}",
-                        id: person.id,
-                        name: person.name.clone(),
-                        unread: has_unread(&person),
-                        confirming: confirming() == Some(person.id),
-                        editing: renaming() == Some(person.id),
-                        draft: draft(),
-                        on_open: move |id| {
-                            confirming.set(None);
-                            renaming.set(None);
-                            on_open.call(id);
-                        },
-                        on_ask: move |id| {
-                            renaming.set(None);
-                            confirming.set(Some(id));
-                        },
-                        on_keep: move |_| confirming.set(None),
-                        on_remove: move |id| {
-                            confirming.set(None);
-                            on_remove.call(id);
-                        },
-                        on_edit: {
-                            let current = person.name.clone();
-                            move |id| {
-                                confirming.set(None);
-                                draft.set(current.clone());
-                                renaming.set(Some(id));
+                    li {
+                        button {
+                            class: "who",
+                            onclick: move |_| on_open.call(person.id),
+                            if has_unread(&person) {
+                                span { class: "fresh", "*" }
                             }
-                        },
-                        on_draft: move |value| draft.set(value),
-                        on_named: move |(id, name)| {
-                            renaming.set(None);
-                            on_rename.call((id, name));
-                        },
-                        on_cancel: move |_| renaming.set(None),
-                        on_share: move |id| on_share.call(id),
+                            "{person.name}"
+                        }
                     }
                 }
             }
@@ -2675,202 +2893,99 @@ fn PeoplePage(
     }
 }
 
-const REMOVE_WIDTH: f64 = 84.0;
-/// Rename and share, side by side.
-const CONFIG_WIDTH: f64 = 168.0;
-
+/// The relationship with one contact. The contact list slides away to the left.
 #[component]
-fn PersonRow(
+fn RelationPage(
     id: u64,
     name: String,
-    unread: bool,
-    confirming: bool,
-    editing: bool,
-    draft: String,
-    on_open: EventHandler<u64>,
-    on_ask: EventHandler<u64>,
-    on_keep: EventHandler<()>,
-    on_remove: EventHandler<u64>,
-    on_edit: EventHandler<u64>,
-    on_draft: EventHandler<String>,
-    on_named: EventHandler<(u64, String)>,
-    on_cancel: EventHandler<()>,
-    on_share: EventHandler<u64>,
+    location: LocationShare,
+    on_name: EventHandler<String>,
+    on_location: EventHandler<LocationShare>,
+    on_share: EventHandler<()>,
+    on_remove: EventHandler<()>,
 ) -> Element {
-    let mut reveal = use_signal(|| 0.0);
-    let mut drag = use_signal(|| None::<(f64, f64, f64)>);
-    let mut dragged = use_signal(|| false);
-    let mut dismissed = use_signal(|| false);
-    let ask = name.clone();
-    if editing {
-        let on_key = draft.clone();
-        let on_leave = draft.clone();
-        return rsx! {
-            li {
-                input {
-                    class: "who rename",
-                    aria_label: "Name",
-                    value: "{draft}",
-                    onmounted: move |event| {
-                        spawn(async move {
-                            let _ = event.set_focus(true).await;
-                        });
-                    },
-                    oninput: move |event| on_draft.call(event.value()),
-                    onkeydown: move |event| {
-                        if event.key() == Key::Escape {
-                            dismissed.set(true);
-                            on_cancel.call(());
-                        } else if event.key() == Key::Enter {
-                            event.prevent_default();
-                            dismissed.set(true);
-                            finish_rename(id, &on_key, on_named, on_cancel);
-                        }
-                    },
-                    onblur: move |_| {
-                        if dismissed() {
-                            dismissed.set(false);
-                            return;
-                        }
-                        finish_rename(id, &on_leave, on_named, on_cancel);
-                    },
-                }
-            }
-        };
+    let mut draft = use_signal(|| name.clone());
+    let mut confirming = use_signal(|| false);
+    let mut for_id = use_signal(|| u64::MAX);
+    if for_id() != id {
+        for_id.set(id);
+        draft.set(name.clone());
+        confirming.set(false);
     }
-    if confirming {
-        return rsx! {
-            li {
-                div { class: "confirm-remove",
-                    p { "Remove {ask}? All history will be deleted." }
-                    div { class: "confirm-actions",
-                        button { onclick: move |_| on_remove.call(id), "Remove" }
-                        button { onclick: move |_| on_keep.call(()), "Keep" }
-                    }
-                }
-            }
-        };
-    }
-    let config = if reveal() < 0.0 { -reveal() } else { 0.0 };
-    let remove = if reveal() > 0.0 { reveal() } else { 0.0 };
+    let keep = name.clone();
+    let stored_key = name.clone();
+    let stored_blur = name.clone();
     rsx! {
-        li {
-            div {
-                class: if drag().is_some() { "name-swipe live" } else { "name-swipe" },
-                style: "--config: {config}px; --remove: {remove}px",
-                onpointerdown: move |event| {
-                    let point = event.client_coordinates();
-                    drag.set(Some((point.x, point.y, reveal())));
-                    dragged.set(false);
-                },
-                onpointermove: move |event| {
-                    let Some((start_x, start_y, start_reveal)) = drag() else {
-                        return;
-                    };
-                    let point = event.client_coordinates();
-                    let travel = point.x - start_x;
-                    let dy = point.y - start_y;
-                    if travel.abs() < 8.0 && dy.abs() > travel.abs() {
-                        return;
-                    }
-                    // A pull to the right opens rename and share. A pull to the left opens removal.
-                    reveal.set((start_reveal - travel).clamp(-CONFIG_WIDTH, REMOVE_WIDTH));
-                },
-                onpointerup: move |event| {
-                    let tap = drag().is_some_and(|(start_x, start_y, _)| {
-                        let point = event.client_coordinates();
-                        let dx = point.x - start_x;
-                        let dy = point.y - start_y;
-                        dx * dx + dy * dy < 18.0 * 18.0
-                    });
-                    release_row(drag, reveal);
-                    dragged.set(!tap);
-                },
-                onpointercancel: move |_| release_row(drag, reveal),
-                onpointerleave: move |_| release_row(drag, reveal),
-                div { class: "name-config",
-                    button {
-                        aria_label: "Share",
-                        onpointerdown: move |event| event.stop_propagation(),
-                        onpointerup: move |event| event.stop_propagation(),
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            reveal.set(0.0);
-                            on_share.call(id);
-                        },
-                        "share"
-                    }
-                    button {
-                        aria_label: "Rename",
-                        onpointerdown: move |event| event.stop_propagation(),
-                        onpointerup: move |event| event.stop_propagation(),
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            reveal.set(0.0);
-                            on_edit.call(id);
-                        },
-                        "rename"
-                    }
+        div { class: "page",
+            div { class: "relation-bar",
+                button {
+                    aria_label: "Share",
+                    onclick: move |_| on_share.call(()),
+                    "share"
                 }
                 button {
-                    class: "who",
-                    onclick: move |_| {
-                        if dragged() {
-                            dragged.set(false);
-                            return;
-                        }
-                        on_open.call(id);
-                    },
-                    if unread {
-                        span { class: "fresh", "*" }
-                    }
-                    "{name}"
+                    aria_label: "Remove",
+                    onclick: move |_| confirming.set(true),
+                    "remove"
                 }
-                div { class: "name-remove",
-                    button {
-                        aria_label: "Remove",
-                        onpointerdown: move |event| event.stop_propagation(),
-                        onpointerup: move |event| event.stop_propagation(),
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            reveal.set(0.0);
-                            on_ask.call(id);
+            }
+            if confirming() {
+                div { class: "confirm-remove",
+                    p { "Remove {keep}? All history will be deleted." }
+                    div { class: "confirm-actions",
+                        button { onclick: move |_| on_remove.call(()), "Remove" }
+                        button { onclick: move |_| confirming.set(false), "Keep" }
+                    }
+                }
+            }
+            div { class: "relation-fields",
+                label {
+                    class: "outlined",
+                    span { "Name" }
+                    input {
+                        aria_label: "Name",
+                        value: "{draft}",
+                        oninput: move |event| draft.set(event.value()),
+                        onkeydown: move |event| {
+                            if event.key() == Key::Enter {
+                                event.prevent_default();
+                                let next = draft().trim().to_string();
+                                if next.is_empty() {
+                                    draft.set(stored_key.clone());
+                                } else {
+                                    draft.set(next.clone());
+                                    on_name.call(next);
+                                }
+                            }
                         },
-                        "remove"
+                        onblur: move |_| {
+                            let next = draft().trim().to_string();
+                            if next.is_empty() {
+                                draft.set(stored_blur.clone());
+                            } else {
+                                draft.set(next.clone());
+                                on_name.call(next);
+                            }
+                        },
+                    }
+                }
+                label {
+                    class: "outlined",
+                    span { "Automatic location share" }
+                    select {
+                        aria_label: "Automatic location share",
+                        value: "{location.token()}",
+                        onchange: move |event| {
+                            on_location.call(LocationShare::parse(&event.value()));
+                        },
+                        option { value: "never", "Never" }
+                        option { value: "day", "once per day" }
+                        option { value: "hour", "once per hour" }
+                        option { value: "ten", "every 10 minutes" }
                     }
                 }
             }
         }
-    }
-}
-
-fn release_row(mut drag: Signal<Option<(f64, f64, f64)>>, mut reveal: Signal<f64>) {
-    if drag().is_none() {
-        return;
-    }
-    drag.set(None);
-    let value = reveal();
-    let next = if value > REMOVE_WIDTH / 2.0 {
-        REMOVE_WIDTH
-    } else if value < -REMOVE_WIDTH / 2.0 {
-        -CONFIG_WIDTH
-    } else {
-        0.0
-    };
-    reveal.set(next);
-}
-
-fn finish_rename(
-    id: u64,
-    draft: &str,
-    on_named: EventHandler<(u64, String)>,
-    on_cancel: EventHandler<()>,
-) {
-    let name = draft.trim();
-    if name.is_empty() {
-        on_cancel.call(());
-    } else {
-        on_named.call((id, name.to_string()));
     }
 }
 
@@ -2930,7 +3045,6 @@ fn CodePage(
     address: String,
     renameable: bool,
     on_name: EventHandler<String>,
-    on_back: EventHandler<()>,
 ) -> Element {
     let payload = contact_code(&name, &address);
     let mark = code_mark(&payload);
@@ -2945,7 +3059,6 @@ fn CodePage(
     rsx! {
         div { class: "page",
             div { class: "title-row",
-                button { class: "back", onclick: move |_| on_back.call(()), "←" }
                 h1 { "{heading}" }
             }
             if renameable {
@@ -3263,7 +3376,6 @@ fn AddPage(
     code: String,
     on_name: EventHandler<String>,
     on_code: EventHandler<String>,
-    on_back: EventHandler<()>,
     on_scanned: EventHandler<(String, String)>,
     on_save: EventHandler<()>,
 ) -> Element {
@@ -3280,7 +3392,6 @@ fn AddPage(
             },
             onpaste: move |event| accept_paste(event, on_scanned, on_code, notice),
             div { class: "title-row",
-                button { class: "back", aria_label: "Back to contacts", onclick: move |_| on_back.call(()), "←" }
                 h1 { "Add a contact" }
             }
             PhotoControl { on_scanned, notice }
@@ -3512,10 +3623,10 @@ fn JournalPage(
     landed: u64,
     on_draft: EventHandler<String>,
     on_place: EventHandler<Place>,
-    on_back: EventHandler<()>,
     on_react: EventHandler<(u64, Reaction)>,
     on_retry: EventHandler<u64>,
     on_write: EventHandler<Option<(String, Vec<u8>)>>,
+    on_info: EventHandler<()>,
 ) -> Element {
     let name = person.name.clone();
     let groups = group_by_day(&person.notes);
@@ -3634,9 +3745,15 @@ fn JournalPage(
     rsx! {
         div { class: "page journal",
             div { class: "title-row",
-                button { class: "back", aria_label: "Back to contacts", onclick: move |_| on_back.call(()), "←" }
                 div { class: "who",
-                    h1 { "{name}" }
+                    div { class: "name-line",
+                        h1 { "{name}" }
+                        button {
+                            class: "info",
+                            onclick: move |_| on_info.call(()),
+                            "info"
+                        }
+                    }
                     if !under_name.is_empty() {
                         p { class: "via", "{under_name}" }
                     }
@@ -5330,6 +5447,123 @@ fn ReactionGlyph(kind: Reaction) -> Element {
                         d: "m35.67 10.07c6.57 0 12.03 3.431 12.03 10.21 0 3.671-0.48 6.526-3.71 9.755-3.956 3.956-7.184 6.346-7.208 8.549-0.0651 5.826-0.005 8.278-0.0044 8.36a1.476 1.476 0 0 1-1.464 1.487h-0.0115a1.476 1.476 0 0 1-1.476-1.464c-0.0005 -0.0819-0.0607-2.561 0.0044-8.416 0.0358-3.231 3.63-6.127 8.385-10.88 2.178-2.174 2.474-4.716 2.474-7.127 0-3.282-2.965-7.587-8.984-7.587-5.338 0-8.499 3.467-8.499 9.552a1.434 1.434 0 0 1-1.395 1.587 1.552 1.552 0 0 1-1.505-1.759c0-9.882 7.291-12.27 11.36-12.27m0-2c-4.964 0-13.36 3.005-13.36 14.27a3.519 3.519 0 0 0 3.505 3.759 3.418 3.418 0 0 0 3.395-3.587c0-3.445 1.128-7.552 6.499-7.552 4.817 0 6.984 3.267 6.984 5.587 0 2.364-0.3155 4.144-1.886 5.712-0.7515 0.75-1.474 1.454-2.157 2.12-3.933 3.833-6.775 6.602-6.815 10.15-0.055 4.946-0.0218 7.539-0.005 8.424a3.476 3.476 0 1 0 6.952-0.0248l-0.0012-0.075c-0.0164-0.8595-0.0488-3.384 0.0056-8.248 0.0092-0.8384 2.102-2.822 3.948-4.572 0.8091-0.767 1.726-1.636 2.675-2.585 3.577-3.577 4.296-6.926 4.296-11.17 0-7.301-5.638-12.21-14.03-12.21z",
                     }
                 },
+            }
+        }
+    }
+}
+
+#[component]
+fn ContactMap(people: Vec<Person>) -> Element {
+    let mut selected = use_signal(|| None::<u64>);
+    let mut size = use_signal(|| (0.0_f64, 0.0_f64));
+    let located: Vec<(u64, Place)> = people
+        .iter()
+        .filter_map(|person| latest_place(person).map(|place| (person.id, place)))
+        .collect();
+    let focus = selected().and_then(|id| {
+        located
+            .iter()
+            .find(|person| person.0 == id)
+            .map(|person| person.1)
+    });
+    let places: Vec<Place> = located.iter().map(|person| person.1).collect();
+    let (width, height) = size();
+    let fit = map_fit(&places, width, height, focus);
+    let zoom = fit.zoom;
+    let tiles = fit.tiles;
+    let chosen = selected();
+    let pins: Vec<(u64, f64, f64)> = fit
+        .pins
+        .into_iter()
+        .enumerate()
+        .map(|(index, (left, top))| (located[index].0, left, top))
+        .collect();
+    let rows: Vec<(u64, String, bool, bool, String)> = people
+        .iter()
+        .map(|person| {
+            (
+                person.id,
+                person.name.clone(),
+                latest_place(person).is_some(),
+                chosen == Some(person.id),
+                place_as_of(person)
+                    .and_then(place_clock)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    rsx! {
+        div { class: "atlas",
+            div {
+                id: "contact-map",
+                class: "atlas-map",
+                onmounted: move |_| {
+                    spawn(async move {
+                        let mut eval = document::eval(
+                            r#"
+                            requestAnimationFrame(function () {
+                              var node = document.getElementById("contact-map");
+                              var rect = node ? node.getBoundingClientRect() : {width: 0, height: 0};
+                              dioxus.send(rect.width + "," + rect.height);
+                            });
+                            "#,
+                        );
+                        if let Ok(text) = eval.recv::<String>().await {
+                            let mut parts = text.split(',');
+                            let next_width = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0.0);
+                            let next_height = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0.0);
+                            if next_width >= 1.0 && next_height >= 1.0 {
+                                size.set((next_width, next_height));
+                            }
+                        }
+                    });
+                },
+                for tile in tiles {
+                    img {
+                        class: "tile",
+                        alt: "",
+                        src: "https://tile.openstreetmap.org/{zoom}/{tile.x}/{tile.y}.png",
+                        style: "left: {tile.left}px; top: {tile.top}px; width: {tile.edge}px; height: {tile.edge}px;",
+                    }
+                }
+                for (id, left, top) in pins {
+                    span {
+                        class: if chosen == Some(id) { "pin chosen" } else { "pin" },
+                        style: "left: {left}px; top: {top}px;",
+                    }
+                }
+                if !places.is_empty() {
+                    p { class: "map-credit", "© OpenStreetMap" }
+                }
+            }
+            ul { class: "names atlas-list",
+                for (id, name, placed, picked, as_of) in rows {
+                    li {
+                        button {
+                            class: if !placed {
+                                "who unplaced"
+                            } else if picked {
+                                "who chosen"
+                            } else {
+                                "who"
+                            },
+                            disabled: !placed,
+                            onclick: move |_| {
+                                if !placed {
+                                    return;
+                                }
+                                selected.set(if selected() == Some(id) { None } else { Some(id) });
+                            },
+                            if picked {
+                                span { class: "fresh", "*" }
+                            }
+                            "{name}"
+                            if !as_of.is_empty() {
+                                span { class: "as-of", "as of {as_of}" }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

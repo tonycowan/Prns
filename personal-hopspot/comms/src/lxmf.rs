@@ -251,9 +251,50 @@ struct ReadMessage {
 
 struct MessageFields {
     place: Option<Place>,
+    /// A place offered on its own, with no note.
+    here: Option<Place>,
     reaction: Option<(f64, String, Option<crate::model::Reaction>)>,
     ack: Option<[u8; 32]>,
     file: Option<(String, Vec<u8>)>,
+}
+
+/// A place offered on its own. Empty words keep it out of the journal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShareLetter {
+    pub place: Place,
+    pub written_at: f64,
+}
+
+/// Packs a place with no words, so the other journal can keep it off the page.
+pub fn pack_share(place: Place, written_at: f64) -> Vec<u8> {
+    let text = place.text();
+    let mut out = Vec::new();
+    out.push(0x94);
+    out.push(0xcb);
+    out.extend_from_slice(&written_at.to_be_bytes());
+    push_bin(&mut out, b"");
+    push_bin(&mut out, b"");
+    out.push(0x81);
+    push_bin(&mut out, b"here");
+    push_bin(&mut out, text.as_bytes());
+    out
+}
+
+/// The place offered on its own. A note, a reaction, and an acknowledgement stay closed.
+pub fn open_share(bytes: &[u8]) -> Option<ShareLetter> {
+    let read = read_message(bytes)?;
+    if !read.words.is_empty()
+        || read.fields.ack.is_some()
+        || read.fields.reaction.is_some()
+        || read.fields.place.is_some()
+        || read.fields.file.is_some()
+    {
+        return None;
+    }
+    Some(ShareLetter {
+        place: read.fields.here?,
+        written_at: read.written_at,
+    })
 }
 
 fn read_message(bytes: &[u8]) -> Option<ReadMessage> {
@@ -329,6 +370,7 @@ pub fn open_ack(bytes: &[u8]) -> Option<[u8; 32]> {
     if !read.words.is_empty()
         || read.fields.reaction.is_some()
         || read.fields.place.is_some()
+        || read.fields.here.is_some()
         || read.fields.file.is_some()
     {
         return None;
@@ -463,12 +505,14 @@ impl<'a> Reader<'a> {
             self.skip_marked(marker)?;
             return Some(MessageFields {
                 place: None,
+                here: None,
                 reaction: None,
                 ack: None,
                 file: None,
             });
         };
         let mut place = None;
+        let mut here = None;
         let mut mark = None;
         let mut on = None;
         let mut of = String::new();
@@ -481,6 +525,13 @@ impl<'a> Reader<'a> {
                     if let Some(value) = self.text_or_skip()? {
                         if let Ok(text) = std::str::from_utf8(&value) {
                             place = Place::parse(text);
+                        }
+                    }
+                }
+                Some(key) if key == b"here" => {
+                    if let Some(value) = self.text_or_skip()? {
+                        if let Ok(text) = std::str::from_utf8(&value) {
+                            here = Place::parse(text);
                         }
                     }
                 }
@@ -545,6 +596,7 @@ impl<'a> Reader<'a> {
         };
         Some(MessageFields {
             place,
+            here,
             reaction,
             ack,
             file,
@@ -787,6 +839,18 @@ mod tests {
         assert_eq!(note.place, Some(place));
         let without = pack_placed_note("Meet me", 1_700_000_000.0, None);
         assert!(open_note(&without).expect("note").place.is_none());
+    }
+
+    #[test]
+    fn a_place_offered_on_its_own_is_not_a_note() {
+        let place = Place::from_degrees(41.88, -87.63).expect("place");
+        let packed = pack_share(place, 1_700_000_000.0);
+        assert!(open_note(&packed).is_none());
+        assert!(open_ack(&packed).is_none());
+        assert!(open_reaction(&packed).is_none());
+        let letter = open_share(&packed).expect("place");
+        assert_eq!(letter.place, place);
+        assert_eq!(letter.written_at, 1_700_000_000.0);
     }
 
     #[test]

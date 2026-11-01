@@ -46,6 +46,8 @@ import org.personal.prns.controller.UsbLink
 
 typealias BuildConfig = org.personal.prns.comms.BuildConfig
 
+private const val DETAILED_METERS = 20f
+
 class MainActivity : WryActivity() {
     private var waiting: CountDownLatch? = null
     private var found: AtomicReference<String?>? = null
@@ -408,60 +410,93 @@ class MainActivity : WryActivity() {
             return null
         }
         val manager = getSystemService(LocationManager::class.java) ?: return null
-        val provider = chooseProvider(manager) ?: return null
-        recent(manager, provider)?.let { return it }
-        return awaitFix(manager, provider)
+        val recent = knownPlaces(manager)
+            .filter { System.currentTimeMillis() - it.time < 120_000 }
+            .minByOrNull { accuracyOf(it) }
+        if (recent != null && accuracyOf(recent) <= DETAILED_METERS) {
+            return format(recent)
+        }
+        val live = awaitFinest(manager)
+        val chosen = listOfNotNull(recent, live).minByOrNull { accuracyOf(it) }
+        return chosen?.let { format(it) }
     }
 
-    private fun chooseProvider(manager: LocationManager): String? {
+    private fun knownPlaces(manager: LocationManager): List<Location> {
+        val names = mutableListOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER,
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            names.add(LocationManager.FUSED_PROVIDER)
+        }
+        return names.mapNotNull { name ->
+            try {
+                manager.getLastKnownLocation(name)
+            } catch (_: SecurityException) {
+                null
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+    }
+
+    private fun accuracyOf(location: Location): Float =
+        if (location.hasAccuracy() && location.accuracy >= 0f) location.accuracy else Float.MAX_VALUE
+
+    private fun liveProviders(manager: LocationManager): List<String> {
+        val names = mutableListOf<String>()
+        if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            names.add(LocationManager.GPS_PROVIDER)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             manager.isProviderEnabled(LocationManager.FUSED_PROVIDER)
         ) {
-            return LocationManager.FUSED_PROVIDER
-        }
-        if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            return LocationManager.GPS_PROVIDER
+            names.add(LocationManager.FUSED_PROVIDER)
         }
         if (manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-            return LocationManager.NETWORK_PROVIDER
+            names.add(LocationManager.NETWORK_PROVIDER)
         }
-        return null
+        return names
     }
 
-    private fun recent(manager: LocationManager, provider: String): String? {
-        val location = try {
-            manager.getLastKnownLocation(provider)
-        } catch (_: SecurityException) {
-            null
-        } ?: return null
-        if (System.currentTimeMillis() - location.time > 120_000) {
+    private fun awaitFinest(manager: LocationManager): Location? {
+        val providers = liveProviders(manager)
+        if (providers.isEmpty()) {
             return null
         }
-        return format(location)
-    }
-
-    private fun awaitFix(manager: LocationManager, provider: String): String? {
         val latch = CountDownLatch(1)
-        val found = AtomicReference<Location?>(null)
-        val listener = LocationListener { location ->
-            found.set(location)
-            latch.countDown()
-        }
-        try {
-            manager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper())
-        } catch (_: SecurityException) {
-            return null
-        } catch (_: IllegalArgumentException) {
-            return null
-        }
-        try {
-            if (!latch.await(45, TimeUnit.SECONDS)) {
-                return null
+        val best = AtomicReference<Location?>(null)
+        val listeners = providers.mapNotNull { provider ->
+            val listener = LocationListener { location ->
+                val current = best.get()
+                if (current == null || accuracyOf(location) < accuracyOf(current)) {
+                    best.set(location)
+                }
+                if (accuracyOf(location) <= DETAILED_METERS) {
+                    latch.countDown()
+                }
             }
-        } finally {
-            manager.removeUpdates(listener)
+            try {
+                manager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper())
+                listener
+            } catch (_: SecurityException) {
+                null
+            } catch (_: IllegalArgumentException) {
+                null
+            }
         }
-        return found.get()?.let { format(it) }
+        if (listeners.isEmpty()) {
+            return null
+        }
+        try {
+            latch.await(12, TimeUnit.SECONDS)
+        } finally {
+            for (listener in listeners) {
+                manager.removeUpdates(listener)
+            }
+        }
+        return best.get()
     }
 
     private fun format(location: Location) = "${location.latitude},${location.longitude}"
