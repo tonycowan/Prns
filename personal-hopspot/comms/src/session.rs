@@ -278,7 +278,6 @@ impl RunningJournal {
                     let flush_handle = node.handle();
                     tokio::spawn(keep_ratchets(flush_handle, vault_dir, rotated_rx));
                     let _ = HANDLE.set(node.handle());
-                    let announcer = node.handle();
                     let _ = ready_tx.send(Ok(()));
                     let announce = tokio::spawn(async move {
                         // Give the interfaces time to come up, then announce on all of
@@ -288,14 +287,7 @@ impl RunningJournal {
                         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                         loop {
                             ticker.tick().await;
-                            if announcer
-                                .issue(PrnsCommand::AnnounceNow(AnnounceNow {
-                                    destination,
-                                    target: AnnounceTarget::AllInterfaces,
-                                    app_data: AnnounceAppData::Registered,
-                                }))
-                                .is_none()
-                            {
+                            if !send_delivery_announce() {
                                 return;
                             }
                         }
@@ -2671,6 +2663,131 @@ fn sent_notes() -> std::sync::MutexGuard<'static, HashMap<u64, [u8; 32]>> {
     SENT.get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// How long a path change has to hold still before the announce mark lights.
+const ANNOUNCE_SETTLE: Duration = Duration::from_secs(5);
+
+/// Interfaces that are up, and peers that are up on them.
+/// A peer is a fleet member. Anything else is the interface itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PathPicture {
+    interfaces: Vec<personal_rns::interfaces::InterfaceId>,
+    peers: Vec<personal_rns::interfaces::InterfaceId>,
+}
+
+struct AnnounceLatch {
+    announced: Option<PathPicture>,
+    settled: Option<(PathPicture, Instant)>,
+}
+
+impl AnnounceLatch {
+    fn fresh() -> Self {
+        Self {
+            announced: None,
+            settled: None,
+        }
+    }
+}
+
+fn announce_latch() -> std::sync::MutexGuard<'static, AnnounceLatch> {
+    static LATCH: OnceLock<Mutex<AnnounceLatch>> = OnceLock::new();
+    LATCH
+        .get_or_init(|| Mutex::new(AnnounceLatch::fresh()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn picture_of(snapshots: &[personal_rns::interfaces::InterfaceSnapshot]) -> PathPicture {
+    use personal_rns::interfaces::ConnectionState;
+    use personal_rns::interfaces::Membership;
+
+    let mut interfaces = Vec::new();
+    let mut peers = Vec::new();
+    for snapshot in snapshots {
+        if !matches!(
+            snapshot.connection,
+            ConnectionState::Connected | ConnectionState::Degraded
+        ) {
+            continue;
+        }
+        let id = snapshot.id;
+        match snapshot.membership {
+            Membership::FleetMember { .. } => peers.push(id),
+            Membership::Independent => interfaces.push(id),
+        }
+    }
+    interfaces.sort_unstable();
+    peers.sort_unstable();
+    PathPicture { interfaces, peers }
+}
+
+fn path_picture() -> PathPicture {
+    match HANDLE.get() {
+        Some(handle) => picture_of(&handle.interfaces()),
+        None => PathPicture {
+            interfaces: Vec::new(),
+            peers: Vec::new(),
+        },
+    }
+}
+
+fn latch_mark_announced(latch: &mut AnnounceLatch, picture: PathPicture) {
+    latch.announced = Some(picture);
+    latch.settled = None;
+}
+
+/// Bright until an announce, then again only after the up set has held a new shape.
+fn latch_wants_press(latch: &mut AnnounceLatch, picture: PathPicture, now: Instant) -> bool {
+    let Some(announced) = latch.announced.clone() else {
+        latch.settled = None;
+        return true;
+    };
+    if picture == announced {
+        latch.settled = None;
+        return false;
+    }
+    match latch.settled.clone() {
+        Some((pending, since)) if pending == picture => {
+            now.checked_duration_since(since).unwrap_or_default() >= ANNOUNCE_SETTLE
+        }
+        _ => {
+            latch.settled = Some((picture, now));
+            false
+        }
+    }
+}
+
+/// True once the interfaces and peers have been still, and different, for five seconds.
+pub fn announce_wants_press() -> bool {
+    let picture = path_picture();
+    latch_wants_press(&mut announce_latch(), picture, Instant::now())
+}
+
+/// Announce this journal's `lxmf.delivery` address on every interface.
+pub fn announce_on_every_interface() -> bool {
+    send_delivery_announce()
+}
+
+fn send_delivery_announce() -> bool {
+    let Some(handle) = HANDLE.get() else {
+        return false;
+    };
+    let Some(destination) = OUR_DELIVERY.get().copied() else {
+        return false;
+    };
+    if handle
+        .issue(PrnsCommand::AnnounceNow(AnnounceNow {
+            destination,
+            target: AnnounceTarget::AllInterfaces,
+            app_data: AnnounceAppData::Registered,
+        }))
+        .is_none()
+    {
+        return false;
+    }
+    latch_mark_announced(&mut announce_latch(), picture_of(&handle.interfaces()));
+    true
 }
 
 /// Which of the four wires currently has a peer.
@@ -5499,11 +5616,12 @@ mod tests {
 
     use super::{
         apply_watched_route, call_can_continue, contact_is_isolated, delivery_destination,
-        finish_sample, forget, gateway_client_id, interface_name, machine_label, marks_from,
-        opens_at_the_mailbox, parse_tcp_target, person_quiet_limit, progress_of, reach_for,
-        reach_map, resource_budget, same_contact, stand_up, JournalIdentity, ReachState, RouteLook,
-        SampleNext, SegmentSlice, WireMarks, BUILT_IN_TCP, MAC_USB, PERSON_SLICE, PHONE_USB,
-        ROUTE_LOOK, STEP_WAIT, UNTIL_POSTED,
+        finish_sample, forget, gateway_client_id, interface_name, latch_mark_announced,
+        latch_wants_press, machine_label, marks_from, opens_at_the_mailbox, parse_tcp_target,
+        person_quiet_limit, picture_of, progress_of, reach_for, reach_map, resource_budget,
+        same_contact, stand_up, AnnounceLatch, JournalIdentity, ReachState, RouteLook, SampleNext,
+        SegmentSlice, WireMarks, BUILT_IN_TCP, MAC_USB, PERSON_SLICE, PHONE_USB, ROUTE_LOOK,
+        STEP_WAIT, UNTIL_POSTED,
     };
 
     #[test]
@@ -5840,6 +5958,66 @@ mod tests {
         assert!(marks_from(&[cable]).usb);
         assert_eq!(interface_name(MAC_USB), "USB");
         assert_eq!(interface_name(PHONE_USB), "USB");
+    }
+
+    #[test]
+    fn an_announce_waits_until_a_path_change_holds_still() {
+        let usb = snapshot(InterfaceKind::UsbAutoHost, ConnectionState::Connected);
+        let mut peer = snapshot(InterfaceKind::BluetoothPeer, ConnectionState::Connected);
+        peer.id = InterfaceId::from_channel_tag(InterfaceKind::BluetoothPeer, b"peer-one");
+        peer.membership = Membership::FleetMember {
+            supervisor_id: usb.id,
+        };
+        let down = snapshot(InterfaceKind::UsbAutoHost, ConnectionState::Disconnected);
+
+        let quiet = picture_of(&[]);
+        let with_usb = picture_of(&[usb]);
+        let with_peer = picture_of(&[usb, peer]);
+        assert_eq!(picture_of(&[down]), quiet);
+        assert_eq!(with_usb.interfaces.len(), 1);
+        assert!(with_usb.peers.is_empty());
+        assert_eq!(with_peer.peers.len(), 1);
+
+        let mut latch = AnnounceLatch::fresh();
+        let start = std::time::Instant::now();
+        assert!(latch_wants_press(&mut latch, quiet.clone(), start));
+        latch_mark_announced(&mut latch, quiet.clone());
+        assert!(!latch_wants_press(&mut latch, quiet.clone(), start));
+
+        assert!(!latch_wants_press(&mut latch, with_usb.clone(), start));
+        assert!(!latch_wants_press(
+            &mut latch,
+            with_usb.clone(),
+            start + Duration::from_secs(4)
+        ));
+        assert!(latch_wants_press(
+            &mut latch,
+            with_usb.clone(),
+            start + Duration::from_secs(5)
+        ));
+
+        latch_mark_announced(&mut latch, with_usb.clone());
+        assert!(!latch_wants_press(&mut latch, with_peer.clone(), start));
+        assert!(!latch_wants_press(
+            &mut latch,
+            quiet.clone(),
+            start + Duration::from_secs(1)
+        ));
+        assert!(!latch_wants_press(
+            &mut latch,
+            with_peer.clone(),
+            start + Duration::from_secs(3)
+        ));
+        assert!(!latch_wants_press(
+            &mut latch,
+            with_peer.clone(),
+            start + Duration::from_secs(7)
+        ));
+        assert!(latch_wants_press(
+            &mut latch,
+            with_peer.clone(),
+            start + Duration::from_secs(8)
+        ));
     }
 
     fn snapshot(kind: InterfaceKind, connection: ConnectionState) -> InterfaceSnapshot {

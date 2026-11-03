@@ -274,25 +274,46 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, .draft:focus-
   transform: translateY(var(--seam, 0px));
   transition: transform var(--seam-move, 180ms ease);
 }
-.wires button.back {
+.wires button.back, .wires button.announce {
   position: absolute;
-  left: max(20px, env(safe-area-inset-left));
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   align-items: center;
-  justify-content: center;
   width: 44px;
   height: 44px;
   margin: 0;
   padding: 0;
-  justify-content: flex-start;
   pointer-events: auto;
   font-size: 22px;
   line-height: 1;
   color: var(--ink);
   text-decoration: none;
 }
+.wires button.back {
+  left: max(20px, env(safe-area-inset-left));
+  justify-content: flex-start;
+}
+.wires button.announce {
+  right: max(20px, env(safe-area-inset-right));
+  justify-content: flex-end;
+}
+.wires button.announce.quiet {
+  color: var(--pencil);
+  opacity: 0.35;
+}
+.wires button.announce .ring {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.wires button.announce .ring .ring { width: 11px; height: 11px; }
+.wires button.announce .ring .ring .ring { width: 4px; height: 4px; }
 .wires .live { color: var(--ink); }
 .wires .quiet { color: var(--pencil); opacity: 0.35; }
 .incoming {
@@ -1974,6 +1995,16 @@ fn App() -> Element {
     let mut styled = use_signal(|| 0_u64);
     let mut visit = use_signal(|| 0_u64);
     let mut wires = use_signal(read_wires);
+    let mut announce_ready = use_signal(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            session::announce_wants_press()
+        }
+    });
     let mut voice = use_signal(VoiceLine::quiet);
     let mut film_at = use_signal(|| 0u32);
     let mut reach = use_signal(Reach::unknown);
@@ -1990,6 +2021,10 @@ fn App() -> Element {
                     let next = read_wires();
                     if wires() != next {
                         wires.set(next);
+                    }
+                    let due = session::announce_wants_press();
+                    if announce_ready() != due {
+                        announce_ready.set(due);
                     }
                     for arrived in session::drain_inbox() {
                         let mut listed = people();
@@ -2278,6 +2313,13 @@ fn App() -> Element {
             WireLetters {
                 wires: wires(),
                 back: open,
+                announce: announce_ready(),
+                on_announce: move |_| {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if session::announce_on_every_interface() {
+                        announce_ready.set(false);
+                    }
+                },
                 on_back: move |_| {
                     if let Page::Info(id) = page() {
                         let next = Page::Journal(id);
@@ -2635,7 +2677,13 @@ fn read_wires() -> Wires {
 }
 
 #[component]
-fn WireLetters(wires: Wires, back: bool, on_back: EventHandler<()>) -> Element {
+fn WireLetters(
+    wires: Wires,
+    back: bool,
+    announce: bool,
+    on_announce: EventHandler<()>,
+    on_back: EventHandler<()>,
+) -> Element {
     rsx! {
         div { class: "wires",
             if back {
@@ -2644,6 +2692,17 @@ fn WireLetters(wires: Wires, back: bool, on_back: EventHandler<()>) -> Element {
                     aria_label: "Back",
                     onclick: move |_| on_back.call(()),
                     "←"
+                }
+            }
+            button {
+                class: if announce { "announce" } else { "announce quiet" },
+                disabled: !announce,
+                aria_label: "Announce",
+                onclick: move |_| on_announce.call(()),
+                span { class: "ring",
+                    span { class: "ring",
+                        span { class: "ring" }
+                    }
                 }
             }
             span { class: if wires.wifi { "live" } else { "quiet" }, title: "Wifi auto", "W" }
