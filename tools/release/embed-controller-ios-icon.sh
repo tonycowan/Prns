@@ -3,14 +3,15 @@
 # Dioxus 0.7.5 does not embed [bundle].icon into the device .app, so this fills that gap.
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+controller_root="$repo_root/personal-hopspot/remote-control-desktop"
 app="${1:-}"
 if [[ -z "$app" || ! -d "$app" ]]; then
   echo "usage: $0 /path/to/PersonalHopspotRemoteControlDesktop.app" >&2
   exit 2
 fi
 
-iconset="$root/assets/AppIcon.appiconset"
+iconset="$controller_root/assets/AppIcon.appiconset"
 if [[ ! -f "$iconset/AppIcon.png" ]]; then
   echo "error: missing $iconset/AppIcon.png" >&2
   exit 1

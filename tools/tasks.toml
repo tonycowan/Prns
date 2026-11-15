@@ -942,6 +942,16 @@ entrypoint = ["bash", "tools/release/package-controller-android.sh"]
 requires = ["bash", "cargo", "dx"]
 
 [[task]]
+id = "release.controller.ios.embed-icon"
+summary = "Embed the Controller AppIcon into a dx-built iOS .app and re-sign it."
+domain = "release"
+effect = "workspace-write"
+platforms = ["macos"]
+audience = ["developer"]
+entrypoint = ["bash", "tools/release/embed-controller-ios-icon.sh"]
+requires = ["bash", "python3"]
+
+[[task]]
 id = "release.attestation.record"
 summary = "Create release attestation metadata bound to exact subject checksums."
 domain = "release"

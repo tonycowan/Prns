@@ -195,14 +195,15 @@ run this app's BLE and Hopspot's BLE on the same phone at once.
 dx build --ios --release --device "Tony" \
   --no-default-features --features mobile
 APP=target/dx/personal-hopspot-remote-control-desktop/release/ios/PersonalHopspotRemoteControlDesktop.app
-./scripts/embed-ios-icon.sh "$APP"
+../../tools/release/embed-controller-ios-icon.sh "$APP"
 xcrun devicectl device install app --device <UDID> "$APP"
 xcrun devicectl device process launch --device <UDID> org.personal.prns.controller
 ```
 
 Launcher / dock icons come from `assets/icon*.png` (`[bundle].icon` in
 `Dioxus.toml`) and the opaque `assets/AppIcon.appiconset` master used by
-`scripts/embed-ios-icon.sh`. Android overlays live under `android/res/mipmap-*`.
+`tools/release/embed-controller-ios-icon.sh`. Android overlays live under
+`android/res/mipmap-*`.
 
 Application id: `org.personal.prns.controller`. Identities persist under
 the app container's Application Support (`…/PRNS Controller`).
