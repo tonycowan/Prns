@@ -70,7 +70,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             arch: aarch64
           - runner: macos-15-intel
             arch: x86_64
@@ -142,7 +142,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             arch: aarch64
           - runner: macos-15-intel
             arch: x86_64

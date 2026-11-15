@@ -106,7 +106,7 @@ local-network / Bonjour) into `Info.plist`. Without those, Finder launch aborts
 immediately under TCC with no UI error.
 
 CI: `controller-macos-package` (`workflow_dispatch`) builds **both** `aarch64`
-(`macos-14`) and `x86_64` (`macos-15-intel`). Developer ID codesign + notarization
+(`macos-15`) and `x86_64` (`macos-15-intel`). Developer ID codesign + notarization
 happen in the PRNS-Controller release shell.
 
 ### Linux portable
