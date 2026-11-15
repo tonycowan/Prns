@@ -390,7 +390,7 @@ impl IdentityCloneAvailable {
     }
 
     #[must_use]
-    pub fn instance(self) -> IdentityHash {
+    pub fn instance(&self) -> IdentityHash {
         self.keys.identity_hash()
     }
 
@@ -896,7 +896,19 @@ impl IdentityCloneShared {
         source_iface: impl Into<String>,
         now: Instant,
     ) {
-        let instance_hash = instance_hash_hex(available.keys.identity_hash());
+        let instance_hash = instance_hash_hex(available.instance());
+        let source_iface = source_iface.into();
+        if let Some(existing) = self.heard_adoptees.get_mut(&instance_hash) {
+            // Ignore reordered/stale advertises; always refresh sighting time and path.
+            if available.counter >= existing.counter {
+                existing.keys = available.keys;
+                existing.alias = available.alias;
+                existing.counter = available.counter;
+            }
+            existing.last_seen = now;
+            existing.source_iface = source_iface;
+            return;
+        }
         self.heard_adoptees.insert(
             instance_hash,
             HeardAdopteeCandidate {
@@ -904,7 +916,7 @@ impl IdentityCloneShared {
                 alias: available.alias,
                 counter: available.counter,
                 last_seen: now,
-                source_iface: source_iface.into(),
+                source_iface,
             },
         );
     }

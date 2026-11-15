@@ -5531,8 +5531,12 @@ impl ControllerSession {
                         return;
                     }
                     if !announce.targets(local_instance_hash) {
+                        let other = announce
+                            .target()
+                            .map(|hash| encode_hex(hash.as_bytes()))
+                            .unwrap_or_else(|| "unknown".to_string());
                         eprintln!(
-                            "adoption: offer dropped — targeted at another Instance on {iface}"
+                            "adoption: offer dropped — targeted at another Instance ({other}) on {iface}"
                         );
                         return;
                     }
