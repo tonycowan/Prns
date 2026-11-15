@@ -31,18 +31,17 @@ const HIGH_WATER: InstantMillis = InstantMillis(1_770_000_000_000);
 #[test]
 fn directory_sync_permission_denied_is_tolerated() {
     assert!(tolerate_unavailable_directory_sync(Ok(())).is_ok());
-    assert!(tolerate_unavailable_directory_sync(Err(std::io::Error::from(
-        ErrorKind::PermissionDenied
-    )))
-    .is_ok());
-    assert!(tolerate_unavailable_directory_sync(Err(std::io::Error::from(
-        ErrorKind::Unsupported
-    )))
-    .is_ok());
-    assert!(tolerate_unavailable_directory_sync(Err(std::io::Error::from(
-        ErrorKind::Other
-    )))
-    .is_err());
+    assert!(
+        tolerate_unavailable_directory_sync(Err(std::io::Error::from(ErrorKind::PermissionDenied)))
+            .is_ok()
+    );
+    assert!(
+        tolerate_unavailable_directory_sync(Err(std::io::Error::from(ErrorKind::Unsupported)))
+            .is_ok()
+    );
+    assert!(
+        tolerate_unavailable_directory_sync(Err(std::io::Error::from(ErrorKind::Other))).is_err()
+    );
 }
 
 fn sealed_timebase() -> Vec<u8> {

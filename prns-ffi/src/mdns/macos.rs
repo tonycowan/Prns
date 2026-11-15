@@ -721,9 +721,7 @@ mod dns_sd_ll {
             };
             if register_error != DNS_SERVICE_NO_ERROR {
                 eprintln!("wifi-diag: DNSServiceRegister failed ({register_error})");
-                crate::diagnostic_log::error!(
-                    "mdns: DNSServiceRegister failed ({register_error})"
-                );
+                crate::diagnostic_log::error!("mdns: DNSServiceRegister failed ({register_error})");
                 return Err(publication_error(register_error));
             }
             self._service_refs.push(service_ref);
