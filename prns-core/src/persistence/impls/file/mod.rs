@@ -164,6 +164,7 @@ fn confirm_directory(directory: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn tolerate_unavailable_directory_sync(result: std::io::Result<()>) -> std::io::Result<()> {
     match result {
         Ok(()) => Ok(()),

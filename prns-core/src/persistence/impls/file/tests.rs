@@ -28,6 +28,7 @@ impl Drop for TempDir {
 
 const HIGH_WATER: InstantMillis = InstantMillis(1_770_000_000_000);
 
+#[cfg(unix)]
 #[test]
 fn directory_sync_permission_denied_is_tolerated() {
     assert!(tolerate_unavailable_directory_sync(Ok(())).is_ok());
