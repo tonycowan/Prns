@@ -23,7 +23,8 @@ pub const IDENTITY_CLONE_ASPECTS: &[&str] = &["controller", "identity-clone"];
 /// Well-known plain address for the one-hop adoption offer. Not announced.
 pub const IDENTITY_CLONE_OFFER_ASPECTS: &[&str] = &["controller", "identity-clone", "offer"];
 /// Well-known plain address for “I am up for adoption” availability. Not announced.
-pub const IDENTITY_CLONE_AVAILABLE_ASPECTS: &[&str] = &["controller", "identity-clone", "available"];
+pub const IDENTITY_CLONE_AVAILABLE_ASPECTS: &[&str] =
+    &["controller", "identity-clone", "available"];
 pub const IDENTITY_CLONE_REQUEST_ENDPOINT_ID: &str = "/prns/controller/identity-clone";
 
 const ANNOUNCE_MAGIC: &[u8; 7] = b"PRNSCL2";
@@ -355,9 +356,7 @@ impl IdentityCloneAnnounce {
         source_nonce.copy_from_slice(&bytes[7 + IDENTITY_PUBLIC_KEY_LEN..ANNOUNCE_LEN]);
         let target = if bytes.len() == ANNOUNCE_TARGETED_LEN {
             Some(IdentityHash::new(
-                bytes[ANNOUNCE_LEN..ANNOUNCE_TARGETED_LEN]
-                    .try_into()
-                    .ok()?,
+                bytes[ANNOUNCE_LEN..ANNOUNCE_TARGETED_LEN].try_into().ok()?,
             ))
         } else {
             None
@@ -1398,7 +1397,9 @@ mod tests {
             now,
         );
         assert_eq!(shared.heard_adoptees.len(), 1);
-        shared.expire_adoptee_candidates(now + ADOPTEE_CANDIDATE_TTL + std::time::Duration::from_secs(1));
+        shared.expire_adoptee_candidates(
+            now + ADOPTEE_CANDIDATE_TTL + std::time::Duration::from_secs(1),
+        );
         assert!(shared.heard_adoptees.is_empty());
     }
 
@@ -1418,7 +1419,9 @@ mod tests {
             "auto-wifi",
             mid,
         );
-        shared.expire_adoptee_candidates(mid + ADOPTEE_CANDIDATE_TTL - std::time::Duration::from_secs(1));
+        shared.expire_adoptee_candidates(
+            mid + ADOPTEE_CANDIDATE_TTL - std::time::Duration::from_secs(1),
+        );
         assert_eq!(shared.heard_adoptees.len(), 1);
         assert_eq!(
             shared

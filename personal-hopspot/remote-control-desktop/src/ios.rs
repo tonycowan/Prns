@@ -72,8 +72,8 @@ fn watch_for_windows() {
         let method = class_getInstanceMethod(class, selector);
         let previous = method_setImplementation(
             method,
-            set_root_view_controller
-                as unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) as *mut c_void,
+            set_root_view_controller as unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void)
+                as *mut c_void,
         );
         ORIGINAL.store(previous, Ordering::Relaxed);
     }
@@ -272,16 +272,21 @@ fn register_scene_delegate() {
             class,
             sel_registerName(c"scene:willConnectToSession:options:".as_ptr()),
             scene_will_connect
-                as unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void)
-                    as *mut c_void,
+                as unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_void,
+                    *mut c_void,
+                    *mut c_void,
+                    *mut c_void,
+                ) as *mut c_void,
             c"v@:@@@".as_ptr(),
         );
         assert!(added != 0, "the scene connection method could not be added");
         let added = class_addMethod(
             class,
             sel_registerName(c"sceneDidBecomeActive:".as_ptr()),
-            scene_did_become_active
-                as unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) as *mut c_void,
+            scene_did_become_active as unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void)
+                as *mut c_void,
             c"v@:@".as_ptr(),
         );
         assert!(added != 0, "the scene activation method could not be added");

@@ -70,12 +70,12 @@ use crate::identity_clone::{
     identity_clone_available_destination_hash, identity_clone_destination_hash,
     identity_clone_offer_destination_hash, instance_hash_hex, parse_clone_siblings,
     parse_identity_clone_message, usb_supervisor_link_is_up, write_clone_payload,
-    ADOPTEE_AVAILABLE_INTERVAL, AdopteeCandidateView, CloneLocality, CloneTransportKind,
-    ControllerAppState, DestCloneSession, IdentityClone, IdentityCloneAccept,
-    IdentityCloneAnnounce, IdentityCloneAvailable, IdentityCloneHello, IdentityCloneInbound,
-    IdentityClonePayload, IdentityCloneShared, IdentityCloneView, SourceCloneSession,
-    IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_ASPECTS, IDENTITY_CLONE_AVAILABLE_ASPECTS,
-    IDENTITY_CLONE_NONCE_LEN, IDENTITY_CLONE_OFFER_ASPECTS, IDENTITY_CLONE_REQUEST_ENDPOINT_ID,
+    AdopteeCandidateView, CloneLocality, CloneTransportKind, ControllerAppState, DestCloneSession,
+    IdentityClone, IdentityCloneAccept, IdentityCloneAnnounce, IdentityCloneAvailable,
+    IdentityCloneHello, IdentityCloneInbound, IdentityClonePayload, IdentityCloneShared,
+    IdentityCloneView, SourceCloneSession, ADOPTEE_AVAILABLE_INTERVAL, IDENTITY_CLONE_APP_NAME,
+    IDENTITY_CLONE_ASPECTS, IDENTITY_CLONE_AVAILABLE_ASPECTS, IDENTITY_CLONE_NONCE_LEN,
+    IDENTITY_CLONE_OFFER_ASPECTS, IDENTITY_CLONE_REQUEST_ENDPOINT_ID,
 };
 use crate::roster_sync::{
     access_for, adopt_sibling, attention_for_target, bind_actor, decode_labels, decode_member_list,
@@ -704,10 +704,9 @@ impl RemoteControlBackend {
             .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
         // Drop stale PeerMissing errors once Settings shows a live transport peer.
         if locality.allows_clone()
-            && shared
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("No direct peer") || error.contains("Start Auto Wi-Fi"))
+            && shared.error.as_deref().is_some_and(|error| {
+                error.contains("No direct peer") || error.contains("Start Auto Wi-Fi")
+            })
         {
             shared.error = None;
         }
@@ -720,9 +719,7 @@ impl RemoteControlBackend {
                 instance_hash: instance_hash_hex(candidate.instance_hash()),
                 alias: candidate.alias.clone(),
                 source_iface: candidate.source_iface.clone(),
-                heard_ago_secs: now
-                    .saturating_duration_since(candidate.last_seen)
-                    .as_secs(),
+                heard_ago_secs: now.saturating_duration_since(candidate.last_seen).as_secs(),
             })
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| left.instance_hash.cmp(&right.instance_hash));
@@ -1045,9 +1042,9 @@ impl RemoteControlBackend {
         };
         let available = IdentityCloneAvailable::new(instance_material.public(), counter, alias);
         let mut bytes = [0u8; 128];
-        let len = available
-            .write(&mut bytes)
-            .ok_or_else(|| BackendError::Clone("availability advertise is too large".to_string()))?;
+        let len = available.write(&mut bytes).ok_or_else(|| {
+            BackendError::Clone("availability advertise is too large".to_string())
+        })?;
         let destination = identity_clone_available_destination_hash().ok_or_else(|| {
             BackendError::Clone("availability advertise address is invalid".to_string())
         })?;
@@ -5494,8 +5491,7 @@ impl ControllerSession {
                     if let Some(available_destination) = identity_clone_available_destination_hash()
                     {
                         if delivery.destination == available_destination {
-                            let Some(available) =
-                                IdentityCloneAvailable::parse(delivery.payload)
+                            let Some(available) = IdentityCloneAvailable::parse(delivery.payload)
                             else {
                                 eprintln!(
                                     "adoption: available dropped — payload did not parse on {iface}"
@@ -5694,11 +5690,7 @@ impl ControllerSession {
                         ),
                     )
                 };
-                #[cfg(not(any(
-                    target_os = "macos",
-                    target_os = "ios",
-                    target_os = "android"
-                )))]
+                #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
                 let wifi = AutoWifi::default();
                 let wifi_status = wifi.status();
                 if !auto_wifi {

@@ -5,11 +5,11 @@ mod backend;
 mod edits;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod flash;
-#[cfg(target_os = "ios")]
-mod ios;
 mod identity_clone;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod image_catalog;
+#[cfg(target_os = "ios")]
+mod ios;
 mod roster_sync;
 
 /// macOS secondary threads default to 512 KiB. The host node future needs a
