@@ -23212,11 +23212,11 @@
       "name": "personal-hopspot-remote-control-desktop",
       "source": "personal-hopspot/remote-control-desktop",
       "unsafe": {
-        "blocks": 20,
-        "externs": 0,
+        "blocks": 26,
+        "externs": 20,
         "functions": 0,
         "impls": 0,
-        "tokens": 20
+        "tokens": 46
       },
       "version": "0.1.0"
     },
