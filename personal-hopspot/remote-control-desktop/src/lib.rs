@@ -3,10 +3,12 @@ mod android;
 mod app;
 mod backend;
 mod edits;
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod flash;
+#[cfg(target_os = "ios")]
+mod ios;
 mod identity_clone;
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod image_catalog;
 mod roster_sync;
 
@@ -40,21 +42,31 @@ pub fn launch_controller() {
     #[cfg(feature = "desktop")]
     {
         use dioxus::desktop::{Config, WindowBuilder};
+        let mut config = Config::new().with_window(
+            WindowBuilder::new()
+                .with_title("PRNS Controller")
+                .with_always_on_top(false),
+        );
+        if let Some(icon) = controller_window_icon() {
+            config = config.with_icon(icon);
+        }
         dioxus::LaunchBuilder::desktop()
-            .with_cfg(
-                Config::new().with_window(
-                    WindowBuilder::new()
-                        .with_title("PRNS Controller")
-                        .with_always_on_top(false),
-                ),
-            )
+            .with_cfg(config)
             .launch(app::App);
     }
 
     #[cfg(feature = "mobile")]
     {
+        #[cfg(target_os = "ios")]
+        ios::adopt_scene_lifecycle();
         dioxus::LaunchBuilder::mobile().launch(app::App);
     }
+}
+
+#[cfg(feature = "desktop")]
+fn controller_window_icon() -> Option<dioxus::desktop::tao::window::Icon> {
+    use dioxus::desktop::tao::window::Icon;
+    dioxus::desktop::icon_from_memory::<Icon>(include_bytes!("../assets/icon-256.png")).ok()
 }
 
 fn init_controller_logging() {
@@ -75,5 +87,6 @@ fn init_controller_logging() {
             .with(filter)
             .with(tracing_subscriber::fmt::layer())
             .try_init();
+        eprintln!("wifi-diag: controller logging initialized (wifi_auto/mdns debug)");
     }
 }

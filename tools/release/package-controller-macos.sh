@@ -216,6 +216,21 @@ if plutil -extract NSBonjourServices raw "$plist" >/dev/null 2>&1; then
 else
     plutil -insert NSBonjourServices -json "$bonjour_services" "$plist"
 fi
+# Dock / App Switcher: CFBundleIconFile must be the base name without .icns.
+# dx names the generated file after the Cargo package; normalize to AppIcon.
+resources="$app_path/Contents/Resources"
+icon_src=""
+for candidate in "$resources"/*.icns; do
+    if [[ -f "$candidate" ]]; then
+        icon_src="$candidate"
+        break
+    fi
+done
+if [[ -n "$icon_src" ]]; then
+    cp "$icon_src" "$resources/AppIcon.icns"
+    plist_set_string CFBundleIconFile "AppIcon"
+    plist_set_string CFBundleIconName "AppIcon"
+fi
 # Re-sign after mutating Info.plist / Resources. Prefer an Apple-issued identity:
 # ad-hoc GUI apps often get Bonjour NoAuth with no Local Network prompt (TN3179).
 codesign_identity="${CODESIGN_IDENTITY:-}"

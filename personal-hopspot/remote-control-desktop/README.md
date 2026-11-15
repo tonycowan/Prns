@@ -184,6 +184,29 @@ adb install -r target/dx/personal-hopspot-remote-control-desktop/release/android
 Application id: `org.personal.prns.controller`. Identities persist under
 the app files directory (`…/files/hopspot-remote-control`).
 
+## iPhone (arm64)
+
+The same crate builds as **PRNS Controller** for iPhone via Dioxus mobile.
+BLE Auto, Auto Wi-Fi (Bonjour), and TCP attach there. Flash and USB stay
+desktop-only. Grant Bluetooth and Local Network when the app asks. Do not
+run this app's BLE and Hopspot's BLE on the same phone at once.
+
+```console
+dx build --ios --release --device "Tony" \
+  --no-default-features --features mobile
+APP=target/dx/personal-hopspot-remote-control-desktop/release/ios/PersonalHopspotRemoteControlDesktop.app
+./scripts/embed-ios-icon.sh "$APP"
+xcrun devicectl device install app --device <UDID> "$APP"
+xcrun devicectl device process launch --device <UDID> org.personal.prns.controller
+```
+
+Launcher / dock icons come from `assets/icon*.png` (`[bundle].icon` in
+`Dioxus.toml`) and the opaque `assets/AppIcon.appiconset` master used by
+`scripts/embed-ios-icon.sh`. Android overlays live under `android/res/mipmap-*`.
+
+Application id: `org.personal.prns.controller`. Identities persist under
+the app container's Application Support (`…/PRNS Controller`).
+
 ## Configure the controller
 
 The application always starts its own Tokio `personal-rns` controller node.
@@ -222,12 +245,13 @@ that location with `HOPSPOT_RC_DATA_DIR`. Settings shows the Operator hash
    label. Sibling aliases live in `sibling-aliases`, keyed by Instance hash.
    Adopt can set the name; otherwise the app stores `Sibling 1`, `Sibling 2`,
    and so on. Settings → Sibling Controllers lists adopted installs by that
-   alias. Configure slides in USB adopt: dest arms **Allow a sibling to
-   replace me**, source presses **Share Operator**, both confirm the six
-   digits.    Dest's Operator is replaced; Instance stays. Quit and reopen the
-   dest app after adopt. The adopt snapshot includes pairing names, target
-   aliases, manager aliases, sibling aliases for other Instances, and
-   non-USB peer aliases. Later roster sync uses Instance and also pulls
+   alias. Configure adopts once a direct peer is live (Auto Wi-Fi preferred on
+   phone; BLE / TCP / USB also work): dest arms **I am up for adoption**,
+   source presses **Adopt**, both confirm the six digits. Dest's Operator is
+   replaced; Instance stays. Quit and reopen the dest app after adopt. The
+   adopt snapshot includes pairing names, target aliases, manager aliases,
+   sibling aliases for other Instances, and peer aliases. Later roster sync
+   uses Instance and also pulls
    those labels from pinned siblings on launch without waiting to hear
    them. **Connect** claims that node for this install for ten minutes;
    siblings mark it Offline, show Connect 00:00, and stop asking it for

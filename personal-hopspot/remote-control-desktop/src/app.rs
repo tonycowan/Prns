@@ -17,25 +17,25 @@ use crate::edits::{
     parse_lora_frequency_mhz, put_draft, revert_drafts, saved_group, saved_tcp_target,
     set_lora_modulation, InterfaceDraft, InterfaceField, LoRaTuneControl, LORA_TX_POWER_MIN_DBM,
 };
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::flash::{
     ota_progress_from_status, EnrolledFlashTarget, FlashDraft, FlashKind, FlashProgress,
     FlashRunOutcome, FlashStage, FlashStageState,
 };
 use crate::identity_clone::{IdentityCloneView, SiblingControllerView};
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FlashProgress;
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct FlashDraft;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 type PublishedTips = crate::flash::PublishedChannelTips;
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PublishedTips;
 use personal_rns::interfaces::lora::{
@@ -76,6 +76,13 @@ button { cursor: pointer; }
   border-bottom: 2px solid #5c7080;
 }
 .app-bar-nav { display: flex; align-items: center; gap: 4px; justify-self: start; }
+.app-bar-brand {
+  justify-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .app-bar h1 { margin: 0; font-size: 20px; font-weight: 500; text-align: center; letter-spacing: .01em; color: #555555; }
 .app-bar-spacer { justify-self: end; }
 .app-bar button {
@@ -96,8 +103,14 @@ button { cursor: pointer; }
   box-shadow: none;
 }
 .app-bar button.active:hover { color: #333333; background: #c9dff0; }
-.app-bar svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.app-bar button svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .app-bar button.active svg { stroke-width: 2.35; }
+.app-bar-brand svg.prns-mark {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  overflow: visible;
+}
 .content {
   flex: 1 1 auto;
   min-height: 0;
@@ -124,6 +137,8 @@ button { cursor: pointer; }
   .content > .section-intro,
   .content > p { padding-left: 18px; padding-right: 18px; }
   .app-bar { padding: 10px 12px; gap: 8px; }
+  .app-bar-brand { gap: 6px; }
+  .app-bar-brand svg.prns-mark { width: 20px; height: 20px; }
   .app-bar h1 { font-size: 17px; }
 }
 h1 { margin: 5px 0 8px; font-size: 31px; }
@@ -797,7 +812,44 @@ pub fn App() -> Element {
                         }
                     }
                 }
-                h1 { "PRNS Controller" }
+                div { class: "app-bar-brand",
+                    svg {
+                        class: "prns-mark",
+                        view_box: "0 0 100 100",
+                        role: "img",
+                        "aria-hidden": "true",
+                        circle {
+                            cx: "50",
+                            cy: "50",
+                            r: "37",
+                            fill: "none",
+                            stroke: "#6ee7b7",
+                            stroke_width: "3",
+                        }
+                        g {
+                            stroke: "#6ee7b7",
+                            stroke_width: "3",
+                            stroke_linecap: "round",
+                            transform: "rotate(46 50 50)",
+                            line { x1: "50", y1: "7", x2: "50", y2: "16" }
+                            line { x1: "50", y1: "84", x2: "50", y2: "93" }
+                            line { x1: "7", y1: "50", x2: "16", y2: "50" }
+                            line { x1: "84", y1: "50", x2: "93", y2: "50" }
+                        }
+                        g {
+                            fill: "none",
+                            stroke: "#6ee7b7",
+                            stroke_linecap: "round",
+                            stroke_width: "2.6",
+                            path { d: "M57.46 39.35 A13 13 0 0 1 57.46 60.65", opacity: "0.9" }
+                            path { d: "M62.04 32.8 A21 21 0 0 1 62.04 67.2", opacity: "0.45" }
+                            path { d: "M42.54 39.35 A13 13 0 0 0 42.54 60.65", opacity: "0.9" }
+                            path { d: "M37.96 32.8 A21 21 0 0 0 37.96 67.2", opacity: "0.45" }
+                        }
+                        circle { cx: "50", cy: "50", r: "6", fill: "#34d399" }
+                    }
+                    h1 { "PRNS Controller" }
+                }
                 div { class: "app-bar-spacer", aria_hidden: "true" }
             }
             main { class: "content",
@@ -900,7 +952,7 @@ pub fn App() -> Element {
                                 }
                             }
                             if interfaces_info() {
-                                p { class: "note info-note", "These are this app's local transports (Auto Wi-Fi, TCP client, BLE, and USB). They are a separate stack from a prnsd running on this machine unless you Start the TCP client at that daemon. Start/Stop brings each transport up and down. Configure on the TCP client card sets this app's outbound host:port (IPv4 or DNS; default port 4242) and keeps it in the app data directory; that is not the Flash form's board TCP client. Configure also matches a target card, including BLE group. Only BLE Auto starts on unless HOPSPOT_RC_BLE=0. USB, Auto Wi-Fi, and TCP start off unless HOPSPOT_RC_USB=1, HOPSPOT_RC_AUTO_WIFI=1, or HOPSPOT_RC_TCP=host:port. HOPSPOT_RC_TCP overrides the saved target at boot and starts that client on. Do not run this app's BLE and a local prnsd Bluetooth Auto at the same time." }
+                                p { class: "note info-note", "These are this app's local transports (Auto Wi-Fi, TCP client, BLE, and USB). They are a separate stack from a prnsd running on this machine unless you Start the TCP client at that daemon. Start/Stop brings each transport up and down. Configure on the TCP client card sets this app's outbound host:port (IPv4 or DNS; default port 4242), saves it, and starts the dialer. That is not the Flash form's board TCP client. Configure also matches a target card, including BLE group. Only BLE Auto starts on unless HOPSPOT_RC_BLE=0. USB starts off unless HOPSPOT_RC_USB=1. On iPhone, Auto Wi-Fi and TCP (touchbase.viewdns.net:4242) start on; elsewhere Auto Wi-Fi/TCP need HOPSPOT_RC_AUTO_WIFI=1 / HOPSPOT_RC_TCP=host:port or Configure/Start. A saved TCP target starts on at boot. HOPSPOT_RC_TCP overrides the saved target at boot. Do not run this app's BLE and a local prnsd Bluetooth Auto at the same time." }
                             }
                             InterfaceAccordion {
                                 host: InterfaceHost::Controller,
@@ -1785,7 +1837,7 @@ fn ManagedTargetConfiguration(
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn ota_flash_toolbar(
     target_id: String,
     ota_board: Signal<Option<String>>,
@@ -1849,7 +1901,7 @@ fn ota_flash_toolbar(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn ota_flash_toolbar(
     target_id: String,
     ota_board: Signal<Option<String>>,
@@ -1893,7 +1945,7 @@ fn ota_flash_toolbar(
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn ota_entry_button(
     mut configuring: Signal<bool>,
     mut ota: Signal<bool>,
@@ -1923,7 +1975,7 @@ fn ota_entry_button(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn ota_entry_button(
     configuring: Signal<bool>,
     ota: Signal<bool>,
@@ -1945,7 +1997,7 @@ fn ota_flash_deck(
     catalog_tick: Signal<u64>,
     published_tips: Signal<Option<PublishedTips>>,
 ) -> Element {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let _ = (
             ota_board,
@@ -1961,7 +2013,7 @@ fn ota_flash_deck(
         );
         return rsx! {};
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let boards = crate::flash::catalog_boards().unwrap_or_default();
         let selected = ota_board().unwrap_or_default();
@@ -2001,7 +2053,7 @@ fn ota_flash_deck(
 }
 
 /// Statuses after a path exists may carry the route interface on a second line.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn split_ota_interface_line(status: &str) -> (String, Option<String>) {
     match status.split_once('\n') {
         Some((detail, interface)) if !interface.is_empty() => {
@@ -2011,7 +2063,7 @@ fn split_ota_interface_line(status: &str) -> (String, Option<String>) {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_ota_firmware_update(
     target_id: String,
     board_slug: String,
@@ -2129,7 +2181,7 @@ fn start_ota_flash(
     flashing: Signal<bool>,
     flash_progress: Signal<Option<FlashProgress>>,
 ) {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let _ = (
             board_slug,
@@ -2146,7 +2198,7 @@ fn start_ota_flash(
         );
         return;
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let Some(slug) = board_slug else {
             return;
@@ -5011,7 +5063,7 @@ fn FlashSection(
     mut flash_progress: Signal<Option<FlashProgress>>,
     flash_info: Signal<bool>,
 ) -> Element {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let _ = (
             backend,
@@ -5036,7 +5088,7 @@ fn FlashSection(
         };
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let mut probable_slugs = use_signal(Vec::<String>::new);
         let mut flash_devices =
@@ -5507,7 +5559,7 @@ fn FlashSection(
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn flash_configure_fields(
     board: crate::flash::CatalogBoard,
     slug: String,
@@ -5555,7 +5607,7 @@ fn flash_configure_fields(
         }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn flash_image_picker(
     slug: String,
     flash_busy: bool,
@@ -5688,7 +5740,7 @@ fn flash_image_picker(
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn flash_options_form(
     board: crate::flash::CatalogBoard,
     slug: String,
@@ -6004,7 +6056,7 @@ fn flash_options_form(
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_select_image(
     slug: String,
     option: crate::flash::ImagePickOption,
@@ -6054,7 +6106,7 @@ fn start_select_image(
     });
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_import(
     slug: String,
     mut flash_status: Signal<String>,
@@ -6090,7 +6142,7 @@ fn start_import(
     });
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_export(slug: String, mut flash_status: Signal<String>, mut exporting: Signal<bool>) {
     let version = crate::image_catalog::current_image(&slug)
         .ok()
@@ -6127,7 +6179,7 @@ fn start_export(slug: String, mut flash_status: Signal<String>, mut exporting: S
     });
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_build(
     slug: String,
     mut build_status: Signal<String>,
@@ -6189,7 +6241,7 @@ fn start_flash(
     mut flash_progress: Signal<Option<FlashProgress>>,
     mut flash_forms: Signal<HashMap<String, FlashDraft>>,
 ) {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let _ = (
             slug,
@@ -6210,7 +6262,7 @@ fn start_flash(
             flash_forms,
         );
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = (screen, drafts, interfaces_by_target, unsaved);
         if flashing() {
@@ -6378,7 +6430,7 @@ fn ota_run_progress(
     flash_progress: Signal<Option<FlashProgress>>,
     flash_status: Signal<String>,
 ) -> Element {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let progress = flash_progress().filter(|progress| progress.kind == FlashKind::Ota);
         let status = flash_status();
@@ -6394,7 +6446,7 @@ fn ota_run_progress(
             }
         };
     }
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let _ = flash_progress;
         let status = flash_status();
@@ -6406,7 +6458,7 @@ fn ota_run_progress(
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn flash_run_progress_view(progress: FlashProgress) -> Element {
     let stages = progress.stages();
     let summary = progress.run_summary_lines();
@@ -6469,7 +6521,7 @@ fn flash_run_progress_view(progress: FlashProgress) -> Element {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn clear_flash_progress(
     mut flash_progress: Signal<Option<FlashProgress>>,
     mut flash_status: Signal<String>,
@@ -6478,7 +6530,7 @@ fn clear_flash_progress(
     flash_status.set(String::new());
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn open_enrolled_flash_target(
     enrolled: EnrolledFlashTarget,
     backend: RemoteControlBackend,
@@ -7410,7 +7462,7 @@ fn SiblingControllersPanel(
     rsx! {
         div { class: "identity-block",
             h3 { "Sibling Controllers" }
-            p { class: "note", "Other PRNS Controller installs that share this Controller identity. Managed node information sync uses their Sibling ids. Configure adopts a new sibling over USB. Fetch Sibling Node Info pulls that shared list once." }
+            p { class: "note", "Other PRNS Controller installs that share this Controller identity. Managed node information sync uses their Sibling ids. Configure adopts a new sibling once a direct peer is live (Auto Wi-Fi preferred; BLE / TCP / USB also work). Fetch Sibling Node Info pulls that shared list once." }
             if let Some(clone) = clone.as_ref() {
                 if let Some(notice) = clone.notice.as_deref() {
                     p { class: "note", "{notice}" }
@@ -7499,7 +7551,7 @@ fn SiblingControllersPanel(
                             activity_log,
                         )}
                         h4 { "Adopt a sibling" }
-                        p { class: "note", "Adoption copies the Operator secret, managed nodes, pairing names, aliases, and sibling pins from this adopting Controller onto the other adoptee Controller. Does not copy Instance. Currently it works only over USB: stop BLE, Auto Wi-Fi, and TCP. The adopting Controller sends a one-hop offer; it is not announced. Adoptee Controller initiates the process by pressing \"I am up for adoption\". The adopting Controller then presses \"Adopt\". Visually verify the six digit adoption code, then \"Approve\". Adoptee Controller must quit and reopen after adoption for the new Operator id to take effect." }
+                        p { class: "note", "Adoption copies the Operator secret, managed nodes, pairing names, aliases, and sibling pins from this adopting Controller onto the other adoptee Controller. Does not copy Instance. Both apps need a live direct peer first — Auto Wi-Fi is preferred on phone; BLE, TCP, or USB also work when peered. Adoptee presses \"I am up for adoption\" (advertises to direct peers). Adopter selects that device below and presses \"Adopt\". Visually verify the six digit code, then \"Approve\". Adoptee must quit and reopen after adoption for the new Operator id to take effect." }
                         {clone_identity_controls(clone, backend, adopt_alias, activity_log)}
                     }
                 }
@@ -7800,12 +7852,22 @@ fn clone_identity_controls(
     mut adopt_alias: Signal<String>,
     activity_log: Signal<Vec<ActivityLogEntry>>,
 ) -> Element {
+    let mut selected_candidate = use_signal(String::new);
     let Some(clone) = clone else {
         return rsx! { p { class: "note", "Sibling adopt is unavailable until the controller node starts." } };
     };
     let locality_ok = clone.locality.allows_clone();
+    let selected = selected_candidate();
+    let candidate_still_present = clone
+        .candidates
+        .iter()
+        .any(|candidate| candidate.instance_hash == selected);
+    let adopt_enabled = locality_ok && candidate_still_present && !selected.is_empty();
     rsx! {
         p { class: if locality_ok { "note" } else { "error" }, "{clone.locality.operator_message()}" }
+        if let Some(error) = clone.error.as_deref() {
+            p { class: "error", "{error}" }
+        }
         OutlinedText {
             label: "Alias used to refer to the sibling (e.g.: Laptop, phone1)".to_string(),
             input {
@@ -7829,13 +7891,51 @@ fn clone_identity_controls(
             }
         }
         if !clone.in_progress {
+            h4 { "Waiting nearby" }
+            if clone.candidates.is_empty() {
+                p { class: "note", "Select a device that pressed I am up for adoption. None heard on a direct peer yet." }
+            } else {
+                ul { class: "peer-list",
+                    for candidate in clone.candidates.iter() {
+                        {
+                            let hash = candidate.instance_hash.clone();
+                            let selected_hash = selected.clone();
+                            let label = if candidate.alias.trim().is_empty() {
+                                format!("Instance {}", &hash[..hash.len().min(8)])
+                            } else {
+                                candidate.alias.clone()
+                            };
+                            let detail = format!(
+                                "{} · heard {}s ago",
+                                candidate.source_iface,
+                                candidate.heard_ago_secs
+                            );
+                            let is_selected = selected_hash == hash;
+                            let selection_hint = if is_selected { "Selected" } else { "Select" };
+                            rsx! {
+                                li { class: "peer-card",
+                                    button {
+                                        class: "button",
+                                        r#type: "button",
+                                        "aria-pressed": if is_selected { "true" } else { "false" },
+                                        onclick: move |_| selected_candidate.set(hash.clone()),
+                                        div { class: "peer-title", "{selection_hint}: {label}" }
+                                        p { class: "note", "{detail}" }
+                                        p { class: "twisty-address", "{hash}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             div { class: "actions",
                 button {
                     class: "button",
                     disabled: !locality_ok,
                     onclick: move |_| {
                         match backend().arm_clone_dest() {
-                            Ok(()) => push_activity(activity_log, "Waiting to be adopted over USB."),
+                            Ok(()) => push_activity(activity_log, "Advertising for adoption."),
                             Err(error) => push_activity(activity_log, error.to_string()),
                         }
                     },
@@ -7843,11 +7943,12 @@ fn clone_identity_controls(
                 }
                 button {
                     class: "button",
-                    disabled: !locality_ok,
+                    disabled: !adopt_enabled,
                     onclick: move |_| {
+                        let target = selected_candidate();
                         spawn(async move {
-                            match backend().start_clone_source().await {
-                                Ok(()) => push_activity(activity_log, "Adoption started on USB."),
+                            match backend().start_clone_source(&target).await {
+                                Ok(()) => push_activity(activity_log, "Adoption started."),
                                 Err(error) => push_activity(activity_log, error.to_string()),
                             }
                         });
@@ -7856,8 +7957,13 @@ fn clone_identity_controls(
                 }
             }
         }
+        if clone.in_progress && clone.outgoing_dest.is_none() && clone.incoming_source.is_none() && !clone.dest_waiting {
+            if let Some(notice) = clone.notice.as_deref() {
+                p { class: "note", "{notice}" }
+            }
+        }
         if clone.dest_waiting && clone.incoming_source.is_none() {
-            p { class: "note", "Waiting to be adopted. The other app should press Adopt." }
+            p { class: "note", "Advertising to direct peers. Keep a peer live; the other app should select this device and press Adopt." }
         } else if clone.dest_accepted {
             p { class: "note", "Approved on this app. Copying the Operator from the other controller." }
         } else if clone.source_accepted {

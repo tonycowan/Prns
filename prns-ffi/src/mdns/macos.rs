@@ -227,6 +227,7 @@ define_class!(
             _browser: &NSNetServiceBrowser,
             error: &NSDictionary<NSString, NSNumber>,
         ) {
+            eprintln!("wifi-diag: browse failed: {error:?}");
             crate::diagnostic_log::error!("mdns: browse failed: {error:?}");
             self.ivars().backend_failed.store(true, Ordering::Release);
         }
@@ -241,6 +242,9 @@ define_class!(
             let service_name = match discovery_service_name(service) {
                 Ok(service_name) => service_name,
                 Err(service_rejection) => {
+                    eprintln!(
+                        "wifi-diag: rejected discovered Apple service: {service_rejection:?}"
+                    );
                     crate::diagnostic_log::debug!(
                         "mdns: rejected discovered Apple service: {service_rejection:?}"
                     );
@@ -250,6 +254,7 @@ define_class!(
             if self.ivars().local_service_names.contains(&service_name) {
                 return;
             }
+            eprintln!("wifi-diag: browse found remote service {service_name:?}");
             let mut resolving_services = self.ivars().resolving.borrow_mut();
             let known_service_index = resolving_services.iter().position(|known_service| {
                 discovery_service_name(known_service).as_ref() == Ok(&service_name)
@@ -376,7 +381,11 @@ fn log_main_bundle_privacy_keys() {
         .objectForInfoDictionaryKey(&NSString::from_str("NSBonjourServices"))
         .map(|value| format!("{value:?}"))
         .unwrap_or_else(|| "MISSING".into());
-    crate::diagnostic_log::debug!(
+    // Always surface on iOS `--console` / device logs while diagnosing Auto Wi-Fi.
+    eprintln!(
+        "wifi-diag: mainBundle={path} NSLocalNetworkUsageDescription={lan} NSBonjourServices={bonjour}"
+    );
+    crate::diagnostic_log::info!(
         "mdns: mainBundle={path} NSLocalNetworkUsageDescription={lan} NSBonjourServices={bonjour}"
     );
 }
@@ -656,7 +665,11 @@ mod dns_sd_ll {
                     )
                 };
                 if register_error != DNS_SERVICE_NO_ERROR {
-                    crate::diagnostic_log::debug!(
+                    eprintln!(
+                        "wifi-diag: DNSServiceRegisterRecord({}) on ifindex {} failed ({register_error})",
+                        host.address, host.interface_index
+                    );
+                    crate::diagnostic_log::error!(
                         "mdns: DNSServiceRegisterRecord({}) on ifindex {} failed ({register_error})",
                         host.address,
                         host.interface_index
@@ -669,7 +682,11 @@ mod dns_sd_ll {
             publisher.register_service(&tcp_name, &tcp_type, &hostname, tcp_port, &txt_record)?;
             publisher.register_service(&udp_name, &udp_type, &hostname, udp_port, &txt_record)?;
 
-            crate::diagnostic_log::debug!(
+            eprintln!(
+                "wifi-diag: publishing LL-only AAAA {:?} for {hostname_label}.local. ports {tcp_port}/{udp_port}",
+                advertised_addresses
+            );
+            crate::diagnostic_log::info!(
                 "mdns: publishing LL-only AAAA {:?} for {hostname_label}.local. ports {tcp_port}/{udp_port}",
                 advertised_addresses
             );
@@ -703,7 +720,10 @@ mod dns_sd_ll {
                 )
             };
             if register_error != DNS_SERVICE_NO_ERROR {
-                crate::diagnostic_log::debug!("mdns: DNSServiceRegister failed ({register_error})");
+                eprintln!("wifi-diag: DNSServiceRegister failed ({register_error})");
+                crate::diagnostic_log::error!(
+                    "mdns: DNSServiceRegister failed ({register_error})"
+                );
                 return Err(publication_error(register_error));
             }
             self._service_refs.push(service_ref);
@@ -948,7 +968,14 @@ impl AppleServiceDiscoveryBackend {
         .await;
         match publication_result {
             Ok(Ok(())) => {
-                crate::diagnostic_log::debug!(
+                eprintln!(
+                    "wifi-diag: advertising LL-only + browsing {} on port {} and {} on port {}",
+                    TCP_DNS_SD_BASE_SERVICE_TYPE,
+                    TCP_RENDEZVOUS_PORT,
+                    UDP_DNS_SD_BASE_SERVICE_TYPE,
+                    UNICAST_DISCOVERY_PORT,
+                );
+                crate::diagnostic_log::info!(
                     "mdns: advertising LL-only + browsing {} on port {} and {} on port {}",
                     TCP_DNS_SD_BASE_SERVICE_TYPE,
                     TCP_RENDEZVOUS_PORT,
@@ -960,8 +987,14 @@ impl AppleServiceDiscoveryBackend {
                     _native_thread: native_thread,
                 })
             }
-            Ok(Err(publication_error)) => Err(publication_error),
-            Err(_) => Err(MdnsError::PublishTimeout),
+            Ok(Err(publication_error)) => {
+                eprintln!("wifi-diag: publish rejected: {publication_error}");
+                Err(publication_error)
+            }
+            Err(_) => {
+                eprintln!("wifi-diag: publish timed out waiting for DNS-SD registration");
+                Err(MdnsError::PublishTimeout)
+            }
         }
     }
 

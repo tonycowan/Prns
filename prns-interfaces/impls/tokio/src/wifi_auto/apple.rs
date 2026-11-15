@@ -54,7 +54,10 @@ async fn run_service_discovery(
             }
             Ok(CentralDiscoverySessionEnd::CapacityMismatch) => {}
             Err(apple_discovery_error) => {
-                crate::diagnostic_log::debug!(
+                eprintln!(
+                    "wifi-diag: Apple service discovery unavailable: {apple_discovery_error}"
+                );
+                crate::diagnostic_log::warn!(
                     "wifi-auto: Apple service discovery unavailable: {apple_discovery_error}"
                 );
             }
@@ -119,12 +122,21 @@ async fn run_central_session(
             }
         }
     };
-    crate::diagnostic_log::debug!("wifi-auto: Apple service discovery advertising and browsing");
+    eprintln!("wifi-diag: Apple service discovery advertising and browsing");
+    crate::diagnostic_log::info!("wifi-auto: Apple service discovery advertising and browsing");
 
     loop {
         tokio::select! {
             next_snapshot = apple_discovery.next_snapshot() => {
                 let discovery_snapshot = next_snapshot.map_err(AppleDiscoveryError::Native)?;
+                eprintln!(
+                    "wifi-diag: discovery snapshot advertisements={} endpoints={}",
+                    discovery_snapshot.len(),
+                    discovery_snapshot
+                        .iter()
+                        .map(|advertisement| advertisement.endpoints().len())
+                        .sum::<usize>()
+                );
                 match service_discovery_publisher.replace_snapshot(discovery_snapshot) {
                     SnapshotPublication::Published => {}
                     SnapshotPublication::NotCentral(DiscoveryParticipation::Inactive) => {

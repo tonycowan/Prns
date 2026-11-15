@@ -147,12 +147,35 @@ impl FileStore {
 fn confirm_directory(directory: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        fs::File::open(directory)?.sync_all()
+        // The snapshot file itself is already sync_all'd. Directory sync only
+        // strengthens rename durability. Some sandboxes (notably iOS app
+        // containers) reject open/fsync on directories with EPERM; treat that
+        // as best-effort so a route flush cannot kill the node.
+        let result = (|| {
+            let file = fs::File::open(directory)?;
+            file.sync_all()
+        })();
+        tolerate_unavailable_directory_sync(result)
     }
     #[cfg(not(unix))]
     {
         let _ = directory;
         Ok(())
+    }
+}
+
+fn tolerate_unavailable_directory_sync(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::Unsupported
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 

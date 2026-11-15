@@ -22,9 +22,12 @@ pub const IDENTITY_CLONE_APP_NAME: &str = "prns";
 pub const IDENTITY_CLONE_ASPECTS: &[&str] = &["controller", "identity-clone"];
 /// Well-known plain address for the one-hop adoption offer. Not announced.
 pub const IDENTITY_CLONE_OFFER_ASPECTS: &[&str] = &["controller", "identity-clone", "offer"];
+/// Well-known plain address for “I am up for adoption” availability. Not announced.
+pub const IDENTITY_CLONE_AVAILABLE_ASPECTS: &[&str] = &["controller", "identity-clone", "available"];
 pub const IDENTITY_CLONE_REQUEST_ENDPOINT_ID: &str = "/prns/controller/identity-clone";
 
 const ANNOUNCE_MAGIC: &[u8; 7] = b"PRNSCL2";
+const AVAILABLE_MAGIC: &[u8; 7] = b"PRNSCLA";
 pub const IDENTITY_CLONE_NONCE_LEN: usize = 32;
 const HASH_LEN: usize = 16;
 const SIGNATURE_LEN: usize = 64;
@@ -33,6 +36,11 @@ const TRANSCRIPT_DOMAIN: &[u8] = b"reticulum.controller.identity.clone.transcrip
 const HELLO_DOMAIN: &[u8] = b"reticulum.controller.identity.clone.hello.v1";
 const ACCEPT_DOMAIN: &[u8] = b"reticulum.controller.identity.clone.accept.v1";
 const ANNOUNCE_LEN: usize = 7 + IDENTITY_PUBLIC_KEY_LEN + IDENTITY_CLONE_NONCE_LEN;
+/// Offer with optional 16-byte target Instance hash (backward compatible).
+const ANNOUNCE_TARGETED_LEN: usize = ANNOUNCE_LEN + HASH_LEN;
+/// Max UTF-8 alias bytes in an Available advertise.
+pub const IDENTITY_CLONE_AVAILABLE_ALIAS_MAX: usize = 32;
+const AVAILABLE_FIXED_LEN: usize = 7 + IDENTITY_PUBLIC_KEY_LEN + 4 + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloneTransportKind {
@@ -45,39 +53,35 @@ pub enum CloneTransportKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloneLocality {
-    Ready,
-    UsbOff,
-    UsbPeerMissing,
-    UsbPeerAmbiguous { peers: u8 },
-    ExtraTransportOn { kind: CloneTransportKind },
+    /// At least one operator transport has a live direct peer.
+    Ready { kind: CloneTransportKind },
+    /// No USB / BLE / Auto Wi-Fi / TCP interface is powered on.
+    NoTransport,
+    /// A transport is on, but nothing is peered yet.
+    PeerMissing,
 }
 
 impl CloneLocality {
     #[must_use]
     pub const fn allows_clone(self) -> bool {
-        matches!(self, Self::Ready)
+        matches!(self, Self::Ready { .. })
     }
 
     #[must_use]
     pub fn operator_message(self) -> String {
         match self {
-            Self::Ready => {
-                "USB is the only live transport and exactly one peer is present.".to_string()
-            }
-            Self::UsbOff => {
-                "Start USB and stop BLE, Auto Wi-Fi, and TCP. Sibling adopt is USB-only for now."
-                    .to_string()
-            }
-            Self::UsbPeerMissing => {
-                "USB is on but has no peer. Plug the other Controller in over USB.".to_string()
-            }
-            Self::UsbPeerAmbiguous { peers } => {
-                format!("USB has {peers} peers. Unplug everything except the other Controller.")
-            }
-            Self::ExtraTransportOn { kind } => format!(
-                "Turn off {} before adopting a sibling. Sibling adopt is USB-only for now.",
+            Self::Ready { kind } => format!(
+                "Direct peer on {}. Adoption stays one hop; confirm the six-digit code.",
                 clone_kind_label(kind)
             ),
+            Self::NoTransport => {
+                "Start Auto Wi-Fi (preferred on phone), BLE, TCP, or USB so this app can reach the other Controller."
+                    .to_string()
+            }
+            Self::PeerMissing => {
+                "No direct peer yet. Turn on Auto Wi-Fi on both Controllers (or BLE / TCP / USB) and wait until the other appears in Settings."
+                    .to_string()
+            }
         }
     }
 }
@@ -88,7 +92,7 @@ fn clone_kind_label(kind: CloneTransportKind) -> &'static str {
         CloneTransportKind::Bluetooth => "BLE",
         CloneTransportKind::AutoWifi => "Auto Wi-Fi",
         CloneTransportKind::Tcp => "TCP",
-        CloneTransportKind::Other => "the extra transport",
+        CloneTransportKind::Other => "a local transport",
     }
 }
 
@@ -105,46 +109,86 @@ pub fn clone_kind_from_interface_name(name: &str) -> CloneTransportKind {
 
 #[must_use]
 pub fn evaluate_clone_locality(interfaces: &[InterfaceEntry]) -> CloneLocality {
-    let mut usb_on = false;
-    let mut usb_peers = 0u8;
+    let mut transport_on = false;
+    let mut ready_kind = None;
     for entry in interfaces {
         if entry.power != InterfacePower::On {
             continue;
         }
-        match clone_kind_from_interface_name(&entry.kind) {
-            CloneTransportKind::Usb => {
-                usb_on = true;
-                usb_peers = usb_peers.saturating_add(usb_entry_peer_count(entry));
-            }
-            kind => return CloneLocality::ExtraTransportOn { kind },
+        let kind = clone_kind_from_interface_name(&entry.kind);
+        if matches!(kind, CloneTransportKind::Other) {
+            continue;
+        }
+        transport_on = true;
+        if clone_transport_peer_count(entry) > 0 {
+            ready_kind.get_or_insert(kind);
         }
     }
-    if !usb_on {
-        return CloneLocality::UsbOff;
-    }
-    match usb_peers {
-        0 => CloneLocality::UsbPeerMissing,
-        1 => CloneLocality::Ready,
-        peers => CloneLocality::UsbPeerAmbiguous { peers },
+    if let Some(kind) = ready_kind {
+        CloneLocality::Ready { kind }
+    } else if transport_on {
+        CloneLocality::PeerMissing
+    } else {
+        CloneLocality::NoTransport
     }
 }
 
-/// USB Auto is a single supervisor: live ports update that host's
-/// connection, they do not appear as fleet-member peers.
+/// Count live direct peers on one transport card.
+///
+/// USB Auto is a single supervisor: a live port updates that host's
+/// connection, and may not appear as a fleet-member peer. Other
+/// supervisors use the peer list, or a Connected/Degraded link when the
+/// list is empty (TCP client, lone Auto Wi-Fi peer).
+///
+/// Prefer Connected/Degraded peer rows (Settings "Peers N") so adoption
+/// agrees with what the Auto Wi-Fi / BLE cards show. Fall back to the
+/// supervisor link, then to RNS destinations/links already on the card.
 #[must_use]
-pub fn usb_entry_peer_count(entry: &InterfaceEntry) -> u8 {
+pub fn clone_transport_peer_count(entry: &InterfaceEntry) -> u8 {
+    let live_peers = entry
+        .peers
+        .iter()
+        .filter(|peer| matches!(peer.connection.as_str(), "Connected" | "Degraded"))
+        .count();
+    if live_peers > 0 {
+        return u8::try_from(live_peers).unwrap_or(u8::MAX);
+    }
     if !entry.peers.is_empty() {
+        // Retrying TCP-out / gateway rows still prove a direct Auto Wi-Fi path.
         return u8::try_from(entry.peers.len()).unwrap_or(u8::MAX);
     }
-    u8::from(usb_supervisor_link_is_up(entry))
+    if clone_supervisor_link_is_up(entry) {
+        return 1;
+    }
+    if matches!(
+        clone_kind_from_interface_name(&entry.kind),
+        CloneTransportKind::AutoWifi | CloneTransportKind::Bluetooth
+    ) && (entry.destinations > 0 || entry.links > 0)
+    {
+        return 1;
+    }
+    0
 }
 
+#[must_use]
+pub fn clone_supervisor_link_is_up(entry: &InterfaceEntry) -> bool {
+    !matches!(
+        clone_kind_from_interface_name(&entry.kind),
+        CloneTransportKind::Other
+    ) && matches!(
+        entry.connection.as_str(),
+        "Connected" | "Degraded" | "Retrying"
+    )
+}
+
+/// USB Auto is a single supervisor: a live port updates that host's
+/// connection, and may not appear as a fleet-member peer.
 #[must_use]
 pub fn usb_supervisor_link_is_up(entry: &InterfaceEntry) -> bool {
     matches!(
         clone_kind_from_interface_name(&entry.kind),
         CloneTransportKind::Usb
-    ) && matches!(entry.connection.as_str(), "Connected" | "Degraded")
+    ) && clone_supervisor_link_is_up(entry)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +271,8 @@ impl IdentityCloneTranscript {
 pub struct IdentityCloneAnnounce {
     source_keys: PublicIdentityMaterial,
     source_nonce: [u8; IDENTITY_CLONE_NONCE_LEN],
+    /// When set, only the waiting adoptee with this Instance hash may accept.
+    target: Option<IdentityHash>,
 }
 
 impl IdentityCloneAnnounce {
@@ -238,7 +284,14 @@ impl IdentityCloneAnnounce {
         Self {
             source_keys,
             source_nonce,
+            target: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_target(mut self, target: IdentityHash) -> Self {
+        self.target = Some(target);
+        self
     }
 
     #[must_use]
@@ -256,29 +309,150 @@ impl IdentityCloneAnnounce {
         self.source_nonce
     }
 
+    #[must_use]
+    pub const fn target(self) -> Option<IdentityHash> {
+        self.target
+    }
+
+    /// True when this offer is untargeted (missing or all-zero), or targets `local`.
+    #[must_use]
+    pub fn targets(self, local: IdentityHash) -> bool {
+        match self.target {
+            None => true,
+            Some(target) if target.as_bytes() == &[0u8; HASH_LEN] => true,
+            Some(target) => target == local,
+        }
+    }
+
     pub fn write(self, out: &mut [u8]) -> Option<usize> {
-        if out.len() < ANNOUNCE_LEN {
+        let len = if self.target.is_some() {
+            ANNOUNCE_TARGETED_LEN
+        } else {
+            ANNOUNCE_LEN
+        };
+        if out.len() < len {
             return None;
         }
         out[..7].copy_from_slice(ANNOUNCE_MAGIC);
         out[7..7 + IDENTITY_PUBLIC_KEY_LEN].copy_from_slice(self.source_keys.as_bytes());
         out[7 + IDENTITY_PUBLIC_KEY_LEN..ANNOUNCE_LEN].copy_from_slice(&self.source_nonce);
-        Some(ANNOUNCE_LEN)
+        if let Some(target) = self.target {
+            out[ANNOUNCE_LEN..ANNOUNCE_TARGETED_LEN].copy_from_slice(target.as_bytes());
+        }
+        Some(len)
     }
 
     pub fn parse(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != ANNOUNCE_LEN || !bytes.starts_with(ANNOUNCE_MAGIC) {
+        if !bytes.starts_with(ANNOUNCE_MAGIC) {
+            return None;
+        }
+        if bytes.len() != ANNOUNCE_LEN && bytes.len() != ANNOUNCE_TARGETED_LEN {
             return None;
         }
         let source_keys =
             PublicIdentityMaterial::from_slice(&bytes[7..7 + IDENTITY_PUBLIC_KEY_LEN]).ok()?;
         let mut source_nonce = [0u8; IDENTITY_CLONE_NONCE_LEN];
         source_nonce.copy_from_slice(&bytes[7 + IDENTITY_PUBLIC_KEY_LEN..ANNOUNCE_LEN]);
+        let target = if bytes.len() == ANNOUNCE_TARGETED_LEN {
+            Some(IdentityHash::new(
+                bytes[ANNOUNCE_LEN..ANNOUNCE_TARGETED_LEN]
+                    .try_into()
+                    .ok()?,
+            ))
+        } else {
+            None
+        };
         Some(Self {
             source_keys,
             source_nonce,
+            target,
         })
     }
+}
+
+/// One-hop “I am up for adoption” advertise from an adoptee Instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityCloneAvailable {
+    pub keys: PublicIdentityMaterial,
+    pub counter: u32,
+    pub alias: String,
+}
+
+impl IdentityCloneAvailable {
+    #[must_use]
+    pub fn new(keys: PublicIdentityMaterial, counter: u32, alias: impl Into<String>) -> Self {
+        let mut alias = alias.into();
+        truncate_available_alias(&mut alias);
+        Self {
+            keys,
+            counter,
+            alias,
+        }
+    }
+
+    #[must_use]
+    pub fn instance(self) -> IdentityHash {
+        self.keys.identity_hash()
+    }
+
+    pub fn write(&self, out: &mut [u8]) -> Option<usize> {
+        let alias_bytes = self.alias.as_bytes();
+        if alias_bytes.len() > IDENTITY_CLONE_AVAILABLE_ALIAS_MAX {
+            return None;
+        }
+        let len = AVAILABLE_FIXED_LEN + alias_bytes.len();
+        if out.len() < len {
+            return None;
+        }
+        out[..7].copy_from_slice(AVAILABLE_MAGIC);
+        out[7..7 + IDENTITY_PUBLIC_KEY_LEN].copy_from_slice(self.keys.as_bytes());
+        let counter_at = 7 + IDENTITY_PUBLIC_KEY_LEN;
+        out[counter_at..counter_at + 4].copy_from_slice(&self.counter.to_le_bytes());
+        out[counter_at + 4] = u8::try_from(alias_bytes.len()).ok()?;
+        out[AVAILABLE_FIXED_LEN..len].copy_from_slice(alias_bytes);
+        Some(len)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < AVAILABLE_FIXED_LEN || !bytes.starts_with(AVAILABLE_MAGIC) {
+            return None;
+        }
+        let keys =
+            PublicIdentityMaterial::from_slice(&bytes[7..7 + IDENTITY_PUBLIC_KEY_LEN]).ok()?;
+        let counter_at = 7 + IDENTITY_PUBLIC_KEY_LEN;
+        let counter = u32::from_le_bytes(bytes[counter_at..counter_at + 4].try_into().ok()?);
+        let alias_len = usize::from(bytes[counter_at + 4]);
+        if alias_len > IDENTITY_CLONE_AVAILABLE_ALIAS_MAX
+            || bytes.len() != AVAILABLE_FIXED_LEN + alias_len
+        {
+            return None;
+        }
+        let alias = if alias_len == 0 {
+            String::new()
+        } else {
+            String::from_utf8(bytes[AVAILABLE_FIXED_LEN..].to_vec()).ok()?
+        };
+        Some(Self {
+            keys,
+            counter,
+            alias,
+        })
+    }
+}
+
+fn truncate_available_alias(alias: &mut String) {
+    let trimmed = alias.trim();
+    if trimmed.len() != alias.len() {
+        *alias = trimmed.to_string();
+    }
+    if alias.len() <= IDENTITY_CLONE_AVAILABLE_ALIAS_MAX {
+        return;
+    }
+    let mut end = IDENTITY_CLONE_AVAILABLE_ALIAS_MAX;
+    while end > 0 && !alias.is_char_boundary(end) {
+        end -= 1;
+    }
+    alias.truncate(end);
 }
 
 pub fn identity_clone_destination_hash(identity: IdentityHash) -> Option<DestinationHash> {
@@ -290,6 +464,12 @@ pub fn identity_clone_destination_hash(identity: IdentityHash) -> Option<Destina
 /// engine drops the packet if it has traveled more than one hop.
 pub fn identity_clone_offer_destination_hash() -> Option<DestinationHash> {
     let name = expand_name(IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_OFFER_ASPECTS).ok()?;
+    Some(derive_plain_destination_hash(&name))
+}
+
+/// Address of the single-hop availability advertise.
+pub fn identity_clone_available_destination_hash() -> Option<DestinationHash> {
+    let name = expand_name(IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_AVAILABLE_ASPECTS).ok()?;
     Some(derive_plain_destination_hash(&name))
 }
 
@@ -660,11 +840,42 @@ impl personal_rns::runtime::RemoteControlHostControls for ControllerAppState {
     }
 }
 
+/// How long a heard Available advertise stays selectable without refresh.
+pub const ADOPTEE_CANDIDATE_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often a waiting adoptee re-sends Available.
+pub const ADOPTEE_AVAILABLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[derive(Clone, Debug)]
+pub struct HeardAdopteeCandidate {
+    pub keys: PublicIdentityMaterial,
+    pub alias: String,
+    pub counter: u32,
+    pub last_seen: Instant,
+    pub source_iface: String,
+}
+
+impl HeardAdopteeCandidate {
+    #[must_use]
+    pub fn instance_hash(&self) -> IdentityHash {
+        self.keys.identity_hash()
+    }
+
+    #[must_use]
+    pub fn is_expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_seen) > ADOPTEE_CANDIDATE_TTL
+    }
+}
+
 #[derive(Default)]
 pub struct IdentityCloneShared {
     pub dest_waiting: bool,
+    /// Monotonic counter for Available advertises while `dest_waiting`.
+    pub available_counter: u32,
+    pub last_available_send: Option<Instant>,
     pub source: Option<SourceCloneSession>,
     pub dest: Option<DestCloneSession>,
+    /// Instance hash hex → heard “up for adoption” peer.
+    pub heard_adoptees: std::collections::HashMap<String, HeardAdopteeCandidate>,
     pub notice: Option<String>,
     pub error: Option<String>,
 }
@@ -674,11 +885,45 @@ impl IdentityCloneShared {
     pub fn in_progress(&self) -> bool {
         self.dest_waiting || self.dest.is_some() || self.source.is_some()
     }
+
+    pub fn expire_adoptee_candidates(&mut self, now: Instant) {
+        self.heard_adoptees
+            .retain(|_, candidate| !candidate.is_expired(now));
+    }
+
+    pub fn remember_adoptee_available(
+        &mut self,
+        available: IdentityCloneAvailable,
+        source_iface: impl Into<String>,
+        now: Instant,
+    ) {
+        let instance_hash = instance_hash_hex(available.keys.identity_hash());
+        self.heard_adoptees.insert(
+            instance_hash,
+            HeardAdopteeCandidate {
+                keys: available.keys,
+                alias: available.alias,
+                counter: available.counter,
+                last_seen: now,
+                source_iface: source_iface.into(),
+            },
+        );
+    }
+}
+
+#[must_use]
+pub fn instance_hash_hex(hash: IdentityHash) -> String {
+    hash.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub struct SourceCloneSession {
     pub source_hash: IdentityHash,
     pub source_nonce: [u8; IDENTITY_CLONE_NONCE_LEN],
+    /// Adoptee Instance this offer was targeted at.
+    pub target_hash: Option<IdentityHash>,
     pub peer_keys: Option<PublicIdentityMaterial>,
     pub transcript: Option<IdentityCloneTranscript>,
     pub accepted: bool,
@@ -715,6 +960,14 @@ pub struct SiblingControllerView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdopteeCandidateView {
+    pub instance_hash: String,
+    pub alias: String,
+    pub source_iface: String,
+    pub heard_ago_secs: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentityCloneView {
     pub locality: CloneLocality,
     pub dest_waiting: bool,
@@ -726,6 +979,8 @@ pub struct IdentityCloneView {
     pub source_accepted: bool,
     pub in_progress: bool,
     pub siblings: Vec<SiblingControllerView>,
+    /// Direct peers that pressed “I am up for adoption”.
+    pub candidates: Vec<AdopteeCandidateView>,
     pub notice: Option<String>,
     pub error: Option<String>,
 }
@@ -949,51 +1204,120 @@ mod tests {
     }
 
     #[test]
-    fn usb_only_with_one_peer_is_ready() {
+    fn usb_with_peer_is_ready() {
         assert_eq!(
             evaluate_clone_locality(&[
                 interface("usb-auto-host", InterfacePower::On, 1),
                 interface("bluetooth-auto", InterfacePower::Off, 2),
             ]),
-            CloneLocality::Ready,
+            CloneLocality::Ready {
+                kind: CloneTransportKind::Usb
+            },
         );
     }
 
     #[test]
-    fn ble_on_blocks_clone() {
+    fn ble_on_without_peer_is_missing() {
         assert_eq!(
-            evaluate_clone_locality(&[
-                interface("usb-auto-host", InterfacePower::On, 1),
-                interface("bluetooth-auto", InterfacePower::On, 0),
-            ]),
-            CloneLocality::ExtraTransportOn {
+            evaluate_clone_locality(&[interface("bluetooth-auto", InterfacePower::On, 0)]),
+            CloneLocality::PeerMissing,
+        );
+    }
+
+    #[test]
+    fn ble_with_peer_is_ready() {
+        assert_eq!(
+            evaluate_clone_locality(&[interface("bluetooth-auto", InterfacePower::On, 1)]),
+            CloneLocality::Ready {
                 kind: CloneTransportKind::Bluetooth
             },
         );
     }
 
     #[test]
-    fn two_usb_peers_are_ambiguous() {
+    fn wifi_with_peer_is_ready() {
         assert_eq!(
-            evaluate_clone_locality(&[interface("usb-auto-host", InterfacePower::On, 2)]),
-            CloneLocality::UsbPeerAmbiguous { peers: 2 },
+            evaluate_clone_locality(&[interface("auto-wifi", InterfacePower::On, 1)]),
+            CloneLocality::Ready {
+                kind: CloneTransportKind::AutoWifi
+            },
         );
+    }
+
+    #[test]
+    fn ble_and_usb_together_prefers_first_live_peer() {
+        assert_eq!(
+            evaluate_clone_locality(&[
+                interface("usb-auto-host", InterfacePower::On, 1),
+                interface("bluetooth-auto", InterfacePower::On, 2),
+            ]),
+            CloneLocality::Ready {
+                kind: CloneTransportKind::Usb
+            },
+        );
+    }
+
+    #[test]
+    fn no_transport_on_is_blocked() {
+        assert_eq!(
+            evaluate_clone_locality(&[interface("bluetooth-auto", InterfacePower::Off, 1)]),
+            CloneLocality::NoTransport,
+        );
+    }
+
+    #[test]
+    fn waiting_usb_host_without_peer_is_missing() {
+        let mut usb = interface("usb-auto-host", InterfacePower::On, 0);
+        usb.connection = "Waiting".to_string();
+        assert_eq!(evaluate_clone_locality(&[usb]), CloneLocality::PeerMissing);
     }
 
     #[test]
     fn connected_usb_host_without_fleet_members_is_ready() {
         let mut usb = interface("usb-auto-host", InterfacePower::On, 0);
         usb.connection = "Connected".to_string();
-        assert_eq!(evaluate_clone_locality(&[usb]), CloneLocality::Ready);
+        assert_eq!(
+            evaluate_clone_locality(&[usb]),
+            CloneLocality::Ready {
+                kind: CloneTransportKind::Usb
+            },
+        );
     }
 
     #[test]
-    fn waiting_usb_host_without_fleet_members_is_missing() {
-        let mut usb = interface("usb-auto-host", InterfacePower::On, 0);
-        usb.connection = "Waiting".to_string();
+    fn auto_wifi_connected_without_peer_rows_is_ready() {
+        let mut wifi = interface("auto-wifi", InterfacePower::On, 0);
+        wifi.connection = "Connected".to_string();
         assert_eq!(
-            evaluate_clone_locality(&[usb]),
-            CloneLocality::UsbPeerMissing
+            evaluate_clone_locality(&[wifi]),
+            CloneLocality::Ready {
+                kind: CloneTransportKind::AutoWifi
+            },
+        );
+    }
+
+    #[test]
+    fn auto_wifi_with_destinations_only_is_ready() {
+        let mut wifi = interface("auto-wifi", InterfacePower::On, 0);
+        wifi.connection = "Waiting".to_string();
+        wifi.destinations = 1;
+        assert_eq!(
+            evaluate_clone_locality(&[wifi]),
+            CloneLocality::Ready {
+                kind: CloneTransportKind::AutoWifi
+            },
+        );
+    }
+
+    #[test]
+    fn auto_wifi_retrying_supervisor_is_ready() {
+        let mut wifi = interface("auto-wifi", InterfacePower::On, 0);
+        wifi.connection = "Retrying".to_string();
+        assert_eq!(
+            evaluate_clone_locality(&[wifi]),
+            CloneLocality::Ready {
+                kind: CloneTransportKind::AutoWifi
+            },
         );
     }
 
@@ -1009,6 +1333,101 @@ mod tests {
         shared.dest = None;
         shared.notice = Some("adopted".to_string());
         assert!(!shared.in_progress());
+    }
+
+    #[test]
+    fn available_packet_round_trip() {
+        let keys = secret(0x44).public();
+        let available = IdentityCloneAvailable::new(keys, 7, "phone1");
+        let mut bytes = [0u8; 128];
+        let len = available.write(&mut bytes).unwrap();
+        let parsed = IdentityCloneAvailable::parse(&bytes[..len]).unwrap();
+        assert_eq!(parsed.keys, keys);
+        assert_eq!(parsed.counter, 7);
+        assert_eq!(parsed.alias, "phone1");
+        assert_eq!(parsed.instance(), keys.identity_hash());
+    }
+
+    #[test]
+    fn available_packet_truncates_long_alias() {
+        let keys = secret(0x45).public();
+        let long = "a".repeat(IDENTITY_CLONE_AVAILABLE_ALIAS_MAX + 8);
+        let available = IdentityCloneAvailable::new(keys, 1, long);
+        assert_eq!(available.alias.len(), IDENTITY_CLONE_AVAILABLE_ALIAS_MAX);
+        let mut bytes = [0u8; 128];
+        let len = available.write(&mut bytes).unwrap();
+        let parsed = IdentityCloneAvailable::parse(&bytes[..len]).unwrap();
+        assert_eq!(parsed.alias.len(), IDENTITY_CLONE_AVAILABLE_ALIAS_MAX);
+    }
+
+    #[test]
+    fn offer_without_target_still_parses() {
+        let keys = secret(0x46).public();
+        let announce = IdentityCloneAnnounce::new(keys, [0x11; IDENTITY_CLONE_NONCE_LEN]);
+        let mut bytes = [0u8; 128];
+        let len = announce.write(&mut bytes).unwrap();
+        assert_eq!(len, ANNOUNCE_LEN);
+        let parsed = IdentityCloneAnnounce::parse(&bytes[..len]).unwrap();
+        assert_eq!(parsed.target(), None);
+        assert!(parsed.targets(secret(0x99).identity_hash()));
+    }
+
+    #[test]
+    fn offer_with_target_only_matches_that_instance() {
+        let keys = secret(0x47).public();
+        let target = secret(0x48).identity_hash();
+        let other = secret(0x49).identity_hash();
+        let announce =
+            IdentityCloneAnnounce::new(keys, [0x22; IDENTITY_CLONE_NONCE_LEN]).with_target(target);
+        let mut bytes = [0u8; 128];
+        let len = announce.write(&mut bytes).unwrap();
+        assert_eq!(len, ANNOUNCE_TARGETED_LEN);
+        let parsed = IdentityCloneAnnounce::parse(&bytes[..len]).unwrap();
+        assert_eq!(parsed.target(), Some(target));
+        assert!(parsed.targets(target));
+        assert!(!parsed.targets(other));
+    }
+
+    #[test]
+    fn heard_adoptee_expires() {
+        let mut shared = IdentityCloneShared::default();
+        let now = Instant::now();
+        shared.remember_adoptee_available(
+            IdentityCloneAvailable::new(secret(0x50).public(), 1, "a"),
+            "auto-wifi",
+            now,
+        );
+        assert_eq!(shared.heard_adoptees.len(), 1);
+        shared.expire_adoptee_candidates(now + ADOPTEE_CANDIDATE_TTL + std::time::Duration::from_secs(1));
+        assert!(shared.heard_adoptees.is_empty());
+    }
+
+    #[test]
+    fn heard_adoptee_refresh_extends_ttl() {
+        let mut shared = IdentityCloneShared::default();
+        let keys = secret(0x51).public();
+        let now = Instant::now();
+        shared.remember_adoptee_available(
+            IdentityCloneAvailable::new(keys, 1, "phone"),
+            "auto-wifi",
+            now,
+        );
+        let mid = now + ADOPTEE_CANDIDATE_TTL - std::time::Duration::from_secs(1);
+        shared.remember_adoptee_available(
+            IdentityCloneAvailable::new(keys, 2, "phone"),
+            "auto-wifi",
+            mid,
+        );
+        shared.expire_adoptee_candidates(mid + ADOPTEE_CANDIDATE_TTL - std::time::Duration::from_secs(1));
+        assert_eq!(shared.heard_adoptees.len(), 1);
+        assert_eq!(
+            shared
+                .heard_adoptees
+                .values()
+                .next()
+                .map(|candidate| candidate.counter),
+            Some(2)
+        );
     }
 
     #[test]

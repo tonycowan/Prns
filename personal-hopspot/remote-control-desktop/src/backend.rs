@@ -53,7 +53,7 @@ use personal_rns::runtime::RoutingControl;
 use personal_rns::units::InstantMillis;
 #[cfg(target_os = "android")]
 use personal_rns::usb_auto::{UsbAutoCandidate, UsbAutoHost};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use personal_rns::wifi_auto::apple_service_discovery;
 use personal_rns::wifi_auto::AutoWifiStatus;
 #[cfg(target_os = "android")]
@@ -66,12 +66,15 @@ use prns_ffi::bluetooth_auto::android::AndroidBleBackend;
 use tokio::sync::Notify;
 
 use crate::identity_clone::{
-    evaluate_clone_locality, identity_clone_destination_hash,
-    identity_clone_offer_destination_hash, parse_clone_siblings, parse_identity_clone_message,
-    usb_supervisor_link_is_up, write_clone_payload, CloneLocality, ControllerAppState,
-    DestCloneSession, IdentityClone, IdentityCloneAccept, IdentityCloneAnnounce,
-    IdentityCloneHello, IdentityCloneInbound, IdentityClonePayload, IdentityCloneShared,
-    IdentityCloneView, SourceCloneSession, IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_ASPECTS,
+    clone_kind_from_interface_name, clone_transport_peer_count, evaluate_clone_locality,
+    identity_clone_available_destination_hash, identity_clone_destination_hash,
+    identity_clone_offer_destination_hash, instance_hash_hex, parse_clone_siblings,
+    parse_identity_clone_message, usb_supervisor_link_is_up, write_clone_payload,
+    ADOPTEE_AVAILABLE_INTERVAL, AdopteeCandidateView, CloneLocality, CloneTransportKind,
+    ControllerAppState, DestCloneSession, IdentityClone, IdentityCloneAccept,
+    IdentityCloneAnnounce, IdentityCloneAvailable, IdentityCloneHello, IdentityCloneInbound,
+    IdentityClonePayload, IdentityCloneShared, IdentityCloneView, SourceCloneSession,
+    IDENTITY_CLONE_APP_NAME, IDENTITY_CLONE_ASPECTS, IDENTITY_CLONE_AVAILABLE_ASPECTS,
     IDENTITY_CLONE_NONCE_LEN, IDENTITY_CLONE_OFFER_ASPECTS, IDENTITY_CLONE_REQUEST_ENDPOINT_ID,
 };
 use crate::roster_sync::{
@@ -91,7 +94,7 @@ use crate::roster_sync::{
 
 const IDENTITY_HASH_BYTES: usize = 16;
 const INTERFACE_ID_BYTES: usize = 8;
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 const DEFAULT_DATA_DIRECTORY: &str = ".local/share/hopspot-remote-control";
 const TARGET_NAMES_FILE: &str = "target-names";
 const TARGET_BOARDS_FILE: &str = "target-boards";
@@ -117,6 +120,9 @@ const PATH_TABLE_PAGE_LIMIT: usize = 64;
 const INTERFACE_PAGE_LIMIT: usize = 16;
 const INVENTORY_RECOVERY_GAP: Duration = Duration::from_secs(2);
 const ACTIVITY_CONTROLLER_SCOPE: &str = "controller";
+#[cfg(target_os = "ios")]
+const DEFAULT_TCP_TARGET: &str = "touchbase.viewdns.net:4242";
+#[cfg(not(target_os = "ios"))]
 const DEFAULT_TCP_TARGET: &str = "127.0.0.1:4242";
 const ROSTER_WARM_GAP: Duration = Duration::from_secs(3);
 const ROSTER_COLD_BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -679,14 +685,47 @@ impl RemoteControlBackend {
 
     pub fn identity_clone(&self) -> Result<IdentityCloneView, BackendError> {
         let session = self.session()?;
-        let locality = match self.local_interfaces() {
-            Ok(interfaces) => evaluate_clone_locality(&interfaces),
-            Err(_) => CloneLocality::UsbOff,
+        let interfaces = self.local_interfaces().ok();
+        let locality = match interfaces.as_deref() {
+            Some(interfaces) => evaluate_clone_locality(interfaces),
+            None => CloneLocality::NoTransport,
         };
-        let shared = session
+        if let Some(interfaces) = interfaces.as_deref() {
+            eprintln!(
+                "adoption: locality={locality:?} interfaces={}",
+                summarize_clone_interfaces(interfaces)
+            );
+        } else {
+            eprintln!("adoption: locality={locality:?} interfaces=<inventory unavailable>");
+        }
+        let mut shared = session
             .clone
             .lock()
             .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
+        // Drop stale PeerMissing errors once Settings shows a live transport peer.
+        if locality.allows_clone()
+            && shared
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("No direct peer") || error.contains("Start Auto Wi-Fi"))
+        {
+            shared.error = None;
+        }
+        let now = Instant::now();
+        shared.expire_adoptee_candidates(now);
+        let mut candidates = shared
+            .heard_adoptees
+            .values()
+            .map(|candidate| AdopteeCandidateView {
+                instance_hash: instance_hash_hex(candidate.instance_hash()),
+                alias: candidate.alias.clone(),
+                source_iface: candidate.source_iface.clone(),
+                heard_ago_secs: now
+                    .saturating_duration_since(candidate.last_seen)
+                    .as_secs(),
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.instance_hash.cmp(&right.instance_hash));
         let self_hash = session.controller_identity.instance_hash.clone();
         let siblings = session
             .roster
@@ -776,6 +815,7 @@ impl RemoteControlBackend {
                 .is_some_and(|source| source.accepted && !source.handoff_complete),
             in_progress: shared.in_progress(),
             siblings,
+            candidates,
             notice: shared.notice.clone(),
             error: shared.error.clone(),
         })
@@ -793,9 +833,11 @@ impl RemoteControlBackend {
             .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
         shared.dest_waiting = true;
         shared.dest = None;
+        shared.available_counter = 0;
+        shared.last_available_send = None;
         shared.error = None;
         shared.notice = Some(
-            "Waiting to be adopted over USB. Approving replaces this app's Operator identity. The Instance id stays."
+            "Advertising to direct peers. Approving replaces this app's Operator identity. The Instance id stays."
                 .to_string(),
         );
         Ok(())
@@ -811,12 +853,32 @@ impl RemoteControlBackend {
         Ok(())
     }
 
-    pub async fn start_clone_source(&self) -> Result<(), BackendError> {
-        let locality = evaluate_clone_locality(&self.local_interfaces()?);
+    pub async fn start_clone_source(&self, target_instance_hash: &str) -> Result<(), BackendError> {
+        let interfaces = self.local_interfaces()?;
+        let locality = evaluate_clone_locality(&interfaces);
         if !locality.allows_clone() {
             return Err(BackendError::Clone(locality.operator_message()));
         }
+        let target_hex = target_instance_hash.trim().to_ascii_lowercase();
+        if target_hex.is_empty() {
+            return Err(BackendError::Clone(
+                "Select a nearby device that pressed I am up for adoption.".to_string(),
+            ));
+        }
         let session = self.session()?;
+        let target_hash = {
+            let shared = session
+                .clone
+                .lock()
+                .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
+            let Some(candidate) = shared.heard_adoptees.get(&target_hex) else {
+                return Err(BackendError::Clone(
+                    "That device is no longer advertising. Wait for it to press I am up for adoption again."
+                        .to_string(),
+                ));
+            };
+            candidate.instance_hash()
+        };
         let instance = load_instance_secret(&session.identities_dir)?;
         let instance_material =
             personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
@@ -825,7 +887,14 @@ impl RemoteControlBackend {
         let mut entropy = OsRuntimeEntropy::try_new()
             .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
         entropy.fill_random(&mut source_nonce);
-        Self::send_clone_offer(session, &instance_material, source_nonce).await?;
+        Self::send_clone_offer(
+            session,
+            &instance_material,
+            source_nonce,
+            Some(target_hash),
+            &interfaces,
+        )
+        .await?;
         let mut shared = session
             .clone
             .lock()
@@ -833,6 +902,7 @@ impl RemoteControlBackend {
         shared.source = Some(SourceCloneSession {
             source_hash,
             source_nonce,
+            target_hash: Some(target_hash),
             peer_keys: None,
             transcript: None,
             accepted: false,
@@ -841,16 +911,25 @@ impl RemoteControlBackend {
             handoff_complete: false,
             last_announce: Instant::now(),
         });
-        shared.notice = Some(
-            "Adoption offer sent on USB. The other app must already have pressed I am up for adoption."
-                .to_string(),
-        );
+        let waiting = match locality {
+            CloneLocality::Ready { kind } => format!(
+                "Adoption offer sent on {} to {}. Waiting for Approve on both sides.",
+                clone_transport_label(kind),
+                &target_hex[..target_hex.len().min(8)]
+            ),
+            _ => format!(
+                "Adoption offer sent to {}. Waiting for Approve on both sides.",
+                &target_hex[..target_hex.len().min(8)]
+            ),
+        };
+        shared.notice = Some(waiting);
         shared.error = None;
         Ok(())
     }
 
     pub async fn advance_clone(&self) -> Result<(), BackendError> {
         self.finish_clone_handoff();
+        let _ = self.refresh_clone_available_advertise().await;
         if let Err(error) = self.refresh_clone_source_announce().await {
             let Ok(session) = self.session() else {
                 return Err(error);
@@ -873,8 +952,23 @@ impl RemoteControlBackend {
     }
 
     async fn refresh_clone_source_announce(&self) -> Result<(), BackendError> {
+        let interfaces = self.local_interfaces()?;
+        let locality = evaluate_clone_locality(&interfaces);
+        if !locality.allows_clone() {
+            let session = self.session()?;
+            if let Ok(mut shared) = session.clone.lock() {
+                if shared.source.is_some() {
+                    shared.error = Some(locality.operator_message());
+                    eprintln!(
+                        "adoption: refresh skipped — no live direct peer ({})",
+                        locality.operator_message()
+                    );
+                }
+            }
+            return Err(BackendError::Clone(locality.operator_message()));
+        }
         let session = self.session()?;
-        let source_nonce = {
+        let (source_nonce, target_hash) = {
             let mut shared = session
                 .clone
                 .lock()
@@ -887,31 +981,119 @@ impl RemoteControlBackend {
                 return Ok(());
             }
             source.last_announce = Instant::now();
-            source.source_nonce
+            let nonce = source.source_nonce;
+            let target = source.target_hash;
+            shared.error = None;
+            (nonce, target)
         };
         let instance = load_instance_secret(&session.identities_dir)?;
         let instance_material =
             personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
-        Self::send_clone_offer(session, &instance_material, source_nonce).await
+        Self::send_clone_offer(
+            session,
+            &instance_material,
+            source_nonce,
+            target_hash,
+            &interfaces,
+        )
+        .await
+    }
+
+    async fn refresh_clone_available_advertise(&self) -> Result<(), BackendError> {
+        let session = self.session()?;
+        let should_send = {
+            let shared = session
+                .clone
+                .lock()
+                .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
+            if !shared.dest_waiting {
+                return Ok(());
+            }
+            match shared.last_available_send {
+                None => true,
+                Some(last) => last.elapsed() >= ADOPTEE_AVAILABLE_INTERVAL,
+            }
+        };
+        if !should_send {
+            return Ok(());
+        }
+        let locality = evaluate_clone_locality(&self.local_interfaces()?);
+        if !locality.allows_clone() {
+            return Ok(());
+        }
+        let instance = load_instance_secret(&session.identities_dir)?;
+        let instance_material =
+            personal_rns::identity::PrivateIdentityMaterial::from_bytes(*instance);
+        let alias = {
+            let aliases = session
+                .sibling_aliases
+                .lock()
+                .expect("sibling aliases mutex poisoned");
+            next_sibling_alias(&aliases)
+        };
+        let counter = {
+            let mut shared = session
+                .clone
+                .lock()
+                .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
+            if !shared.dest_waiting {
+                return Ok(());
+            }
+            shared.available_counter = shared.available_counter.wrapping_add(1);
+            shared.last_available_send = Some(Instant::now());
+            shared.available_counter
+        };
+        let available = IdentityCloneAvailable::new(instance_material.public(), counter, alias);
+        let mut bytes = [0u8; 128];
+        let len = available
+            .write(&mut bytes)
+            .ok_or_else(|| BackendError::Clone("availability advertise is too large".to_string()))?;
+        let destination = identity_clone_available_destination_hash().ok_or_else(|| {
+            BackendError::Clone("availability advertise address is invalid".to_string())
+        })?;
+        eprintln!(
+            "adoption: advertising available counter={counter} dest={}",
+            encode_hex(destination.as_bytes())
+        );
+        session
+            .handle
+            .send_plain_packet(destination, &bytes[..len])
+            .await
+            .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
+        Ok(())
     }
 
     async fn send_clone_offer(
         session: &ControllerSession,
         instance_material: &personal_rns::identity::PrivateIdentityMaterial,
         source_nonce: [u8; IDENTITY_CLONE_NONCE_LEN],
+        target: Option<personal_rns::identity::IdentityHash>,
+        interfaces: &[InterfaceEntry],
     ) -> Result<(), BackendError> {
-        let offer = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
+        let mut offer = IdentityCloneAnnounce::new(instance_material.public(), source_nonce);
+        if let Some(target) = target {
+            offer = offer.with_target(target);
+        }
         let mut bytes = [0u8; 128];
         let len = offer
             .write(&mut bytes)
             .ok_or_else(|| BackendError::Clone("adoption offer is too large".to_string()))?;
         let destination = identity_clone_offer_destination_hash()
             .ok_or_else(|| BackendError::Clone("adoption offer address is invalid".to_string()))?;
+        eprintln!(
+            "adoption: sending offer dest={} target={} interfaces={}",
+            encode_hex(destination.as_bytes()),
+            target
+                .map(|hash| encode_hex(hash.as_bytes()))
+                .unwrap_or_else(|| "any".to_string()),
+            summarize_clone_interfaces(interfaces)
+        );
         session
             .handle
             .send_plain_packet(destination, &bytes[..len])
             .await
             .map_err(|error| BackendError::Clone(format!("{error:?}")))?;
+        eprintln!("adoption: offer plain packet accepted by the local node");
         Ok(())
     }
 
@@ -980,7 +1162,7 @@ impl RemoteControlBackend {
                 .lock()
                 .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
             let dest = shared.dest.as_ref().ok_or_else(|| {
-                BackendError::Clone("no sibling push has been heard on USB".to_string())
+                BackendError::Clone("no sibling adoption offer has been heard yet".to_string())
             })?;
             (dest.destination, dest.announce)
         };
@@ -1036,7 +1218,7 @@ impl RemoteControlBackend {
             dest.hello_in_flight = false;
         }
         shared.notice = Some(
-            "USB sibling session is live. Confirm the six-digit adoption code, then Approve."
+            "Sibling session is live. Confirm the six-digit adoption code, then Approve."
                 .to_string(),
         );
         shared.error = None;
@@ -1150,12 +1332,10 @@ impl RemoteControlBackend {
                 .lock()
                 .map_err(|_| BackendError::Clone("clone state lock was poisoned".to_string()))?;
             let dest = shared.dest.as_mut().ok_or_else(|| {
-                BackendError::Clone("no sibling push has been heard on USB".to_string())
+                BackendError::Clone("no sibling adoption offer has been heard yet".to_string())
             })?;
             let transcript = dest.transcript.ok_or_else(|| {
-                BackendError::Clone(
-                    "the USB sibling session has not finished hello yet".to_string(),
-                )
+                BackendError::Clone("the sibling session has not finished hello yet".to_string())
             })?;
             dest.accepted = true;
             (dest.destination, dest.announce, transcript)
@@ -2582,6 +2762,10 @@ impl RemoteControlBackend {
             .tcp_dial
             .lock()
             .expect("tcp client target mutex poisoned") = canonical;
+        // Configure implies Start: bring the dialer up and redial the new host.
+        session
+            .local_power
+            .set(session.tcp_id, InterfacePower::On)?;
         session.local_power.bounce_tokio_if_enabled(session.tcp_id)
     }
 
@@ -4908,8 +5092,14 @@ impl LocalInterfacePower {
         match (control, power) {
             (LocalPowerControl::Tokio(status), InterfacePower::On) => status.enable(),
             (LocalPowerControl::Tokio(status), InterfacePower::Off) => status.disable(),
-            (LocalPowerControl::Wifi(status), InterfacePower::On) => status.enable(),
-            (LocalPowerControl::Wifi(status), InterfacePower::Off) => status.disable(),
+            (LocalPowerControl::Wifi(status), InterfacePower::On) => {
+                eprintln!("wifi-diag: Auto Wi-Fi power ON requested");
+                status.enable();
+            }
+            (LocalPowerControl::Wifi(status), InterfacePower::Off) => {
+                eprintln!("wifi-diag: Auto Wi-Fi power OFF requested");
+                status.disable();
+            }
             (LocalPowerControl::Ble(status), InterfacePower::On) => status.enable(),
             (LocalPowerControl::Ble(status), InterfacePower::Off) => status.disable(),
         }
@@ -5045,6 +5235,11 @@ impl ControllerSession {
         if env_tcp.is_some() {
             persist_tcp_target(&tcp_target_path, &tcp_target);
         }
+        // Phones can't set HOPSPOT_RC_AUTO_WIFI; default Auto Wi-Fi on for iOS
+        // (opt out with HOPSPOT_RC_AUTO_WIFI=0). Desktop/other stay opt-in.
+        #[cfg(target_os = "ios")]
+        let auto_wifi = !env_started_off("HOPSPOT_RC_AUTO_WIFI");
+        #[cfg(not(target_os = "ios"))]
         let auto_wifi = env_enabled("HOPSPOT_RC_AUTO_WIFI");
         let start_ble = !env_started_off("HOPSPOT_RC_BLE");
         #[cfg(any(
@@ -5244,6 +5439,10 @@ impl ControllerSession {
                     app_name: IDENTITY_CLONE_APP_NAME,
                     aspects: IDENTITY_CLONE_OFFER_ASPECTS,
                 },
+                PreConfiguredDestination::Plain {
+                    app_name: IDENTITY_CLONE_APP_NAME,
+                    aspects: IDENTITY_CLONE_AVAILABLE_ASPECTS,
+                },
                 PreConfiguredDestination::Single {
                     app_name: IDENTITY_CLONE_APP_NAME,
                     aspects: IDENTITY_CLONE_ASPECTS,
@@ -5288,29 +5487,73 @@ impl ControllerSession {
                 PrnsEvent::Message(Message::Delivered(
                     personal_rns::routing::delivery::Delivery::Plain(delivery),
                 )) => {
+                    let iface = format_interface(delivery.source_interface);
+                    if !clone_announce_is_direct_local(1, delivery.source_interface) {
+                        return;
+                    }
+                    if let Some(available_destination) = identity_clone_available_destination_hash()
+                    {
+                        if delivery.destination == available_destination {
+                            let Some(available) =
+                                IdentityCloneAvailable::parse(delivery.payload)
+                            else {
+                                eprintln!(
+                                    "adoption: available dropped — payload did not parse on {iface}"
+                                );
+                                return;
+                            };
+                            if available.keys.identity_hash() == local_instance_hash {
+                                return;
+                            }
+                            let Ok(mut shared) = clone_events.lock() else {
+                                return;
+                            };
+                            shared.remember_adoptee_available(
+                                available,
+                                iface.clone(),
+                                Instant::now(),
+                            );
+                            eprintln!(
+                                "adoption: heard available on {iface}; candidates={}",
+                                shared.heard_adoptees.len()
+                            );
+                            return;
+                        }
+                    }
                     let Some(offer_destination) = identity_clone_offer_destination_hash() else {
                         return;
                     };
                     if delivery.destination != offer_destination {
                         return;
                     }
-                    if !clone_announce_is_usb_local(1, delivery.source_interface) {
-                        return;
-                    }
                     let Some(announce) = IdentityCloneAnnounce::parse(delivery.payload) else {
+                        eprintln!("adoption: offer dropped — payload did not parse on {iface}");
                         return;
                     };
                     if announce.source() == local_instance_hash {
+                        eprintln!("adoption: offer dropped — from this install on {iface}");
+                        return;
+                    }
+                    if !announce.targets(local_instance_hash) {
+                        eprintln!(
+                            "adoption: offer dropped — targeted at another Instance on {iface}"
+                        );
                         return;
                     }
                     let Some(destination) = identity_clone_destination_hash(announce.source())
                     else {
+                        eprintln!(
+                            "adoption: offer dropped — could not derive approval address on {iface}"
+                        );
                         return;
                     };
                     let Ok(mut shared) = clone_events.lock() else {
                         return;
                     };
                     if !shared.dest_waiting {
+                        eprintln!(
+                            "adoption: offer dropped — not waiting (press I am up for adoption first); iface={iface}"
+                        );
                         return;
                     }
                     shared.dest = Some(DestCloneSession {
@@ -5323,8 +5566,12 @@ impl ControllerSession {
                     });
                     shared.error = None;
                     shared.notice = Some(
-                        "Heard a USB sibling adoption offer. Opening the approval link for the six-digit code."
+                        "Heard a sibling adoption offer. Opening the approval link for the six-digit code."
                             .to_string(),
+                    );
+                    eprintln!(
+                        "adoption: offer heard on {iface}; opening approval link {}",
+                        encode_hex(destination.as_bytes())
                     );
                 }
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard {
@@ -5420,17 +5667,22 @@ impl ControllerSession {
                 PrnsEvent::Message(_) | PrnsEvent::Diagnostic(_) => {}
             },
             interfaces: move |handle: &PrnsNodeHandle| {
-                let client = TcpClientInterface::new(attach_tcp);
+                let client = TcpClientInterface::new(attach_tcp.clone());
                 let tcp_status = client.status();
                 *attach_dial_slot
                     .lock()
                     .expect("tcp client target slot mutex poisoned") = Some(client.target_handle());
-                if !start_tcp {
+                if start_tcp {
+                    eprintln!("tcp-diag: TCP client starts ON → {attach_tcp}");
+                } else {
+                    eprintln!(
+                        "tcp-diag: TCP client starts OFF (target {attach_tcp}); Start it in Settings or set HOPSPOT_RC_TCP"
+                    );
                     tcp_status.disable();
                 }
                 attach_power.register(LocalPowerControl::Tokio(tcp_status));
                 handle.attach(client);
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let wifi = AutoWifi::default().with_host_discovery(apple_service_discovery());
                 #[cfg(target_os = "android")]
                 let wifi = {
@@ -5442,11 +5694,20 @@ impl ControllerSession {
                         ),
                     )
                 };
-                #[cfg(not(any(target_os = "macos", target_os = "android")))]
+                #[cfg(not(any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "android"
+                )))]
                 let wifi = AutoWifi::default();
                 let wifi_status = wifi.status();
                 if !auto_wifi {
+                    eprintln!(
+                        "wifi-diag: Auto Wi-Fi starts OFF (HOPSPOT_RC_AUTO_WIFI unset); Start it in Settings to advertise/browse"
+                    );
                     wifi_status.disable();
+                } else {
+                    eprintln!("wifi-diag: Auto Wi-Fi starts ON (HOPSPOT_RC_AUTO_WIFI enabled)");
                 }
                 #[cfg(target_os = "android")]
                 crate::android::lan_bridge().attach_wifi_status(wifi_status.clone());
@@ -6595,7 +6856,17 @@ fn controller_data_dir() -> PathBuf {
     {
         return android_files_dir().unwrap_or_else(std::env::temp_dir);
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    {
+        // The iOS app container's HOME is the sandbox root. Keep Controller state there.
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Library")
+            .join("Application Support")
+            .join("PRNS Controller");
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -6962,20 +7233,65 @@ fn operator_local_interface(
     operator_local_kind(&entry.snapshot).is_some()
 }
 
-/// This app's USB Auto host id is `[0xD0; 8]`, a cookie, not `kind ++ hash`.
-/// Settings still reports it as `UsbAutoHost`.
+fn clone_transport_label(kind: CloneTransportKind) -> &'static str {
+    match kind {
+        CloneTransportKind::Usb => "USB",
+        CloneTransportKind::Bluetooth => "BLE",
+        CloneTransportKind::AutoWifi => "Auto Wi-Fi",
+        CloneTransportKind::Tcp => "TCP",
+        CloneTransportKind::Other => "a local transport",
+    }
+}
+
+fn summarize_clone_interfaces(interfaces: &[InterfaceEntry]) -> String {
+    let mut parts = Vec::new();
+    for entry in interfaces {
+        if entry.power != InterfacePower::On {
+            continue;
+        }
+        let kind = clone_kind_from_interface_name(&entry.kind);
+        if matches!(kind, CloneTransportKind::Other) {
+            continue;
+        }
+        parts.push(format!(
+            "{}:{} peers={} conn={}",
+            entry.kind,
+            clone_transport_label(kind),
+            clone_transport_peer_count(entry),
+            entry.connection
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
+/// Accept adoption offers that arrived on a direct local transport.
 ///
-/// Any independent supervisor whose first id byte is not a known
-/// `InterfaceKind` gets that same stamp. Fleet members stay omitted; a
-/// decodable member kind is dropped, not relabeled USB.
-/// Ingress stores a direct USB announce as hop 1 (`header.hops + 1`).
-/// Hop 0 is kept for any path that does not increment.
-fn clone_announce_is_usb_local(hops: u8, source_interface: InterfaceId) -> bool {
-    hops <= 1
-        && matches!(
-            source_interface.kind(),
-            Some(InterfaceKind::UsbAutoHost | InterfaceKind::UsbAutoDevice) | None
-        )
+/// Ingress stores a direct delivery as hop 1 (`header.hops + 1`). Hop 0 is
+/// kept for any path that does not increment. USB Auto's host id is
+/// `[0xD0; 8]` (no kind byte); treat that cookie as USB as well.
+fn clone_announce_is_direct_local(hops: u8, source_interface: InterfaceId) -> bool {
+    if hops > 1 {
+        return false;
+    }
+    match source_interface.kind() {
+        None => true,
+        Some(
+            InterfaceKind::UsbAutoHost
+            | InterfaceKind::UsbAutoDevice
+            | InterfaceKind::BluetoothAuto
+            | InterfaceKind::BluetoothPeer
+            | InterfaceKind::AutoWifi
+            | InterfaceKind::WifiPeer
+            | InterfaceKind::TcpClient
+            | InterfaceKind::TcpServer
+            | InterfaceKind::TcpServerPeer,
+        ) => true,
+        Some(_) => false,
+    }
 }
 
 fn operator_local_kind(snapshot: &InterfaceSnapshot) -> Option<InterfaceKind> {
@@ -8868,9 +9184,12 @@ fn resolve_controller_tcp_target(
         return Ok((parse_tcp_dial_target(value)?, true));
     }
     if let Some(stored) = stored_target.filter(|value| !value.is_empty()) {
-        return Ok((stored, false));
+        // A saved target is intentional configuration — start the dialer.
+        return Ok((stored, true));
     }
-    Ok((DEFAULT_TCP_TARGET.to_string(), false))
+    // iOS defaults to the public gateway and starts on (phones cannot set
+    // HOPSPOT_RC_TCP). Desktop keeps loopback and starts off until Configure/Start.
+    Ok((DEFAULT_TCP_TARGET.to_string(), cfg!(target_os = "ios")))
 }
 
 fn parse_target_names(text: &str) -> HashMap<String, String> {
@@ -10316,7 +10635,7 @@ mod tests {
         attach_auto_wifi_local_addresses, attach_our_side_of_the_link, attach_usb_link_peer,
         auto_wifi_peer_list_note, ble_prefix_alias_map, bluetooth_auto_name_prefix,
         bluetooth_auto_peer_list_note, bluetooth_auto_prefix_from_direct_peer,
-        bluetooth_auto_title, clone_announce_is_usb_local, control_announce_satisfies,
+        bluetooth_auto_title, clone_announce_is_direct_local, control_announce_satisfies,
         controller_identity_secret_path, encode_hex, endpoint_matches_wifi_ll_keys,
         ensure_wifi_auto_tcp_client, firmware_monitor_deadline, format_activity_age,
         format_announce_millis, format_connect_label, format_hop_count, format_interface,
@@ -10377,7 +10696,7 @@ mod tests {
         assert_eq!(
             resolve_controller_tcp_target(None, Some("192.0.2.10:4242".to_string()))
                 .expect("stored target"),
-            ("192.0.2.10:4242".to_string(), false)
+            ("192.0.2.10:4242".to_string(), true)
         );
     }
 
@@ -11131,14 +11450,22 @@ mod tests {
     }
 
     #[test]
-    fn a_direct_usb_announce_is_local_at_hop_one() {
+    fn a_direct_announce_is_local_at_hop_one_on_operator_transports() {
         let usb = InterfaceId::new([0xD0; 8]);
-        assert!(clone_announce_is_usb_local(0, usb));
-        assert!(clone_announce_is_usb_local(1, usb));
-        assert!(!clone_announce_is_usb_local(2, usb));
-        assert!(!clone_announce_is_usb_local(
+        assert!(clone_announce_is_direct_local(0, usb));
+        assert!(clone_announce_is_direct_local(1, usb));
+        assert!(!clone_announce_is_direct_local(2, usb));
+        assert!(clone_announce_is_direct_local(
             1,
             InterfaceId::from_channel_tag(InterfaceKind::BluetoothAuto, b"ble")
+        ));
+        assert!(clone_announce_is_direct_local(
+            1,
+            InterfaceId::from_channel_tag(InterfaceKind::WifiPeer, b"peer")
+        ));
+        assert!(!clone_announce_is_direct_local(
+            1,
+            InterfaceId::from_channel_tag(InterfaceKind::LoRa, b"radio")
         ));
     }
 

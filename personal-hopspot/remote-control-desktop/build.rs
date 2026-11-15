@@ -13,10 +13,11 @@ fn main() {
         .nth(4)
         .expect("WRY kotlin dir is under app/src/main/kotlin");
     copy_tree(Path::new("android/src"), &app_main.join("java"));
-    copy_tree(
-        Path::new("android/res/xml"),
-        &app_main.join("res").join("xml"),
-    );
+    // Overlay launcher icons and USB filters onto the Dioxus-generated res tree.
+    let res = app_main.join("res");
+    copy_tree(Path::new("android/res"), &res);
+    // Drop the stock adaptive-icon vector so our PNG foreground wins.
+    let _ = fs::remove_file(res.join("drawable-v24").join("ic_launcher_foreground.xml"));
 }
 
 fn copy_tree(src: &Path, dst: &Path) {

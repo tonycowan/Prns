@@ -1,5 +1,5 @@
 [application]
-name = "PRNS Controller"
+name = "PRNSController"
 default_platform = "desktop"
 android_min_sdk_version = 30
 android_manifest = "android/AndroidManifest.xml"
@@ -12,6 +12,51 @@ title = "PRNS Controller"
 identifier = "org.personal.prns.controller"
 publisher = "Personal PRNS"
 short_description = "PRNS Controller for Personal Hopspot"
+icon = [
+    "assets/icon-32.png",
+    "assets/icon-128.png",
+    "assets/icon-256.png",
+    "assets/icon-512.png",
+    "assets/icon-1024.png",
+]
+
+[ios]
+background_modes = ["bluetooth-central", "bluetooth-peripheral"]
+
+[ios.raw]
+info_plist = """
+<key>CFBundleDisplayName</key>
+<string>PRNS Controller</string>
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>PRNS Controller uses Bluetooth to reach nearby Hopspot devices.</string>
+<key>NSBluetoothPeripheralUsageDescription</key>
+<string>PRNS Controller uses Bluetooth to reach nearby Hopspot devices.</string>
+<key>NSLocalNetworkUsageDescription</key>
+<string>PRNS Controller uses your local Wi-Fi network to reach nearby Hopspot devices.</string>
+<key>NSBonjourServices</key>
+<array>
+    <string>_reticulum._tcp</string>
+    <string>_reticulum._udp</string>
+    <string>_prns._tcp</string>
+</array>
+<key>UIApplicationSceneManifest</key>
+<dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+        <key>UIWindowSceneSessionRoleApplication</key>
+        <array>
+            <dict>
+                <key>UISceneConfigurationName</key>
+                <string>Default Configuration</string>
+                <key>UISceneDelegateClassName</key>
+                <string>PrnsControllerSceneDelegate</string>
+            </dict>
+        </array>
+    </dict>
+</dict>
+"""
 
 [android]
 min_sdk = 30
